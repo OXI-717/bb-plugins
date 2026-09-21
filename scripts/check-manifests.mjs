@@ -16,6 +16,8 @@ for (const entry of marketplace.plugins) {
   assert.match(entry.id, /^[a-z][a-z0-9-]*$/);
   assert(!seen.has(entry.id), `duplicate plugin: ${entry.id}`);
   seen.add(entry.id);
+  assert.match(entry.icon?.url ?? '', /^\.\/icons\/[a-z0-9-]+\.svg$/);
+  assert(existsSync(entry.icon.url), `missing icon: ${entry.id}`);
   const source = entry.source.git;
   assert.equal(source.url, 'https://github.com/OXI-717/bb-plugins.git');
   assert.equal(source.subdir, `plugins/${entry.id}`);
