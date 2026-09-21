@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { z } from "zod";
-import type { PluginKvStorage } from "@get-bb/plugin-sdk";
+import type { PoolKvStorage } from "./core-storage.js";
 import {
   accountSchema,
   accountSecretSchema,
@@ -57,7 +57,7 @@ export class AccountStore {
   private mutationLock: Promise<void> | null = null;
 
   constructor(
-    private readonly kv: PluginKvStorage,
+    private readonly kv: PoolKvStorage,
     private readonly secretsDir: string,
   ) {}
 
@@ -369,6 +369,15 @@ export class HubTokenStore {
     );
   }
 
+  async remove(hostId: string): Promise<void> {
+    await this.initialize();
+    await this.serialized(hostId, async () => {
+      await fs.rm(this.tokenPath(hostId), { force: true });
+      this.tokens.delete(hostId);
+      this.persistedLastUsedAt.delete(hostId);
+    });
+  }
+
   private create(hostId: string): StoredHubToken {
     return storedHubTokenSchema.parse({
       hostId,
@@ -474,7 +483,7 @@ function matchesStoredToken(
 
 export class RoutingStore {
   constructor(
-    private readonly kv: PluginKvStorage,
+    private readonly kv: PoolKvStorage,
     private readonly now: () => number = Date.now,
   ) {}
 

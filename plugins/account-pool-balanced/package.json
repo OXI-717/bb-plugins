@@ -20,7 +20,8 @@
   "scripts": {
     "build": "bb plugin build .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "pool": "tsx src/standalone/cli.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

@@ -57,6 +57,7 @@ export function createClaudeAdapter(options: {
   return {
     provider: "claude",
     upstreamName: "Anthropic",
+    inboundToken: (headers) => headers.get("x-api-key"),
     async importAccount() {
       const imported = await (
         options.importCredentials ?? importClaudeCredentials

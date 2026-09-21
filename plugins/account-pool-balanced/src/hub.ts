@@ -93,7 +93,7 @@ interface HubOptions {
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
   maxAffinityBindings: number;
-  hubTokens: HubTokenStore;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list">;
   getSettings: () => AccountPoolConfig;
   adapters: ReadonlyMap<PoolProvider, ProviderAdapter>;
   fetch: typeof fetch;
@@ -1261,7 +1261,7 @@ export function createHub(options: {
   accounts: AccountStore;
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
-  hubTokens: HubTokenStore;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list">;
   getSettings: () => AccountPoolConfig;
   fetch?: typeof fetch;
   now?: () => number;

@@ -8,7 +8,7 @@ Use multiple accounts of the same provider, track available quota and switch acc
 
 Adapters exist for Claude, Codex, Kimi, Z.AI, OpenCode Go and Cursor. Authentication and model availability depend on each provider. Claude and Codex support subscription login flows; other adapters use their supported provider keys. This does not turn every consumer subscription into an API account.
 
-The pool is a BB plugin, not a standalone server or a hosted subscription service. It starts empty; you add your own accounts. Cursor additionally requires an operator-configured ACP provider and wrapper; see [Cursor routing](plugins/account-pool-balanced/docs/cursor-paths.md). Devin is not a supported pool client.
+The released pool is a BB plugin. The source tree also includes an experimental standalone server, external client credentials for BB, and a Devin cloud-session adapter: see [external clients and standalone setup](plugins/account-pool-balanced/docs/external-clients.md). These additions are not in the 0.2.4 tag. Both modes start with your own accounts; no credentials are distributed. Cursor additionally requires an operator-configured ACP provider and wrapper; see [Cursor routing](plugins/account-pool-balanced/docs/cursor-paths.md). Devin cloud sessions use their separate API; local Devin CLI subscription proxying is not implemented.
 
 ## Install
 

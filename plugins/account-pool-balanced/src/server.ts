@@ -5,6 +5,7 @@ import {
 import path from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { registerPoolCli } from "./cli.js";
+import { ExternalClients, combinedTokens } from "./external-clients.js";
 import {
   accountPoolConfigSchema,
   accountPoolConfigSetInputSchema,
@@ -112,6 +113,8 @@ export function createAccountPoolPlugin(
     await hubTokens.initialize();
     const enrolledHosts = await bb.sdk.hosts.list();
     await hubTokens.prune(enrolledHosts.map((host) => host.id));
+    const externalClients = new ExternalClients(path.join(secretDir, "external-clients"));
+    await externalClients.tokens.initialize();
     const routing = new RoutingStore(bb.storage.kv, now);
     const db = bb.storage.database();
     bb.storage.migrate(db, QUOTA_MIGRATIONS);
@@ -124,7 +127,7 @@ export function createAccountPoolPlugin(
       accounts,
       quotas,
       affinity: new PoolAffinityStore(db),
-      hubTokens,
+      hubTokens: combinedTokens(hubTokens, externalClients.tokens),
       getSettings: () => currentSettings,
       fetch: upstreamFetch,
       now,
@@ -213,7 +216,7 @@ export function createAccountPoolPlugin(
         return { state: "observed", account, lastUsedAt: observation.lastUsedAt };
       }),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config);
+    registerPoolCli(bb, operations, login, codexLogin, config, externalClients);
     registerUsageSource(bb, hub);
     const proxiedHealth = async (provider: PoolProvider) =>
       (await operations.isRoutingEnabled(provider)) &&
@@ -318,7 +321,9 @@ export function createAccountPoolPlugin(
             { status: 401 },
           );
         }
-        const token = await hubTokens.forHost(hostId);
+        const token = hostId.startsWith("external_")
+          ? await externalClients.tokens.forHost(hostId)
+          : await hubTokens.forHost(hostId);
         return Response.json({ accessToken: token, refreshToken: token });
       },
       { auth: "none" },

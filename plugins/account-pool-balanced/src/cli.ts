@@ -26,6 +26,7 @@ import {
 import type { PoolOperations } from "./operations.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
+import type { ExternalClients } from "./external-clients.js";
 
 interface ParsedFlags {
   booleans: Set<string>;
@@ -58,6 +59,8 @@ const HELP = [
   "  bb pool config",
   "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays> <value>",
   "  bb pool token rotate --machine <id-or-name>",
+  "  bb pool client add <name> --output <new-private-file-on-server>",
+  "  bb pool client revoke <name>",
   "  bb pool bypass <thread-id> [--off]",
   "",
   "Accounts run sequentially by priority, then order added. The current fallback stays active until unavailable.",
@@ -304,6 +307,7 @@ export function registerPoolCli(
   login: ClaudeOAuthLogin,
   codexLogin: CodexDeviceLogin,
   config: AccountPoolConfigController,
+  externalClients?: ExternalClients,
 ): void {
   bb.cli.register({
     name: "pool",
@@ -692,6 +696,20 @@ export function registerPoolCli(
             exitCode: 0,
             stdout: `Rotated the Account Pooler token for ${token.hostName ?? token.hostId}.\n`,
           };
+        }
+        if (argv[0] === "client" && externalClients) {
+          if (argv[1] === "add" && argv[2]) {
+            const flags = parseFlags(argv.slice(3), [], ["output"]);
+            const output = flags.values.get("output");
+            if (!output) throw new Error("--output is required (path on the BB server).");
+            await externalClients.add(argv[2], output);
+            return { exitCode: 0, stdout: "External client token saved to private file on the BB server.\n" };
+          }
+          if (argv[1] === "revoke" && argv.length === 3) {
+            await externalClients.revoke(argv[2]!);
+            return { exitCode: 0, stdout: "External client revoked.\n" };
+          }
+          throw new Error(HELP);
         }
         if (argv[0] === "bypass") {
           const threadId = argv[1];
