@@ -1,0 +1,11 @@
+{
+  "$schema": "https://getbb.app/schemas/plugins.schema.json",
+  "schemaVersion": 1,
+  "name": "oxi-public-plugins",
+  "plugins": [
+    {
+      "name": "account-pool-balanced",
+      "source": "./plugins/account-pool-balanced"
+    }
+  ]
+}

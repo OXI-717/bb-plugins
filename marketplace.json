@@ -1,0 +1,30 @@
+{
+  "$schema": "https://getbb.app/schemas/marketplace.schema.json",
+  "schemaVersion": 1,
+  "name": "oxi-public",
+  "displayName": "OXI Public Plugins",
+  "description": "Плагины BB, поддерживаемые OXI.",
+  "plugins": [
+    {
+      "id": "account-pool-balanced",
+      "displayName": "Пул аккаунтов (balanced)",
+      "description": "Балансировка аккаунтов, лимиты и резервные аккаунты для агентов BB.",
+      "author": {
+        "name": "OXI",
+        "github": "OXI-717"
+      },
+      "tags": [
+        "agents",
+        "accounts"
+      ],
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/account-pool-balanced",
+          "range": "^0.2.4",
+          "tagPrefix": "account-pool-balanced/"
+        }
+      }
+    }
+  ]
+}
