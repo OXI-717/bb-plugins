@@ -25,7 +25,7 @@ Or install the release directly:
 bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.2.4 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
 ```
 
-Do not enable BB's built-in `account-pool` at the same time: both register `bb pool` and provider routes. If replacing an existing installation, preserve its data and use source replacement through `bb plugin install`; do not remove it just to update.
+Do not enable BB's built-in `account-pool` at the same time: both register `bb pool` and provider routes. These install commands are for new installations. BB 0.43.3 rejects replacing an existing plugin's Git source. If migrating from another repository, keep the existing installation until you have a supported migration procedure with verified backup and restore; do not remove a live pool just to change its source.
 
 Add accounts through the pool settings in BB or run `bb pool --help`. For example, `bb pool account add --provider codex --login` starts a device login. Follow the returned instructions, then repeat to add another account. `bb pool status` shows the resulting pool. Browser login can be completed on a different device from the BB server.
 
