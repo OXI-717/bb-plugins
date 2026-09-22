@@ -955,6 +955,299 @@ describe("Account Pool plugin", () => {
     expect(requests[0]?.headers.has("x-unrelated-header")).toBe(false);
   });
 
+  describe("opencode-go provider-specific wire path normalization", () => {
+    const CHAT_BODY = JSON.stringify({
+      model: "mimo-v2.6-pro",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const RESPONSES_BODY = JSON.stringify({
+      model: "mimo-v2.6-pro",
+      input: "hi",
+      instructions: "be brief",
+    });
+    const AMBIGUOUS_BODY = JSON.stringify({ model: "mimo-v2.6-pro" });
+
+    function opencodeGoFixture(upstreamFetch: typeof fetch) {
+      return createFixture({
+        upstreamUrl: "https://upstream.example",
+        provider: "opencode-go",
+        source: "api-key",
+        apiKey: "sk-go-subscription",
+        options: {
+          opencodeGoUsagesUrl: "https://usages.example/zen/go/v1/usage",
+          fetch: async (input, init) => {
+            const request = new Request(input, init);
+            if (request.url.startsWith("https://usages.example/")) {
+              return Response.json({
+                usage: { rolling: { percent: 4 }, weekly: { percent: 72 } },
+              });
+            }
+            return upstreamFetch(input, init);
+          },
+        },
+      });
+    }
+
+    it("I1: inbound /responses reaches upstream /chat/completions", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "completion-one" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/responses",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: CHAT_BODY,
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://upstream.example/chat/completions",
+      );
+    });
+
+    it("I2: native /chat/completions remains unchanged (not double rewritten)", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "completion-one" });
+      });
+      await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: CHAT_BODY,
+        },
+      );
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://upstream.example/chat/completions",
+      );
+    });
+
+    it("I3: /models remains unchanged", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ data: [] });
+      });
+      await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/models",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: "{}",
+        },
+      );
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/models");
+    });
+
+    it("I4: query string and streaming SSE bytes are preserved across the rewrite", async () => {
+      const requests: Request[] = [];
+      const first = Buffer.from('event: response.created\ndata: {"one":1}\n\n');
+      const second = Buffer.from(
+        'event: response.completed\ndata: {"two":2}\n\n',
+      );
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(first));
+              setTimeout(() => {
+                controller.enqueue(new Uint8Array(second));
+                controller.close();
+              }, 20);
+            },
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/responses?stream=true&a=1&b=2",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: CHAT_BODY,
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://upstream.example/chat/completions?stream=true&a=1&b=2",
+      );
+      const received = Buffer.from(await response.arrayBuffer());
+      expect(received.equals(Buffer.concat([first, second]))).toBe(true);
+    });
+
+    it("I5: body bytes, headers and auth are preserved across the rewrite", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "completion-one" });
+      });
+      await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/responses",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+            "x-opencode-session": "session-one",
+            "x-unrelated-header": "dropped",
+          },
+          body: CHAT_BODY,
+        },
+      );
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://upstream.example/chat/completions",
+      );
+      expect(await requests[0]?.text()).toBe(CHAT_BODY);
+      expect(requests[0]?.headers.get("x-opencode-session")).toBe("session-one");
+      expect(requests[0]?.headers.get("authorization")).toBe(
+        "Bearer sk-go-subscription",
+      );
+      expect(requests[0]?.headers.get("content-type")).toBe("application/json");
+      expect(requests[0]?.headers.has("x-unrelated-header")).toBe(false);
+    });
+
+    it("I6: Responses body on /responses is refused with 400 unsupported_wire_protocol and never forwarded", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "must-not-happen" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/responses",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: RESPONSES_BODY,
+        },
+      );
+      expect(response.status).toBe(400);
+      const payload = (await response.json()) as {
+        error: { type: string; code: string; message: string };
+      };
+      expect(payload.error.code).toBe("unsupported_wire_protocol");
+      expect(payload.error.type).toBe("invalid_request_error");
+      expect(payload.error.message).toContain("chat/completions");
+      expect(requests).toHaveLength(0);
+    });
+
+    it("I7: ambiguous body on /responses fails closed (400, never forwarded)", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "must-not-happen" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/responses",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: AMBIGUOUS_BODY,
+        },
+      );
+      expect(response.status).toBe(400);
+      const payload = (await response.json()) as {
+        error: { code: string };
+      };
+      expect(payload.error.code).toBe("unsupported_wire_protocol");
+      expect(requests).toHaveLength(0);
+    });
+
+    it("I8: zai /responses is never rewritten to chat/completions", async () => {
+      const requests: Request[] = [];
+      const fixture = await createFixture({
+        upstreamUrl: "https://upstream.example",
+        provider: "zai",
+        source: "api-key",
+        apiKey: "sk-zai-subscription",
+        options: {
+          zaiUsagesUrl: "https://usages.example/zai/usage",
+          fetch: async (input, init) => {
+            const request = new Request(input, init);
+            if (request.url.startsWith("https://usages.example/")) {
+              return Response.json({
+                usage: { rolling: { percent: 4 }, weekly: { percent: 72 } },
+              });
+            }
+            requests.push(request);
+            return Response.json({ id: "zai-completion" });
+          },
+        },
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/zai/v1/responses",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: RESPONSES_BODY,
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/responses");
+    });
+
+    it("I9: codex /responses is never rewritten to chat/completions", async () => {
+      const requests: Request[] = [];
+      const fixture = await createOAuthRequestFixture(
+        "codex",
+        async (input, init) => {
+          requests.push(new Request(input, init));
+          return Response.json({ id: "codex-completion" });
+        },
+        Date.now,
+      );
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/v1/responses",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-bb-account-pool-token": fixture.key,
+          },
+          body: JSON.stringify({ model: "gpt-5.6-luna", input: "hi" }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/responses");
+    });
+  });
+
   it("imports, refreshes, and routes Codex HTTP sessions by provider", async () => {
     const seen: Array<{
       path: string;
