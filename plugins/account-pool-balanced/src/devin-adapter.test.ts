@@ -43,6 +43,13 @@ describe("Devin CLI protobuf proxy", () => {
     expect(rewritten.subarray(-11)).toEqual(body.subarray(-11));
   });
 
+  it("rewrites a gzip-compressed unary protobuf request", () => {
+    const output = rewriteDevinBody(gzipSync(original), "application/proto", "account-pat", "gzip");
+    const decoded = gunzipSync(output);
+    expect(Buffer.from(decoded).includes(Buffer.from(bytes("account-pat")))).toBe(true);
+    expect(Buffer.from(decoded).includes(Buffer.from(bytes("client-token")))).toBe(false);
+  });
+
   it("uses the selected PAT in both body and HTTP authorization", () => {
     const adapter = createDevinAdapter();
     const secret = { kind: "api-key" as const, apiKey: "account-pat" };

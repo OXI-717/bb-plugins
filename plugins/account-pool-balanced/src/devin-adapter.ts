@@ -109,7 +109,15 @@ export function replaceDevinKey(body: Uint8Array, key: string): Uint8Array {
   return rewrite(body, false);
 }
 
-export function rewriteDevinBody(body: Uint8Array, contentType: string, key: string): Uint8Array {
+export function rewriteDevinBody(body: Uint8Array, contentType: string, key: string, contentEncoding: string | null = null): Uint8Array {
+  const encoding = contentEncoding?.trim().toLowerCase() ?? "identity";
+  if (encoding === "gzip") {
+    const decoded = gunzipSync(body, { maxOutputLength: MAX_PROTO });
+    const encoded = gzipSync(rewriteDevinBody(decoded, contentType, key));
+    if (encoded.length > MAX_PROTO) throw new Error("Devin request exceeds the protobuf limit.");
+    return encoded;
+  }
+  if (encoding !== "identity" && encoding !== "") throw new Error("Unsupported Devin HTTP content encoding.");
   if (!contentType.startsWith("application/connect+")) return replaceDevinKey(body, key);
   const frames: Uint8Array[] = [];
   let offset = 0;
@@ -147,7 +155,7 @@ export function createDevinAdapter(): ProviderAdapter {
         parentAffinityId: null,
         forAccount(_account, secret) {
           if (secret.kind !== "api-key") throw new Error("Devin requires a PAT.");
-          return rewriteDevinBody(body, headers.get("content-type") ?? "application/proto", secret.apiKey);
+          return rewriteDevinBody(body, headers.get("content-type") ?? "application/proto", secret.apiKey, headers.get("content-encoding"));
         },
       };
     },
