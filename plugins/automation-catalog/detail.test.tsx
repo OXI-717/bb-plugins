@@ -45,19 +45,22 @@ describe("detail failure states", () => {
     const html = renderToStaticMarkup(
       <CatalogDetailContent detail={fixture} />,
     );
-    expect(html).toContain("Connection problem");
+    expect(html).toContain("Ошибка соединения");
     expect(html).toContain("Source unavailable");
-    expect(html).toContain("Execution history is not connected.");
-    expect(html).toContain("Could not refresh this source");
+    expect(html).toContain("Источник не передаёт историю запусков.");
+    expect(html).toContain("Не удалось обновить источник");
   });
   it("escapes imported text and reports missing tasks", () => {
     const html = renderToStaticMarkup(
       <CatalogDetailContent
         detail={{
           ...fixture,
+          source: { ...fixture.source, managedHere: true },
           task: {
             ...fixture.task,
             missing: true,
+            scheduler: "bb",
+            projectId: "proj_example",
             description: "<script>alert(1)</script>",
           },
         }}
@@ -65,6 +68,25 @@ describe("detail failure states", () => {
     );
     expect(html).not.toContain("<script>");
     expect(html).toContain("&lt;script&gt;");
-    expect(html).toContain("missing from the latest source snapshot");
+    expect(html).toContain("нет в последнем снимке источника");
+    expect(html).not.toContain("Открыть автоматизацию в BB");
+  });
+  it("links BB failures to the source without copying script output", () => {
+    const html = renderToStaticMarkup(
+      <CatalogDetailContent detail={{ ...fixture, source: { ...fixture.source, managedHere: true }, task: {
+        ...fixture.task,
+        sourceId: "bb-main",
+        scheduler: "bb",
+        projectId: "proj_example",
+        lastRun: {
+          id: "run1", taskId: "daily", host: "example", status: "failed",
+          startedAt: 1, finishedAt: 2, summary: null, exitCode: 1,
+          evidence: "execution", observedAt: null,
+        },
+      } }} />,
+    );
+    expect(html).toContain("/plugins/automations/automations/proj_example/daily");
+    expect(html).toContain("код 1");
+    expect(html).toContain("Каталог не копирует вывод скрипта");
   });
 });

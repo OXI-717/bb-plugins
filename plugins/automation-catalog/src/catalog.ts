@@ -1,5 +1,9 @@
 import { composeRequestSchema, hostRequest } from "./compose";
+import { refreshBbCatalog } from "./bb-refresh.js";
+import { manageBbCatalog } from "./bb-management.js";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { z } from "zod";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { Db } from "./data.js";
@@ -21,6 +25,7 @@ CREATE TABLE automation_catalog_runs (task_key TEXT NOT NULL REFERENCES automati
 CREATE INDEX automation_catalog_runs_time ON automation_catalog_runs(task_key, started_at DESC, id);
 `;
 const stored = z.object({ data: z.string() });
+const execFileAsync = promisify(execFile);
 function decode<T>(row: unknown, schema: z.ZodType<T>): T {
   return schema.parse(JSON.parse(stored.parse(row).data));
 }
@@ -32,6 +37,18 @@ function taskKey(source: string, host: string, id: string) {
       .digest("hex")
       .slice(0, 40)
   );
+}
+function sameLocalServer(configured?: string, actual?: string) {
+  if (!configured || !actual) return false;
+  try {
+    const expected = new URL(actual);
+    const selected = new URL(configured);
+    const loopback = new Set(["localhost", "127.0.0.1", "[::1]"]);
+    return loopback.has(expected.hostname) && loopback.has(selected.hostname)
+      && expected.protocol === selected.protocol && expected.port === selected.port
+      && expected.pathname === selected.pathname && !selected.username && !selected.password
+      && !selected.search && !selected.hash;
+  } catch { return false; }
 }
 export function createCatalog(db: Db) {
   function source(id: string) {
@@ -55,11 +72,54 @@ export function createCatalog(db: Db) {
     };
   }
   return {
-    publish(input: unknown) {
+    setBbState(key: string, state: "active" | "paused") {
+      const task = entry(key);
+      if (!source(task.sourceId).managedHere || task.scheduler !== "bb" || task.missing)
+        throw new Error("Only current BB automations can be updated");
+      db.prepare("UPDATE automation_catalog_tasks SET data = ? WHERE key = ?").run(
+        JSON.stringify({ ...task, state, nextRunAt: state === "paused" ? null : task.nextRunAt, observedAt: Date.now() }), key,
+      );
+    },
+    remove(key: string) {
+      return db.transaction(() => {
+        entry(key);
+        db.prepare("DELETE FROM automation_catalog_runs WHERE task_key = ?").run(key);
+        db.prepare("DELETE FROM automation_catalog_tasks WHERE key = ?").run(key);
+        return { ok: true as const };
+      })();
+    },
+    forgetMissing(key: string) {
+      return db.transaction(() => {
+        const task = entry(key);
+        if (!task.missing) throw new Error("Only missing catalog entries can be removed");
+        db.prepare("DELETE FROM automation_catalog_runs WHERE task_key = ?").run(key);
+        db.prepare("DELETE FROM automation_catalog_tasks WHERE key = ? AND missing = 1").run(key);
+        return { ok: true as const };
+      })();
+    },
+    entry,
+    publish(input: unknown, localBbServerUrl?: string) {
       const snapshot = catalogSnapshotSchema.parse(input);
+      const managedHere = sameLocalServer(snapshot.source.bbServerUrl, localBbServerUrl);
       if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > 4_000_000)
         throw new Error("Snapshot exceeds 4 MB");
       return db.transaction(() => {
+        const resolved = new Map<string, string>();
+        const identityKey = (host: string, id: string) => {
+          const identity = snapshot.source.bbServerUrl ? id : JSON.stringify([host, id]);
+          const cached = resolved.get(identity);
+          if (cached) return cached;
+          if (snapshot.source.bbServerUrl) {
+            const existing = db.prepare("SELECT key FROM automation_catalog_tasks WHERE source_id = ? AND json_extract(data, '$.id') = ? ORDER BY missing ASC LIMIT 1").get(snapshot.source.id, id) as { key: string } | undefined;
+            if (existing) {
+              resolved.set(identity, existing.key);
+              return existing.key;
+            }
+          }
+          const key = taskKey(snapshot.source.id, host, id);
+          resolved.set(identity, key);
+          return key;
+        };
         const previous = db
           .prepare("SELECT data FROM automation_catalog_sources WHERE id = ?")
           .get(snapshot.source.id);
@@ -70,17 +130,19 @@ export function createCatalog(db: Db) {
           throw new Error("Snapshot is older than stored data");
         const keys = new Set(
           snapshot.tasks.map((task) =>
-            taskKey(snapshot.source.id, task.host, task.id),
+            identityKey(task.host, task.id),
           ),
         );
         if (keys.size !== snapshot.tasks.length)
           throw new Error("Duplicate task identity");
         for (const run of snapshot.runs) {
-          if (!keys.has(taskKey(snapshot.source.id, run.host, run.taskId)))
+          if (!keys.has(identityKey(run.host, run.taskId)))
             throw new Error("Run references a missing task");
         }
+        const { bbServerUrl: _bbServerUrl, ...publicSource } = snapshot.source;
         const status = {
-          ...snapshot.source,
+          ...publicSource,
+          managedHere: snapshot.error === null ? managedHere : (old?.managedHere ?? managedHere),
           taskIds:
             snapshot.error === null ? snapshot.source.taskIds : old?.taskIds,
           checkedAt: snapshot.observedAt,
@@ -98,7 +160,7 @@ export function createCatalog(db: Db) {
           "UPDATE automation_catalog_tasks SET missing = 1 WHERE source_id = ?",
         ).run(status.id);
         for (const task of snapshot.tasks) {
-          const key = taskKey(status.id, task.host, task.id);
+          const key = identityKey(task.host, task.id);
           const value = {
             ...task,
             key,
@@ -111,7 +173,7 @@ export function createCatalog(db: Db) {
           ).run(key, status.id, JSON.stringify(value));
         }
         for (const run of snapshot.runs) {
-          const key = taskKey(status.id, run.host, run.taskId);
+          const key = identityKey(run.host, run.taskId);
           const previousRun = db
             .prepare(
               "SELECT data FROM automation_catalog_runs WHERE task_key = ? AND id = ?",
@@ -195,6 +257,18 @@ export function createCatalog(db: Db) {
 }
 
 export const catalogRpcContract = defineRpcContract({
+  catalog_refresh: {
+    input: z.null(),
+    output: z.object({ refreshed: z.array(z.string()), deferred: z.array(z.string()) }),
+  },
+  catalog_forget_missing: {
+    input: z.object({ key: z.string().min(1) }).strict(),
+    output: z.object({ ok: z.literal(true) }),
+  },
+  catalog_manage_bb: {
+    input: z.object({ key: z.string().min(1), action: z.enum(["pause", "resume", "delete"]) }).strict(),
+    output: z.object({ ok: z.literal(true) }),
+  },
   catalog_compose: {
     input: z.object({ request: composeRequestSchema }).strict(),
     output: z.object({ threadId: z.string() }),
@@ -211,7 +285,32 @@ export const catalogRpcContract = defineRpcContract({
 });
 export function registerCatalog(bb: BbPluginApi, db: Db) {
   const catalog = createCatalog(db);
+  async function bbCli(...args: string[]) {
+    const serverUrl = bb.server.loopbackBaseUrl;
+    const { stdout } = await execFileAsync(process.env.BB_CLI || "bb", [...args, "--json"], {
+      env: { ...process.env, BB_SERVER_URL: serverUrl },
+      timeout: 15000,
+      maxBuffer: 1024 * 1024,
+    });
+    return JSON.parse(stdout) as Record<string, unknown>;
+  }
   bb.rpc.register(catalogRpcContract, {
+    catalog_refresh: async () => {
+      const result = await refreshBbCatalog(catalog, bbCli, bb.server.loopbackBaseUrl);
+      for (const sourceId of result.refreshed) bb.realtime.publish("automation-catalog", { sourceId });
+      return result;
+    },
+    catalog_forget_missing: ({ key }) => {
+      const result = catalog.forgetMissing(key);
+      bb.realtime.publish("automation-catalog", { key });
+      return result;
+    },
+    catalog_manage_bb: async ({ key, action }) => {
+      const sourceId = catalog.entry(key).sourceId;
+      const result = await manageBbCatalog(catalog, bbCli, key, action);
+      bb.realtime.publish("automation-catalog", { sourceId });
+      return result;
+    },
     catalog_compose: async ({ request }) => {
       const thread = await bb.sdk.threads.spawn({
         ...hostRequest(request),
@@ -222,7 +321,7 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
     catalog_list: () => catalog.list(),
     catalog_detail: (input) => catalog.detail(input),
     catalog_publish: (input) => {
-      const result = catalog.publish(input);
+      const result = catalog.publish(input, bb.server.loopbackBaseUrl);
       bb.realtime.publish("automation-catalog", { sourceId: input.source.id });
       return result;
     },

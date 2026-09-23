@@ -17,5 +17,5 @@ export function matchesFilters(t: CatalogTask, f: Filters) {
     (!f.scope || t.scope === f.scope) && (!f.host || t.host === f.host) && (!f.state || t.state === f.state) && (!f.project || t.projectId === f.project);
 }
 export function stateLabel(t: CatalogTask) {
-  return t.missing ? "Missing from source" : t.state === "unknown" ? "Live status not connected" : t.state;
+  return t.missing ? "Отсутствует в источнике" : t.state === "unknown" ? "Состояние не подключено" : t.state;
 }

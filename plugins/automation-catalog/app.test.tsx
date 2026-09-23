@@ -54,6 +54,7 @@ async function mount() {
     {
       rpc: {
         catalog_list: () => ({ tasks: [task], sources: [source] }),
+        catalog_refresh: () => ({ refreshed: ["bb-main"], deferred: ["example"] }),
         catalog_detail: () => ({
           task,
           source,
@@ -65,19 +66,37 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("uses the scheduler refresh RPC before reloading the table", async () => {
+    const slot = await mount();
+    await slot.findByText("Daily report");
+    fireEvent.click(slot.getByRole("button", { name: "Обновить BB" }));
+    await slot.findByText("BB обновлён. Остальные источники обновляются по своему расписанию.");
+    expect(slot.inspection.rpcCalls.map((call) => call.method).slice(-2)).toEqual(["catalog_refresh", "catalog_list"]);
+    slot.lifecycle.unmount();
+  });
+  it("counts attention only within the visible source and search filters", async () => {
+    sessionStorage.setItem("bb:automation-catalog:filters:v1", JSON.stringify({ query: "no-match", source: "", scope: "", host: "", state: "", project: "" }));
+    const slot = await mount();
+    await slot.findByText("По заданным фильтрам автоматизаций нет.");
+    const attention = slot.getByRole("button", { name: /Требуют внимания/ });
+    expect(attention.textContent).toContain("0");
+    fireEvent.click(attention);
+    expect(slot.getByText("По заданным фильтрам автоматизаций нет.")).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
   it("shows the failed result, keeps filters on return and provides compact history", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");
-    expect(slot.getByText(/Last run failed/)).toBeTruthy();
-    expect(slot.getAllByText("Every 15 minutes · UTC")[0]).toBeTruthy();
-    fireEvent.click(slot.getByRole("button", { name: /Needs attention/ }));
+    expect(slot.getByText(/Последний запуск завершился ошибкой/)).toBeTruthy();
+    expect(slot.getAllByText("Каждые 15 минут · UTC")[0]).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: /Требуют внимания/ }));
     fireEvent.click(slot.getByRole("button", { name: "Daily report" }));
-    await slot.findByText("Execution history");
-    expect(slot.getByRole("columnheader", { name: "Duration" })).toBeTruthy();
-    fireEvent.click(slot.getByRole("button", { name: "← Automations" }));
+    await slot.findByText("История запусков");
+    expect(slot.getByRole("columnheader", { name: "Длительность" })).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "← Автоматизации" }));
     expect(
       slot
-        .getByRole("button", { name: /Needs attention/ })
+        .getByRole("button", { name: /Требуют внимания/ })
         .getAttribute("aria-pressed"),
     ).toBe("true");
     slot.lifecycle.unmount();
@@ -85,15 +104,15 @@ describe("automation workflows", () => {
   it("prepares a personal BB creation request without starting a thread", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");
-    fireEvent.click(slot.getByRole("button", { name: "Create automation" }));
-    fireEvent.click(slot.getByRole("button", { name: /BB automation/ }));
+    fireEvent.click(slot.getByRole("button", { name: "Создать автоматизацию" }));
+    fireEvent.click(slot.getByRole("button", { name: /Автоматизация BB/ }));
     expect(
-      slot.getByRole("heading", { name: "Create personal BB automation" }),
+      slot.getByRole("heading", { name: "Создать личную автоматизацию · Автоматизация BB" }),
     ).toBeTruthy();
     expect(
       slot.getByRole("textbox").textContent ||
         (slot.getByRole("textbox") as HTMLTextAreaElement).value,
-    ).toContain("personal automation");
+    ).toContain("личную автоматизацию");
     expect(
       slot.inspection.rpcCalls.every((call) =>
         ["catalog_list", "catalog_detail"].includes(call.method),
@@ -104,21 +123,21 @@ describe("automation workflows", () => {
   it("keeps ownership and destination correct when switching creation routes", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");
-    fireEvent.click(slot.getByRole("button", { name: "Create automation" }));
-    fireEvent.click(slot.getByRole("button", { name: /Server automation/ }));
+    fireEvent.click(slot.getByRole("button", { name: "Создать автоматизацию" }));
+    fireEvent.click(slot.getByRole("button", { name: /Серверная автоматизация/ }));
     const first = slot.getByRole("textbox") as HTMLTextAreaElement;
-    expect(first.value || first.textContent).toContain("personal automation");
-    fireEvent.click(slot.getByRole("button", { name: "← Automations" }));
+    expect(first.value || first.textContent).toContain("личную автоматизацию");
+    fireEvent.click(slot.getByRole("button", { name: "← Автоматизации" }));
     fireEvent.change(
-      slot.getByRole("combobox", { name: "Automation ownership" }),
+      slot.getByRole("combobox", { name: "Тип автоматизации" }),
       { target: { value: "team" } },
     );
-    fireEvent.click(slot.getByRole("button", { name: /BB automation/ }));
+    fireEvent.click(slot.getByRole("button", { name: /Автоматизация BB/ }));
     const second = slot.getByRole("textbox") as HTMLTextAreaElement;
-    expect(second.value || second.textContent).toContain("team automation");
-    expect(second.value || second.textContent).toContain("automations skill");
+    expect(second.value || second.textContent).toContain("командную автоматизацию");
+    expect(second.value || second.textContent).toContain("скилл automations");
     expect(second.value || second.textContent).not.toContain(
-      "server-automation creation skill",
+      "скилл для создания серверной автоматизации",
     );
     expect(
       slot.inspection.rpcCalls.some(

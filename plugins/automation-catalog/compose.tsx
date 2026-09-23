@@ -21,17 +21,17 @@ export function AutomationComposer({
     <main className="mx-auto flex h-full w-full max-w-5xl flex-col gap-3 p-4">
       <div>
         <Button size="sm" variant="ghost" onClick={onBack}>
-          ← Automations
+          ← Автоматизации
         </Button>
         <h1 className="mt-3 text-lg font-semibold">{intent.title}</h1>
         <p className="text-xs text-muted-foreground">
-          Describe the task and schedule, choose the project and model, then
-          send to start setup.
+          Опишите задачу и расписание, выберите проект и модель, затем
+          отправьте запрос для настройки.
         </p>
       </div>
       {error && (
         <p role="alert" className="text-sm text-destructive">
-          Could not start setup. Your draft is preserved. {error}
+          Не удалось начать настройку. Черновик сохранён. {error}
         </p>
       )}
       <NewThreadComposer

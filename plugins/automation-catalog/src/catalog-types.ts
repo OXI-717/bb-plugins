@@ -63,6 +63,7 @@ export const catalogSourceSchema = z
     name: z.string().min(1).max(300),
     staleAfterMs: z.number().int().min(60000).max(604800000),
     taskIds: z.array(id).max(2000).optional(),
+    bbServerUrl: z.url().max(2000).optional(),
   })
   .strict();
 export const catalogSnapshotSchema = z
@@ -87,7 +88,8 @@ export const catalogEntrySchema = catalogTaskSchema.extend({
   missing: z.boolean(),
   lastRun: catalogRunSchema.nullable().default(null),
 });
-export const catalogSourceStatusSchema = catalogSourceSchema.extend({
+export const catalogSourceStatusSchema = catalogSourceSchema.omit({ bbServerUrl: true }).extend({
+  managedHere: z.boolean().optional(),
   checkedAt: time,
   lastSuccessAt: time.nullable(),
   error: text.nullable(),
