@@ -55,6 +55,8 @@ describe("Devin CLI protobuf proxy", () => {
     const secret = { kind: "api-key" as const, apiKey: "account-pat" };
     const headers = new Headers({ authorization: "Basic client-token", "content-type": "application/proto" });
     const parsed = adapter.parseRequest(original, headers);
+    expect(parsed.affinityId).toBe(adapter.parseRequest(original, headers).affinityId);
+    expect(parsed.affinityId).not.toBe(adapter.parseRequest(original, new Headers({ authorization: "Basic another-client" })).affinityId);
     expect(Buffer.from(parsed.forAccount({} as never, secret)).includes(Buffer.from(bytes("account-pat")))).toBe(true);
     const upstream = adapter.requestHeaders(headers, {} as never, secret);
     expect(upstream.get("authorization")).toBe("Basic account-pat");

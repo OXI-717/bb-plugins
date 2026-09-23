@@ -1,4 +1,5 @@
 import { gunzipSync, gzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import type { AccountSecret } from "./contracts.js";
 import type { ProviderAdapter } from "./provider-adapter.js";
 import { filterRequestHeaders, mountedUpstreamUrl } from "./provider-adapter.js";
@@ -149,9 +150,16 @@ export function createDevinAdapter(): ProviderAdapter {
     inboundToken: devinMachineToken,
     async importAccount() { throw new Error("Add Devin with a PAT via --api-key-stdin."); },
     parseRequest(body, headers) {
+      const clientSession = headers.get("x-bb-devin-session");
+      const clientAuthorization = headers.get("authorization");
+      const affinityId = clientSession !== null && /^[A-Za-z0-9_-]{8,128}$/u.test(clientSession)
+        ? `cli:${clientSession}`
+        : clientAuthorization !== null
+          ? `cli:${createHash("sha256").update(clientAuthorization).digest("base64url")}`
+          : "cli:default";
       return {
         family: "other",
-        affinityId: null,
+        affinityId,
         parentAffinityId: null,
         forAccount(_account, secret) {
           if (secret.kind !== "api-key") throw new Error("Devin requires a PAT.");

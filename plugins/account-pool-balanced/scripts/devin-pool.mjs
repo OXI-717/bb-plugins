@@ -24,6 +24,7 @@ if (!tokenStat.isFile() || (tokenStat.mode & 0o077) !== 0) throw new Error('Pool
 const token = (await fs.readFile(options[3], 'utf8')).trim();
 if (!/^[A-Za-z0-9_-]{32,256}$/u.test(token)) throw new Error('Invalid pool token file.');
 const localKey = randomBytes(32).toString('base64url');
+const sessionId = randomBytes(16).toString('base64url');
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'devin-pool-'));
 await fs.chmod(profile, 0o700);
 const dataHome = path.join(profile, 'data');
@@ -47,6 +48,7 @@ const server = createServer(async (req, res) => {
       if (req.headers[name]) headers.set(name, String(req.headers[name]));
     }
     headers.set('x-bb-account-pool-token', token);
+    headers.set('x-bb-devin-session', sessionId);
     const upstream = await fetch(target, { method: 'POST', headers, body: Buffer.concat(chunks), redirect: 'error' });
     const responseHeaders = {};
     for (const [name, value] of upstream.headers) {

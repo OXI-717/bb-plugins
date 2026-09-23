@@ -749,6 +749,43 @@ describe("Account Pool plugin", () => {
     expect(requests).toHaveLength(1);
   });
 
+  it("pins concurrent Devin RPCs from one CLI process under balanced routing", async () => {
+    const requests: Request[] = [];
+    const first = deferred();
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "devin",
+      apiKey: "cog_first_synthetic",
+      options: { fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        if (requests.length === 1) await first.promise;
+        return new Response(Uint8Array.of(0x0a, 0x00), { headers: { "content-type": "application/proto" } });
+      } },
+    });
+    await fixture.host.harness.behavior.callRpc("account.add", {
+      provider: "devin", source: { kind: "api-key", apiKey: "cog_second_synthetic" }, label: null, priority: 101,
+    });
+    await fixture.host.harness.behavior.callRpc("config.set", { routingStrategy: "balanced" });
+    const key = new TextEncoder().encode(fixture.key);
+    const metadata = Uint8Array.of(0x1a, key.length, ...key);
+    const body = Buffer.from(Uint8Array.of(0x0a, metadata.length, ...metadata));
+    const rpcPath = "/devin/exa.seat_management_pb.SeatManagementService/GetUserStatus";
+    const headers = { authorization: `Basic ${fixture.key}`, "content-type": "application/proto", "x-bb-devin-session": "synthetic-cli-session" };
+    try {
+      const one = fixture.host.harness.behavior.fetchHttp("POST", rpcPath, { headers, body });
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      const two = fixture.host.harness.behavior.fetchHttp("POST", rpcPath, { headers, body });
+      await vi.waitFor(() => expect(requests).toHaveLength(2));
+      first.resolve();
+      expect((await one).status).toBe(200);
+      expect((await two).status).toBe(200);
+      expect(requests[0]?.headers.get("authorization")).toBe(requests[1]?.headers.get("authorization"));
+    } finally {
+      first.resolve();
+    }
+  });
+
   it("mints an access token from the pooled key and never forwards the pool token", async () => {
     const requests: Request[] = [];
     let exchanges = 0;
