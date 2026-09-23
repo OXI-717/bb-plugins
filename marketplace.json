@@ -48,7 +48,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/automation-catalog",
-          "range": "^0.1.0",
+          "range": "^0.1.1",
           "tagPrefix": "automation-catalog/"
         }
       }

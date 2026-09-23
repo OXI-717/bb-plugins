@@ -1,5 +1,25 @@
+import cronstrue from "cronstrue";
 export function catalogSchedule(schedule: string | null): string {
-  if (!schedule) return "No schedule declared";
+  if (!schedule) return "On demand / no schedule supplied";
+  const cron =
+    /^(\S+\s+\S+\s+\S+\s+\S+\s+\S+)(?:\s+([A-Za-z_]+(?:\/[A-Za-z_+-]+)+|UTC))?$/.exec(
+      schedule,
+    );
+  if (cron) {
+    try {
+      return (
+        cronstrue.toString(cron[1], {
+          use24HourTimeFormat: true,
+          throwExceptionOnParseError: true,
+        }) + (cron[2] ? ` · ${cron[2]}` : "")
+      );
+    } catch {}
+  }
+  if (
+    /^\d{4}-\d{2}-\d{2}T/.test(schedule) &&
+    Number.isFinite(Date.parse(schedule))
+  )
+    return `Once · ${new Date(schedule).toLocaleString()}`;
   const interval = /^Every (\d+) seconds$/.exec(schedule);
   if (interval) {
     const seconds = Number(interval[1]);
@@ -17,7 +37,11 @@ export function catalogSchedule(schedule: string | null): string {
       if (!item || typeof item !== "object") return null;
       if ("kind" in item && "value" in item && typeof item.value === "string") {
         const label =
-          item.kind === "interval" ? `Every ${item.value}` : item.value;
+          item.kind === "interval"
+            ? `Every ${item.value.replace(/(\d+)min\b/g, "$1 minutes").replace(/(\d+)h\b/g, "$1 hours")}`
+            : item.kind === "event" && item.value === "always-on"
+              ? "Continuously running"
+              : systemCalendar(item.value);
         return (
           label +
           ("timezone" in item &&
@@ -100,4 +124,30 @@ export function catalogSchedule(schedule: string | null): string {
   } catch {
     return schedule;
   }
+}
+
+function systemCalendar(value: string): string {
+  const interval = /^\*:0\/(\d+)$/.exec(value);
+  if (interval) return `Every ${interval[1]} minutes`;
+  const daily = /^(\d{2}(?:,\d{2})*):(\d{2})$/.exec(value);
+  if (daily)
+    return `Daily at ${daily[1]
+      .split(",")
+      .map((hour) => `${hour}:${daily[2]}`)
+      .join(", ")}`;
+  const weekly =
+    /^(Mon\.\.Fri|Mon|Tue|Wed|Thu|Fri|Sat|Sun) \*-\*-\* (\d{2}:\d{2})(?::00)?(.*)$/.exec(
+      value,
+    );
+  const days: Record<string, string> = {
+    "Mon..Fri": "Weekdays",
+    Mon: "Monday",
+    Tue: "Tuesday",
+    Wed: "Wednesday",
+    Thu: "Thursday",
+    Fri: "Friday",
+    Sat: "Saturday",
+    Sun: "Sunday",
+  };
+  return weekly ? `${days[weekly[1]]} at ${weekly[2]}${weekly[3]}` : value;
 }

@@ -247,8 +247,8 @@ def bb_collect(server, host):
         schedule = ((trigger.get('cron', '') + ' ' + trigger.get('timezone', '')).strip()
                     if trigger.get('triggerType') == 'schedule' else datetime.datetime.fromtimestamp(trigger['runAt'] / 1000, datetime.timezone.utc).isoformat() if trigger.get('runAt') else 'Unknown schedule')
         task.update(scope='personal' if project['id'] == 'proj_personal' else 'unknown',
-                    projectId=project['id'], scheduler='bb', executor=execution.get('interpreter') or execution.get('mode', 'Unknown'),
-                    state='active' if item.get('enabled') else 'paused', schedule=schedule,
+                    projectId=project['id'], projectName=project['name'], scheduler='bb', executor=execution.get('interpreter') or execution.get('mode', 'Unknown'),
+                    state='active' if item.get('enabled') else 'paused', schedule=schedule, nextRunAt=item.get('nextRunAt'),
                     history='available', description='Managed by the connected BB instance. Project: ' + project['name'] + '. Read-only projection; schedules remain at the source.')
         tasks.append(task)
         history = read(['automation', 'runs', item['id'], '--project', project['id'], '--limit', '100'])
