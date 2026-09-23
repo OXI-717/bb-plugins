@@ -28,6 +28,7 @@
     "hooks",
     "src",
     "detail.tsx",
-    "detail.test.tsx"
+    "detail.test.tsx",
+    "app.test.tsx"
   ]
 }
