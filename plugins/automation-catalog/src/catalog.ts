@@ -1,5 +1,7 @@
 import { composeRequestSchema, hostRequest } from "./compose";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { z } from "zod";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { Db } from "./data.js";
@@ -21,6 +23,7 @@ CREATE TABLE automation_catalog_runs (task_key TEXT NOT NULL REFERENCES automati
 CREATE INDEX automation_catalog_runs_time ON automation_catalog_runs(task_key, started_at DESC, id);
 `;
 const stored = z.object({ data: z.string() });
+const execFileAsync = promisify(execFile);
 function decode<T>(row: unknown, schema: z.ZodType<T>): T {
   return schema.parse(JSON.parse(stored.parse(row).data));
 }
@@ -55,11 +58,37 @@ export function createCatalog(db: Db) {
     };
   }
   return {
+    forgetMissing(key: string) {
+      return db.transaction(() => {
+        const task = entry(key);
+        if (!task.missing) throw new Error("Only missing catalog entries can be removed");
+        db.prepare("DELETE FROM automation_catalog_runs WHERE task_key = ?").run(key);
+        db.prepare("DELETE FROM automation_catalog_tasks WHERE key = ? AND missing = 1").run(key);
+        return { ok: true as const };
+      })();
+    },
+    entry,
     publish(input: unknown) {
       const snapshot = catalogSnapshotSchema.parse(input);
       if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > 4_000_000)
         throw new Error("Snapshot exceeds 4 MB");
       return db.transaction(() => {
+        const resolved = new Map<string, string>();
+        const identityKey = (host: string, id: string) => {
+          const identity = snapshot.source.id === "bb-main" ? id : JSON.stringify([host, id]);
+          const cached = resolved.get(identity);
+          if (cached) return cached;
+          if (snapshot.source.id === "bb-main") {
+            const existing = db.prepare("SELECT key FROM automation_catalog_tasks WHERE source_id = ? AND json_extract(data, '$.id') = ? ORDER BY missing ASC LIMIT 1").get(snapshot.source.id, id) as { key: string } | undefined;
+            if (existing) {
+              resolved.set(identity, existing.key);
+              return existing.key;
+            }
+          }
+          const key = taskKey(snapshot.source.id, host, id);
+          resolved.set(identity, key);
+          return key;
+        };
         const previous = db
           .prepare("SELECT data FROM automation_catalog_sources WHERE id = ?")
           .get(snapshot.source.id);
@@ -70,13 +99,13 @@ export function createCatalog(db: Db) {
           throw new Error("Snapshot is older than stored data");
         const keys = new Set(
           snapshot.tasks.map((task) =>
-            taskKey(snapshot.source.id, task.host, task.id),
+            identityKey(task.host, task.id),
           ),
         );
         if (keys.size !== snapshot.tasks.length)
           throw new Error("Duplicate task identity");
         for (const run of snapshot.runs) {
-          if (!keys.has(taskKey(snapshot.source.id, run.host, run.taskId)))
+          if (!keys.has(identityKey(run.host, run.taskId)))
             throw new Error("Run references a missing task");
         }
         const status = {
@@ -98,7 +127,7 @@ export function createCatalog(db: Db) {
           "UPDATE automation_catalog_tasks SET missing = 1 WHERE source_id = ?",
         ).run(status.id);
         for (const task of snapshot.tasks) {
-          const key = taskKey(status.id, task.host, task.id);
+          const key = identityKey(task.host, task.id);
           const value = {
             ...task,
             key,
@@ -111,7 +140,7 @@ export function createCatalog(db: Db) {
           ).run(key, status.id, JSON.stringify(value));
         }
         for (const run of snapshot.runs) {
-          const key = taskKey(status.id, run.host, run.taskId);
+          const key = identityKey(run.host, run.taskId);
           const previousRun = db
             .prepare(
               "SELECT data FROM automation_catalog_runs WHERE task_key = ? AND id = ?",
@@ -195,6 +224,14 @@ export function createCatalog(db: Db) {
 }
 
 export const catalogRpcContract = defineRpcContract({
+  catalog_forget_missing: {
+    input: z.object({ key: z.string().min(1) }).strict(),
+    output: z.object({ ok: z.literal(true) }),
+  },
+  catalog_manage_bb: {
+    input: z.object({ key: z.string().min(1), action: z.enum(["pause", "resume", "delete"]) }).strict(),
+    output: z.object({ ok: z.literal(true) }),
+  },
   catalog_compose: {
     input: z.object({ request: composeRequestSchema }).strict(),
     output: z.object({ threadId: z.string() }),
@@ -211,7 +248,31 @@ export const catalogRpcContract = defineRpcContract({
 });
 export function registerCatalog(bb: BbPluginApi, db: Db) {
   const catalog = createCatalog(db);
+  async function bbCommand(...args: string[]) {
+    const { stdout } = await execFileAsync(process.env.BB_CLI || "bb", ["automation", ...args, "--json"], {
+      timeout: 15000,
+      maxBuffer: 1024 * 1024,
+    });
+    return JSON.parse(stdout) as Record<string, unknown>;
+  }
   bb.rpc.register(catalogRpcContract, {
+    catalog_forget_missing: ({ key }) => {
+      const result = catalog.forgetMissing(key);
+      bb.realtime.publish("automation-catalog", { key });
+      return result;
+    },
+    catalog_manage_bb: async ({ key, action }) => {
+      const task = catalog.entry(key);
+      if (task.sourceId !== "bb-main" || task.scheduler !== "bb" || !task.projectId || task.missing)
+        throw new Error("Direct management is available only for current BB automations");
+      const current = await bbCommand("show", task.id, "--project", task.projectId);
+      if (current.id !== task.id || current.projectId !== task.projectId || current.name !== task.name)
+        throw new Error("The BB automation identity changed. Refresh the catalog.");
+      if (action === "pause" && current.enabled === false) throw new Error("Already disabled");
+      if (action === "resume" && current.enabled === true) throw new Error("Already enabled");
+      await bbCommand(action, task.id, "--project", task.projectId, ...(action === "delete" ? ["--yes"] : []));
+      return { ok: true as const };
+    },
     catalog_compose: async ({ request }) => {
       const thread = await bb.sdk.threads.spawn({
         ...hostRequest(request),
