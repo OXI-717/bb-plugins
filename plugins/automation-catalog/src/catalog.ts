@@ -1,3 +1,4 @@
+import { composeRequestSchema, hostRequest } from "./compose";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -194,6 +195,10 @@ export function createCatalog(db: Db) {
 }
 
 export const catalogRpcContract = defineRpcContract({
+  catalog_compose: {
+    input: z.object({ request: composeRequestSchema }).strict(),
+    output: z.object({ threadId: z.string() }),
+  },
   catalog_list: { input: z.null(), output: catalogListSchema },
   catalog_detail: {
     input: catalogDetailInputSchema,
@@ -207,6 +212,13 @@ export const catalogRpcContract = defineRpcContract({
 export function registerCatalog(bb: BbPluginApi, db: Db) {
   const catalog = createCatalog(db);
   bb.rpc.register(catalogRpcContract, {
+    catalog_compose: async ({ request }) => {
+      const thread = await bb.sdk.threads.spawn({
+        ...hostRequest(request),
+        title: "Automation setup",
+      });
+      return { threadId: thread.id };
+    },
     catalog_list: () => catalog.list(),
     catalog_detail: (input) => catalog.detail(input),
     catalog_publish: (input) => {

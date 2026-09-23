@@ -1,10 +1,6 @@
+import { AutomationComposer, type ComposeIntent } from "./compose";
 import { useCallback, useEffect, useState } from "react";
-import {
-  definePluginApp,
-  useBbNavigate,
-  useRealtime,
-  useRpc,
-} from "@get-bb/plugin-sdk/app";
+import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { catalogRpcContract } from "./src/catalog";
 import type { CatalogList } from "./src/catalog-types";
 import { CatalogDetailView } from "./detail";
@@ -28,7 +24,7 @@ import {
 
 export function CatalogPage() {
   const rpc = useRpc<typeof catalogRpcContract>();
-  const navigate = useBbNavigate();
+  const [compose, setCompose] = useState<ComposeIntent | null>(null);
   const [data, setData] = useState<CatalogList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState(readFilters);
@@ -58,6 +54,10 @@ export function CatalogPage() {
     } catch {}
     setPage(0);
   }, [filters]);
+  if (compose)
+    return (
+      <AutomationComposer intent={compose} onBack={() => setCompose(null)} />
+    );
   if (selected)
     return (
       <div className="h-full overflow-y-auto">
@@ -167,9 +167,10 @@ export function CatalogPage() {
                   key={type.id}
                   className="rounded-md border p-3 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() =>
-                    navigate.toCompose({
-                      initialPrompt: creationPrompt(type.id, creationScope),
-                      focusPrompt: true,
+                    setCompose({
+                      title: `Create ${creationScope} ${type.label}`,
+                      prompt: creationPrompt(type.id, creationScope),
+                      draftKey: `catalog:create:${type.id}:${creationScope}`,
                     })
                   }
                 >

@@ -87,17 +87,44 @@ describe("automation workflows", () => {
     await slot.findByText("Daily report");
     fireEvent.click(slot.getByRole("button", { name: "Create automation" }));
     fireEvent.click(slot.getByRole("button", { name: /BB automation/ }));
-    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain(
-      "personal automation",
-    );
-    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain(
-      "automations skill",
-    );
+    expect(
+      slot.getByRole("heading", { name: "Create personal BB automation" }),
+    ).toBeTruthy();
+    expect(
+      slot.getByRole("textbox").textContent ||
+        (slot.getByRole("textbox") as HTMLTextAreaElement).value,
+    ).toContain("personal automation");
     expect(
       slot.inspection.rpcCalls.every((call) =>
         ["catalog_list", "catalog_detail"].includes(call.method),
       ),
     ).toBe(true);
+    slot.lifecycle.unmount();
+  });
+  it("keeps ownership and destination correct when switching creation routes", async () => {
+    const slot = await mount();
+    await slot.findByText("Daily report");
+    fireEvent.click(slot.getByRole("button", { name: "Create automation" }));
+    fireEvent.click(slot.getByRole("button", { name: /Server automation/ }));
+    const first = slot.getByRole("textbox") as HTMLTextAreaElement;
+    expect(first.value || first.textContent).toContain("personal automation");
+    fireEvent.click(slot.getByRole("button", { name: "← Automations" }));
+    fireEvent.change(
+      slot.getByRole("combobox", { name: "Automation ownership" }),
+      { target: { value: "team" } },
+    );
+    fireEvent.click(slot.getByRole("button", { name: /BB automation/ }));
+    const second = slot.getByRole("textbox") as HTMLTextAreaElement;
+    expect(second.value || second.textContent).toContain("team automation");
+    expect(second.value || second.textContent).toContain("automations skill");
+    expect(second.value || second.textContent).not.toContain(
+      "server-automation creation skill",
+    );
+    expect(
+      slot.inspection.rpcCalls.some(
+        (call) => call.method === "catalog_compose",
+      ),
+    ).toBe(false);
     slot.lifecycle.unmount();
   });
 });
