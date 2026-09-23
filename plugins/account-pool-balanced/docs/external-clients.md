@@ -1,6 +1,6 @@
 # External clients and standalone server
 
-The pool can serve agents launched outside BB. Use the BB-hosted pool to share its existing accounts, or run the standalone server without BB. Both hosts use the same hub, adapters, quota routing and affinity code. Available in `account-pool-balanced/v0.3.0`; standalone and Devin cloud support are experimental.
+The pool can serve agents launched outside BB. Use the BB-hosted pool to share its existing accounts, or run the standalone server without BB. Both hosts use the same hub, adapters, quota routing and affinity code. Available in `account-pool-balanced/v0.3.1`; standalone and Devin cloud support are experimental.
 
 ## Share a BB pool
 
@@ -19,7 +19,7 @@ Pool credentials are for trusted clients belonging to the operator. They allow u
 Requirements: Node 22+, npm, and a compiler toolchain if the SQLite native prebuild is unavailable. No BB installation is needed for this mode:
 
 ```sh
-git clone --branch account-pool-balanced/v0.3.0 --depth 1 https://github.com/OXI-717/bb-plugins.git
+git clone --branch account-pool-balanced/v0.3.1 --depth 1 https://github.com/OXI-717/bb-plugins.git
 cd bb-plugins/plugins/account-pool-balanced
 npm ci
 npm run pool -- --data-dir /secure/pool import-login --provider codex

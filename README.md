@@ -1,6 +1,6 @@
 # OXI Public Plugins for BB
 
-Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory, version and immutable release tags. This repository ships **Account Pool Balanced**. **Automation Catalog** adds a unified view across schedulers.
+Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory and versioned release tags. GitHub Release immutability is enabled for releases published after 0.3.0; the earlier 0.3.0 release is not protected retroactively. This repository ships **Account Pool Balanced**. **Automation Catalog** adds a unified view across schedulers.
 
 ## Account Pool Balanced
 
@@ -8,7 +8,7 @@ Use multiple accounts of the same provider, track available quota and switch acc
 
 Adapters exist for Claude, Codex, Kimi, Z.AI, OpenCode Go and Cursor. Authentication and model availability depend on each provider. Claude and Codex support subscription login flows; other adapters use their supported provider keys. This does not turn every consumer subscription into an API account.
 
-Version 0.3.0 includes external client credentials, an experimental standalone server and a Devin cloud-session adapter: see [external clients and standalone setup](plugins/account-pool-balanced/docs/external-clients.md). Both modes start with your own accounts; no credentials are distributed. Cursor additionally requires an operator-configured ACP provider and wrapper; see [Cursor routing](plugins/account-pool-balanced/docs/cursor-paths.md). Devin cloud sessions use their separate API; local Devin CLI subscription proxying is not implemented.
+Version 0.3.1 includes external client credentials, an experimental standalone server and a Devin cloud-session adapter: see [external clients and standalone setup](plugins/account-pool-balanced/docs/external-clients.md). Both modes start with your own accounts; no credentials are distributed. Cursor additionally requires an operator-configured ACP provider and wrapper; see [Cursor routing](plugins/account-pool-balanced/docs/cursor-paths.md). Devin cloud sessions use their separate API; local Devin CLI subscription proxying is not implemented.
 
 ## Install
 
@@ -22,7 +22,7 @@ bb plugin install account-pool-balanced@oxi-public
 Or install the release directly:
 
 ```sh
-bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.3.0 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
+bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.3.1 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
 ```
 
 Do not enable BB's built-in `account-pool` at the same time: both register `bb pool` and provider routes. These install commands are for new installations. BB 0.43.3 rejects replacing an existing plugin's Git source. If migrating from another repository, keep the existing installation until you have a supported migration procedure with verified backup and restore; do not remove a live pool just to change its source.

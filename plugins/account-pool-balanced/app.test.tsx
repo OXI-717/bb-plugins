@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type {
@@ -756,13 +756,15 @@ describe("Account Pool settings", () => {
     });
     const slot = render([], { "codexLogin.start": codexLoginStart });
     fireEvent.click(await slot.findByRole("button", { name: "Войти в Codex" }));
-    fireEvent.click(
-      await slot.findByRole("button", { name: "Скопировать код входа Codex" }),
-    );
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith("ABCD-1234"));
-    await waitFor(() =>
-      expect(slot.getByText("Код входа скопирован")).toBeTruthy(),
-    );
+    const codeCopyButton = await slot.findByRole("button", {
+      name: "Скопировать код входа Codex",
+    });
+    await act(async () => {
+      fireEvent.click(codeCopyButton);
+      await writeText.mock.results[0]?.value;
+    });
+    expect(writeText).toHaveBeenCalledWith("ABCD-1234");
+    expect(slot.getByText("Код входа скопирован")).toBeTruthy();
     expect(
       slot
         .getByRole("button", { name: "Скопировать код входа Codex" })
