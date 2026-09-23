@@ -54,6 +54,7 @@ async function mount() {
     {
       rpc: {
         catalog_list: () => ({ tasks: [task], sources: [source] }),
+        catalog_refresh: () => ({ refreshed: ["bb-main"], deferred: ["example"] }),
         catalog_detail: () => ({
           task,
           source,
@@ -65,6 +66,14 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("uses the scheduler refresh RPC before reloading the table", async () => {
+    const slot = await mount();
+    await slot.findByText("Daily report");
+    fireEvent.click(slot.getByRole("button", { name: "Обновить BB" }));
+    await slot.findByText("BB обновлён. Остальные источники обновляются по своему расписанию.");
+    expect(slot.inspection.rpcCalls.map((call) => call.method).slice(-2)).toEqual(["catalog_refresh", "catalog_list"]);
+    slot.lifecycle.unmount();
+  });
   it("counts attention only within the visible source and search filters", async () => {
     sessionStorage.setItem("bb:automation-catalog:filters:v1", JSON.stringify({ query: "no-match", source: "", scope: "", host: "", state: "", project: "" }));
     const slot = await mount();

@@ -4,6 +4,11 @@ import { catalogSchedule } from "./catalog-schedule";
 import type { CatalogTask } from "../src/catalog-types";
 const task = { state: "active", missing: false, lastRun: null } as CatalogTask;
 describe("operational state", () => {
+  it("keeps source deletions visible without counting them as running failures", () => {
+    expect(health({ ...task, missing: true })).toMatchObject({
+      label: "Отсутствует", attention: false, tone: "danger",
+    });
+  });
   it("surfaces failed executions despite an enabled schedule", () => {
     expect(
       health({

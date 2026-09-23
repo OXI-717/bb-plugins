@@ -28,6 +28,8 @@ export function CatalogPage() {
   const [compose, setCompose] = useState<ComposeIntent | null>(null);
   const [data, setData] = useState<CatalogList | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
   const [filters, setFilters] = useState(readFilters);
   const [selected, setSelected] = useState<string | null>(null);
   const [page, setPage] = useState(0);
@@ -35,16 +37,35 @@ export function CatalogPage() {
   const [creating, setCreating] = useState(false);
   const [creationScope, setCreationScope] = useState("personal");
   const refresh = useCallback(() => {
-    rpc.call("catalog_list").then(
+    return rpc.call("catalog_list").then(
       (value) => {
         setData(value);
         setError(null);
+        return true;
       },
-      (cause) => setError(String(cause)),
+      (cause) => {
+        setError(String(cause));
+        return false;
+      },
     );
   }, [rpc]);
-  useEffect(refresh, [refresh]);
-  useRealtime("automation-catalog", refresh);
+  useEffect(() => { void refresh(); }, [refresh]);
+  useRealtime("automation-catalog", () => { void refresh(); });
+  async function refreshSources() {
+    setRefreshing(true);
+    setRefreshMessage(null);
+    try {
+      const result = await rpc.call("catalog_refresh");
+      if (!await refresh()) throw new Error("Не удалось загрузить обновлённый каталог");
+      setRefreshMessage(result.deferred.length
+        ? "BB обновлён. Остальные источники обновляются по своему расписанию."
+        : "Данные BB обновлены.");
+    } catch (cause) {
+      setError(`Не удалось опросить BB: ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setRefreshing(false);
+    }
+  }
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60000);
     return () => clearInterval(timer);
@@ -65,7 +86,7 @@ export function CatalogPage() {
         <CatalogDetailView
           key={selected}
           taskKey={selected}
-          onBack={() => setSelected(null)}
+          onBack={() => { setSelected(null); void refresh(); }}
         />
       </div>
     );
@@ -105,6 +126,11 @@ export function CatalogPage() {
       label: "Без данных о запусках",
       count: filteredTasks.filter((t) => t.history === "not-connected").length,
     },
+    {
+      id: "missing",
+      label: "Нет в источнике",
+      count: filteredTasks.filter((t) => t.missing).length,
+    },
   ];
   const matched = filteredTasks
     .filter(
@@ -116,6 +142,8 @@ export function CatalogPage() {
             ? states.get(t.key)!.paused
             : filters.state === "unmonitored"
               ? t.history === "not-connected"
+            : filters.state === "missing"
+              ? t.missing
             : filters.state === "running"
               ? ["running", "queued"].includes(t.lastRun?.status ?? "")
               : t.state === filters.state),
@@ -140,8 +168,8 @@ export function CatalogPage() {
             </p>
           </div>
           <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={refresh}>
-              Обновить
+            <Button size="sm" variant="outline" disabled={refreshing} onClick={() => void refreshSources()}>
+              {refreshing ? "Обновляем BB…" : "Обновить BB"}
             </Button>
             <Button
               size="sm"
@@ -152,6 +180,7 @@ export function CatalogPage() {
             </Button>
           </div>
         </header>
+        {refreshMessage && <p role="status" className="text-xs text-muted-foreground">{refreshMessage}</p>}
         {creating && (
           <section
             aria-label="Создать автоматизацию"

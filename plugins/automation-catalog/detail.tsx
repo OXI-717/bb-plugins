@@ -296,7 +296,7 @@ export function CatalogDetailView({
       setConfirmAction(null);
       if (action === "forget" || action === "delete") onBack();
       else {
-        setActionMessage(action === "pause" ? "Отключено в BB. Каталог обновится при следующей синхронизации." : "Включено в BB. Каталог обновится при следующей синхронизации.");
+        setActionMessage(action === "pause" ? "Отключено в BB. Каталог обновлён." : "Включено в BB. Каталог обновлён.");
         setRevision((v) => v + 1);
       }
     } catch (reason) {

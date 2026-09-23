@@ -1,4 +1,6 @@
 import { composeRequestSchema, hostRequest } from "./compose";
+import { refreshBbCatalog } from "./bb-refresh.js";
+import { manageBbCatalog } from "./bb-management.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -58,6 +60,22 @@ export function createCatalog(db: Db) {
     };
   }
   return {
+    setBbState(key: string, state: "active" | "paused") {
+      const task = entry(key);
+      if (task.sourceId !== "bb-main" || task.scheduler !== "bb" || task.missing)
+        throw new Error("Only current BB automations can be updated");
+      db.prepare("UPDATE automation_catalog_tasks SET data = ? WHERE key = ?").run(
+        JSON.stringify({ ...task, state, nextRunAt: state === "paused" ? null : task.nextRunAt, observedAt: Date.now() }), key,
+      );
+    },
+    remove(key: string) {
+      return db.transaction(() => {
+        entry(key);
+        db.prepare("DELETE FROM automation_catalog_runs WHERE task_key = ?").run(key);
+        db.prepare("DELETE FROM automation_catalog_tasks WHERE key = ?").run(key);
+        return { ok: true as const };
+      })();
+    },
     forgetMissing(key: string) {
       return db.transaction(() => {
         const task = entry(key);
@@ -224,6 +242,10 @@ export function createCatalog(db: Db) {
 }
 
 export const catalogRpcContract = defineRpcContract({
+  catalog_refresh: {
+    input: z.null(),
+    output: z.object({ refreshed: z.array(z.string()), deferred: z.array(z.string()) }),
+  },
   catalog_forget_missing: {
     input: z.object({ key: z.string().min(1) }).strict(),
     output: z.object({ ok: z.literal(true) }),
@@ -248,30 +270,28 @@ export const catalogRpcContract = defineRpcContract({
 });
 export function registerCatalog(bb: BbPluginApi, db: Db) {
   const catalog = createCatalog(db);
-  async function bbCommand(...args: string[]) {
-    const { stdout } = await execFileAsync(process.env.BB_CLI || "bb", ["automation", ...args, "--json"], {
+  async function bbCli(...args: string[]) {
+    const { stdout } = await execFileAsync(process.env.BB_CLI || "bb", [...args, "--json"], {
       timeout: 15000,
       maxBuffer: 1024 * 1024,
     });
     return JSON.parse(stdout) as Record<string, unknown>;
   }
   bb.rpc.register(catalogRpcContract, {
+    catalog_refresh: async () => {
+      const result = await refreshBbCatalog(catalog, bbCli);
+      bb.realtime.publish("automation-catalog", { sourceId: "bb-main" });
+      return result;
+    },
     catalog_forget_missing: ({ key }) => {
       const result = catalog.forgetMissing(key);
       bb.realtime.publish("automation-catalog", { key });
       return result;
     },
     catalog_manage_bb: async ({ key, action }) => {
-      const task = catalog.entry(key);
-      if (task.sourceId !== "bb-main" || task.scheduler !== "bb" || !task.projectId || task.missing)
-        throw new Error("Direct management is available only for current BB automations");
-      const current = await bbCommand("show", task.id, "--project", task.projectId);
-      if (current.id !== task.id || current.projectId !== task.projectId || current.name !== task.name)
-        throw new Error("The BB automation identity changed. Refresh the catalog.");
-      if (action === "pause" && current.enabled === false) throw new Error("Already disabled");
-      if (action === "resume" && current.enabled === true) throw new Error("Already enabled");
-      await bbCommand(action, task.id, "--project", task.projectId, ...(action === "delete" ? ["--yes"] : []));
-      return { ok: true as const };
+      const result = await manageBbCatalog(catalog, bbCli, key, action);
+      bb.realtime.publish("automation-catalog", { sourceId: "bb-main" });
+      return result;
     },
     catalog_compose: async ({ request }) => {
       const thread = await bb.sdk.threads.spawn({

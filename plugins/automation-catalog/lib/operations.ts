@@ -42,7 +42,7 @@ export function health(
       "Отсутствует",
       "Нет в последнем списке источника",
       0,
-      true,
+      false,
       "danger",
     );
   if (task.state === "blocked")
