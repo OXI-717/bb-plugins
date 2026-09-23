@@ -85,7 +85,8 @@ type DialogState =
       kind: "account" | "priority" | "role" | "cap" | "remove";
       accountId: string;
     }
-  | { kind: "claude-login" | "codex-login" | "api-key" }
+  | { kind: "claude-login" | "codex-login" }
+  | { kind: "api-key"; provider: PoolProvider }
   | null;
 
 type ConfigField = Exclude<
@@ -689,7 +690,7 @@ function AddAccountMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
-        <DropdownMenuItem
+        {(provider === "claude" || provider === "codex") ? <DropdownMenuItem
           className="items-start py-2"
           onSelect={() => onChoose("login")}
         >
@@ -704,8 +705,8 @@ function AddAccountMenu({
                 : "Откроет ChatGPT с кодом устройства"}
             </span>
           </span>
-        </DropdownMenuItem>
-        <DropdownMenuItem
+        </DropdownMenuItem> : null}
+        {(provider === "claude" || provider === "codex") ? <DropdownMenuItem
           className="items-start py-2"
           onSelect={() => onChoose("import")}
         >
@@ -717,19 +718,19 @@ function AddAccountMenu({
               хоста сервера
             </span>
           </span>
-        </DropdownMenuItem>
-        {provider === "claude" ? (
+        </DropdownMenuItem> : null}
+        {provider !== "codex" ? (
           <>
-            <DropdownMenuSeparator />
+            {provider === "claude" ? <DropdownMenuSeparator /> : null}
             <DropdownMenuItem
               className="items-start py-2"
               onSelect={() => onChoose("api-key")}
             >
               <Icon name="Lock" className="mt-0.5" />
               <span>
-                <span className="block">Добавить API-ключ…</span>
+                <span className="block">{provider === "devin" ? "Добавить PAT…" : "Добавить API-ключ…"}</span>
                 <span className="block text-xs text-muted-foreground">
-                  Платный запасной вариант, выбирается последним
+                  {provider === "claude" ? "Платный запасной вариант, выбирается последним" : "Ключ хранится на сервере пула"}
                 </span>
               </span>
             </DropdownMenuItem>
@@ -1225,7 +1226,7 @@ function AccountPoolSettings() {
       return;
     }
     if (choice === "api-key") {
-      setDialog({ kind: "api-key" });
+      setDialog({ kind: "api-key", provider });
       return;
     }
     await run(`import-${provider}`, async () => {
@@ -1317,6 +1318,7 @@ function AccountPoolSettings() {
   function closeDialog(): void {
     if (dialog?.kind === "codex-login" && codexStep !== null)
       void rpc.call("codexLogin.cancel", { sessionId: codexStep.sessionId });
+    if (dialog?.kind === "api-key") setApiKey("");
     setDialog(null);
     setLoginStep(null);
     setCodexStep(null);
@@ -1954,7 +1956,7 @@ function AccountPoolSettings() {
         ) : null}
         {dialog?.kind === "api-key" ? (
           <DialogFrame
-            title="Добавить API-ключ Anthropic"
+            title={dialog.provider === "claude" ? "Добавить API-ключ Anthropic" : `Добавить ${dialog.provider === "devin" ? "PAT" : "API-ключ"} ${PROVIDERS.find((entry) => entry.id === dialog.provider)?.title ?? dialog.provider}`}
             footer={
               <>
                 <span className="flex-1" />
@@ -1966,7 +1968,7 @@ function AccountPoolSettings() {
                   onClick={() =>
                     void run("api-key", async () => {
                       await rpc.call("account.add", {
-                        provider: "claude",
+                        provider: dialog.provider,
                         source: { kind: "api-key", apiKey: apiKey.trim() },
                         label: null,
                         priority: 100,
@@ -1982,14 +1984,14 @@ function AccountPoolSettings() {
             }
           >
             <p className="text-sm text-muted-foreground">
-              Платный запасной вариант; хранится в защищённом каталоге секретов
-              пула аккаунтов.
+              {dialog.provider === "claude" ? "Платный запасной вариант; " : null}
+              Ключ хранится в защищённом каталоге секретов пула аккаунтов.
             </p>
             <Input
               type="password"
               autoComplete="off"
-              aria-label="API-ключ Anthropic"
-              placeholder="sk-ant-…"
+              aria-label={dialog.provider === "devin" ? "Devin PAT" : `API-ключ ${dialog.provider === "claude" ? "Anthropic" : PROVIDERS.find((entry) => entry.id === dialog.provider)?.title ?? dialog.provider}`}
+              placeholder={dialog.provider === "claude" ? "sk-ant-…" : dialog.provider === "devin" ? "cog_…" : undefined}
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}
             />

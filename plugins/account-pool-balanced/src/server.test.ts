@@ -740,6 +740,13 @@ describe("Account Pool plugin", () => {
       const denied = await fixture.host.harness.behavior.fetchHttp("POST", `/devin/${rpcPath}`, { body: Buffer.from(body) });
       expect([rpcPath, denied.status]).toEqual([rpcPath, 401]);
     }
+    expect((await fixture.host.harness.behavior.runCli(["routing", "devin", "--off"])).exitCode).toBe(0);
+    const disabled = await fixture.host.harness.behavior.fetchHttp(
+      "POST", "/devin/exa.seat_management_pb.SeatManagementService/GetUserStatus",
+      { headers: { authorization: `Basic ${fixture.key}`, "content-type": "application/proto" }, body: Buffer.from(body) },
+    );
+    expect(disabled.status).toBe(503);
+    expect(requests).toHaveLength(1);
   });
 
   it("mints an access token from the pooled key and never forwards the pool token", async () => {

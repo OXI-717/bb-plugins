@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type {
@@ -347,6 +347,21 @@ describe("Account Pool settings", () => {
     expect(
       (await slot.findByLabelText("Код устройства Codex")).textContent,
     ).toContain("ABCD-1234");
+  });
+
+  it("adds a Devin PAT from its card without offering Codex login", async () => {
+    const slot = render([], { "account.add": () => account({ provider: "devin" }) });
+    const addButtons = await slot.findAllByRole("button", { name: "Добавить аккаунт" });
+    fireEvent.pointerDown(addButtons[6]!);
+    expect(slot.queryByText("Вход в Codex", { selector: "span.block" })).toBeNull();
+    fireEvent.click(await slot.findByText("Добавить PAT…"));
+    const dialog = await slot.findByRole("dialog", { name: "Добавить PAT Devin" });
+    fireEvent.change(slot.getByLabelText("Devin PAT"), { target: { value: "cog_synthetic" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Добавить ключ" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({
+      method: "account.add",
+      input: { provider: "devin", source: { kind: "api-key", apiKey: "cog_synthetic" }, label: null, priority: 100 },
+    }));
   });
 
   it("persists provider routing from the section switch", async () => {

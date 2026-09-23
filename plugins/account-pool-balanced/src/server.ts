@@ -344,7 +344,10 @@ export function createAccountPoolPlugin(
       bb.http.route(
         "POST",
         `/${DEVIN_MOUNT_PREFIX}${rpcPath}`,
-        (context) => hub.handle(context.req.raw, "devin"),
+        async (context) =>
+          (await operations.isRoutingEnabled("devin"))
+            ? hub.handle(context.req.raw, "devin")
+            : Response.json({ error: { message: "Devin pool routing is disabled.", code: 503 } }, { status: 503 }),
         { auth: "none" },
       );
     }
