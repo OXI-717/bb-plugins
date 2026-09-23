@@ -18,6 +18,7 @@ import {
   runLabel,
   timestamp,
   scopeLabel,
+  sourceLabel,
   creationTypes,
   creationPrompt,
 } from "./lib/operations";
@@ -80,22 +81,22 @@ export function CatalogPage() {
     ]),
   );
   const views = [
-    { id: "", label: "All", count: tasks.length },
+    { id: "", label: "Все", count: tasks.length },
     {
       id: "attention",
-      label: "Needs attention",
+      label: "Требуют внимания",
       count: tasks.filter((t) => states.get(t.key)!.attention).length,
     },
     {
       id: "running",
-      label: "Running / queued",
+      label: "Выполняются / в очереди",
       count: tasks.filter((t) =>
         ["running", "queued"].includes(t.lastRun?.status ?? ""),
       ).length,
     },
     {
       id: "paused",
-      label: "Paused",
+      label: "Отключены",
       count: tasks.filter((t) => states.get(t.key)!.paused).length,
     },
   ];
@@ -126,39 +127,39 @@ export function CatalogPage() {
       <main className="mx-auto max-w-7xl space-y-4 p-4">
         <header className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h1 className="text-xl font-semibold">Automations</h1>
+            <h1 className="text-xl font-semibold">Автоматизации</h1>
             <p className="text-xs text-muted-foreground">
-              Execution, schedules and results across your connected systems
+              Запуски, расписания и результаты из подключённых систем
             </p>
           </div>
           <div className="flex gap-2">
             <Button size="sm" variant="outline" onClick={refresh}>
-              Refresh
+              Обновить
             </Button>
             <Button
               size="sm"
               onClick={() => setCreating(!creating)}
               aria-expanded={creating}
             >
-              Create automation
+              Создать автоматизацию
             </Button>
           </div>
         </header>
         {creating && (
           <section
-            aria-label="Create automation"
+            aria-label="Создать автоматизацию"
             className="rounded-md border bg-card p-4 space-y-3"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="font-medium">Where should it run?</h2>
+              <h2 className="font-medium">Где запускать?</h2>
               <select
-                aria-label="Automation ownership"
+                aria-label="Тип автоматизации"
                 className="rounded-md border bg-background px-2 py-1 text-sm"
                 value={creationScope}
                 onChange={(e) => setCreationScope(e.target.value)}
               >
-                <option value="personal">Personal</option>
-                <option value="team">Team</option>
+                <option value="personal">Личная</option>
+                <option value="team">Командная</option>
               </select>
             </div>
             <div className="grid gap-2 sm:grid-cols-3">
@@ -168,7 +169,7 @@ export function CatalogPage() {
                   className="rounded-md border p-3 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() =>
                     setCompose({
-                      title: `Create ${creationScope} ${type.label}`,
+                      title: `Создать ${creationScope === "team" ? "командную" : "личную"} автоматизацию · ${type.label}`,
                       prompt: creationPrompt(type.id, creationScope),
                       draftKey: `catalog:create:${type.id}:${creationScope}`,
                     })
@@ -184,13 +185,13 @@ export function CatalogPage() {
               ))}
             </div>
             <p className="text-xs text-muted-foreground">
-              Opens a prepared request in BB. Add the task description and send
-              it to start setup.
+              Откроется подготовленный запрос в BB. Добавьте описание задачи и отправьте
+              его, чтобы начать настройку.
             </p>
           </section>
         )}
         <nav
-          aria-label="Automation views"
+          aria-label="Разделы автоматизаций"
           className="flex flex-wrap gap-1 border-b pb-2"
         >
           {views.map((view) => (
@@ -217,8 +218,8 @@ export function CatalogPage() {
         <div className="flex flex-wrap gap-2">
           <Input
             className="h-8 w-full sm:w-64"
-            aria-label="Search automations"
-            placeholder="Search automations…"
+            aria-label="Поиск автоматизаций"
+            placeholder="Поиск автоматизаций…"
             value={filters.query}
             onChange={(e) => setFilters({ ...filters, query: e.target.value })}
           />
@@ -249,10 +250,10 @@ export function CatalogPage() {
                 <option value="">
                   {
                     {
-                      source: "All sources",
-                      scope: "All ownership",
-                      host: "All hosts",
-                      project: "All projects",
+                      source: "Все источники",
+                      scope: "Любой тип",
+                      host: "Все хосты",
+                      project: "Все проекты",
                     }[field]
                   }
                 </option>
@@ -262,12 +263,12 @@ export function CatalogPage() {
                 {values.map((v) => (
                   <option key={v} value={v}>
                     {field === "source"
-                      ? (data?.sources.find((s) => s.id === v)?.name ?? v)
+                      ? sourceLabel(data?.sources.find((s) => s.id === v)?.name ?? v)
                       : field === "scope"
                         ? scopeLabel(v)
                         : field === "project"
                           ? (tasks.find((t) => t.projectId === v)
-                              ?.projectName ?? "Project name unavailable")
+                              ?.projectName ?? "Проект не указан")
                           : v}
                   </option>
                 ))}
@@ -279,32 +280,32 @@ export function CatalogPage() {
             variant="ghost"
             onClick={() => setFilters({ ...emptyFilters })}
           >
-            Clear
+            Сбросить
           </Button>
         </div>
         {error && (
           <div role="alert" className="rounded-md border p-3 text-sm">
             <p>
-              Could not refresh the catalog. Your last loaded inventory is
-              preserved.
+              Не удалось обновить каталог. Последние загруженные данные
+              сохранены.
             </p>
             <details className="text-xs text-muted-foreground">
-              <summary>Connection details</summary>
+              <summary>Подробности соединения</summary>
               {error}
             </details>
           </div>
         )}
-        {data === null && !error && <p role="status">Loading automations…</p>}
+        {data === null && !error && <p role="status">Загрузка автоматизаций…</p>}
         {data && (
           <p className="text-xs text-muted-foreground">
-            {matched.length} automations · Problems first
+            {matched.length} автоматизаций · сначала проблемные
           </p>
         )}
         {data && matched.length === 0 && (
           <p className="py-8 text-center text-sm text-muted-foreground">
             {tasks.length
-              ? "No automations match these filters."
-              : "No automations connected. Create one or connect a source."}
+              ? "По заданным фильтрам автоматизаций нет."
+              : "Нет подключённых автоматизаций. Создайте новую или подключите источник."}
           </p>
         )}
         {matched.length > 0 && (
@@ -312,13 +313,13 @@ export function CatalogPage() {
             <table className="w-full text-left text-sm">
               <thead className="border-b bg-muted/40 text-xs text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-2 font-medium">Automation / source</th>
-                  <th className="px-3 py-2 font-medium">State</th>
+                  <th className="px-3 py-2 font-medium">Автоматизация / источник</th>
+                  <th className="px-3 py-2 font-medium">Состояние</th>
                   <th className="hidden px-3 py-2 font-medium md:table-cell">
-                    Schedule
+                    Расписание
                   </th>
                   <th className="hidden px-3 py-2 font-medium lg:table-cell">
-                    Last execution
+                    Последний запуск
                   </th>
                 </tr>
               </thead>
@@ -340,8 +341,8 @@ export function CatalogPage() {
                             {t.name}
                           </button>
                           <p className="mt-1 break-words text-xs text-muted-foreground">
-                            {data?.sources.find((s) => s.id === t.sourceId)
-                              ?.name ?? t.sourceId}{" "}
+                            {sourceLabel(data?.sources.find((s) => s.id === t.sourceId)
+                              ?.name ?? t.sourceId)}{" "}
                             · {scopeLabel(t.scope)}
                           </p>
                           <p className="mt-1 text-xs text-muted-foreground md:hidden">
@@ -350,7 +351,7 @@ export function CatalogPage() {
                           <p className="mt-1 text-xs text-muted-foreground lg:hidden">
                             {t.lastRun
                               ? `${runLabel(t.lastRun.status)} · ${timestamp(t.lastRun.startedAt ?? t.lastRun.finishedAt)}`
-                              : "No execution received"}
+                              : "Данных о запусках нет"}
                           </p>
                         </td>
                         <td className="max-w-48 px-3 py-3 align-top">
@@ -368,7 +369,7 @@ export function CatalogPage() {
                           {catalogSchedule(t.schedule)}
                           {t.nextRunAt != null && (
                             <p className="mt-1 text-muted-foreground">
-                              Next: {timestamp(t.nextRunAt)}
+                              Следующий запуск: {timestamp(t.nextRunAt)}
                             </p>
                           )}
                         </td>
@@ -392,13 +393,13 @@ export function CatalogPage() {
                               {t.lastRun.startedAt === null &&
                                 t.lastRun.finishedAt === null && (
                                   <p className="text-muted-foreground">
-                                    Time not retained
+                                    Время не сохранено
                                   </p>
                                 )}
                             </>
                           ) : (
                             <span className="text-muted-foreground">
-                              No execution received
+                              Данных о запусках нет
                             </span>
                           )}
                         </td>
@@ -417,7 +418,7 @@ export function CatalogPage() {
               disabled={currentPage === 0}
               onClick={() => setPage(currentPage - 1)}
             >
-              Previous
+              Назад
             </Button>
             <span>
               {currentPage + 1} / {lastPage + 1}
@@ -428,23 +429,23 @@ export function CatalogPage() {
               disabled={currentPage === lastPage}
               onClick={() => setPage(currentPage + 1)}
             >
-              Next
+              Далее
             </Button>
           </div>
         )}
         <details className="text-xs text-muted-foreground">
           <summary className="cursor-pointer">
-            Connected sources ({data?.sources.length ?? 0})
+            Подключённые источники ({data?.sources.length ?? 0})
           </summary>
           <div className="mt-2 space-y-2">
             {data?.sources.map((s) => (
               <p key={s.id}>
-                {s.name} · Updated {timestamp(s.lastSuccessAt)}
+                {sourceLabel(s.name)} · Обновлено {timestamp(s.lastSuccessAt)}
                 {s.error
-                  ? " · Connection problem"
+                  ? " · Ошибка соединения"
                   : s.lastSuccessAt === null ||
                       now - s.lastSuccessAt > s.staleAfterMs
-                    ? " · Data out of date"
+                    ? " · Данные устарели"
                     : ""}
               </p>
             ))}
@@ -457,7 +458,7 @@ export function CatalogPage() {
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "catalog",
-    title: "Automation Catalog",
+    title: "Каталог автоматизаций",
     icon: "Repeat",
     path: "catalog",
     component: CatalogPage,

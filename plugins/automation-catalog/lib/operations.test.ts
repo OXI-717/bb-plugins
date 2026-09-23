@@ -10,16 +10,16 @@ describe("operational state", () => {
         ...task,
         lastRun: { status: "failed" } as CatalogTask["lastRun"],
       }),
-    ).toMatchObject({ label: "Last run failed", attention: true });
+    ).toMatchObject({ label: "Последний запуск завершился ошибкой", attention: true });
   });
   it("surfaces declared blockers when live monitoring is absent", () => {
     expect(
       health({ ...task, state: "unknown", declaredState: "blocked" }),
-    ).toMatchObject({ label: "Blocked", attention: true });
+    ).toMatchObject({ label: "Заблокирована", attention: true });
   });
   it("does not treat a deliberate pause as failure", () => {
     expect(health({ ...task, state: "paused" })).toMatchObject({
-      label: "Paused",
+      label: "Отключена",
       attention: false,
       paused: true,
     });
@@ -36,16 +36,16 @@ describe("operational state", () => {
   it("does not invent healthy state without monitoring", () => {
     expect(
       health({ ...task, state: "unknown", declaredState: "active" }),
-    ).toMatchObject({ label: "Not monitored", attention: true });
+    ).toMatchObject({ label: "Нет мониторинга", attention: true });
   });
   it("routes creation by scope and execution destination", () => {
     expect(creationPrompt("bb", "personal")).toContain(
-      "installed automations skill",
+      "установленный скилл automations",
     );
     expect(creationPrompt("local", "personal")).toContain("oxi-launchd");
-    expect(creationPrompt("server", "team")).toContain("team automation");
+    expect(creationPrompt("server", "team")).toContain("командную автоматизацию");
     expect(creationPrompt("server", "team")).toContain(
-      "Do not substitute another scheduler",
+      "Не заменяй выбранный планировщик",
     );
   });
 });
@@ -64,14 +64,14 @@ describe("freshness and registry signals", () => {
         },
         100000,
       ).reason,
-    ).toContain("Source connection problem");
+    ).toContain("Ошибка связи с источником");
   });
   it("recognizes a registry failure without claiming live verification", () => {
     expect(
       health({ ...task, state: "unknown", declaredState: "failed" }),
     ).toMatchObject({
-      label: "Failed",
-      reason: "Marked failed in the registry",
+      label: "Ошибка",
+      reason: "Помечена ошибочной в реестре",
       attention: true,
     });
   });
@@ -85,25 +85,25 @@ describe("freshness and registry signals", () => {
       error: null,
     };
     expect(health({ ...task, nextRunAt: 1 }, source, 200000).label).toBe(
-      "Overdue",
+      "Просрочена",
     );
     expect(
       health({ ...task, nextRunAt: 1 }, { ...source, lastSuccessAt: 1 }, 200000)
         .label,
-    ).toBe("Data out of date");
+    ).toBe("Данные устарели");
     expect(
       health({ ...task, state: "paused", nextRunAt: 1 }, source, 200000).label,
-    ).toBe("Paused");
+    ).toBe("Отключена");
   });
 });
 describe("human schedules", () => {
   it("reads cron with its timezone", () => {
     expect(catalogSchedule("*/15 * * * * Europe/Paris")).toBe(
-      "Every 15 minutes · Europe/Paris",
+      "Каждые 15 минут · Europe/Paris",
     );
   });
   it("reads one-shot times", () => {
-    expect(catalogSchedule("2026-01-01T10:00:00Z")).toMatch(/^Once · /);
+    expect(catalogSchedule("2026-01-01T10:00:00Z")).toMatch(/^Однократно · /);
   });
   it("preserves unsupported definitions for inspection", () => {
     expect(catalogSchedule("on deployment")).toBe("on deployment");

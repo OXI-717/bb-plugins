@@ -27,12 +27,12 @@ export function health(
     reason:
       reason +
       (rank < 4 && source?.error
-        ? " · Source connection problem"
+        ? " · Ошибка связи с источником"
         : rank < 4 &&
             source &&
             (source.lastSuccessAt === null ||
               now - source.lastSuccessAt > source.staleAfterMs)
-          ? " · Data out of date"
+          ? " · Данные устарели"
           : ""),
     rank,
     attention,
@@ -41,48 +41,48 @@ export function health(
   });
   if (task.missing)
     return result(
-      "Missing",
-      "Absent from the latest source inventory",
+      "Отсутствует",
+      "Нет в последнем списке источника",
       0,
       true,
       "danger",
     );
   if (task.state === "blocked" || task.declaredState === "blocked")
     return result(
-      "Blocked",
+      "Заблокирована",
       task.state === "blocked"
-        ? "Execution is blocked"
-        : "Marked blocked in the registry",
+        ? "Выполнение заблокировано"
+        : "Помечена заблокированной в реестре",
       1,
       true,
       "danger",
     );
   if (task.state === "failed" || task.declaredState === "failed")
     return result(
-      "Failed",
+      "Ошибка",
       task.state === "failed"
-        ? "Scheduler reports a failure"
-        : "Marked failed in the registry",
+        ? "Планировщик сообщает об ошибке"
+        : "Помечена ошибочной в реестре",
       2,
       true,
       "danger",
     );
   if (task.lastRun?.status === "failed")
     return result(
-      "Last run failed",
+      "Последний запуск завершился ошибкой",
       paused
-        ? "Paused · last execution failed"
+        ? "Отключена · последний запуск с ошибкой"
         : task.state === "active"
-          ? "Enabled · last execution failed"
-          : "Last recorded execution failed",
+          ? "Включена · последний запуск с ошибкой"
+          : "Последний записанный запуск с ошибкой",
       3,
       true,
       "danger",
     );
   if (source?.error)
     return result(
-      "Connection problem",
-      "Could not refresh this source; showing last known data",
+      "Ошибка соединения",
+      "Не удалось обновить источник; показаны последние известные данные",
       4,
     );
   if (
@@ -91,8 +91,8 @@ export function health(
       now - source.lastSuccessAt > source.staleAfterMs)
   )
     return result(
-      "Data out of date",
-      "Current execution state needs verification",
+      "Данные устарели",
+      "Текущее состояние требует проверки",
       5,
     );
   if (
@@ -103,29 +103,29 @@ export function health(
     !["running", "queued"].includes(task.lastRun?.status ?? "")
   )
     return result(
-      "Overdue",
-      "Scheduled execution time has passed; verify the scheduler",
+      "Просрочена",
+      "Время запуска прошло; проверьте планировщик",
       6,
     );
   if (task.lastRun?.status === "running")
-    return result("Running", "Execution is in progress", 6, false);
+    return result("Выполняется", "Идёт выполнение", 6, false);
   if (task.lastRun?.status === "queued")
-    return result("Queued", "Waiting to execute", 7, false);
+    return result("В очереди", "Ожидает выполнения", 7, false);
   if (paused)
-    return result("Paused", "Scheduled execution is paused", 8, false);
+    return result("Отключена", "Запуск по расписанию приостановлен", 8, false);
   if (task.state === "unknown")
     return result(
-      "Not monitored",
+      "Нет мониторинга",
       task.declaredState
-        ? `Registry: ${task.declaredState}; live execution is not connected`
-        : "Live execution is not connected",
+        ? `В реестре: ${automationStateLabel(task.declaredState)}; состояние запусков не подключено`
+        : "Состояние запусков не подключено",
       9,
     );
   return result(
-    "Enabled",
+    "Включена",
     task.lastRun
-      ? "Schedule enabled"
-      : "Schedule enabled; no execution received yet",
+      ? "Расписание включено"
+      : "Расписание включено; данных о запусках пока нет",
     10,
     false,
   );
@@ -134,21 +134,24 @@ export function runLabel(status: string) {
   return (
     (
       {
-        succeeded: "Succeeded",
-        failed: "Failed",
-        running: "Running",
-        queued: "Queued",
-        skipped: "Skipped",
-        cancelled: "Cancelled",
-        unknown: "Result unavailable",
+        succeeded: "Успешно",
+        failed: "Ошибка",
+        running: "Выполняется",
+        queued: "В очереди",
+        skipped: "Пропущено",
+        cancelled: "Отменено",
+        unknown: "Результат недоступен",
       } as Record<string, string>
-    )[status] ?? "Result unavailable"
+    )[status] ?? "Результат недоступен"
   );
+}
+export function automationStateLabel(state: string) {
+  return ({ active: "Включена", paused: "Отключена", blocked: "Заблокирована", failed: "Ошибка", unknown: "Неизвестно" } as Record<string, string>)[state] ?? state;
 }
 export function timestamp(value: number | null | undefined) {
   return value == null
     ? "—"
-    : new Date(value).toLocaleString(undefined, {
+    : new Date(value).toLocaleString("ru-RU", {
         month: "short",
         day: "numeric",
         hour: "2-digit",
@@ -159,40 +162,43 @@ export function duration(start: number | null, end: number | null) {
   if (start === null || end === null) return "—";
   const seconds = Math.max(0, Math.round((end - start) / 1000));
   return seconds < 60
-    ? `${seconds}s`
+    ? `${seconds} с`
     : seconds < 3600
-      ? `${Math.floor(seconds / 60)}m ${seconds % 60}s`
-      : `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+      ? `${Math.floor(seconds / 60)} мин ${seconds % 60} с`
+      : `${Math.floor(seconds / 3600)} ч ${Math.floor((seconds % 3600) / 60)} мин`;
 }
 export function scopeLabel(scope: string) {
   return scope === "personal"
-    ? "Personal"
+    ? "Личная"
     : scope === "team"
-      ? "Team"
-      : "Unassigned";
+      ? "Командная"
+      : "Не задано";
+}
+export function sourceLabel(name: string) {
+  return ({ "AIM server registry": "Реестр сервера AIM", "AIM team automations": "Командные автоматизации AIM" } as Record<string, string>)[name] ?? name;
 }
 export const creationTypes = [
   {
     id: "bb",
-    label: "BB automation",
-    description: "Agent or script, scheduled by BB.",
+    label: "Автоматизация BB",
+    description: "Агент или скрипт по расписанию BB.",
     skill: "automations",
   },
   {
     id: "local",
-    label: "Local automation",
-    description: "Run on your computer using its scheduler.",
+    label: "Локальная автоматизация",
+    description: "Запуск на вашем компьютере через его планировщик.",
     skill: "oxi-launchd",
   },
   {
     id: "server",
-    label: "Server automation",
-    description: "Use a connected server scheduler and its creation skill.",
+    label: "Серверная автоматизация",
+    description: "Запуск на подключённом сервере через его планировщик.",
     skill: null,
   },
 ] as const;
 export function creationPrompt(type: string, scope: string) {
   const route =
     creationTypes.find((item) => item.id === type) ?? creationTypes[0];
-  return `Help me create a ${scope === "team" ? "team" : "personal"} automation. Execution destination: ${route.label}.\n${route.skill ? `Use the installed ${route.skill} skill.` : "Discover the installed server-automation creation skill or client and verify the available execution profiles."}\nAsk me what it should do and when it should run. Verify the destination, ownership, timezone and execution capabilities. If the selected scheduler does not support the requested personal/team ownership, explain the mismatch before creating anything. Prefer a script when reasoning is unnecessary. Do not substitute another scheduler. Register it in Automation Catalog after creation and verify that its schedule and state appear.\nTask description: `;
+  return `Помоги создать ${scope === "team" ? "командную" : "личную"} автоматизацию. Где запускать: ${route.label}.\n${route.skill ? `Используй установленный скилл ${route.skill}.` : "Найди установленный скилл или клиент для создания серверной автоматизации и проверь доступные варианты запуска."}\nСпроси, что автоматизация должна делать и когда запускаться. Проверь место запуска, владельца, часовой пояс и возможности планировщика. Если выбранный планировщик не поддерживает нужный тип владения, объясни это до создания. Для задачи без рассуждений предпочти скрипт. Не заменяй выбранный планировщик. После создания добавь автоматизацию в каталог и проверь её расписание и состояние.\nОписание задачи: `;
 }

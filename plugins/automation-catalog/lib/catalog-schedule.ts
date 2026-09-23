@@ -1,6 +1,6 @@
-import cronstrue from "cronstrue";
+import cronstrue from "cronstrue/i18n.js";
 export function catalogSchedule(schedule: string | null): string {
-  if (!schedule) return "On demand / no schedule supplied";
+  if (!schedule) return "По запросу / расписание не указано";
   const cron =
     /^(\S+\s+\S+\s+\S+\s+\S+\s+\S+)(?:\s+([A-Za-z_]+(?:\/[A-Za-z_+-]+)+|UTC))?$/.exec(
       schedule,
@@ -10,6 +10,7 @@ export function catalogSchedule(schedule: string | null): string {
       return (
         cronstrue.toString(cron[1], {
           use24HourTimeFormat: true,
+          locale: "ru",
           throwExceptionOnParseError: true,
         }) + (cron[2] ? ` · ${cron[2]}` : "")
       );
@@ -19,13 +20,13 @@ export function catalogSchedule(schedule: string | null): string {
     /^\d{4}-\d{2}-\d{2}T/.test(schedule) &&
     Number.isFinite(Date.parse(schedule))
   )
-    return `Once · ${new Date(schedule).toLocaleString()}`;
+    return `Однократно · ${new Date(schedule).toLocaleString("ru-RU")}`;
   const interval = /^Every (\d+) seconds$/.exec(schedule);
   if (interval) {
     const seconds = Number(interval[1]);
-    if (seconds % 3600 === 0) return `Every ${seconds / 3600} hours`;
-    if (seconds % 60 === 0) return `Every ${seconds / 60} minutes`;
-    return schedule;
+    if (seconds % 3600 === 0) return `Каждые ${seconds / 3600} ч`;
+    if (seconds % 60 === 0) return `Каждые ${seconds / 60} мин`;
+    return `Каждые ${seconds} с`;
   }
   const suffix = " (host timezone)";
   try {
@@ -38,9 +39,9 @@ export function catalogSchedule(schedule: string | null): string {
       if ("kind" in item && "value" in item && typeof item.value === "string") {
         const label =
           item.kind === "interval"
-            ? `Every ${item.value.replace(/(\d+)min\b/g, "$1 minutes").replace(/(\d+)h\b/g, "$1 hours")}`
+            ? `Каждые ${item.value.replace(/(\d+)min\b/g, "$1 мин").replace(/(\d+)h\b/g, "$1 ч")}`
             : item.kind === "event" && item.value === "always-on"
-              ? "Continuously running"
+              ? "Работает постоянно"
               : systemCalendar(item.value);
         return (
           label +
@@ -84,14 +85,14 @@ export function catalogSchedule(schedule: string | null): string {
           return null;
         parts.push(
           [
-            "Sunday",
-            "Monday",
-            "Tuesday",
-            "Wednesday",
-            "Thursday",
-            "Friday",
-            "Saturday",
-            "Sunday",
+            "Воскресенье",
+            "Понедельник",
+            "Вторник",
+            "Среда",
+            "Четверг",
+            "Пятница",
+            "Суббота",
+            "Воскресенье",
           ][item.Weekday],
         );
       }
@@ -103,7 +104,7 @@ export function catalogSchedule(schedule: string | null): string {
           item.Day > 31
         )
           return null;
-        parts.push(`Day ${item.Day} of the month`);
+        parts.push(`${item.Day}-е число месяца`);
       }
       if ("Month" in item) {
         if (
@@ -113,13 +114,13 @@ export function catalogSchedule(schedule: string | null): string {
           item.Month > 12
         )
           return null;
-        parts.push(`month ${item.Month}`);
+        parts.push(`${item.Month}-й месяц`);
       }
-      if (!parts.length) parts.push("Daily");
-      return `${parts.join(", ")} at ${String(item.Hour).padStart(2, "0")}:${String(item.Minute).padStart(2, "0")}`;
+      if (!parts.length) parts.push("Ежедневно");
+      return `${parts.join(", ")} в ${String(item.Hour).padStart(2, "0")}:${String(item.Minute).padStart(2, "0")}`;
     });
     return labels.length && labels.every((label) => label !== null)
-      ? labels.join("; ") + (schedule.endsWith(suffix) ? suffix : "")
+      ? labels.join("; ") + (schedule.endsWith(suffix) ? " (часовой пояс хоста)" : "")
       : schedule;
   } catch {
     return schedule;
@@ -128,10 +129,10 @@ export function catalogSchedule(schedule: string | null): string {
 
 function systemCalendar(value: string): string {
   const interval = /^\*:0\/(\d+)$/.exec(value);
-  if (interval) return `Every ${interval[1]} minutes`;
+  if (interval) return `Каждые ${interval[1]} мин`;
   const daily = /^(\d{2}(?:,\d{2})*):(\d{2})$/.exec(value);
   if (daily)
-    return `Daily at ${daily[1]
+    return `Ежедневно в ${daily[1]
       .split(",")
       .map((hour) => `${hour}:${daily[2]}`)
       .join(", ")}`;
@@ -140,14 +141,14 @@ function systemCalendar(value: string): string {
       value,
     );
   const days: Record<string, string> = {
-    "Mon..Fri": "Weekdays",
-    Mon: "Monday",
-    Tue: "Tuesday",
-    Wed: "Wednesday",
-    Thu: "Thursday",
-    Fri: "Friday",
-    Sat: "Saturday",
-    Sun: "Sunday",
+    "Mon..Fri": "По будням",
+    Mon: "Понедельник",
+    Tue: "Вторник",
+    Wed: "Среда",
+    Thu: "Четверг",
+    Fri: "Пятница",
+    Sat: "Суббота",
+    Sun: "Воскресенье",
   };
-  return weekly ? `${days[weekly[1]]} at ${weekly[2]}${weekly[3]}` : value;
+  return weekly ? `${days[weekly[1]]} в ${weekly[2]}${weekly[3]}` : value;
 }

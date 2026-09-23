@@ -45,10 +45,10 @@ describe("detail failure states", () => {
     const html = renderToStaticMarkup(
       <CatalogDetailContent detail={fixture} />,
     );
-    expect(html).toContain("Connection problem");
+    expect(html).toContain("Ошибка соединения");
     expect(html).toContain("Source unavailable");
-    expect(html).toContain("Execution history is not connected.");
-    expect(html).toContain("Could not refresh this source");
+    expect(html).toContain("История запусков не подключена.");
+    expect(html).toContain("Не удалось обновить источник");
   });
   it("escapes imported text and reports missing tasks", () => {
     const html = renderToStaticMarkup(
@@ -65,6 +65,6 @@ describe("detail failure states", () => {
     );
     expect(html).not.toContain("<script>");
     expect(html).toContain("&lt;script&gt;");
-    expect(html).toContain("missing from the latest source snapshot");
+    expect(html).toContain("нет в последнем снимке источника");
   });
 });
