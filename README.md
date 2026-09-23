@@ -1,6 +1,6 @@
 # OXI Public Plugins for BB
 
-Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory, version and immutable release tags. This repository currently ships **Account Pool Balanced**.
+Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory, version and immutable release tags. This repository ships **Account Pool Balanced**. **Automation Catalog** adds a unified view across schedulers.
 
 ## Account Pool Balanced
 
@@ -55,3 +55,7 @@ CI runs all plugin tests, typechecks and builds on standard GitHub-hosted runner
 ## License
 
 MIT. Account Pooler and vendored UI derive from `get-bb/bb`; upstream attribution is preserved in [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Automation Catalog
+
+An independent panel for inventory, source freshness and execution history across schedulers. It does not execute jobs or invoke models. See [development and source setup](plugins/automation-catalog/README.md). Install through `bb plugin install automation-catalog@oxi-public`, or use the release command in its README.
