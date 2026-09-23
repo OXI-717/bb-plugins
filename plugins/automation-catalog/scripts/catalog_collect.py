@@ -300,6 +300,8 @@ def main():
         parser.error('--host is required for the Scheduler execution host')
     snapshot = dict(source=dict(id=args.source_id, name=args.name, staleAfterMs=7200000),
                     observedAt=int(time.time() * 1000), error=None, tasks=[], runs=[])
+    if args.kind == 'bb':
+        snapshot['source']['bbServerUrl'] = args.bb_server
     try:
         if args.kind == 'local':
             selection = json.loads(args.selection.read_text())

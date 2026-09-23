@@ -38,6 +38,18 @@ function taskKey(source: string, host: string, id: string) {
       .slice(0, 40)
   );
 }
+function sameLocalServer(configured?: string, actual?: string) {
+  if (!configured || !actual) return false;
+  try {
+    const expected = new URL(actual);
+    const selected = new URL(configured);
+    const loopback = new Set(["localhost", "127.0.0.1", "[::1]"]);
+    return loopback.has(expected.hostname) && loopback.has(selected.hostname)
+      && expected.protocol === selected.protocol && expected.port === selected.port
+      && expected.pathname === selected.pathname && !selected.username && !selected.password
+      && !selected.search && !selected.hash;
+  } catch { return false; }
+}
 export function createCatalog(db: Db) {
   function source(id: string) {
     return decode(
@@ -62,7 +74,7 @@ export function createCatalog(db: Db) {
   return {
     setBbState(key: string, state: "active" | "paused") {
       const task = entry(key);
-      if (task.sourceId !== "bb-main" || task.scheduler !== "bb" || task.missing)
+      if (!source(task.sourceId).managedHere || task.scheduler !== "bb" || task.missing)
         throw new Error("Only current BB automations can be updated");
       db.prepare("UPDATE automation_catalog_tasks SET data = ? WHERE key = ?").run(
         JSON.stringify({ ...task, state, nextRunAt: state === "paused" ? null : task.nextRunAt, observedAt: Date.now() }), key,
@@ -86,17 +98,18 @@ export function createCatalog(db: Db) {
       })();
     },
     entry,
-    publish(input: unknown) {
+    publish(input: unknown, localBbServerUrl?: string) {
       const snapshot = catalogSnapshotSchema.parse(input);
+      const managedHere = sameLocalServer(snapshot.source.bbServerUrl, localBbServerUrl);
       if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > 4_000_000)
         throw new Error("Snapshot exceeds 4 MB");
       return db.transaction(() => {
         const resolved = new Map<string, string>();
         const identityKey = (host: string, id: string) => {
-          const identity = snapshot.source.id === "bb-main" ? id : JSON.stringify([host, id]);
+          const identity = snapshot.source.bbServerUrl ? id : JSON.stringify([host, id]);
           const cached = resolved.get(identity);
           if (cached) return cached;
-          if (snapshot.source.id === "bb-main") {
+          if (snapshot.source.bbServerUrl) {
             const existing = db.prepare("SELECT key FROM automation_catalog_tasks WHERE source_id = ? AND json_extract(data, '$.id') = ? ORDER BY missing ASC LIMIT 1").get(snapshot.source.id, id) as { key: string } | undefined;
             if (existing) {
               resolved.set(identity, existing.key);
@@ -126,8 +139,10 @@ export function createCatalog(db: Db) {
           if (!keys.has(identityKey(run.host, run.taskId)))
             throw new Error("Run references a missing task");
         }
+        const { bbServerUrl: _bbServerUrl, ...publicSource } = snapshot.source;
         const status = {
-          ...snapshot.source,
+          ...publicSource,
+          managedHere: snapshot.error === null ? managedHere : (old?.managedHere ?? managedHere),
           taskIds:
             snapshot.error === null ? snapshot.source.taskIds : old?.taskIds,
           checkedAt: snapshot.observedAt,
@@ -271,7 +286,9 @@ export const catalogRpcContract = defineRpcContract({
 export function registerCatalog(bb: BbPluginApi, db: Db) {
   const catalog = createCatalog(db);
   async function bbCli(...args: string[]) {
+    const serverUrl = bb.server.loopbackBaseUrl;
     const { stdout } = await execFileAsync(process.env.BB_CLI || "bb", [...args, "--json"], {
+      env: { ...process.env, BB_SERVER_URL: serverUrl },
       timeout: 15000,
       maxBuffer: 1024 * 1024,
     });
@@ -279,8 +296,8 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
   }
   bb.rpc.register(catalogRpcContract, {
     catalog_refresh: async () => {
-      const result = await refreshBbCatalog(catalog, bbCli);
-      bb.realtime.publish("automation-catalog", { sourceId: "bb-main" });
+      const result = await refreshBbCatalog(catalog, bbCli, bb.server.loopbackBaseUrl);
+      for (const sourceId of result.refreshed) bb.realtime.publish("automation-catalog", { sourceId });
       return result;
     },
     catalog_forget_missing: ({ key }) => {
@@ -289,8 +306,9 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
       return result;
     },
     catalog_manage_bb: async ({ key, action }) => {
+      const sourceId = catalog.entry(key).sourceId;
       const result = await manageBbCatalog(catalog, bbCli, key, action);
-      bb.realtime.publish("automation-catalog", { sourceId: "bb-main" });
+      bb.realtime.publish("automation-catalog", { sourceId });
       return result;
     },
     catalog_compose: async ({ request }) => {
@@ -303,7 +321,7 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
     catalog_list: () => catalog.list(),
     catalog_detail: (input) => catalog.detail(input),
     catalog_publish: (input) => {
-      const result = catalog.publish(input);
+      const result = catalog.publish(input, bb.server.loopbackBaseUrl);
       bb.realtime.publish("automation-catalog", { sourceId: input.source.id });
       return result;
     },

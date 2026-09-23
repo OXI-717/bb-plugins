@@ -31,9 +31,9 @@ const runsSchema = z.object({ runs: z.array(z.object({
   skipReason: z.string().nullable().optional(),
 })) });
 
-export async function refreshBbCatalog(catalog: Catalog, command: Command) {
+export async function refreshBbCatalog(catalog: Catalog, command: Command, localBbServerUrl: string) {
   const current = catalog.list();
-  const source = current.sources.find((item) => item.id === "bb-main");
+  const source = current.sources.find((item) => item.managedHere);
   if (!source) throw new Error("Источник BB не подключён к каталогу");
   const overview = overviewSchema.parse(await command("plugin", "rpc", "call", "automations", "automations_overview"));
   const tasks = overview.automations.map(({ automation: item, project }) => {
@@ -76,11 +76,11 @@ export async function refreshBbCatalog(catalog: Catalog, command: Command) {
     }));
   }));
   catalog.publish({
-    source: { id: source.id, name: source.name, staleAfterMs: source.staleAfterMs },
+    source: { id: source.id, name: source.name, staleAfterMs: source.staleAfterMs, bbServerUrl: localBbServerUrl },
     observedAt: Date.now(),
     error: null,
     tasks,
     runs: runGroups.flat(),
-  });
+  }, localBbServerUrl);
   return { refreshed: [source.id], deferred: current.sources.filter((item) => item.id !== source.id).map((item) => item.id) };
 }

@@ -55,9 +55,12 @@ describe("detail failure states", () => {
       <CatalogDetailContent
         detail={{
           ...fixture,
+          source: { ...fixture.source, managedHere: true },
           task: {
             ...fixture.task,
             missing: true,
+            scheduler: "bb",
+            projectId: "proj_example",
             description: "<script>alert(1)</script>",
           },
         }}
@@ -66,10 +69,11 @@ describe("detail failure states", () => {
     expect(html).not.toContain("<script>");
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain("нет в последнем снимке источника");
+    expect(html).not.toContain("Открыть автоматизацию в BB");
   });
   it("links BB failures to the source without copying script output", () => {
     const html = renderToStaticMarkup(
-      <CatalogDetailContent detail={{ ...fixture, task: {
+      <CatalogDetailContent detail={{ ...fixture, source: { ...fixture.source, managedHere: true }, task: {
         ...fixture.task,
         sourceId: "bb-main",
         scheduler: "bb",

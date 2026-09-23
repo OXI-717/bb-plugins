@@ -54,16 +54,16 @@ afterEach(() => {
 describe("external catalog", () => {
   it("keeps a BB task identity and history when its host label changes", () => {
     const { catalog } = setup();
-    const first = snapshot();
-    first.source.id = "bb-main";
+    const first = { ...snapshot(), source: { ...snapshot().source, id: "bb-local", bbServerUrl: "http://127.0.0.1:38886" } };
     first.tasks[0].scheduler = "bb";
-    catalog.publish(first);
+    catalog.publish(first, "http://127.0.0.1:38886");
     const key = catalog.list().tasks[0].key;
     const next = { ...snapshot(2000), source: first.source, tasks: [{ ...first.tasks[0], host: "renamed-host" }], runs: [{ ...first.runs[0], host: "renamed-host", id: "run-2" }] };
-    catalog.publish(next);
+    catalog.publish(next, "http://127.0.0.1:38886");
     expect(catalog.list().tasks).toHaveLength(1);
     expect(catalog.list().tasks[0].key).toBe(key);
     expect(catalog.detail({ key }).total).toBe(2);
+    expect(JSON.stringify(catalog.list())).not.toContain("38886");
   });
   it("removes only a missing projection and its history, without touching a live record with the same scheduler ID", () => {
     const { catalog } = setup();

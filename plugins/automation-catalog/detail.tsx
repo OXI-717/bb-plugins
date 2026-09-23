@@ -91,7 +91,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           Открыть в исходной системе ↗
         </a>
       )}
-      {task.sourceId === "bb-main" && task.scheduler === "bb" && task.projectId && (
+      {!task.missing && source.managedHere && task.scheduler === "bb" && task.projectId && (
         <a
           href={`/plugins/automations/automations/${encodeURIComponent(task.projectId)}/${encodeURIComponent(task.id)}`}
           className="text-sm underline"
@@ -366,7 +366,7 @@ export function CatalogDetailView({
             <h3 className="text-sm font-semibold">Управление автоматизацией</h3>
             {detail.task.missing ? (
               <Button size="sm" variant="outline" disabled={actionPending} onClick={() => setConfirmAction("forget")}>Удалить устаревшую запись из каталога</Button>
-            ) : detail.task.sourceId === "bb-main" && detail.task.scheduler === "bb" && detail.task.projectId ? (
+            ) : detail.source.managedHere && detail.task.scheduler === "bb" && detail.task.projectId ? (
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" variant="outline" disabled={actionPending || detail.task.state === "paused"} onClick={() => performAction("pause")}>Отключить</Button>
                 <Button size="sm" variant="outline" disabled={actionPending || detail.task.state === "active"} onClick={() => performAction("resume")}>Включить</Button>

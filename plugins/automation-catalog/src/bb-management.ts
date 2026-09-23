@@ -12,7 +12,8 @@ export async function manageBbCatalog(
   action: "pause" | "resume" | "delete",
 ) {
   const task = catalog.entry(key);
-  if (task.sourceId !== "bb-main" || task.scheduler !== "bb" || !task.projectId || task.missing)
+  const source = catalog.list().sources.find((item) => item.id === task.sourceId);
+  if (!source?.managedHere || task.scheduler !== "bb" || !task.projectId || task.missing)
     throw new Error("Direct management is available only for current BB automations");
   const current = currentSchema.parse(await command("automation", "show", task.id, "--project", task.projectId));
   if (current.id !== task.id || current.projectId !== task.projectId || current.name !== task.name)
