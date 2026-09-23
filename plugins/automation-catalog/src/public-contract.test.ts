@@ -13,6 +13,7 @@ it("uses only public packages and package-local imports", () => {
         /^@testing-library\/react$/,
         /^react-dom\/server$/,
         /^(react|vitest|better-sqlite3|cronstrue|class-variance-authority|clsx|tailwind-merge)$/,
+        /^cronstrue\/i18n\.js$/,
         /^@radix-ui\/react-slot$/,
       ],
     },
