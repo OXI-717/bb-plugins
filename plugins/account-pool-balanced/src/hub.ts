@@ -18,6 +18,8 @@ import { createCursorAdapter } from "./cursor-adapter.js";
 import { createKimiAdapter } from "./kimi-adapter.js";
 import {
   createOpenAiCompatibleAdapter,
+  guardOpencodeGoRequestBody,
+  normalizeOpencodeGoUpstreamPathSuffix,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
@@ -222,12 +224,10 @@ export class AccountPoolHub {
         503,
         "Account Pooler is not accepting requests.",
       );
-    return this.forward(
-      request,
-      new Uint8Array(await request.arrayBuffer()),
-      adapter,
-      hostId,
-    );
+    const body = new Uint8Array(await request.arrayBuffer());
+    const refusal = adapter.guardRequest?.(request, body);
+    if (refusal !== null && refusal !== undefined) return refusal;
+    return this.forward(request, body, adapter, hostId);
   }
 
   sessionObservation(provider: PoolProvider, hostId: string, sessionId: string): AccountBinding | null {
@@ -1327,6 +1327,8 @@ export function createHub(options: {
         usagesUrl:
           options.opencodeGoUsagesUrl ?? DEFAULT_OPENCODE_GO_USAGES_URL,
         allowedHeaderPrefixes: ["x-opencode-"],
+        normalizeUpstreamPathSuffix: normalizeOpencodeGoUpstreamPathSuffix,
+        guardRequestBody: guardOpencodeGoRequestBody,
         parseUsages: opencodeGoQuotaFromUsages,
       }),
     ],

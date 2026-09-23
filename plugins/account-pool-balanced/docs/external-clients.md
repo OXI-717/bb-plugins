@@ -1,10 +1,10 @@
 # External clients and standalone server
 
-The pool can serve agents launched outside BB. Use the BB-hosted pool to share its existing accounts, or run the standalone server without BB. Both hosts use the same hub, adapters, quota routing and affinity code. This feature is source-only until a new immutable release is published.
+The pool can serve agents launched outside BB. Use the BB-hosted pool to share its existing accounts, or run the standalone server without BB. Both hosts use the same hub, adapters, quota routing and affinity code. Available in `account-pool-balanced/v0.3.0`; standalone and Devin cloud support are experimental.
 
 ## Share a BB pool
 
-After installing a release containing this feature, create a separate client credential:
+With version 0.3.0 or later, create a separate client credential:
 
 ```sh
 bb pool client add orca --output /secure/client.token
@@ -16,9 +16,11 @@ Pool credentials are for trusted clients belonging to the operator. They allow u
 
 ## Standalone setup
 
-Requirements: Node 22+, npm, and a compiler toolchain if the SQLite native prebuild is unavailable. Run from `plugins/account-pool-balanced` in the repository:
+Requirements: Node 22+, npm, and a compiler toolchain if the SQLite native prebuild is unavailable. No BB installation is needed for this mode:
 
 ```sh
+git clone --branch account-pool-balanced/v0.3.0 --depth 1 https://github.com/OXI-717/bb-plugins.git
+cd bb-plugins/plugins/account-pool-balanced
 npm ci
 npm run pool -- --data-dir /secure/pool import-login --provider codex
 npm run pool -- --data-dir /secure/pool import-login --provider claude
@@ -71,7 +73,7 @@ POOL_URL=http://127.0.0.1:8787
   export ANTHROPIC_BASE_URL="$POOL_URL"
   ANTHROPIC_AUTH_TOKEN=$(cat "$POOL_TOKEN_FILE")
   export ANTHROPIC_AUTH_TOKEN
-  exec claude
+  exec claude --model 'claude-opus-5-5[1m]'
 )
 ```
 
@@ -91,6 +93,16 @@ POOL_CLIENT_TOKEN="$(cat "$POOL_TOKEN_FILE")" codex \
 ```
 
 For a BB-hosted pool, set `POOL_URL` to its plugin HTTP base URL above. Do not enable shell tracing around token loading. The token is in the child environment, not in CLI arguments. These commands connect the CLI inside Orca; they do not add a new native Orca provider UI. Configuration contract: [Codex reference](https://developers.openai.com/codex/config-reference).
+
+## Verify routing and context
+
+In Claude, `/status` must show your pool URL and `ANTHROPIC_AUTH_TOKEN`. The saved local login email and “API Usage Billing” label do not identify the upstream account selected by the pool. Use `bb pool status` or the BB pool panel for per-account quotas; native client screens do not show aggregate pool balances.
+
+For Opus 5.5 use Claude Code 2.1.280 or later. Inside the session select `/model claude-opus-5-5[1m]`, then check `/context` shows a 1M denominator. Plain `opus` through a gateway was observed to budget only 200K, causing repeated compaction with large rules/MCP context. Keep automatic compaction enabled. See [Claude model configuration](https://code.claude.com/docs/en/model-config#extended-context).
+
+In Codex, check that the provider is `Account Pool`. Choose a model available to your accounts. Unsupported models should produce a provider error, not bypass the pool. Revoking a dedicated client token should make new requests fail rather than use the local login.
+
+BB client commands run on the server: a remote `--output` path is not a file on your laptop. Keep the server running. On the same host use `http://127.0.0.1:38886/api/v1/plugins/account-pool-balanced/http`; standalone examples use port 8787. Claude subscription connectors may be unavailable under proxy authentication.
 
 ## Devin cloud sessions (standalone host)
 
@@ -117,4 +129,4 @@ Contracts: [create](https://docs.devin.ai/api-reference/v3/sessions/post-organiz
 
 ## Validation boundary
 
-Tests cover loopback HTTP forwarding and streaming, durable standalone accounts/tokens, BB client issuance and revocation, Devin session binding, client isolation, ACU limits and non-retry behavior with synthetic upstreams. A real provider generation, real Devin account and an interactive Orca session are required for end-to-end acceptance. No production account is imported, live pool reloaded, or paid Devin task created by these tests.
+Tests cover loopback HTTP forwarding and streaming, durable standalone accounts/tokens, BB client issuance and revocation, Devin session binding, client isolation, ACU limits and non-retry behavior with synthetic upstreams. Real Claude and Codex generation from Orca terminals has been verified against the BB-hosted pool using an existing machine token. Opus 5.5 with `[1m]` accepted a synthetic request exceeding 500K input tokens. Dedicated external-client issuance/revocation and standalone forwarding use synthetic upstreams in integration tests. Real Devin execution and forced live quota exhaustion/failover have not been tested. Automated tests do not import production accounts or reload a live pool.

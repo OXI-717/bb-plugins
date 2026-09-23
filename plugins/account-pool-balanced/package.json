@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-account-pool-balanced",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Балансировка аккаунтов, квоты и резервные аккаунты для агентов BB.",

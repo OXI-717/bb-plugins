@@ -66,6 +66,7 @@ export interface ProviderAdapter {
     forAccount: (account: Account) => Uint8Array;
   };
   upstreamUrl(request: Request, settings: AccountPoolConfig): URL;
+  guardRequest?(request: Request, body: Uint8Array): Response | null;
   requestHeaders(
     inbound: Headers,
     account: Account,
@@ -191,11 +192,10 @@ export function filterRequestHeaders(
   return headers;
 }
 
-export function mountedUpstreamUrl(
+export function mountedPathSuffix(
   request: Request,
-  upstreamBaseUrl: string,
   stripPrefix = "",
-): URL {
+): string {
   const requestUrl = new URL(request.url);
   const mountedPath = requestUrl.pathname.indexOf("/http/");
   const rawPath =
@@ -203,11 +203,24 @@ export function mountedUpstreamUrl(
       ? requestUrl.pathname
       : requestUrl.pathname.slice(mountedPath + 5);
   const normalizedPath = rawPath.replace(/^\//u, "");
-  const upstreamPath = normalizedPath.startsWith(stripPrefix)
+  return normalizedPath.startsWith(stripPrefix)
     ? normalizedPath.slice(stripPrefix.length)
     : normalizedPath;
+}
+
+export function mountedUpstreamUrl(
+  request: Request,
+  upstreamBaseUrl: string,
+  stripPrefix = "",
+  rewritePathSuffix?: (upstreamPath: string) => string,
+): URL {
+  const requestUrl = new URL(request.url);
+  const upstreamPath = mountedPathSuffix(request, stripPrefix);
+  const finalPath = rewritePathSuffix
+    ? rewritePathSuffix(upstreamPath)
+    : upstreamPath;
   return new URL(
-    upstreamPath + requestUrl.search,
+    finalPath + requestUrl.search,
     upstreamBaseUrl.endsWith("/") ? upstreamBaseUrl : `${upstreamBaseUrl}/`,
   );
 }

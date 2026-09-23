@@ -1,6 +1,6 @@
 # OXI Public Plugins for BB
 
-Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory, version and immutable release tags. This repository currently ships **Account Pool Balanced**.
+Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory, version and immutable release tags. This repository ships **Account Pool Balanced**. **Automation Catalog** adds a unified view across schedulers.
 
 ## Account Pool Balanced
 
@@ -8,7 +8,7 @@ Use multiple accounts of the same provider, track available quota and switch acc
 
 Adapters exist for Claude, Codex, Kimi, Z.AI, OpenCode Go and Cursor. Authentication and model availability depend on each provider. Claude and Codex support subscription login flows; other adapters use their supported provider keys. This does not turn every consumer subscription into an API account.
 
-The released pool is a BB plugin. The source tree also includes an experimental standalone server, external client credentials for BB, and a Devin cloud-session adapter: see [external clients and standalone setup](plugins/account-pool-balanced/docs/external-clients.md). These additions are not in the 0.2.4 tag. Both modes start with your own accounts; no credentials are distributed. Cursor additionally requires an operator-configured ACP provider and wrapper; see [Cursor routing](plugins/account-pool-balanced/docs/cursor-paths.md). Devin cloud sessions use their separate API; local Devin CLI subscription proxying is not implemented.
+Version 0.3.0 includes external client credentials, an experimental standalone server and a Devin cloud-session adapter: see [external clients and standalone setup](plugins/account-pool-balanced/docs/external-clients.md). Both modes start with your own accounts; no credentials are distributed. Cursor additionally requires an operator-configured ACP provider and wrapper; see [Cursor routing](plugins/account-pool-balanced/docs/cursor-paths.md). Devin cloud sessions use their separate API; local Devin CLI subscription proxying is not implemented.
 
 ## Install
 
@@ -22,7 +22,7 @@ bb plugin install account-pool-balanced@oxi-public
 Or install the release directly:
 
 ```sh
-bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.2.4 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
+bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.3.0 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
 ```
 
 Do not enable BB's built-in `account-pool` at the same time: both register `bb pool` and provider routes. These install commands are for new installations. BB 0.43.3 rejects replacing an existing plugin's Git source. If migrating from another repository, keep the existing installation until you have a supported migration procedure with verified backup and restore; do not remove a live pool just to change its source.
@@ -30,6 +30,12 @@ Do not enable BB's built-in `account-pool` at the same time: both register `bb p
 Add accounts through the pool settings in BB or run `bb pool --help`. For example, `bb pool account add --provider codex --login` starts a device login. Follow the returned instructions, then repeat to add another account. `bb pool status` shows the resulting pool. Browser login can be completed on a different device from the BB server.
 
 Access from a computer or phone is provided by BB and its authenticated remote access. The plugin does not ship a separate mobile app. See [setup guidance](docs/setup.md).
+
+## Use from Orca, terminals and other applications
+
+BB is optional: run the standalone server, or connect external clients to accounts already managed by BB. Claude Code uses Messages; Codex uses Responses. Other clients must support the corresponding native protocol and a configurable base URL/token.
+
+The [external-client quickstart](plugins/account-pool-balanced/docs/external-clients.md) includes copyable Claude/Codex commands, standalone installation, remote access and troubleshooting. No private launcher or custom Orca plugin is required. For Opus through a gateway, select `claude-opus-5-5[1m]` to avoid the client's 200K context default. Client usage screens do not aggregate pool balances.
 
 ## Update
 
@@ -55,3 +61,7 @@ CI runs all plugin tests, typechecks and builds on standard GitHub-hosted runner
 ## License
 
 MIT. Account Pooler and vendored UI derive from `get-bb/bb`; upstream attribution is preserved in [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Automation Catalog
+
+An independent panel for inventory, source freshness and execution history across schedulers. It does not execute jobs or invoke models. See [development and source setup](plugins/automation-catalog/README.md). Install through `bb plugin install automation-catalog@oxi-public`, or use the release command in its README.

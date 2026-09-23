@@ -6,6 +6,10 @@
     {
       "name": "account-pool-balanced",
       "source": "./plugins/account-pool-balanced"
+    },
+    {
+      "name": "automation-catalog",
+      "source": "./plugins/automation-catalog"
     }
   ]
 }

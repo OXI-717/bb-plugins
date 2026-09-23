@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['account-pool-balanced/v*']
+    tags: ['account-pool-balanced/v*', 'automation-catalog/v*']
   pull_request:
   workflow_dispatch:
 
@@ -20,6 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        plugin: [account-pool-balanced, automation-catalog]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
@@ -30,20 +31,24 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: plugins/account-pool-balanced/package-lock.json
+          cache-dependency-path: plugins/${{ matrix.plugin }}/package-lock.json
       - name: Check publication manifests
         run: node scripts/check-manifests.mjs
       - name: Install dependencies
-        working-directory: plugins/account-pool-balanced
+        working-directory: plugins/${{ matrix.plugin }}
         run: npm ci
       - name: Typecheck
-        working-directory: plugins/account-pool-balanced
+        working-directory: plugins/${{ matrix.plugin }}
         run: npm run typecheck
       - name: Test
-        working-directory: plugins/account-pool-balanced
+        working-directory: plugins/${{ matrix.plugin }}
         run: npm test
+      - name: Collector tests
+        if: matrix.plugin == 'automation-catalog'
+        working-directory: plugins/automation-catalog/scripts
+        run: python3 -m unittest test_catalog_collect test_catalog_history test_catalog_sync
       - name: Build with the published BB CLI
-        working-directory: plugins/account-pool-balanced
+        working-directory: plugins/${{ matrix.plugin }}
         run: npm exec --yes --package=bb-app@0.43.3 -- bb plugin build .
       - name: Ensure checks leave tracked files clean
         run: git diff --exit-code
