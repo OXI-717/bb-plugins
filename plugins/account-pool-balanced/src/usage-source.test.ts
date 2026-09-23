@@ -41,6 +41,7 @@ describe("pooled providers on the usage surface", () => {
       zai: "acp-opencode-zai",
       "opencode-go": "acp-opencode-go",
       cursor: "acp-oxi-cursor",
+      devin: "acp-devin",
     });
     expect(new Set(Object.values(USAGE_PROVIDER_IDS)).size).toBe(
       Object.keys(USAGE_PROVIDER_IDS).length,

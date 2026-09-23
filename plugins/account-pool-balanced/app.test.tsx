@@ -101,6 +101,7 @@ function status(
     zai: null,
     "opencode-go": null,
     cursor: null,
+    devin: null,
   },
 ): PoolStatus {
   return {
@@ -120,6 +121,7 @@ function status(
       zai: true,
       "opencode-go": true,
       cursor: true,
+      devin: true,
     },
   };
 }
@@ -132,6 +134,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
     opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
     cursorUpstreamBaseUrl: "https://api2.cursor.sh",
+    devinUpstreamBaseUrl: "https://server.codeium.com",
     switchThreshold: 0.98,
     routingStrategy: "sequential",
     reserveDrainHours: 24,
@@ -186,7 +189,7 @@ describe("Account Pool settings", () => {
     window.localStorage.setItem(STATUS_CACHE_KEY, '{"accounts":"nope"}');
     const live = deferred<PoolStatus>();
     const slot = render([], { "status.get": () => live.promise });
-    expect(slot.getAllByText("Загрузка…")).toHaveLength(6);
+    expect(slot.getAllByText("Загрузка…")).toHaveLength(7);
     live.resolve(status());
     expect(await slot.findByText("person@example.com")).toBeTruthy();
   });
@@ -417,6 +420,7 @@ describe("Account Pool settings", () => {
           zai: null,
           "opencode-go": null,
           cursor: null,
+          devin: null,
         }),
     });
     expect(

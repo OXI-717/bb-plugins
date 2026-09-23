@@ -15,6 +15,7 @@ import {
   DEFAULT_CODEX_USAGE_URL,
 } from "./codex-adapter.js";
 import { createCursorAdapter } from "./cursor-adapter.js";
+import { createDevinAdapter } from "./devin-adapter.js";
 import { createKimiAdapter } from "./kimi-adapter.js";
 import {
   createOpenAiCompatibleAdapter,
@@ -354,6 +355,7 @@ export class AccountPoolHub {
         "opencode-go":
           this.activeAccounts.get("opencode-go")?.accountId ?? null,
         cursor: this.activeAccounts.get("cursor")?.accountId ?? null,
+        devin: this.activeAccounts.get("devin")?.accountId ?? null,
       },
       accounts: accounts.map((account) => {
         const quota = this.options.quotas.get(account.id);
@@ -496,7 +498,7 @@ export class AccountPoolHub {
           try {
             upstream = await this.fetchUpstream(
               request,
-              parsed.forAccount(selected.account),
+              parsed.forAccount(selected.account, secret),
               selected.account,
               secret,
               adapter,
@@ -1339,6 +1341,7 @@ export function createHub(options: {
         usageUrl: options.cursorUsageUrl ?? DEFAULT_CURSOR_USAGE_URL,
       }),
     ],
+    ["devin", createDevinAdapter()],
   ]);
   return new AccountPoolHub({
     route: options.route,

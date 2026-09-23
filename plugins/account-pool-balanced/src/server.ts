@@ -23,6 +23,7 @@ import {
   CURSOR_PROXIED_PATHS,
 } from "./cursor-adapter.js";
 import { KIMI_MOUNT_PREFIX } from "./kimi-adapter.js";
+import { DEVIN_MOUNT_PREFIX, DEVIN_PROXIED_PATHS } from "./devin-adapter.js";
 import {
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
@@ -338,6 +339,14 @@ export function createAccountPoolPlugin(
           { auth: "none" },
         );
       }
+    }
+    for (const rpcPath of DEVIN_PROXIED_PATHS) {
+      bb.http.route(
+        "POST",
+        `/${DEVIN_MOUNT_PREFIX}${rpcPath}`,
+        (context) => hub.handle(context.req.raw, "devin"),
+        { auth: "none" },
+      );
     }
     for (const cursorProviderId of ["acp-oxi-cursor"]) {
       bb.providers.experimental_contributeEnv(cursorProviderId, async (context) => {

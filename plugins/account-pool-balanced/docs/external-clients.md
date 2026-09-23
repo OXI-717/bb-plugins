@@ -1,6 +1,6 @@
 # External clients and standalone server
 
-The pool can serve agents launched outside BB. Use the BB-hosted pool to share its existing accounts, or run the standalone server without BB. Both hosts use the same hub, adapters, quota routing and affinity code. Available in `account-pool-balanced/v0.3.1`; standalone and Devin cloud support are experimental.
+The pool can serve agents launched outside BB. Use the BB-hosted pool to share its existing accounts, or run the standalone server without BB. Both hosts use the same hub, adapters, quota routing and affinity code. Devin Local CLI support starts with `account-pool-balanced/v0.4.0`; standalone and Devin cloud support are experimental.
 
 ## Share a BB pool
 
@@ -19,7 +19,7 @@ Pool credentials are for trusted clients belonging to the operator. They allow u
 Requirements: Node 22+, npm, and a compiler toolchain if the SQLite native prebuild is unavailable. No BB installation is needed for this mode:
 
 ```sh
-git clone --branch account-pool-balanced/v0.3.1 --depth 1 https://github.com/OXI-717/bb-plugins.git
+git clone --branch account-pool-balanced/v0.4.0 --depth 1 https://github.com/OXI-717/bb-plugins.git
 cd bb-plugins/plugins/account-pool-balanced
 npm ci
 npm run pool -- --data-dir /secure/pool import-login --provider codex
@@ -56,8 +56,35 @@ Standalone model paths:
 | Kimi | `POST /kimi/v1/messages`, `/kimi/v1/messages/count_tokens` |
 | Z.ai | `POST /zai/v1/chat/completions` |
 | OpenCode Go | `POST /opencode-go/v1/chat/completions` |
+| Devin Local CLI | `POST /exa.*` Connect/protobuf RPCs (via the launcher below) |
 
 Cursor remains available through the BB host's existing custom ACP integration; standalone Cursor is not implemented. This server preserves native provider protocols, and does not translate every model into Chat Completions.
+
+## Devin Local CLI through the pool
+
+Add a [Devin personal access token](https://docs.devin.ai/api-reference/personal-access-tokens) to the pool on its server. This is for local `devin -p` or `devin acp`; the separate `/agents/devin/sessions` endpoints below drive Devin Cloud sessions instead.
+
+BB-hosted pool:
+
+```sh
+bb pool account add --provider devin --api-key-stdin --label team-one
+bb pool client add devin-laptop --output /secure/devin-client.token
+```
+
+Standalone pool: import an account with `"provider":"devin"`, `"kind":"api-key"` and the PAT in `secret.apiKey` using `import-account`. Create a client token with `client-add` as above. Repeat account import for each subscription; priorities and reserve roles use the ordinary pool controls. Keep PATs only on the pool server.
+
+On the client machine, privately transfer the **client token**, install the Devin CLI and run the launcher from this plugin checkout:
+
+```sh
+node scripts/devin-pool.mjs \
+  --pool-url https://YOUR_BB_SERVER/api/v1/plugins/account-pool-balanced/http \
+  --token-file /secure/devin-client.token \
+  -- -p 'Reply with OK' --model swe-2-high
+```
+
+For a standalone pool, use its root URL as `--pool-url`. The launcher creates an isolated, temporary Devin profile and a loopback HTTP bridge because Devin sends RPCs to absolute `/exa.*` paths, ignoring a path in `api_server_url`. It removes the temporary profile after Devin exits. The actual pool token stays in the launcher and is sent to the hub in a header; provider PATs stay on the server. To launch ACP, replace arguments after `--` with `acp` and connect its stdio to the ACP host. Add `--respect-workspace-trust false` after `-p` only when running in an intentionally trusted directory that Devin has not recorded yet.
+
+The local CLI and ACP paths were verified with a single PAT and SWE-2 high. Multiple Devin accounts participate in the shared pool's sequential routing and HTTP quota failover; cross-account failover during an existing Devin conversation still needs a live two-PAT test because the CLI can cache an account-specific JWT. Start a fresh CLI session when switching subscriptions until that scenario is verified. Devin currently exposes no quota telemetry to this adapter, so the pool advances on upstream quota rejection rather than a displayed percentage.
 
 ## Orca and other CLI hosts
 

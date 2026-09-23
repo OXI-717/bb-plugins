@@ -132,6 +132,11 @@ const PROVIDERS: Array<{
     description:
       "Треды Cursor идут через этот ключ: машина получает токен хаба вместо ключа подписки.",
   },
+  {
+    id: "devin",
+    title: "Devin",
+    description: "Devin CLI использует PAT аккаунтов через пул; на клиенте остаётся только токен хаба.",
+  },
 ];
 const FAMILY_LABELS: Record<ModelFamily, string> = {
   fable: "Fable, неделя",
@@ -164,6 +169,7 @@ function configDrafts(config: AccountPoolConfig): Record<ConfigField, string> {
     zaiUpstreamBaseUrl: config.zaiUpstreamBaseUrl,
     opencodeGoUpstreamBaseUrl: config.opencodeGoUpstreamBaseUrl,
     cursorUpstreamBaseUrl: config.cursorUpstreamBaseUrl,
+    devinUpstreamBaseUrl: config.devinUpstreamBaseUrl,
     switchThreshold: String(config.switchThreshold),
   };
 }
@@ -998,6 +1004,7 @@ function AccountPoolSettings() {
     zaiUpstreamBaseUrl: "",
     opencodeGoUpstreamBaseUrl: "",
     cursorUpstreamBaseUrl: "",
+    devinUpstreamBaseUrl: "",
     switchThreshold: "",
   });
   const [configErrors, setConfigErrors] = useState<
@@ -1009,6 +1016,7 @@ function AccountPoolSettings() {
     zaiUpstreamBaseUrl: null,
     opencodeGoUpstreamBaseUrl: null,
     cursorUpstreamBaseUrl: null,
+    devinUpstreamBaseUrl: null,
     switchThreshold: null,
   });
   const [dialog, setDialog] = useState<DialogState>(null);
