@@ -63,7 +63,7 @@ export interface ProviderAdapter {
     family: ModelFamily;
     affinityId: string | null;
     parentAffinityId: string | null;
-    forAccount: (account: Account) => Uint8Array;
+    forAccount: (account: Account, secret: AccountSecret) => Uint8Array;
   };
   upstreamUrl(request: Request, settings: AccountPoolConfig): URL;
   guardRequest?(request: Request, body: Uint8Array): Response | null;

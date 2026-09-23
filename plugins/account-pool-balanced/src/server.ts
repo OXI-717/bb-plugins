@@ -23,6 +23,7 @@ import {
   CURSOR_PROXIED_PATHS,
 } from "./cursor-adapter.js";
 import { KIMI_MOUNT_PREFIX } from "./kimi-adapter.js";
+import { DEVIN_MOUNT_PREFIX, DEVIN_PROXIED_PATHS } from "./devin-adapter.js";
 import {
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
@@ -338,6 +339,17 @@ export function createAccountPoolPlugin(
           { auth: "none" },
         );
       }
+    }
+    for (const rpcPath of DEVIN_PROXIED_PATHS) {
+      bb.http.route(
+        "POST",
+        `/${DEVIN_MOUNT_PREFIX}${rpcPath}`,
+        async (context) =>
+          (await operations.isRoutingEnabled("devin"))
+            ? hub.handle(context.req.raw, "devin")
+            : Response.json({ error: { message: "Devin pool routing is disabled.", code: 503 } }, { status: 503 }),
+        { auth: "none" },
+      );
     }
     for (const cursorProviderId of ["acp-oxi-cursor"]) {
       bb.providers.experimental_contributeEnv(cursorProviderId, async (context) => {

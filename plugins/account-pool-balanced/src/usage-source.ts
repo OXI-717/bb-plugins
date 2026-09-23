@@ -51,6 +51,7 @@ export const USAGE_PROVIDER_IDS: Record<PoolProvider, string> = {
   zai: "acp-opencode-zai",
   "opencode-go": "acp-opencode-go",
   cursor: "acp-oxi-cursor",
+  devin: "acp-devin",
 };
 
 const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
@@ -60,6 +61,7 @@ const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
   zai: "Z.ai Coding Plan",
   "opencode-go": "OpenCode Go",
   cursor: "Cursor",
+  devin: "Devin",
 };
 
 export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {

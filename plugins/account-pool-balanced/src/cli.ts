@@ -42,7 +42,7 @@ const HELP = [
   "  bb pool account login-poll --session <id>",
   "  printf '%s\\n' \"$CLAUDE_AUTH_CODE\" | bb pool account login-complete --session <id> --code-stdin",
   "  bb pool account add --provider claude --api-key-stdin [--label <text>] [--priority <n>]",
-  "  bb pool account add --provider <kimi|zai|opencode-go|cursor> --api-key-stdin [--label <text>] [--priority <n>]",
+  "  bb pool account add --provider <kimi|zai|opencode-go|cursor|devin> --api-key-stdin [--label <text>] [--priority <n>]",
   "  bb pool account add --provider claude --api-key <key> [--label <text>] [--priority <n>]  Unsafe: exposes the key in process arguments.",
   "  bb pool account list [--json]",
   "  bb pool account remove <id>",
@@ -52,12 +52,12 @@ const HELP = [
   "  bb pool account role <id> <primary|reserve>",
   "  bb pool account cap <id> <early> <late>",
   "  bb pool account cap <id> off",
-  "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor> <id>...",
+  "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor|devin> <id>...",
   "  bb pool account refresh <id>",
   "  bb pool status [--json]",
-  "  bb pool routing <claude|codex|kimi|zai|opencode-go|cursor> [--off]",
+  "  bb pool routing <claude|codex|kimi|zai|opencode-go|cursor|devin> [--off]",
   "  bb pool config",
-  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays> <value>",
+  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays> <value>",
   "  bb pool token rotate --machine <id-or-name>",
   "  bb pool client add <name> --output <new-private-file-on-server>",
   "  bb pool client revoke <name>",
@@ -223,6 +223,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `zaiUpstreamBaseUrl: ${config.zaiUpstreamBaseUrl}`,
     `opencodeGoUpstreamBaseUrl: ${config.opencodeGoUpstreamBaseUrl}`,
     `cursorUpstreamBaseUrl: ${config.cursorUpstreamBaseUrl}`,
+    `devinUpstreamBaseUrl: ${config.devinUpstreamBaseUrl}`,
     `switchThreshold: ${config.switchThreshold}`,
     `routingStrategy: ${config.routingStrategy}`,
     `reserveDrainHours: ${config.reserveDrainHours}`,
@@ -271,6 +272,9 @@ function parseConfigUpdate(
       cursorUpstreamBaseUrl: value,
     });
   }
+  if (key === "devinUpstreamBaseUrl") {
+    return accountPoolConfigSetInputSchema.parse({ devinUpstreamBaseUrl: value });
+  }
   if (key === "switchThreshold") {
     return accountPoolConfigSetInputSchema.parse({
       switchThreshold: Number(value),
@@ -293,7 +297,7 @@ function parseConfigUpdate(
     });
   }
   throw new Error(
-    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, cursorUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, or restDays.",
+    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, or restDays.",
   );
 }
 
@@ -360,7 +364,7 @@ export function registerPoolCli(
       {
         name: "account-reorder",
         summary: "Set the complete failover order for one provider",
-        usage: "bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor> <id>...",
+        usage: "bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor|devin> <id>...",
       },
       {
         name: "account-refresh",
@@ -375,7 +379,7 @@ export function registerPoolCli(
       {
         name: "routing",
         summary: "Enable or disable pooled routing for one provider",
-        usage: "bb pool routing <claude|codex|kimi|zai|opencode-go|cursor> [--off]",
+        usage: "bb pool routing <claude|codex|kimi|zai|opencode-go|cursor|devin> [--off]",
       },
       {
         name: "config",
@@ -386,7 +390,7 @@ export function registerPoolCli(
         name: "config-set",
         summary: "Update one Account Pooler routing configuration value",
         usage:
-          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays> <value>",
+          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays> <value>",
       },
       {
         name: "token-rotate",

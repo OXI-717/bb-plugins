@@ -7,6 +7,7 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
   opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
   cursorUpstreamBaseUrl: "https://api2.cursor.sh",
+  devinUpstreamBaseUrl: "https://server.codeium.com",
   switchThreshold: 0.98,
   routingStrategy: "sequential" as const,
   reserveDrainHours: 24,
@@ -74,6 +75,9 @@ export const accountPoolConfigSchema = z
     cursorUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.cursorUpstreamBaseUrl,
     ),
+    devinUpstreamBaseUrl: httpUrlSchema.default(
+      DEFAULT_ACCOUNT_POOL_CONFIG.devinUpstreamBaseUrl,
+    ),
     switchThreshold: switchThresholdSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.switchThreshold,
     ),
@@ -97,6 +101,7 @@ export const accountPoolConfigSetInputSchema = z
     zaiUpstreamBaseUrl: httpUrlSchema.optional(),
     opencodeGoUpstreamBaseUrl: httpUrlSchema.optional(),
     cursorUpstreamBaseUrl: httpUrlSchema.optional(),
+    devinUpstreamBaseUrl: httpUrlSchema.optional(),
     switchThreshold: switchThresholdSchema.optional(),
     routingStrategy: routingStrategySchema.optional(),
     reserveDrainHours: reserveDrainHoursSchema.optional(),
@@ -120,6 +125,7 @@ export const providerSchema = z.enum([
   "zai",
   "opencode-go",
   "cursor",
+  "devin",
 ]);
 export type PoolProvider = z.infer<typeof providerSchema>;
 export const accountKindSchema = z.enum(["oauth", "api-key"]);
@@ -302,6 +308,7 @@ export const statusSchema = z
         zai: z.string().uuid().nullable(),
         "opencode-go": z.string().uuid().nullable(),
         cursor: z.string().uuid().nullable(),
+        devin: z.string().uuid().nullable(),
       })
       .strict(),
     routing: z
@@ -312,6 +319,7 @@ export const statusSchema = z
         zai: z.boolean(),
         "opencode-go": z.boolean(),
         cursor: z.boolean(),
+        devin: z.boolean(),
       })
       .strict(),
   })

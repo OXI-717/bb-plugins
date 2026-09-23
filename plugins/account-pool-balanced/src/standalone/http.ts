@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { PoolProvider } from "../contracts.js";
+import { DEVIN_PROXIED_PATHS, devinMachineToken } from "../devin-adapter.js";
 import type { StandalonePool } from "./runtime.js";
 
 const routes = new Map<string, PoolProvider>([
@@ -11,6 +12,10 @@ const routes = new Map<string, PoolProvider>([
   ["/kimi/v1/messages", "kimi"], ["/kimi/v1/messages/count_tokens", "kimi"],
   ["/zai/v1/chat/completions", "zai"], ["/opencode-go/v1/chat/completions", "opencode-go"],
 ]);
+for (const rpcPath of DEVIN_PROXIED_PATHS) {
+  routes.set(`/devin/${rpcPath}`, "devin");
+  routes.set(`/${rpcPath}`, "devin");
+}
 const MAX_BODY = 16 * 1024 * 1024;
 class BodyTooLarge extends Error {}
 async function readBody(req: IncomingMessage) {
@@ -54,7 +59,7 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
         if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(", ") : value);
       }
       // Authenticate before buffering input, including Anthropic's x-api-key form.
-      const credential = headers.get("x-bb-account-pool-token") ?? headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? headers.get("x-api-key") ?? null;
+      const credential = headers.get("x-bb-account-pool-token") ?? (provider === "devin" ? devinMachineToken(headers) : headers.get("authorization")?.replace(/^Bearer\s+/i, "")) ?? headers.get("x-api-key") ?? null;
       const client = await pool.tokens.authenticate(credential);
       if (client === null) { fail(401, "Invalid pool token."); return; }
       headers.set("x-bb-account-pool-token", credential!);

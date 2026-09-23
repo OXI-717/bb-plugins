@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_PROXIED_PATHS } from "./cursor-adapter.js";
+import { DEVIN_PROXIED_PATHS } from "./devin-adapter.js";
 import {
   accountSchema,
   accountSecretSchema,
@@ -230,7 +231,7 @@ function testJwt(payload: object): string {
 async function createFixture(args: {
   upstreamUrl: string;
   options?: AccountPoolPluginOptions;
-  provider?: "claude" | "codex" | "kimi" | "zai" | "opencode-go" | "cursor";
+  provider?: "claude" | "codex" | "kimi" | "zai" | "opencode-go" | "cursor" | "devin";
   source?: "api-key" | "import";
   apiKey?: string;
   priority?: number;
@@ -249,6 +250,7 @@ async function createFixture(args: {
     zaiUpstreamBaseUrl: args.upstreamUrl,
     opencodeGoUpstreamBaseUrl: args.upstreamUrl,
     cursorUpstreamBaseUrl: args.upstreamUrl,
+    devinUpstreamBaseUrl: args.upstreamUrl,
   });
   const plugin = createAccountPoolPlugin({
     usageUrl: "data:application/json,{}",
@@ -312,6 +314,13 @@ async function createFixture(args: {
               ).token
             : args.provider === "cursor"
               ? await resolveCursorToken(host)
+              : args.provider === "devin"
+                ? await (async () => {
+                    const output = path.join(dataDir, "devin-client.token");
+                    const result = await host.harness.behavior.runCli(["client", "add", "devin-test", "--output", output]);
+                    expect(result.exitCode).toBe(0);
+                    return (await fs.readFile(output, "utf8")).trim();
+                  })()
               : await resolveToken(host);
   return { dataDir, host, service, key, account };
 }
@@ -423,6 +432,7 @@ describe("Account Pool config schema", () => {
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
+      devinUpstreamBaseUrl: "https://server.codeium.com",
       switchThreshold: 0.98,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -494,6 +504,7 @@ describe("Account Pool plugin", () => {
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
+      devinUpstreamBaseUrl: "https://server.codeium.com",
       switchThreshold: 0.75,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -698,6 +709,81 @@ describe("Account Pool plugin", () => {
     expect(exchanged.accessToken).toBe(fixture.key);
     expect(exchanged.refreshToken).toBe(fixture.key);
     expect(exchanged.accessToken).not.toBe("cursor-subscription-key");
+  });
+
+  it("routes Devin protobuf RPCs with the selected PAT and keeps the machine token upstream-private", async () => {
+    const requests: Request[] = [];
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "devin",
+      apiKey: "cog_test_pat",
+      options: { fetch: async (input, init) => {
+        requests.push(new Request(input, init));
+        return new Response(Uint8Array.of(0x0a, 0x00), { headers: { "content-type": "application/proto" } });
+      } },
+    });
+    const key = new TextEncoder().encode(fixture.key);
+    const metadata = Uint8Array.of(0x1a, key.length, ...key);
+    const body = Uint8Array.of(0x0a, metadata.length, ...metadata);
+    const response = await fixture.host.harness.behavior.fetchHttp(
+      "POST", "/devin/exa.seat_management_pb.SeatManagementService/GetUserStatus",
+      { headers: { authorization: `Basic ${fixture.key}-${"a".repeat(43)}`, "content-type": "application/proto" }, body: Buffer.from(body) },
+    );
+    expect(response.status).toBe(200);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("https://upstream.example/exa.seat_management_pb.SeatManagementService/GetUserStatus");
+    expect(requests[0]?.headers.get("authorization")).toBe("Basic cog_test_pat");
+    const upstreamBody = Buffer.from(await requests[0]!.arrayBuffer());
+    expect(upstreamBody.includes(Buffer.from("cog_test_pat"))).toBe(true);
+    expect(upstreamBody.includes(Buffer.from(fixture.key))).toBe(false);
+    for (const rpcPath of DEVIN_PROXIED_PATHS) {
+      const denied = await fixture.host.harness.behavior.fetchHttp("POST", `/devin/${rpcPath}`, { body: Buffer.from(body) });
+      expect([rpcPath, denied.status]).toEqual([rpcPath, 401]);
+    }
+    expect((await fixture.host.harness.behavior.runCli(["routing", "devin", "--off"])).exitCode).toBe(0);
+    const disabled = await fixture.host.harness.behavior.fetchHttp(
+      "POST", "/devin/exa.seat_management_pb.SeatManagementService/GetUserStatus",
+      { headers: { authorization: `Basic ${fixture.key}`, "content-type": "application/proto" }, body: Buffer.from(body) },
+    );
+    expect(disabled.status).toBe(503);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("pins concurrent Devin RPCs from one CLI process under balanced routing", async () => {
+    const requests: Request[] = [];
+    const first = deferred();
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "devin",
+      apiKey: "cog_first_synthetic",
+      options: { fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        if (requests.length === 1) await first.promise;
+        return new Response(Uint8Array.of(0x0a, 0x00), { headers: { "content-type": "application/proto" } });
+      } },
+    });
+    await fixture.host.harness.behavior.callRpc("account.add", {
+      provider: "devin", source: { kind: "api-key", apiKey: "cog_second_synthetic" }, label: null, priority: 101,
+    });
+    await fixture.host.harness.behavior.callRpc("config.set", { routingStrategy: "balanced" });
+    const key = new TextEncoder().encode(fixture.key);
+    const metadata = Uint8Array.of(0x1a, key.length, ...key);
+    const body = Buffer.from(Uint8Array.of(0x0a, metadata.length, ...metadata));
+    const rpcPath = "/devin/exa.seat_management_pb.SeatManagementService/GetUserStatus";
+    const headers = { authorization: `Basic ${fixture.key}`, "content-type": "application/proto", "x-bb-devin-session": "synthetic-cli-session" };
+    try {
+      const one = fixture.host.harness.behavior.fetchHttp("POST", rpcPath, { headers, body });
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      const two = fixture.host.harness.behavior.fetchHttp("POST", rpcPath, { headers, body });
+      await vi.waitFor(() => expect(requests).toHaveLength(2));
+      first.resolve();
+      expect((await one).status).toBe(200);
+      expect((await two).status).toBe(200);
+      expect(requests[0]?.headers.get("authorization")).toBe(requests[1]?.headers.get("authorization"));
+    } finally {
+      first.resolve();
+    }
   });
 
   it("mints an access token from the pooled key and never forwards the pool token", async () => {
@@ -6065,6 +6151,7 @@ describe("Account Pool plugin", () => {
       zai: true,
       "opencode-go": true,
       cursor: true,
+      devin: true,
     });
   });
 
@@ -6478,6 +6565,7 @@ describe("sequential pool recovery", () => {
       zai: null,
       "opencode-go": null,
       cursor: null,
+      devin: null,
     });
     expect(
       pool.accounts.find((account) => account.id === fixture.account.id)

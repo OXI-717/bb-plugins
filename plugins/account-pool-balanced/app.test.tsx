@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type {
@@ -101,6 +101,7 @@ function status(
     zai: null,
     "opencode-go": null,
     cursor: null,
+    devin: null,
   },
 ): PoolStatus {
   return {
@@ -120,6 +121,7 @@ function status(
       zai: true,
       "opencode-go": true,
       cursor: true,
+      devin: true,
     },
   };
 }
@@ -132,6 +134,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
     opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
     cursorUpstreamBaseUrl: "https://api2.cursor.sh",
+    devinUpstreamBaseUrl: "https://server.codeium.com",
     switchThreshold: 0.98,
     routingStrategy: "sequential",
     reserveDrainHours: 24,
@@ -186,7 +189,7 @@ describe("Account Pool settings", () => {
     window.localStorage.setItem(STATUS_CACHE_KEY, '{"accounts":"nope"}');
     const live = deferred<PoolStatus>();
     const slot = render([], { "status.get": () => live.promise });
-    expect(slot.getAllByText("Загрузка…")).toHaveLength(6);
+    expect(slot.getAllByText("Загрузка…")).toHaveLength(7);
     live.resolve(status());
     expect(await slot.findByText("person@example.com")).toBeTruthy();
   });
@@ -346,6 +349,21 @@ describe("Account Pool settings", () => {
     ).toContain("ABCD-1234");
   });
 
+  it("adds a Devin PAT from its card without offering Codex login", async () => {
+    const slot = render([], { "account.add": () => account({ provider: "devin" }) });
+    const addButtons = await slot.findAllByRole("button", { name: "Добавить аккаунт" });
+    fireEvent.pointerDown(addButtons[6]!);
+    expect(slot.queryByText("Вход в Codex", { selector: "span.block" })).toBeNull();
+    fireEvent.click(await slot.findByText("Добавить PAT…"));
+    const dialog = await slot.findByRole("dialog", { name: "Добавить PAT Devin" });
+    fireEvent.change(slot.getByLabelText("Devin PAT"), { target: { value: "cog_synthetic" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Добавить ключ" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({
+      method: "account.add",
+      input: { provider: "devin", source: { kind: "api-key", apiKey: "cog_synthetic" }, label: null, priority: 100 },
+    }));
+  });
+
   it("persists provider routing from the section switch", async () => {
     const slot = render([account()], {
       "routing.set": () => ({ provider: "claude", enabled: false }),
@@ -417,6 +435,7 @@ describe("Account Pool settings", () => {
           zai: null,
           "opencode-go": null,
           cursor: null,
+          devin: null,
         }),
     });
     expect(
