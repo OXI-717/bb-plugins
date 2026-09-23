@@ -65,6 +65,16 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("counts attention only within the visible source and search filters", async () => {
+    sessionStorage.setItem("bb:automation-catalog:filters:v1", JSON.stringify({ query: "no-match", source: "", scope: "", host: "", state: "", project: "" }));
+    const slot = await mount();
+    await slot.findByText("По заданным фильтрам автоматизаций нет.");
+    const attention = slot.getByRole("button", { name: /Требуют внимания/ });
+    expect(attention.textContent).toContain("0");
+    fireEvent.click(attention);
+    expect(slot.getByText("По заданным фильтрам автоматизаций нет.")).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
   it("shows the failed result, keeps filters on return and provides compact history", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");

@@ -80,28 +80,33 @@ export function CatalogPage() {
       ),
     ]),
   );
+  const filteredTasks = tasks.filter((task) => matchesFilters(task, { ...filters, state: "" }));
   const views = [
-    { id: "", label: "Все", count: tasks.length },
+    { id: "", label: "Все", count: filteredTasks.length },
     {
       id: "attention",
       label: "Требуют внимания",
-      count: tasks.filter((t) => states.get(t.key)!.attention).length,
+      count: filteredTasks.filter((t) => states.get(t.key)!.attention).length,
     },
     {
       id: "running",
       label: "Выполняются / в очереди",
-      count: tasks.filter((t) =>
+      count: filteredTasks.filter((t) =>
         ["running", "queued"].includes(t.lastRun?.status ?? ""),
       ).length,
     },
     {
       id: "paused",
       label: "Отключены",
-      count: tasks.filter((t) => states.get(t.key)!.paused).length,
+      count: filteredTasks.filter((t) => states.get(t.key)!.paused).length,
+    },
+    {
+      id: "unmonitored",
+      label: "Без данных о запусках",
+      count: filteredTasks.filter((t) => t.history === "not-connected").length,
     },
   ];
-  const matched = tasks
-    .filter((task) => matchesFilters(task, { ...filters, state: "" }))
+  const matched = filteredTasks
     .filter(
       (t) =>
         !filters.state ||
@@ -109,6 +114,8 @@ export function CatalogPage() {
           ? states.get(t.key)!.attention
           : filters.state === "paused"
             ? states.get(t.key)!.paused
+            : filters.state === "unmonitored"
+              ? t.history === "not-connected"
             : filters.state === "running"
               ? ["running", "queued"].includes(t.lastRun?.status ?? "")
               : t.state === filters.state),
@@ -298,7 +305,7 @@ export function CatalogPage() {
         {data === null && !error && <p role="status">Загрузка автоматизаций…</p>}
         {data && (
           <p className="text-xs text-muted-foreground">
-            {matched.length} автоматизаций · сначала проблемные
+            Показано: {matched.length} из {filteredTasks.length}
           </p>
         )}
         {data && matched.length === 0 && (
@@ -351,7 +358,7 @@ export function CatalogPage() {
                           <p className="mt-1 text-xs text-muted-foreground lg:hidden">
                             {t.lastRun
                               ? `${runLabel(t.lastRun.status)} · ${timestamp(t.lastRun.startedAt ?? t.lastRun.finishedAt)}`
-                              : "Данных о запусках нет"}
+                              : t.history === "not-connected" ? "История не подключена" : "Данных о запусках нет"}
                           </p>
                         </td>
                         <td className="max-w-48 px-3 py-3 align-top">
@@ -399,7 +406,7 @@ export function CatalogPage() {
                             </>
                           ) : (
                             <span className="text-muted-foreground">
-                              Данных о запусках нет
+                              {t.history === "not-connected" ? "История не подключена" : "Данных о запусках нет"}
                             </span>
                           )}
                         </td>

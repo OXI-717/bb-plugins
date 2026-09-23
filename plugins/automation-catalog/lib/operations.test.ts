@@ -12,10 +12,10 @@ describe("operational state", () => {
       }),
     ).toMatchObject({ label: "Последний запуск завершился ошибкой", attention: true });
   });
-  it("surfaces declared blockers when live monitoring is absent", () => {
+  it("keeps unverified registry blockers out of the actionable count", () => {
     expect(
       health({ ...task, state: "unknown", declaredState: "blocked" }),
-    ).toMatchObject({ label: "Заблокирована", attention: true });
+    ).toMatchObject({ label: "Нет данных о запусках", attention: false });
   });
   it("does not treat a deliberate pause as failure", () => {
     expect(health({ ...task, state: "paused" })).toMatchObject({
@@ -36,7 +36,7 @@ describe("operational state", () => {
   it("does not invent healthy state without monitoring", () => {
     expect(
       health({ ...task, state: "unknown", declaredState: "active" }),
-    ).toMatchObject({ label: "Нет мониторинга", attention: true });
+    ).toMatchObject({ label: "Нет данных о запусках", attention: false });
   });
   it("routes creation by scope and execution destination", () => {
     expect(creationPrompt("bb", "personal")).toContain(
@@ -66,13 +66,13 @@ describe("freshness and registry signals", () => {
       ).reason,
     ).toContain("Ошибка связи с источником");
   });
-  it("recognizes a registry failure without claiming live verification", () => {
+  it("shows registry failure as unverified metadata", () => {
     expect(
       health({ ...task, state: "unknown", declaredState: "failed" }),
     ).toMatchObject({
-      label: "Ошибка",
-      reason: "Помечена ошибочной в реестре",
-      attention: true,
+      label: "Нет данных о запусках",
+      reason: "В реестре указано: Ошибка. Фактическое состояние не подключено.",
+      attention: false,
     });
   });
   it("requires fresh source evidence before calling a task overdue", () => {

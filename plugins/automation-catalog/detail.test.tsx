@@ -47,7 +47,7 @@ describe("detail failure states", () => {
     );
     expect(html).toContain("Ошибка соединения");
     expect(html).toContain("Source unavailable");
-    expect(html).toContain("История запусков не подключена.");
+    expect(html).toContain("Источник не передаёт историю запусков.");
     expect(html).toContain("Не удалось обновить источник");
   });
   it("escapes imported text and reports missing tasks", () => {
@@ -66,5 +66,23 @@ describe("detail failure states", () => {
     expect(html).not.toContain("<script>");
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain("нет в последнем снимке источника");
+  });
+  it("links BB failures to the source without copying script output", () => {
+    const html = renderToStaticMarkup(
+      <CatalogDetailContent detail={{ ...fixture, task: {
+        ...fixture.task,
+        sourceId: "bb-main",
+        scheduler: "bb",
+        projectId: "proj_example",
+        lastRun: {
+          id: "run1", taskId: "daily", host: "example", status: "failed",
+          startedAt: 1, finishedAt: 2, summary: null, exitCode: 1,
+          evidence: "execution", observedAt: null,
+        },
+      } }} />,
+    );
+    expect(html).toContain("/plugins/automations/automations/proj_example/daily");
+    expect(html).toContain("код 1");
+    expect(html).toContain("Каталог не копирует вывод скрипта");
   });
 });

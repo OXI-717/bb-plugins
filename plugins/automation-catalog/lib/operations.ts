@@ -13,9 +13,7 @@ export function health(
   source?: Source,
   now = Date.now(),
 ): Health {
-  const paused =
-    task.state === "paused" ||
-    (task.state === "unknown" && task.declaredState === "paused");
+  const paused = task.state === "paused";
   const result = (
     label: string,
     reason: string,
@@ -47,22 +45,18 @@ export function health(
       true,
       "danger",
     );
-  if (task.state === "blocked" || task.declaredState === "blocked")
+  if (task.state === "blocked")
     return result(
       "Заблокирована",
-      task.state === "blocked"
-        ? "Выполнение заблокировано"
-        : "Помечена заблокированной в реестре",
+      "Планировщик сообщает о блокировке выполнения",
       1,
       true,
       "danger",
     );
-  if (task.state === "failed" || task.declaredState === "failed")
+  if (task.state === "failed")
     return result(
       "Ошибка",
-      task.state === "failed"
-        ? "Планировщик сообщает об ошибке"
-        : "Помечена ошибочной в реестре",
+      "Планировщик сообщает об ошибке",
       2,
       true,
       "danger",
@@ -84,6 +78,7 @@ export function health(
       "Ошибка соединения",
       "Не удалось обновить источник; показаны последние известные данные",
       4,
+      false,
     );
   if (
     source &&
@@ -94,6 +89,7 @@ export function health(
       "Данные устарели",
       "Текущее состояние требует проверки",
       5,
+      false,
     );
   if (
     !paused &&
@@ -115,11 +111,12 @@ export function health(
     return result("Отключена", "Запуск по расписанию приостановлен", 8, false);
   if (task.state === "unknown")
     return result(
-      "Нет мониторинга",
+      "Нет данных о запусках",
       task.declaredState
-        ? `В реестре: ${automationStateLabel(task.declaredState)}; состояние запусков не подключено`
-        : "Состояние запусков не подключено",
+        ? `В реестре указано: ${automationStateLabel(task.declaredState)}. Фактическое состояние не подключено.`
+        : "Фактическое состояние и история запусков не подключены",
       9,
+      false,
     );
   return result(
     "Включена",

@@ -27,6 +27,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
         <p className="mt-1 text-xs text-muted-foreground">
           {scopeLabel(task.scope)} · {sourceLabel(source.name)} · {task.host}
           {task.team ? ` · ${task.team}` : ""}
+          {task.owner ? ` · Ответственный: ${task.owner}` : ""}
         </p>
       </header>
       <section
@@ -40,6 +41,11 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           {state.label}
         </p>
         <p className="mt-1 text-sm text-muted-foreground">{state.reason}</p>
+        {task.history === "not-connected" && (
+          <p className="mt-2 text-sm">
+            Источник передаёт только сведения из реестра. Результаты и время фактических запусков сюда не поступают.
+          </p>
+        )}
         {task.missing && (
           <p className="text-sm">
             Этой задачи нет в последнем снимке источника. Последние известные
@@ -62,7 +68,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           <dd className="mt-1">
             {task.lastRun
               ? runLabel(task.lastRun.status)
-              : "Данных о запусках нет"}
+              : task.history === "not-connected" ? "История не подключена" : "Данных о запусках нет"}
           </dd>
           {task.lastRun && (
             <dd className="text-xs text-muted-foreground">
@@ -85,12 +91,25 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           Открыть в исходной системе ↗
         </a>
       )}
+      {task.sourceId === "bb-main" && task.scheduler === "bb" && task.projectId && (
+        <a
+          href={`/plugins/automations/automations/${encodeURIComponent(task.projectId)}/${encodeURIComponent(task.id)}`}
+          className="text-sm underline"
+        >
+          Открыть автоматизацию в BB ↗
+        </a>
+      )}
+      {task.lastRun?.status === "failed" && !task.lastRun.summary && (
+        <p className="text-sm text-destructive">
+          Последний запуск завершился с ошибкой{task.lastRun.exitCode !== null ? ` (код ${task.lastRun.exitCode})` : ""}. Каталог не копирует вывод скрипта; причину можно посмотреть в исходном планировщике.
+        </p>
+      )}
       <section className="space-y-2">
         <h3 className="text-sm font-semibold">История запусков</h3>
         {!executions.length && (
           <p className="py-3 text-sm text-muted-foreground">
             {task.history === "not-connected"
-              ? "История запусков не подключена. Подключите планировщик, чтобы видеть результаты."
+              ? "Источник не передаёт историю запусков. Последняя проверка реестра указана выше; она не подтверждает успешный запуск."
               : task.history === "not-recorded"
                 ? "Источник не хранит историю запусков."
                 : events.length
