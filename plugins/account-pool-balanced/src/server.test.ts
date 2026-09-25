@@ -2376,6 +2376,12 @@ describe("Account Pool plugin", () => {
         reason:
           "Claude Code turns tool search off behind a custom base URL; the hub forwards tool_reference blocks",
       },
+      {
+        name: "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+        value: "1",
+        reason:
+          "Preserve the native Opus context window through the Account Pooler hub",
+      },
     ]);
     await expect(
       fixture.host.harness.behavior.resolveProviderEnvHealth("claude-code", {

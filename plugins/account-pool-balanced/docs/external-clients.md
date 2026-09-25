@@ -19,7 +19,7 @@ Pool credentials are for trusted clients belonging to the operator. They allow u
 Requirements: Node 22+, npm, and a compiler toolchain if the SQLite native prebuild is unavailable. No BB installation is needed for this mode:
 
 ```sh
-git clone --branch account-pool-balanced/v0.4.0 --depth 1 https://github.com/OXI-717/bb-plugins.git
+git clone --branch account-pool-balanced/v0.4.1 --depth 1 https://github.com/OXI-717/bb-plugins.git
 cd bb-plugins/plugins/account-pool-balanced
 npm ci
 npm run pool -- --data-dir /secure/pool import-login --provider codex
@@ -125,7 +125,7 @@ For a BB-hosted pool, set `POOL_URL` to its plugin HTTP base URL above. Do not e
 
 In Claude, `/status` must show your pool URL and `ANTHROPIC_AUTH_TOKEN`. The saved local login email and “API Usage Billing” label do not identify the upstream account selected by the pool. Use `bb pool status` or the BB pool panel for per-account quotas; native client screens do not show aggregate pool balances.
 
-For Opus 5.5 use Claude Code 2.1.280 or later. Inside the session select `/model claude-opus-5-5[1m]`, then check `/context` shows a 1M denominator. Plain `opus` through a gateway was observed to budget only 200K, causing repeated compaction with large rules/MCP context. Keep automatic compaction enabled. See [Claude model configuration](https://code.claude.com/docs/en/model-config#extended-context).
+For Opus 5.5 use Claude Code 2.1.280 or later. BB-routed Claude Code sessions preserve the native 1M window starting with pool version 0.4.1; restart the session after updating and check `/context`. For external clients, select `/model claude-opus-5-5[1m]`, then check `/context` shows a 1M denominator. Plain `opus` through a gateway was observed to budget only 200K, causing repeated compaction with large rules/MCP context. Keep automatic compaction enabled. See [Claude model configuration](https://code.claude.com/docs/en/model-config#extended-context).
 
 In Codex, check that the provider is `Account Pool`. Choose a model available to your accounts. Unsupported models should produce a provider error, not bypass the pool. Revoking a dedicated client token should make new requests fail rather than use the local login.
 
