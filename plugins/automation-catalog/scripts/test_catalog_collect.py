@@ -22,6 +22,7 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(tasks[0]['scope'], 'personal')
         self.assertEqual(runs[0]['status'], 'skipped')
         self.assertEqual(runs[0]['finishedAt'], 200)
+        self.assertTrue(runs[0]['hasOutput'])
         self.assertNotIn('PRIVATE', str((tasks, runs)))
         self.assertTrue(all(call.kwargs['env']['BB_SERVER_URL'] == 'http://source:1234' for call in read.call_args_list))
 

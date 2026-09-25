@@ -113,7 +113,7 @@ export function CatalogPage() {
       id: "running",
       label: "Выполняются / в очереди",
       count: filteredTasks.filter((t) =>
-        ["running", "queued"].includes(t.lastRun?.status ?? ""),
+        !t.missing && ["running", "queued"].includes(t.lastRun?.status ?? ""),
       ).length,
     },
     {
@@ -145,7 +145,7 @@ export function CatalogPage() {
             : filters.state === "missing"
               ? t.missing
             : filters.state === "running"
-              ? ["running", "queued"].includes(t.lastRun?.status ?? "")
+              ? !t.missing && ["running", "queued"].includes(t.lastRun?.status ?? "")
               : t.state === filters.state),
     )
     .sort(
@@ -403,7 +403,7 @@ export function CatalogPage() {
                         </td>
                         <td className="hidden max-w-64 px-3 py-3 align-top text-xs md:table-cell">
                           {catalogSchedule(t.schedule)}
-                          {t.nextRunAt != null && (
+                          {!t.missing && t.nextRunAt != null && (
                             <p className="mt-1 text-muted-foreground">
                               Следующий запуск: {timestamp(t.nextRunAt)}
                             </p>

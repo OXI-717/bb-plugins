@@ -248,14 +248,16 @@ def bb_collect(server, host):
                     if trigger.get('triggerType') == 'schedule' else datetime.datetime.fromtimestamp(trigger['runAt'] / 1000, datetime.timezone.utc).isoformat() if trigger.get('runAt') else 'Unknown schedule')
         task.update(scope='personal' if project['id'] == 'proj_personal' else 'unknown',
                     projectId=project['id'], projectName=project['name'], scheduler='bb', executor=execution.get('interpreter') or execution.get('mode', 'Unknown'),
-                    state='active' if item.get('enabled') else 'paused', schedule=schedule, nextRunAt=item.get('nextRunAt'),
+                    state='active' if item.get('enabled') else 'paused', schedule=schedule,
+                    scheduleKind='once' if trigger.get('triggerType') == 'once' else 'recurring', nextRunAt=item.get('nextRunAt'),
                     history='available', description='Managed by the connected BB instance. Project: ' + project['name'] + '. Read-only projection; schedules remain at the source.')
         tasks.append(task)
         history = read(['automation', 'runs', item['id'], '--project', project['id'], '--limit', '100'])
         for run in history['runs']:
             runs.append(dict(taskId=item['id'], host=task['host'], id=run['id'],
                              status=run['status'], startedAt=run.get('startedAt'), finishedAt=run.get('finishedAt'),
-                             exitCode=run.get('exitCode'), summary=('Skipped: ' + run['skipReason']) if run.get('skipReason') else None))
+                             exitCode=run.get('exitCode'), summary=('Skipped: ' + run['skipReason']) if run.get('skipReason') else None,
+                             hasOutput=bool(run.get('output'))))
     return tasks, runs
 
 

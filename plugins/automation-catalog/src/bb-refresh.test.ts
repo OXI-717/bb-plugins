@@ -33,6 +33,7 @@ describe("BB refresh", () => {
       expect(task.state).toBe("active");
       expect(task.missing).toBe(false);
       expect(catalog.detail({ key: task.key }).total).toBe(1);
+      expect(catalog.detail({ key: task.key }).runs[0].hasOutput).toBe(true);
       expect(JSON.stringify(catalog.detail({ key: task.key }))).not.toContain("PRIVATE");
       entries = [];
       await refreshBbCatalog(catalog, command, "http://127.0.0.1:38886");

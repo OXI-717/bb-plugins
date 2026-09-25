@@ -57,7 +57,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
         <div>
           <dt className="text-xs text-muted-foreground">Расписание</dt>
           <dd className="mt-1">{catalogSchedule(task.schedule)}</dd>
-          {task.nextRunAt != null && (
+          {!task.missing && task.nextRunAt != null && (
             <dd className="mt-1 text-xs text-muted-foreground">
               Следующий запуск: {timestamp(task.nextRunAt)}
             </dd>
@@ -77,8 +77,8 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           )}
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">Данные обновлены</dt>
-          <dd className="mt-1">{timestamp(source.lastSuccessAt)}</dd>
+          <dt className="text-xs text-muted-foreground">{task.missing ? "Последние данные о задаче" : "Источник проверен"}</dt>
+          <dd className="mt-1">{timestamp(task.missing ? task.observedAt : source.lastSuccessAt)}</dd>
         </div>
       </dl>
       {task.url && (
@@ -96,7 +96,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           href={`/plugins/automations/automations/${encodeURIComponent(task.projectId)}/${encodeURIComponent(task.id)}`}
           className="text-sm underline"
         >
-          Открыть автоматизацию в BB ↗
+          Открыть запуски и вывод в BB ↗
         </a>
       )}
       {task.lastRun?.status === "failed" && !task.lastRun.summary && (
@@ -127,7 +127,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
                   <th className="hidden px-3 py-2 font-medium sm:table-cell">
                     Длительность
                   </th>
-                  <th className="px-3 py-2 font-medium">Подробности</th>
+                  <th className="px-3 py-2 font-medium">Результат в источнике</th>
                 </tr>
               </thead>
               <tbody>
@@ -153,23 +153,12 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
                       {duration(run.startedAt, run.finishedAt)}
                     </td>
                     <td className="max-w-md px-3 py-2 align-top">
-                      <details>
-                        <summary className="cursor-pointer text-muted-foreground">
-                          {run.summary ? "Показать результат" : "Подробности запуска"}
-                        </summary>
-                        {run.summary && (
-                          <p className="mt-2 whitespace-pre-wrap break-words">
-                            {run.summary}
-                          </p>
-                        )}
-                        <p className="mt-2 break-all text-muted-foreground">
-                          ID: {run.id}
-                        </p>
-                        <p className="text-muted-foreground">
-                          Started: {timestamp(run.startedAt)} · Finished:{" "}
-                          {timestamp(run.finishedAt)}
-                        </p>
-                      </details>
+                      {run.summary && <p className="whitespace-pre-wrap break-words">{run.summary}</p>}
+                      {!task.missing && source.managedHere && task.scheduler === "bb" && task.projectId ? (
+                        <a className="underline" href={`/plugins/automations/automations/${encodeURIComponent(task.projectId)}/${encodeURIComponent(task.id)}`}>
+                          {run.hasOutput ? "Посмотреть вывод в BB ↗" : "Открыть запуск в BB ↗"}
+                        </a>
+                      ) : !run.summary ? <span className="text-muted-foreground">Подробности не переданы</span> : null}
                     </td>
                   </tr>
                 ))}

@@ -13,7 +13,8 @@ export function health(
   source?: Source,
   now = Date.now(),
 ): Health {
-  const paused = task.state === "paused";
+  const completedOnce = task.scheduleKind === "once" && task.state === "paused" && task.lastRun?.status === "succeeded";
+  const paused = task.state === "paused" && !completedOnce && !task.missing;
   const result = (
     label: string,
     reason: string,
@@ -107,6 +108,8 @@ export function health(
     return result("Выполняется", "Идёт выполнение", 6, false);
   if (task.lastRun?.status === "queued")
     return result("В очереди", "Ожидает выполнения", 7, false);
+  if (completedOnce)
+    return result("Завершена", "Одноразовый запуск выполнен", 8, false);
   if (paused)
     return result("Отключена", "Запуск по расписанию приостановлен", 8, false);
   if (task.state === "unknown")
@@ -120,7 +123,9 @@ export function health(
     );
   return result(
     "Включена",
-    task.lastRun
+    task.lastRun?.status === "succeeded" && task.lastRun.hasOutput
+      ? "Планировщик сообщил об успехе. Вывод не проверен — откройте результат в источнике."
+      : task.lastRun
       ? "Расписание включено"
       : "Расписание включено; данных о запусках пока нет",
     10,

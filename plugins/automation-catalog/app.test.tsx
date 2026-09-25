@@ -84,6 +84,17 @@ describe("automation workflows", () => {
     expect(slot.getByText("По заданным фильтрам автоматизаций нет.")).toBeTruthy();
     slot.lifecycle.unmount();
   });
+  it("does not count a missing running record as a live execution", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+      catalog_list: () => ({ tasks: [{ ...task, missing: true, nextRunAt: Date.now() - 1000,
+        lastRun: { ...task.lastRun, status: "running" } }], sources: [source] }),
+    } });
+    const running = await slot.findByRole("button", { name: /Выполняются \/ в очереди/ });
+    expect(running.textContent).toContain("0");
+    expect(slot.queryByText(/Следующий запуск:/)).toBeNull();
+    slot.lifecycle.unmount();
+  });
   it("shows the failed result, keeps filters on return and provides compact history", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");
