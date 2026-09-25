@@ -29,6 +29,14 @@ describe("operational state", () => {
       paused: true,
     });
   });
+  it("shows a completed one-shot separately from paused schedules", () => {
+    expect(health({ ...task, state: "paused", scheduleKind: "once", lastRun: { status: "succeeded" } as CatalogTask["lastRun"] }))
+      .toMatchObject({ label: "Завершена", paused: false, attention: false });
+  });
+  it("does not equate scheduler success with validated output", () => {
+    expect(health({ ...task, lastRun: { status: "succeeded", hasOutput: true } as CatalogTask["lastRun"] }).reason)
+      .toContain("Вывод не проверен");
+  });
   it("does not hide a failure behind a pause", () => {
     expect(
       health({

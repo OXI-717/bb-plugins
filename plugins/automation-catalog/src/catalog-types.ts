@@ -16,6 +16,7 @@ export const catalogTaskSchema = z
     scheduler: id,
     executor: text,
     schedule: text.nullable(),
+    scheduleKind: z.enum(["once", "recurring"]).optional(),
     nextRunAt: time.nullable().optional(),
     state: z.enum(["active", "paused", "blocked", "failed", "unknown"]),
     declaredState: text.nullable().optional(),
@@ -47,6 +48,7 @@ export const catalogRunSchema = z
     startedAt: time.nullable(),
     finishedAt: time.nullable(),
     summary: z.string().max(8000).nullable(),
+    hasOutput: z.boolean().optional(),
     exitCode: z.number().int().nullable(),
   })
   .strict()

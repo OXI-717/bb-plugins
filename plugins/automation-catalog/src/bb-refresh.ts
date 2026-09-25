@@ -29,6 +29,7 @@ const runsSchema = z.object({ runs: z.array(z.object({
   finishedAt: z.number().nullable().optional(),
   exitCode: z.number().nullable().optional(),
   skipReason: z.string().nullable().optional(),
+  output: z.string().nullable().optional(),
 })) });
 
 export async function refreshBbCatalog(catalog: Catalog, command: Command, localBbServerUrl: string) {
@@ -54,6 +55,7 @@ export async function refreshBbCatalog(catalog: Catalog, command: Command, local
       scheduler: "bb",
       executor: item.execution.interpreter ?? item.execution.mode,
       schedule,
+      scheduleKind: item.trigger.triggerType === "once" ? "once" as const : "recurring" as const,
       nextRunAt: item.nextRunAt ?? null,
       state: item.enabled ? "active" as const : "paused" as const,
       description: previous?.description ?? `Managed by BB. Project: ${project.name}.`,
@@ -73,6 +75,7 @@ export async function refreshBbCatalog(catalog: Catalog, command: Command, local
       finishedAt: run.finishedAt ?? null,
       exitCode: run.exitCode ?? null,
       summary: run.skipReason ? `Skipped: ${run.skipReason.slice(0, 2000)}` : null,
+      hasOutput: Boolean(run.output),
     }));
   }));
   catalog.publish({
