@@ -270,8 +270,12 @@ export const catalogRpcContract = defineRpcContract({
     output: z.object({ ok: z.literal(true) }),
   },
   catalog_compose: {
-    input: z.object({ request: composeRequestSchema }).strict(),
+    input: z.object({ request: composeRequestSchema, title: z.string().trim().min(1).max(200), parentThreadId: z.string().min(1), taskKey: z.string().min(1).optional() }).strict(),
     output: z.object({ threadId: z.string() }),
+  },
+  catalog_compose_context: {
+    input: z.object({ taskKey: z.string().min(1).optional() }).strict(),
+    output: z.object({ parentThreadId: z.string(), parentTitle: z.string(), projectId: z.string() }),
   },
   catalog_list: { input: z.null(), output: catalogListSchema },
   catalog_detail: {
@@ -285,6 +289,18 @@ export const catalogRpcContract = defineRpcContract({
 });
 export function registerCatalog(bb: BbPluginApi, db: Db) {
   const catalog = createCatalog(db);
+  const settings = bb.settings.define({
+    parentThreadId: { type: "string", label: "Родительский тред каталога", description: "Тред BB, под которым группируются обсуждения автоматизаций. Его проект используется по умолчанию для новых и внешних автоматизаций.", default: "" },
+  });
+  async function composeContext(taskKey?: string) {
+    const { parentThreadId } = await settings.get();
+    if (!parentThreadId.trim()) throw new Error("Укажите родительский тред каталога в настройках плагина перед созданием обсуждения.");
+    const parent = await bb.sdk.threads.get({ threadId: parentThreadId });
+    if (parent.archivedAt !== null) throw new Error("Родительский тред каталога архивирован. Выберите действующий тред в настройках плагина.");
+    const detail = taskKey ? catalog.detail({ key: taskKey, offset: 0, limit: 1 }) : null;
+    if (detail?.task.missing) throw new Error("Автоматизация удалена из источника. Создание обсуждения недоступно.");
+    return { parentThreadId: parent.id, parentTitle: parent.title || "Каталог автоматизаций", projectId: detail?.source.managedHere && detail.task.projectId ? detail.task.projectId : parent.projectId };
+  }
   async function bbCli(...args: string[]) {
     const serverUrl = bb.server.loopbackBaseUrl;
     const { stdout } = await execFileAsync(process.env.BB_CLI || "bb", [...args, "--json"], {
@@ -311,10 +327,15 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
       bb.realtime.publish("automation-catalog", { sourceId });
       return result;
     },
-    catalog_compose: async ({ request }) => {
+    catalog_compose_context: ({ taskKey }) => composeContext(taskKey),
+    catalog_compose: async ({ request, title, parentThreadId, taskKey }) => {
+      const context = await composeContext(taskKey);
+      if (context.parentThreadId !== parentThreadId) throw new Error("Привязка каталога изменилась. Откройте черновик заново.");
       const thread = await bb.sdk.threads.spawn({
         ...hostRequest(request),
-        title: "Automation setup",
+        title,
+        parentThreadId: context.parentThreadId,
+        pluginMetadata: { kind: "automation-discussion", taskKey: taskKey ?? null },
       });
       return { threadId: thread.id };
     },
