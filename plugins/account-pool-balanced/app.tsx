@@ -1479,9 +1479,10 @@ function AccountPoolSettings() {
                         onAction={(action) =>
                           void accountAction(account, action)
                         }
-                        onOpen={() =>
-                          setDialog({ kind: "account", accountId: account.id })
-                        }
+                        onOpen={() => {
+                          setDialog({ kind: "account", accountId: account.id });
+                          void refresh();
+                        }}
                       />
                     ))}
                   </div>
