@@ -1,4 +1,5 @@
 import { AutomationComposer, type ComposeIntent } from "./compose";
+import { nextStep, resultText } from "./lib/overview";
 import { useEffect, useState } from "react";
 import { useRpc, useRealtime } from "@get-bb/plugin-sdk/app";
 import { Button } from "./components/ui/button";
@@ -53,6 +54,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           </p>
         )}
       </section>
+      <section className="rounded-md border p-3 space-y-1" aria-label="Что делать дальше"><h3 className="font-medium">Что делать дальше</h3><p className="text-sm">{nextStep(task)}</p></section>
       <dl className="grid gap-4 text-sm sm:grid-cols-3">
         <div>
           <dt className="text-xs text-muted-foreground">Расписание</dt>
@@ -153,7 +155,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
                       {duration(run.startedAt, run.finishedAt)}
                     </td>
                     <td className="max-w-md px-3 py-2 align-top">
-                      {run.summary && <p className="whitespace-pre-wrap break-words">{run.summary}</p>}
+                      {run.summary && <p className="whitespace-pre-wrap break-words">{resultText(run.summary)}</p>}
                       {!task.missing && source.managedHere && task.scheduler === "bb" && task.projectId ? (
                         <a className="underline" href={`/plugins/automations/automations/${encodeURIComponent(task.projectId)}/${encodeURIComponent(task.id)}`}>
                           {run.hasOutput ? "Посмотреть вывод в BB ↗" : "Открыть запуск в BB ↗"}
@@ -304,14 +306,14 @@ export function CatalogDetailView({
         <Button size="sm" variant="ghost" onClick={onBack}>
           ← Автоматизации
         </Button>
-        {detail && (
+        {detail && !detail.task.missing && (
           <div className="flex gap-2">
             <Button
               size="sm"
               variant="outline"
               onClick={() => manage("Найди проблемы в работе")}
             >
-              Диагностика
+              Разобрать с агентом
             </Button>
             <Button
               size="sm"
@@ -320,7 +322,7 @@ export function CatalogDetailView({
                 manage("Помоги изменить расписание или настройки")
               }
             >
-              Изменить
+              Настроить с агентом
             </Button>
           </div>
         )}
@@ -341,6 +343,7 @@ export function CatalogDetailView({
           </details>
         </div>
       )}
+      {detail && !detail.task.missing && <p className="text-xs text-muted-foreground">Кнопки «с агентом» открывают черновик запроса. Модель запускается только после отправки.</p>}
       {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
       {actionMessage && <p role="status" className="text-sm">{actionMessage}</p>}
       {loading && (

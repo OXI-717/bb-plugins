@@ -1,4 +1,5 @@
 import { AutomationComposer, type ComposeIntent } from "./compose";
+import { category } from "./lib/overview";
 import { useCallback, useEffect, useState } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import type { catalogRpcContract } from "./src/catalog";
@@ -103,7 +104,9 @@ export function CatalogPage() {
   );
   const filteredTasks = tasks.filter((task) => matchesFilters(task, { ...filters, state: "" }));
   const views = [
-    { id: "", label: "Все", count: filteredTasks.length },
+    { id: "current", label: "Действующие", count: filteredTasks.filter(t => category(t) === "current").length },
+    { id: "completed", label: "Завершённые", count: filteredTasks.filter(t => category(t) === "completed").length },
+    { id: "", label: "Все записи", count: filteredTasks.length },
     {
       id: "attention",
       label: "Требуют внимания",
@@ -123,12 +126,12 @@ export function CatalogPage() {
     },
     {
       id: "unmonitored",
-      label: "Без данных о запусках",
+      label: "Реестр без мониторинга",
       count: filteredTasks.filter((t) => t.history === "not-connected").length,
     },
     {
       id: "missing",
-      label: "Нет в источнике",
+      label: "Удалённые из источника",
       count: filteredTasks.filter((t) => t.missing).length,
     },
   ];
@@ -136,7 +139,9 @@ export function CatalogPage() {
     .filter(
       (t) =>
         !filters.state ||
-        (filters.state === "attention"
+        (["current", "completed"].includes(filters.state)
+          ? category(t) === filters.state
+          : filters.state === "attention"
           ? states.get(t.key)!.attention
           : filters.state === "paused"
             ? states.get(t.key)!.paused
@@ -164,7 +169,7 @@ export function CatalogPage() {
           <div>
             <h1 className="text-xl font-semibold">Автоматизации</h1>
             <p className="text-xs text-muted-foreground">
-              Запуски, расписания и результаты из подключённых систем
+              Что выполняется, что проверить и где посмотреть результат
             </p>
           </div>
           <div className="flex gap-2">
@@ -180,6 +185,13 @@ export function CatalogPage() {
             </Button>
           </div>
         </header>
+        {data && <section className="rounded-md border bg-card p-3 space-y-1" aria-label="Сводка автоматизаций">
+          <p className="font-medium">Действующие задачи: {tasks.filter(t => category(t) === "current").length} · Требуют проверки: {tasks.filter(t => states.get(t.key)?.attention).length}</p>
+          <p className="text-sm text-muted-foreground">Проверка учитывает состояние и коды завершения планировщиков. Содержимое результатов автоматически не проверяется.</p>
+          <p className="text-sm text-muted-foreground">{tasks.filter(t => category(t) === "unmonitored").length} записей реестра без мониторинга — их работоспособность не подтверждена. Завершённые, отключённые и удалённые задачи доступны в отдельных разделах.</p>
+          {data.sources.filter(s => s.error || !s.lastSuccessAt || now - s.lastSuccessAt > s.staleAfterMs).map(s => <p className="text-sm text-destructive" key={s.id}>Проверьте подключение: {sourceLabel(s.name)}. Свежие сведения не получены; статусы ниже могут устареть.</p>)}
+        </section>}
+        <p className="text-sm text-muted-foreground">{filters.state === "current" ? "Текущие задачи. Откройте название, чтобы посмотреть результаты или выбрать действие." : filters.state === "unmonitored" ? "Здесь только описания задач. Отсутствие истории не означает сбой — мониторинг ещё не подключён." : filters.state === "completed" ? "Одноразовые задачи уже выполнены; новые запуски не ожидаются." : filters.state === "missing" ? "Задачи отсутствуют в последнем списке планировщика. Сохранена только их история." : "Выберите задачу, чтобы посмотреть результаты и доступные действия."}</p>
         {refreshMessage && <p role="status" className="text-xs text-muted-foreground">{refreshMessage}</p>}
         {creating && (
           <section
@@ -314,7 +326,7 @@ export function CatalogPage() {
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => setFilters({ ...emptyFilters })}
+            onClick={() => setFilters({ ...emptyFilters, state: "current" })}
           >
             Сбросить
           </Button>

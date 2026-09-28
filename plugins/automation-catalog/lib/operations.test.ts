@@ -19,8 +19,8 @@ describe("operational state", () => {
   });
   it("keeps unverified registry blockers out of the actionable count", () => {
     expect(
-      health({ ...task, state: "unknown", declaredState: "blocked" }),
-    ).toMatchObject({ label: "Нет данных о запусках", attention: false });
+      health({ ...task, state: "unknown", history: "not-connected", declaredState: "blocked" }),
+    ).toMatchObject({ label: "Только описание", attention: false });
   });
   it("does not treat a deliberate pause as failure", () => {
     expect(health({ ...task, state: "paused" })).toMatchObject({
@@ -48,8 +48,8 @@ describe("operational state", () => {
   });
   it("does not invent healthy state without monitoring", () => {
     expect(
-      health({ ...task, state: "unknown", declaredState: "active" }),
-    ).toMatchObject({ label: "Нет данных о запусках", attention: false });
+      health({ ...task, state: "unknown", history: "not-connected", declaredState: "active" }),
+    ).toMatchObject({ label: "Только описание", attention: false });
   });
   it("routes creation by scope and execution destination", () => {
     expect(creationPrompt("bb", "personal")).toContain(
@@ -81,9 +81,9 @@ describe("freshness and registry signals", () => {
   });
   it("shows registry failure as unverified metadata", () => {
     expect(
-      health({ ...task, state: "unknown", declaredState: "failed" }),
+      health({ ...task, state: "unknown", history: "not-connected", declaredState: "failed" }),
     ).toMatchObject({
-      label: "Нет данных о запусках",
+      label: "Только описание",
       reason: "В реестре указано: Ошибка. Фактическое состояние не подключено.",
       attention: false,
     });
