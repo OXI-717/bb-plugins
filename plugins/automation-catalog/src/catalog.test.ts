@@ -52,6 +52,16 @@ afterEach(() => {
 });
 
 describe("external catalog", () => {
+  it("updates a display label without changing external identity or losing runs", () => {
+    const { catalog } = setup();
+    catalog.publish(snapshot());
+    const key = catalog.list().tasks[0].key;
+    const next = snapshot(2000);
+    catalog.publish({ ...next, tasks: next.tasks.map(t => ({ ...t, hostLabel: "team-worker-example" })), runs: [] });
+    expect(catalog.list().tasks).toHaveLength(1);
+    expect(catalog.list().tasks[0]).toMatchObject({ key, host: "worker-example", hostLabel: "team-worker-example" });
+    expect(catalog.detail({ key }).total).toBe(1);
+  });
   it("keeps a BB task identity and history when its host label changes", () => {
     const { catalog } = setup();
     const first = { ...snapshot(), source: { ...snapshot().source, id: "bb-local", bbServerUrl: "http://127.0.0.1:38886" } };

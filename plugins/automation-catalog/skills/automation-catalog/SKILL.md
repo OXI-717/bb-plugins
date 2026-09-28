@@ -35,3 +35,7 @@ where the user selects the matching timestamp (BB has no per-run deep link). Ext
 Local launchd collection distinguishes explicit disabled overrides from an
 unloaded or inaccessible service; an inaccessible override database does not imply
 that a task is disabled.
+
+Collectors accept `--host-prefix` for project-qualified display names. Snapshots
+may carry `hostLabel`; raw `host` remains the scheduler identity. Display labels
+appear in cards and host filters and are searchable without rewriting run keys.

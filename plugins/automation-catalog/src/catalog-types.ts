@@ -8,6 +8,7 @@ export const catalogTaskSchema = z
     id,
     name: z.string().min(1).max(300),
     host: id,
+    hostLabel: id.optional(),
     scope: z.enum(["personal", "team", "unknown"]),
     owner: text.nullable(),
     team: text.nullable(),
