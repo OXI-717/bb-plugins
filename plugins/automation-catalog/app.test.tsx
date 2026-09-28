@@ -66,6 +66,18 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("opens current tasks by default and keeps registry records accessible separately", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+      catalog_list: () => ({ tasks: [task, { ...task, key: "registry", name: "Registry example", state: "unknown", history: "not-connected", lastRun: null }], sources: [source] }),
+    } });
+    await slot.findByRole("button", { name: "Daily report" });
+    expect(slot.queryByRole("button", { name: "Registry example" })).toBeNull();
+    fireEvent.click(slot.getByRole("button", { name: /Реестр без мониторинга/ }));
+    expect(slot.getByRole("button", { name: "Registry example" })).toBeTruthy();
+    expect(slot.queryByRole("button", { name: "Daily report" })).toBeNull();
+    slot.lifecycle.unmount();
+  });
   it("uses the scheduler refresh RPC before reloading the table", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");
@@ -75,7 +87,7 @@ describe("automation workflows", () => {
     slot.lifecycle.unmount();
   });
   it("counts attention only within the visible source and search filters", async () => {
-    sessionStorage.setItem("bb:automation-catalog:filters:v1", JSON.stringify({ query: "no-match", source: "", scope: "", host: "", state: "", project: "" }));
+    sessionStorage.setItem("bb:automation-catalog:filters:v2", JSON.stringify({ query: "no-match", source: "", scope: "", host: "", state: "", project: "" }));
     const slot = await mount();
     await slot.findByText("По заданным фильтрам автоматизаций нет.");
     const attention = slot.getByRole("button", { name: /Требуют внимания/ });

@@ -114,12 +114,14 @@ export function health(
     return result("Отключена", "Запуск по расписанию приостановлен", 8, false);
   if (task.state === "unknown")
     return result(
-      "Нет данных о запусках",
-      task.declaredState
+      task.history === "not-connected" ? "Только описание" : "Состояние не подтверждено",
+      task.history !== "not-connected"
+        ? "Планировщик не подтвердил текущее состояние. Откройте задачу для проверки."
+        : task.declaredState
         ? `В реестре указано: ${automationStateLabel(task.declaredState)}. Фактическое состояние не подключено.`
         : "Фактическое состояние и история запусков не подключены",
       9,
-      false,
+      task.history !== "not-connected",
     );
   return result(
     "Включена",

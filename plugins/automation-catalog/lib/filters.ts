@@ -1,5 +1,5 @@
 import type { CatalogTask } from "../src/catalog-types";
-export const storageKey = "bb:automation-catalog:filters:v1";
+export const storageKey = "bb:automation-catalog:filters:v2";
 export const emptyFilters = { query: "", source: "", scope: "", host: "", state: "", project: "" };
 export type Filters = typeof emptyFilters;
 export function readFilters(): Filters {
@@ -9,7 +9,7 @@ export function readFilters(): Filters {
       return Object.fromEntries(Object.keys(emptyFilters).map(k => [k, (value as Record<string, string>)[k]])) as Filters;
     }
   } catch {}
-  return { ...emptyFilters };
+  return { ...emptyFilters, state: "current" };
 }
 export function matchesFilters(t: CatalogTask, f: Filters) {
   return (!f.query || [t.name, t.id, t.host, t.owner, t.team].some(v => v?.toLowerCase().includes(f.query.trim().toLowerCase()))) &&
