@@ -47,6 +47,7 @@ export async function refreshBbCatalog(catalog: Catalog, command: Command, local
       id: item.id,
       name: item.name,
       host: executionHost,
+      ...(previous?.hostLabel && previous.host === executionHost ? { hostLabel: previous.hostLabel } : {}),
       scope: project.id === "proj_personal" ? "personal" as const : "unknown" as const,
       owner: null,
       team: null,
