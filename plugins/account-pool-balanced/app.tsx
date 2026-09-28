@@ -252,7 +252,9 @@ function resetLabel(timestamp: number | null): string {
     hourCycle: "h23",
     timeZone: POOL_TIME_ZONE,
   }).format(timestamp)} МСК`;
-  const minutes = Math.max(1, Math.round((timestamp - Date.now()) / 60_000));
+  const remaining = timestamp - Date.now();
+  if (remaining <= 0) return `сброс ожидался ${exact} · обновите квоты`;
+  const minutes = Math.max(1, Math.round(remaining / 60_000));
   if (minutes < 1_440)
     return `сброс ${exact} (через ${minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes} мин`})`;
   return `сброс ${exact}`;
@@ -791,7 +793,7 @@ function QuotaDetail({
         <div className="text-xs text-muted-foreground">
           {percent(utilization)}
           {quota?.resetAt === null || quota === null
-            ? ""
+            ? " · время сброса неизвестно"
             : ` · ${resetLabel(quota.resetAt)}`}{" "}
           · пропуск при {Math.round(limit * 100)}%
         </div>
@@ -1084,6 +1086,11 @@ function AccountPoolSettings() {
   useRealtime(ACCOUNT_POOL_ACCOUNTS_CHANGED, () => {
     void refresh();
   });
+  useEffect(() => {
+    if (dialog?.kind !== "account") return;
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [dialog?.kind, refresh]);
   useRealtime(ACCOUNT_POOL_CONFIG_CHANGED, () => {
     void refreshConfig();
   });
@@ -1477,9 +1484,10 @@ function AccountPoolSettings() {
                         onAction={(action) =>
                           void accountAction(account, action)
                         }
-                        onOpen={() =>
-                          setDialog({ kind: "account", accountId: account.id })
-                        }
+                        onOpen={() => {
+                          setDialog({ kind: "account", accountId: account.id });
+                          void refresh();
+                        }}
                       />
                     ))}
                   </div>
@@ -2243,6 +2251,8 @@ function AccountDialog({
         </dd>
         <dt className="text-muted-foreground">Приоритет</dt>
         <dd>{account.priority}</dd>
+        <dt className="text-muted-foreground">Запросы через пул</dt>
+        <dd>{account.successfulRequests.toLocaleString("ru-RU")} успешных с момента начала учёта</dd>
         <dt className="text-muted-foreground">Использован</dt>
         <dd>
           {account.lastUsedAt === null

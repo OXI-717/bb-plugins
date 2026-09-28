@@ -8,7 +8,7 @@ Use multiple accounts of the same provider, track available quota and switch acc
 
 Adapters exist for Claude, Codex, Kimi, Z.AI, OpenCode Go, Cursor and Devin Local CLI. Authentication and model availability depend on each provider. Claude and Codex support subscription login flows; other adapters use their supported provider keys. This does not turn every consumer subscription into an API account.
 
-Version 0.4.1 preserves the native 1M Opus context window for Claude Code threads routed through the BB pool. Version 0.4.0 adds experimental Devin Local CLI proxying with server-side PAT storage and an isolated launcher for `devin -p` and ACP: see [external clients and standalone setup](plugins/account-pool-balanced/docs/external-clients.md). Both modes start with your own accounts; no credentials are distributed. Cursor additionally requires an operator-configured ACP provider and wrapper; see [Cursor routing](plugins/account-pool-balanced/docs/cursor-paths.md). Devin cloud sessions continue to use their separate API.
+Version 0.4.2 adds a successful-request count and explicit observed limit-reset times to each account card. Counts start when this version is installed and do not represent the provider's remaining token allowance. Version 0.4.1 preserves the native 1M Opus context window for Claude Code threads routed through the BB pool. Version 0.4.0 adds experimental Devin Local CLI proxying with server-side PAT storage and an isolated launcher for `devin -p` and ACP: see [external clients and standalone setup](plugins/account-pool-balanced/docs/external-clients.md). Both modes start with your own accounts; no credentials are distributed. Cursor additionally requires an operator-configured ACP provider and wrapper; see [Cursor routing](plugins/account-pool-balanced/docs/cursor-paths.md). Devin cloud sessions continue to use their separate API.
 
 ## Install
 
@@ -22,7 +22,7 @@ bb plugin install account-pool-balanced@oxi-public
 Or install the release directly:
 
 ```sh
-bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.4.1 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
+bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.4.2 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
 ```
 
 Do not enable BB's built-in `account-pool` at the same time: both register `bb pool` and provider routes. These install commands are for new installations. BB 0.43.3 rejects replacing an existing plugin's Git source. If migrating from another repository, keep the existing installation until you have a supported migration procedure with verified backup and restore; do not remove a live pool just to change its source.

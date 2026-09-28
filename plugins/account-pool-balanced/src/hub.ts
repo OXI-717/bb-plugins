@@ -365,6 +365,7 @@ export class AccountPoolHub {
           ...account,
           lastUsedHostName: null,
           ...quotaFields,
+          successfulRequests: this.options.quotas.successfulRequests(account.id),
           inFlight: this.inFlightByAccount.get(account.id) ?? 0,
           capLimit: limit,
           eligible: eligibleIds.has(account.id),
@@ -636,7 +637,10 @@ export class AccountPoolHub {
             }
             break;
           }
-          if (response.ok) selected.accept();
+          if (response.ok) {
+            selected.accept();
+            this.options.quotas.recordSuccessfulRequest(selected.account.id);
+          }
           return this.clientResponse(upstream);
         }
       }

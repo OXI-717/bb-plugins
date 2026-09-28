@@ -104,6 +104,27 @@ describe("AccountStore", () => {
 });
 
 describe("QuotaStore", () => {
+  it("counts successful pooled requests and removes counts with the account", () => {
+    const database = new Database(":memory:");
+    try {
+      for (const migration of QUOTA_MIGRATIONS) database.exec(migration);
+      const quotas = new QuotaStore(database);
+      const first = "11111111-1111-4111-8111-111111111111";
+      const second = "22222222-2222-4222-8222-222222222222";
+      expect(quotas.successfulRequests(first)).toBe(0);
+      quotas.recordSuccessfulRequest(first);
+      quotas.recordSuccessfulRequest(first);
+      quotas.recordSuccessfulRequest(second);
+      expect(quotas.successfulRequests(first)).toBe(2);
+      expect(quotas.successfulRequests(second)).toBe(1);
+      quotas.remove(first);
+      expect(quotas.successfulRequests(first)).toBe(0);
+      expect(quotas.successfulRequests(second)).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
   it("migrates an existing quota table to family observations", () => {
     const database = new Database(":memory:");
     const initial = QUOTA_MIGRATIONS[0];
