@@ -67,6 +67,14 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("offers a way out of an empty section without clearing other filters", async () => {
+    sessionStorage.setItem("bb:automation-catalog:filters:v2", JSON.stringify({ query: "Daily", source: "example", scope: "", host: "", state: "unmonitored", project: "" }));
+    const slot = await mount();
+    fireEvent.click(await slot.findByRole("button", { name: "Показать все записи по фильтрам (1)" }));
+    expect(slot.getByRole("button", { name: "Daily report" })).toBeTruthy();
+    expect((slot.getByRole("textbox", { name: "Поиск автоматизаций" }) as HTMLInputElement).value).toBe("Daily");
+    slot.lifecycle.unmount();
+  });
   it("keeps summary counts consistent with search filters", async () => {
     const slot = await mount();
     await slot.findByRole("button", { name: "Daily report" });

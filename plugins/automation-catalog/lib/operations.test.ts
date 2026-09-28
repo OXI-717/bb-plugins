@@ -110,6 +110,16 @@ describe("freshness and registry signals", () => {
   });
 });
 describe("human schedules", () => {
+  it("explains event schedules without inferring activation from prose", () => {
+    expect(catalogSchedule(JSON.stringify({ kind: "event", description: "example cron disabled" })))
+      .toBe("По событию / вручную · условия в описании расписания");
+    expect(catalogSchedule('{"kind":"unsupported"}')).not.toContain("{");
+    expect(catalogSchedule('{invalid')).not.toContain("{");
+  });
+  it("reads full daily calendar values", () => {
+    expect(catalogSchedule(JSON.stringify({ kind: "calendar", value: "*-*-* 03:00:00 UTC" })))
+      .toBe("Ежедневно в 03:00 · UTC");
+  });
   it("reads cron with its timezone", () => {
     expect(catalogSchedule("*/15 * * * * Europe/Paris")).toBe(
       "Каждые 15 минут · Europe/Paris",

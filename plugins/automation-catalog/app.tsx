@@ -359,11 +359,21 @@ export function CatalogPage() {
           </p>
         )}
         {data && matched.length === 0 && (
-          <p className="py-8 text-center text-sm text-muted-foreground">
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            <p>
             {tasks.length
-              ? "По заданным фильтрам автоматизаций нет."
+              ? filteredTasks.length
+                ? "В этом разделе записей нет. По выбранным фильтрам есть записи в других разделах."
+                : "По заданным фильтрам автоматизаций нет."
               : "Нет подключённых автоматизаций. Создайте новую или подключите источник."}
-          </p>
+            </p>
+            {filteredTasks.length > 0 && (
+              <Button size="sm" variant="outline" className="mt-3"
+                onClick={() => setFilters({ ...filters, state: "" })}>
+                Показать все записи по фильтрам ({filteredTasks.length})
+              </Button>
+            )}
+          </div>
         )}
         {matched.length > 0 && (
           <div className="overflow-x-auto rounded-md border">
