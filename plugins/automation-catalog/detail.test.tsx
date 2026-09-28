@@ -42,6 +42,15 @@ const fixture: CatalogDetail = {
   total: 0,
 };
 describe("detail failure states", () => {
+  it("does not claim the configured model is effective for existing threads", () => {
+    const task = { ...fixture.task, agent: { provider: "example", model: "example-model", reasoning: "high", serviceTier: "fast", modelSource: "existing-thread" as const, targetThreadId: "thread-example" } };
+    const local = renderToStaticMarkup(<CatalogDetailContent detail={{ ...fixture, source: { ...fixture.source, managedHere: true }, task }} />);
+    expect(local).toContain("Модель из треда");
+    expect(local).toContain("не подтверждает фактическую");
+    expect(local).toContain("Открыть тред и проверить модель");
+    const remote = renderToStaticMarkup(<CatalogDetailContent detail={{ ...fixture, task }} />);
+    expect(remote).not.toContain("Открыть тред и проверить модель");
+  });
   it("separates the project and BB executor from the unknown machine", () => {
     const html = renderToStaticMarkup(<CatalogDetailContent detail={{ ...fixture, task: { ...fixture.task, host: "BB-managed agent", scheduler: "bb", executor: "agent", projectName: "Alpha" } }} />);
     expect(html).toContain("Проект: Alpha");

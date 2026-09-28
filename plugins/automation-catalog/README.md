@@ -78,3 +78,9 @@ Storage belongs to the plugin. Existing built-in automation definitions are neve
 The repository contains only code and synthetic fixtures. Hostnames, selection files, snapshots and execution output can be private: keep them in local configuration and BB storage. Run output is excluded by default where supported. BB access controls govern who can see the catalog. `--include-private-metadata` explicitly includes private registry entries; the collector does not verify destination access. Use it only when every reader of the destination BB instance is authorized. BB collection includes the connected instance’s inventory and run status/skip reasons; it does not copy agent prompts or full execution output.
 
 MIT; derived catalog code and vendored UI retain BB's upstream attribution in the repository license and notices.
+
+### Model and project transparency
+
+Rows show the configured agent model and project association. BB agent metadata is projected by both scheduled collection and manual refresh; prompts and scripts are excluded. For existing-thread automation targets, the thread's settings control execution, so the catalog explicitly labels the stored model as configuration rather than proof of the effective model. Locally managed targets offer navigation to the thread. Historical model usage, token spend and models invoked inside scripts are not inferred.
+
+The project selector includes unlinked tasks. An external project name without a BB project ID is shown as external/unlinked; the catalog's discussion parent does not imply execution ownership. Built-in Personal is labelled separately from ordinary projects called Personal. Legacy snapshots with no agent metadata remain readable and show that model calls have not been verified.

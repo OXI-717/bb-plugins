@@ -4,6 +4,26 @@ import { catalogMigration, createCatalog } from "./catalog.js";
 import { refreshBbCatalog } from "./bb-refresh.js";
 
 describe("BB refresh", () => {
+  it("refreshes model settings and clears them on an agent-to-script transition", async () => {
+    const db = new Database(":memory:");
+    try {
+      db.exec(catalogMigration);
+      const catalog = createCatalog(db);
+      const url = "http://127.0.0.1:38886";
+      catalog.publish({ source: { id: "bb-local", name: "BB", staleAfterMs: 60000, bbServerUrl: url }, observedAt: 1, error: null, tasks: [], runs: [] }, url);
+      let execution: Record<string, unknown> = { mode: "agent", providerId: "example", model: "model-one", reasoningLevel: "high", serviceTier: "fast", prompt: "PRIVATE" };
+      const command = async (...args: string[]) => args[0] === "plugin" ? { automations: [{ project: { id: "project-example", name: "Example" }, automation: { id: "job", name: "Job", enabled: true, execution, trigger: { triggerType: "schedule", cron: "0 9 * * 0", timezone: "UTC" } } }] } : { runs: [] };
+      await refreshBbCatalog(catalog, command, url);
+      expect(catalog.list().tasks[0].agent).toEqual({ targetThreadId: null, provider: "example", model: "model-one", reasoning: "high", serviceTier: "fast", modelSource: "automation" });
+      execution = { ...execution, model: "model-two", targetThreadId: "thread-example" };
+      await refreshBbCatalog(catalog, command, url);
+      expect(catalog.list().tasks.find(t => !t.missing)?.agent).toMatchObject({ model: "model-two", modelSource: "existing-thread" });
+      expect(JSON.stringify(catalog.list())).not.toContain("PRIVATE");
+      execution = { mode: "script", interpreter: "bash" };
+      await refreshBbCatalog(catalog, command, url);
+      expect(catalog.list().tasks.find(t => !t.missing)?.agent).toBeNull();
+    } finally { db.close(); }
+  });
   it("does not query the local CLI for an unbound BB source", async () => {
     const db = new Database(":memory:");
     try {

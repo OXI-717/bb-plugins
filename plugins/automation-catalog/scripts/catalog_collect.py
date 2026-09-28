@@ -263,6 +263,9 @@ def bb_collect(server, host):
                     state='active' if item.get('enabled') else 'paused', schedule=schedule,
                     scheduleKind='once' if trigger.get('triggerType') == 'once' else 'recurring', nextRunAt=item.get('nextRunAt'),
                     history='available', description='Managed by the connected BB instance. Project: ' + project['name'] + '. Read-only projection; schedules remain at the source.')
+        task['agent'] = dict(targetThreadId=execution.get('targetThreadId'), provider=execution.get('providerId'), model=execution.get('model'),
+                             reasoning=execution.get('reasoningLevel'), serviceTier=execution.get('serviceTier'),
+                             modelSource='existing-thread' if execution.get('targetThreadId') else 'automation') if execution.get('mode') == 'agent' else None
         tasks.append(task)
         history = read(['automation', 'runs', item['id'], '--project', project['id'], '--limit', '100'])
         for run in history['runs']:
