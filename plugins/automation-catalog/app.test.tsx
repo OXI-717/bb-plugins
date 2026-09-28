@@ -53,6 +53,7 @@ async function mount() {
     { subPath: "" },
     {
       rpc: {
+        catalog_compose_context: () => ({ parentThreadId: "thread_catalog", parentTitle: "Automation discussions", projectId: "project_catalog" }),
         catalog_list: () => ({ tasks: [task], sources: [source] }),
         catalog_refresh: () => ({ refreshed: ["bb-main"], deferred: ["example"] }),
         catalog_detail: () => ({
@@ -132,13 +133,14 @@ describe("automation workflows", () => {
     expect(
       slot.getByRole("heading", { name: "Создать личную автоматизацию · Автоматизация BB" }),
     ).toBeTruthy();
+    await slot.findByRole("button", { name: "Открыть родительский тред" });
     expect(
-      slot.getByRole("textbox").textContent ||
-        (slot.getByRole("textbox") as HTMLTextAreaElement).value,
+      slot.getAllByRole("textbox").at(-1)!.textContent ||
+        (slot.getAllByRole("textbox").at(-1) as HTMLTextAreaElement).value,
     ).toContain("личную автоматизацию");
     expect(
       slot.inspection.rpcCalls.every((call) =>
-        ["catalog_list", "catalog_detail"].includes(call.method),
+        ["catalog_list", "catalog_detail", "catalog_compose_context"].includes(call.method),
       ),
     ).toBe(true);
     slot.lifecycle.unmount();
@@ -148,7 +150,8 @@ describe("automation workflows", () => {
     await slot.findByText("Daily report");
     fireEvent.click(slot.getByRole("button", { name: "Создать автоматизацию" }));
     fireEvent.click(slot.getByRole("button", { name: /Серверная автоматизация/ }));
-    const first = slot.getByRole("textbox") as HTMLTextAreaElement;
+    await slot.findByRole("button", { name: "Открыть родительский тред" });
+    const first = slot.getAllByRole("textbox").at(-1) as HTMLTextAreaElement;
     expect(first.value || first.textContent).toContain("личную автоматизацию");
     fireEvent.click(slot.getByRole("button", { name: "← Автоматизации" }));
     fireEvent.change(
@@ -156,7 +159,8 @@ describe("automation workflows", () => {
       { target: { value: "team" } },
     );
     fireEvent.click(slot.getByRole("button", { name: /Автоматизация BB/ }));
-    const second = slot.getByRole("textbox") as HTMLTextAreaElement;
+    await slot.findByRole("button", { name: "Открыть родительский тред" });
+    const second = slot.getAllByRole("textbox").at(-1) as HTMLTextAreaElement;
     expect(second.value || second.textContent).toContain("командную автоматизацию");
     expect(second.value || second.textContent).toContain("скилл automations");
     expect(second.value || second.textContent).not.toContain(

@@ -15,3 +15,13 @@ Collectors are optional Python scripts in this package. Local collection require
 Never scan and publish every local job by default. Do not include private metadata or results without authorization.
 Publish a validated snapshot with `bb plugin rpc call automation-catalog catalog_publish --input-file snapshot.json --json`.
 Connection settings, snapshots, logs and credentials belong outside the source repository.
+
+Before using the agent composer, configure a live parent discussion thread in the plugin's
+settings, or run `bb plugin config automation-catalog set parentThreadId <thread-id>`.
+New discussions are children of this thread and have an editable descriptive title.
+For a locally managed BB automation the composer seeds its project; otherwise it seeds
+the parent's project. The user can explicitly choose a different project before submitting.
+The plugin preserves that choice, model, workspace and scheduled send time.
+Opening a draft never starts a thread or invokes a model. An unavailable or archived parent
+blocks submission rather than creating an orphan. Existing automation discussions carry
+their catalog task key in the plugin's thread metadata.
