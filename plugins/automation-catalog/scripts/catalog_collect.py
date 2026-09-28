@@ -279,6 +279,7 @@ def main():
     parser.add_argument('--source-id', required=True)
     parser.add_argument('--name', required=True)
     parser.add_argument('--host', help='Execution host for local or Scheduler API tasks')
+    parser.add_argument('--host-prefix', default='', help='Display-only host prefix; scheduler identity and history keys are unchanged')
     parser.add_argument('--registry', type=Path)
     parser.add_argument('--bb-server', help='Read-only source BB server URL; publication still uses the selected BB server')
     parser.add_argument('--scope', choices=['personal', 'team', 'unknown'], default=None)
@@ -334,6 +335,9 @@ def main():
     except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         snapshot['error'] = 'Source unavailable (' + type(error).__name__ + ')'
         snapshot['tasks'], snapshot['runs'] = [], []
+    if args.host_prefix:
+        for task in snapshot['tasks']:
+            task['hostLabel'] = task['host'] if task['host'].startswith(args.host_prefix) else args.host_prefix + task['host']
     if args.publish:
         with tempfile.TemporaryDirectory(prefix='bb-catalog-') as directory:
             path = Path(directory) / 'snapshot.json'

@@ -12,9 +12,9 @@ export function readFilters(): Filters {
   return { ...emptyFilters, state: "current" };
 }
 export function matchesFilters(t: CatalogTask, f: Filters) {
-  return (!f.query || [t.name, t.id, t.host, t.owner, t.team].some(v => v?.toLowerCase().includes(f.query.trim().toLowerCase()))) &&
+  return (!f.query || [t.name, t.id, t.host, t.hostLabel, t.owner, t.team].some(v => v?.toLowerCase().includes(f.query.trim().toLowerCase()))) &&
     (!f.source || t.sourceId === f.source || (f.source === "bb" && t.scheduler === "bb")) &&
-    (!f.scope || t.scope === f.scope) && (!f.host || t.host === f.host) && (!f.state || t.state === f.state) && (!f.project || t.projectId === f.project);
+    (!f.scope || t.scope === f.scope) && (!f.host || (t.hostLabel ?? t.host) === f.host) && (!f.state || t.state === f.state) && (!f.project || t.projectId === f.project);
 }
 export function stateLabel(t: CatalogTask) {
   return t.missing ? "Отсутствует в источнике" : t.state === "unknown" ? "Состояние не подключено" : t.state;

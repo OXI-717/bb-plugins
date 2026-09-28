@@ -27,7 +27,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
       <header>
         <h2 className="text-xl font-semibold">{task.name}</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          {scopeLabel(task.scope)} · {sourceLabel(source.name)} · {task.host}
+          {scopeLabel(task.scope)} · {sourceLabel(source.name)} · {task.hostLabel ?? task.host}
           {task.team ? ` · ${task.team}` : ""}
           {task.owner ? ` · Ответственный: ${task.owner}` : ""}
         </p>
