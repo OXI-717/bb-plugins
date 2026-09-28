@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { emptyFilters, matchesFilters, readFilters, stateLabel } from "./filters";
+import { emptyFilters, hostName, matchesFilters, readFilters, stateLabel } from "./filters";
 import type { CatalogTask } from "../src/catalog-types";
 const task = { id: "daily", name: "Daily", host: "example", scope: "personal", owner: null, team: null, sourceId: "local-bb", scheduler: "bb", projectId: null, state: "unknown", missing: false } as CatalogTask;
 describe("catalog filters", () => {
+  it("does not treat the legacy BB executor sentinel as a machine", () => {
+    const agent = { ...task, host: "BB-managed agent", hostLabel: "prefix-BB-managed agent", projectName: "Example Project" };
+    expect(hostName(agent)).toBeNull();
+    expect(matchesFilters(agent, { ...emptyFilters, host: "BB-managed agent" })).toBe(false);
+    expect(matchesFilters(agent, { ...emptyFilters, query: "Example Project" })).toBe(true);
+    Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: { getItem: () => JSON.stringify({ ...emptyFilters, host: "BB-managed agent", project: "project-example" }) } });
+    expect(readFilters()).toEqual({ ...emptyFilters, host: "", project: "project-example" });
+    Reflect.deleteProperty(globalThis, "sessionStorage");
+  });
   it("separates display labels for hosts with the same raw name", () => {
     const labelled = { ...task, hostLabel: "team-example" };
     expect(matchesFilters(labelled, { ...emptyFilters, query: "team-example" })).toBe(true);

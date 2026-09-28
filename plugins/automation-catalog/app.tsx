@@ -9,6 +9,7 @@ import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { catalogSchedule } from "./lib/catalog-schedule";
 import {
+  hostName,
   emptyFilters,
   readFilters,
   matchesFilters,
@@ -288,7 +289,7 @@ export function CatalogPage() {
                       ? t.sourceId
                       : field === "project"
                         ? t.projectId
-                        : field === "host" ? (t.hostLabel ?? t.host)
+                        : field === "host" ? hostName(t)
                         : t[field],
                   )
                   .filter((v): v is string => !!v),
@@ -412,7 +413,8 @@ export function CatalogPage() {
                             {sourceLabel(data?.sources.find((s) => s.id === t.sourceId)
                               ?.name ?? t.sourceId)}{" "}
                             {t.scope !== "unknown" && <>· {scopeLabel(t.scope)}</>}
-                            {t.hostLabel && <> · {t.hostLabel}</>}
+                            {t.projectName && <> · Проект: {t.projectName}</>}
+                            {hostName(t) && <> · Хост: {hostName(t)}</>}
                           </p>
                           <p className="mt-1 text-xs text-muted-foreground md:hidden">
                             {catalogSchedule(t.schedule)}

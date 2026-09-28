@@ -67,6 +67,24 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("shows projects separately and removes the old executor host filter", async () => {
+    sessionStorage.setItem("bb:automation-catalog:filters:v2", JSON.stringify({ query: "", source: "", scope: "", host: "BB-managed agent", state: "current", project: "" }));
+    const app = await loadPluginApp(() => import("./app"));
+    const tasks = [
+      { ...task, host: "BB-managed agent", projectId: "alpha", projectName: "Alpha" },
+      { ...task, id: "other", key: "other", name: "Other report", host: "BB-managed agent", projectId: "beta", projectName: "Beta" },
+    ];
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: { catalog_list: () => ({ tasks, sources: [source] }) } });
+    await slot.findByRole("button", { name: "Daily report" });
+    expect(slot.getByRole("button", { name: "Other report" })).toBeTruthy();
+    expect(slot.getByText(/Проект: Alpha/)).toBeTruthy();
+    expect(slot.getByText(/Проект: Beta/)).toBeTruthy();
+    expect(slot.queryByRole("option", { name: "BB-managed agent" })).toBeNull();
+    fireEvent.change(slot.getByRole("combobox", { name: "Проект" }), { target: { value: "alpha" } });
+    expect(slot.queryByRole("button", { name: "Other report" })).toBeNull();
+    expect(slot.getByRole("button", { name: "Daily report" })).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
   it("offers a way out of an empty section without clearing other filters", async () => {
     sessionStorage.setItem("bb:automation-catalog:filters:v2", JSON.stringify({ query: "Daily", source: "example", scope: "", host: "", state: "unmonitored", project: "" }));
     const slot = await mount();
