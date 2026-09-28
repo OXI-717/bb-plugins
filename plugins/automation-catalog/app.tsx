@@ -417,7 +417,7 @@ export function CatalogPage() {
                           </p>
                           <p className="mt-1 text-xs text-muted-foreground lg:hidden">
                             {t.lastRun
-                              ? `${runLabel(t.lastRun.status)} · ${timestamp(t.lastRun.startedAt ?? t.lastRun.finishedAt)}`
+                              ? `${runLabel(t.lastRun.status)} · ${t.lastRun.startedAt === null && t.lastRun.finishedAt === null ? "время не сохранено" : timestamp(t.lastRun.startedAt ?? t.lastRun.finishedAt)}`
                               : t.history === "not-connected" ? "История не подключена" : "Данных о запусках нет"}
                           </p>
                         </td>

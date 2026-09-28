@@ -9,7 +9,7 @@ export function RunResult({ taskKey, runId }: { taskKey: string; runId: string }
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ status: string; output: string | null; error: string | null; threadId: string | null; truncated: boolean } | null>(null);
+  const [result, setResult] = useState<{ status: string; hasOutput: boolean; hasError: boolean; threadId: string | null; nativeUrl: string } | null>(null);
   async function load() {
     setOpen(true); setLoading(true); setError(null);
     try { setResult(await rpc.call("catalog_run_result", { key: taskKey, runId })); }
@@ -23,10 +23,10 @@ export function RunResult({ taskKey, runId }: { taskKey: string; runId: string }
     {open && <section aria-label="Результат выбранного запуска" className="mt-2 space-y-2 rounded border p-2">
       {loading ? <p role="status">Читаем результат из BB…</p> : error ? <p role="alert">{error} <button className="underline" onClick={() => void load()}>Повторить</button></p> : result && <>
         <p className="font-medium">{runLabel(result.status)}</p>
-        {result.error && <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-destructive">{result.error}</pre>}
-        {result.output ? <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words">{result.output}</pre> : <p>Текстовый вывод не сохранён.</p>}
-        {result.threadId && <button className="underline" onClick={() => navigate.toThread(result.threadId!)}>Открыть тред этого запуска</button>}
-        {result.truncated && <p>Показано начало длинного результата. Полный текст доступен в BB.</p>}
+        <p>{result.hasOutput || result.hasError ? "Вывод этого запуска доступен в BB." : "Текстовый вывод не сохранён."}</p>
+        {result.threadId
+          ? <button className="underline" onClick={() => navigate.toThread(result.threadId!)}>Открыть тред этого запуска</button>
+          : <><a className="underline" href={result.nativeUrl}>Открыть историю и вывод в BB</a><p className="text-muted-foreground">В истории BB выберите запуск с указанным в этой строке временем.</p></>}
       </>}
     </section>}
   </div>;

@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { catalogMigration, createCatalog } from "./catalog";
 import { readRunResult } from "./run-result";
 
-it("reads only the selected locally owned run, bounds text, and never persists output", async () => {
+it("reads only the selected locally owned run and never returns or persists raw output", async () => {
   const db = new Database(":memory:");
   try {
     db.exec(catalogMigration);
@@ -17,11 +17,16 @@ it("reads only the selected locally owned run, bounds text, and never persists o
     catalog.publish(snapshot, "http://127.0.0.1:38886");
     const key = catalog.list().tasks[0].key;
     const calls: string[][] = [];
-    const response = { id: "run_example", automationId: "auto_example", status: "succeeded", output: "PRIVATE_RESULT".repeat(6000), error: null, threadId: "thread_example" };
+    const response = { id: "run_example", automationId: "auto_example", status: "succeeded", output: "PRIVATE_RESULT".repeat(6000), error: "PRIVATE_ERROR", threadId: "thread_example" };
     const command = async (...args: string[]) => { calls.push(args); return response; };
     const result = await readRunResult(catalog, command, key, "run_example");
-    expect(result.output).toHaveLength(50000);
-    expect(result.truncated).toBe(true);
+    expect(result.hasOutput).toBe(true);
+    expect(result.hasError).toBe(true);
+    expect(result.nativeUrl).toBe("/plugins/automations/automations/proj_example/auto_example");
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_RESULT");
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_ERROR");
+    expect(result).not.toHaveProperty("output");
+    expect(result).not.toHaveProperty("error");
     expect(calls[0]).toEqual(["automation", "runs", "auto_example", "--project", "proj_example", "--limit", "200", "--output", "run_example"]);
     expect(JSON.stringify(catalog.detail({ key }))).not.toContain("PRIVATE_RESULT");
     await expect(readRunResult(catalog, command, key, "foreign_run")).rejects.toThrow("не найден");

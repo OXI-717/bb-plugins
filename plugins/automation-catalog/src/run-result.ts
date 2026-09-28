@@ -2,8 +2,8 @@ import { z } from "zod";
 import type { createCatalog } from "./catalog";
 
 export const runResultSchema = z.object({
-  status: z.string(), output: z.string().nullable(), error: z.string().nullable(),
-  threadId: z.string().nullable(), truncated: z.boolean(),
+  status: z.string(), hasOutput: z.boolean(), hasError: z.boolean(),
+  threadId: z.string().nullable(), nativeUrl: z.string(),
 });
 const sourceRun = z.object({
   id: z.string(), automationId: z.string(), status: z.string(),
@@ -22,7 +22,8 @@ export async function readRunResult(catalog: ReturnType<typeof createCatalog>, c
   }
   const run = sourceRun.parse(value);
   if (run.id !== runId || run.automationId !== task.id) throw new Error("Результат не соответствует выбранному запуску.");
-  const limit = 50000;
-  return { status: run.status, output: run.output?.slice(0, limit) ?? null, error: run.error?.slice(0, limit) ?? null,
-    threadId: run.threadId, truncated: (run.output?.length ?? 0) > limit || (run.error?.length ?? 0) > limit };
+  // Raw logs stay server-side; the panel receives navigation metadata only.
+  return { status: run.status, hasOutput: !!run.output?.trim(), hasError: !!run.error?.trim(),
+    threadId: run.threadId,
+    nativeUrl: `/plugins/automations/automations/${encodeURIComponent(task.projectId)}/${encodeURIComponent(task.id)}` };
 }

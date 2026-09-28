@@ -12,6 +12,8 @@ class CollectorTests(unittest.TestCase):
     def test_launchd_disabled_overrides_do_not_become_unknown_or_active(self):
         cases = [
             ('disabled', False, False, 'paused'),
+            ('true', False, False, 'paused'),
+            ('false', True, True, 'active'),
             ('disabled', False, True, 'paused'),
             ('enabled', True, True, 'active'),
             ('enabled', False, False, 'unknown'),

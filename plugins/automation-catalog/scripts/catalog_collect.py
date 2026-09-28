@@ -79,8 +79,8 @@ def local_tasks(host, ledger=None, runs=None, boot=None, selection=None):
             try:
                 disabled_output = command(['launchctl', 'print-disabled', domain])
                 if 'disabled services = {' in disabled_output:
-                    overrides = {label: value == 'disabled' for label, value in
-                                 re.findall(r'^\s*"([^"\n]+)"\s*=>\s*(disabled|enabled)\s*$', disabled_output, re.M)}
+                    overrides = {label: value in ('disabled', 'true') for label, value in
+                                 re.findall(r'^\s*"([^"\n]+)"\s*=>\s*(disabled|enabled|true|false)\s*$', disabled_output, re.M)}
             except RuntimeError:
                 pass  # An inaccessible override database must not imply disabled.
         for path in sorted(folder.glob('*.plist')):
