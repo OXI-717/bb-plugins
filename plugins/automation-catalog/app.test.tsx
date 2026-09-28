@@ -67,6 +67,15 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("keeps summary counts consistent with search filters", async () => {
+    const slot = await mount();
+    await slot.findByRole("button", { name: "Daily report" });
+    expect(slot.getByRole("button", { name: "Требуют проверки: 1" })).toBeTruthy();
+    fireEvent.change(slot.getByRole("textbox", { name: "Поиск автоматизаций" }), { target: { value: "does not exist" } });
+    fireEvent.click(slot.getByRole("button", { name: "Требуют проверки: 0" }));
+    expect(slot.queryByRole("button", { name: "Daily report" })).toBeNull();
+    slot.lifecycle.unmount();
+  });
   it("opens current tasks by default and keeps registry records accessible separately", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {

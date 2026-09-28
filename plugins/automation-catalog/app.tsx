@@ -36,6 +36,7 @@ export function CatalogPage() {
   const [page, setPage] = useState(0);
   const [now, setNow] = useState(Date.now);
   const [creating, setCreating] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [creationScope, setCreationScope] = useState("personal");
   const refresh = useCallback(() => {
     return rpc.call("catalog_list").then(
@@ -104,9 +105,7 @@ export function CatalogPage() {
   );
   const filteredTasks = tasks.filter((task) => matchesFilters(task, { ...filters, state: "" }));
   const views = [
-    { id: "current", label: "Действующие", count: filteredTasks.filter(t => category(t) === "current").length },
-    { id: "completed", label: "Завершённые", count: filteredTasks.filter(t => category(t) === "completed").length },
-    { id: "", label: "Все записи", count: filteredTasks.length },
+    { id: "current", label: "Текущие", count: filteredTasks.filter(t => category(t) === "current").length },
     {
       id: "attention",
       label: "Требуют внимания",
@@ -134,6 +133,8 @@ export function CatalogPage() {
       label: "Удалённые из источника",
       count: filteredTasks.filter((t) => t.missing).length,
     },
+    { id: "completed", label: "Завершённые", count: filteredTasks.filter(t => category(t) === "completed").length },
+    { id: "", label: "Все записи", count: filteredTasks.length },
   ];
   const matched = filteredTasks
     .filter(
@@ -186,9 +187,13 @@ export function CatalogPage() {
           </div>
         </header>
         {data && <section className="rounded-md border bg-card p-3 space-y-1" aria-label="Сводка автоматизаций">
-          <p className="font-medium">Действующие задачи: {tasks.filter(t => category(t) === "current").length} · Требуют проверки: {tasks.filter(t => states.get(t.key)?.attention).length}</p>
-          <p className="text-sm text-muted-foreground">Проверка учитывает состояние и коды завершения планировщиков. Содержимое результатов автоматически не проверяется.</p>
-          <p className="text-sm text-muted-foreground">{tasks.filter(t => category(t) === "unmonitored").length} записей реестра без мониторинга — их работоспособность не подтверждена. Завершённые, отключённые и удалённые задачи доступны в отдельных разделах.</p>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm font-medium">
+            <button className="hover:underline" onClick={() => setFilters(f => ({ ...f, state: "current" }))}>Текущие задачи: {filteredTasks.filter(t => category(t) === "current").length}</button>
+            <button className="hover:underline" onClick={() => setFilters(f => ({ ...f, state: "attention" }))}>Требуют проверки: {filteredTasks.filter(t => states.get(t.key)?.attention).length}</button>
+          </div>
+          <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Счётчики учитывают выбранные фильтры · Как читать состояния</summary>
+            <p className="mt-2">Проверка учитывает состояние и коды завершения планировщиков. Содержимое результатов автоматически не проверяется. Реестр без мониторинга содержит только описания. Завершённые, отключённые и удалённые задачи доступны в отдельных разделах.</p>
+          </details>
           {data.sources.filter(s => s.error || !s.lastSuccessAt || now - s.lastSuccessAt > s.staleAfterMs).map(s => <p className="text-sm text-destructive" key={s.id}>Проверьте подключение: {sourceLabel(s.name)}. Свежие сведения не получены; статусы ниже могут устареть.</p>)}
         </section>}
         <p className="text-sm text-muted-foreground">{filters.state === "current" ? "Текущие задачи. Откройте название, чтобы посмотреть результаты или выбрать действие." : filters.state === "unmonitored" ? "Здесь только описания задач. Отсутствие истории не означает сбой — мониторинг ещё не подключён." : filters.state === "completed" ? "Одноразовые задачи уже выполнены; новые запуски не ожидаются." : filters.state === "missing" ? "Задачи отсутствуют в последнем списке планировщика. Сохранена только их история." : "Выберите задачу, чтобы посмотреть результаты и доступные действия."}</p>
@@ -240,12 +245,13 @@ export function CatalogPage() {
         )}
         <nav
           aria-label="Разделы автоматизаций"
-          className="flex flex-wrap gap-1 border-b pb-2"
+          className="flex gap-1 overflow-x-auto border-b pb-2 sm:flex-wrap"
         >
           {views.map((view) => (
             <Button
               size="sm"
               key={view.id}
+              className="shrink-0"
               variant="ghost"
               aria-pressed={filters.state === view.id}
               onClick={() => setFilters({ ...filters, state: view.id })}
@@ -271,6 +277,8 @@ export function CatalogPage() {
             value={filters.query}
             onChange={(e) => setFilters({ ...filters, query: e.target.value })}
           />
+          <Button className="sm:hidden" size="sm" variant="outline" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(value => !value)}>Фильтры{[filters.source, filters.scope, filters.host, filters.project].filter(Boolean).length ? ` (${[filters.source, filters.scope, filters.host, filters.project].filter(Boolean).length})` : ""}</Button>
+          <div className={`${filtersOpen ? "flex" : "hidden"} flex-wrap gap-2 sm:flex`}>
           {(["source", "scope", "host", "project"] as const).map((field) => {
             const values = [
               ...new Set(
@@ -288,7 +296,7 @@ export function CatalogPage() {
             return (
               <select
                 key={field}
-                aria-label={`Filter ${field}`}
+                aria-label={{ source: "Источник", scope: "Тип", host: "Хост", project: "Проект" }[field]}
                 className="h-8 min-w-0 max-w-full rounded-md border bg-background px-2 text-xs"
                 value={filters[field]}
                 onChange={(e) =>
@@ -330,6 +338,7 @@ export function CatalogPage() {
           >
             Сбросить
           </Button>
+          </div>
         </div>
         {error && (
           <div role="alert" className="rounded-md border p-3 text-sm">
@@ -391,7 +400,7 @@ export function CatalogPage() {
                           <p className="mt-1 break-words text-xs text-muted-foreground">
                             {sourceLabel(data?.sources.find((s) => s.id === t.sourceId)
                               ?.name ?? t.sourceId)}{" "}
-                            · {scopeLabel(t.scope)}
+                            {t.scope !== "unknown" && <>· {scopeLabel(t.scope)}</>}
                           </p>
                           <p className="mt-1 text-xs text-muted-foreground md:hidden">
                             {catalogSchedule(t.schedule)}
@@ -409,9 +418,7 @@ export function CatalogPage() {
                             {state.attention ? "! " : ""}
                             {state.label}
                           </span>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {state.reason}
-                          </p>
+                          {state.reason !== "Расписание включено" && <p className="mt-1 text-xs text-muted-foreground">{state.reason}</p>}
                         </td>
                         <td className="hidden max-w-64 px-3 py-3 align-top text-xs md:table-cell">
                           {catalogSchedule(t.schedule)}

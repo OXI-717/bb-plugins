@@ -1,4 +1,5 @@
 import { composeRequestSchema, hostRequest } from "./compose";
+import { readRunResult, runResultSchema } from "./run-result";
 import { refreshBbCatalog } from "./bb-refresh.js";
 import { manageBbCatalog } from "./bb-management.js";
 import { createHash } from "node:crypto";
@@ -98,6 +99,11 @@ export function createCatalog(db: Db) {
       })();
     },
     entry,
+    recordedRun(key: string, runId: string) {
+      const row = db.prepare("SELECT data FROM automation_catalog_runs WHERE task_key = ? AND id = ?").get(key, runId);
+      if (!row) throw new Error("Запуск не найден в истории этой автоматизации.");
+      return decode(row, catalogRunSchema);
+    },
     publish(input: unknown, localBbServerUrl?: string) {
       const snapshot = catalogSnapshotSchema.parse(input);
       const managedHere = sameLocalServer(snapshot.source.bbServerUrl, localBbServerUrl);
@@ -257,6 +263,10 @@ export function createCatalog(db: Db) {
 }
 
 export const catalogRpcContract = defineRpcContract({
+  catalog_run_result: {
+    input: z.object({ key: z.string().min(1).max(300), runId: z.string().min(1).max(300) }).strict(),
+    output: runResultSchema,
+  },
   catalog_refresh: {
     input: z.null(),
     output: z.object({ refreshed: z.array(z.string()), deferred: z.array(z.string()) }),
@@ -306,11 +316,12 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
     const { stdout } = await execFileAsync(process.env.BB_CLI || "bb", [...args, "--json"], {
       env: { ...process.env, BB_SERVER_URL: serverUrl },
       timeout: 15000,
-      maxBuffer: 1024 * 1024,
+      maxBuffer: args.includes("--output") ? 8 * 1024 * 1024 : 1024 * 1024,
     });
     return JSON.parse(stdout) as Record<string, unknown>;
   }
   bb.rpc.register(catalogRpcContract, {
+    catalog_run_result: ({ key, runId }) => readRunResult(catalog, bbCli, key, runId),
     catalog_refresh: async () => {
       const result = await refreshBbCatalog(catalog, bbCli, bb.server.loopbackBaseUrl);
       for (const sourceId of result.refreshed) bb.realtime.publish("automation-catalog", { sourceId });

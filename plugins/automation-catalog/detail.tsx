@@ -1,4 +1,5 @@
 import { AutomationComposer, type ComposeIntent } from "./compose";
+import { RunResult } from "./run-result";
 import { nextStep, resultText } from "./lib/overview";
 import { useEffect, useState } from "react";
 import { useRpc, useRealtime } from "@get-bb/plugin-sdk/app";
@@ -66,7 +67,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           )}
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">Последний запуск</dt>
+          <dt className="text-xs text-muted-foreground">Последний сохранённый результат</dt>
           <dd className="mt-1">
             {task.lastRun
               ? runLabel(task.lastRun.status)
@@ -74,7 +75,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           </dd>
           {task.lastRun && (
             <dd className="text-xs text-muted-foreground">
-              {timestamp(task.lastRun.startedAt ?? task.lastRun.finishedAt)}
+              {task.lastRun.startedAt === null && task.lastRun.finishedAt === null ? "Время запуска не передано" : timestamp(task.lastRun.startedAt ?? task.lastRun.finishedAt)}
             </dd>
           )}
         </div>
@@ -103,7 +104,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
       )}
       {task.lastRun?.status === "failed" && !task.lastRun.summary && (
         <p className="text-sm text-destructive">
-          Последний запуск завершился с ошибкой{task.lastRun.exitCode !== null ? ` (код ${task.lastRun.exitCode})` : ""}. Каталог не копирует вывод скрипта; причину можно посмотреть в исходном планировщике.
+          Последний запуск завершился с ошибкой{task.lastRun.exitCode !== null ? ` (код ${task.lastRun.exitCode})` : ""}. Откройте результат нужного запуска в истории ниже. Если вывод не подключён, проверьте исходный планировщик.
         </p>
       )}
       <section className="space-y-2">
@@ -144,7 +145,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
                       )}
                     </td>
                     <td className="px-3 py-2 align-top">
-                      {timestamp(run.startedAt ?? run.finishedAt)}
+                      {run.startedAt === null && run.finishedAt === null ? "Время запуска не передано" : timestamp(run.startedAt ?? run.finishedAt)}
                       {run.startedAt === null && run.finishedAt === null && (
                         <p className="text-muted-foreground">
                           Обнаружено {timestamp(run.observedAt)}
@@ -157,9 +158,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
                     <td className="max-w-md px-3 py-2 align-top">
                       {run.summary && <p className="whitespace-pre-wrap break-words">{resultText(run.summary)}</p>}
                       {!task.missing && source.managedHere && task.scheduler === "bb" && task.projectId ? (
-                        <a className="underline" href={`/plugins/automations/automations/${encodeURIComponent(task.projectId)}/${encodeURIComponent(task.id)}`}>
-                          {run.hasOutput ? "Посмотреть вывод в BB ↗" : "Открыть запуск в BB ↗"}
-                        </a>
+                        <RunResult taskKey={task.key} runId={run.id} />
                       ) : !run.summary ? <span className="text-muted-foreground">Подробности не переданы</span> : null}
                     </td>
                   </tr>
