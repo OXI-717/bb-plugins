@@ -14,6 +14,7 @@ describe("operational overview", () => {
   it("explains what to check without claiming a healthy outcome", () => {
     expect(nextStep({ ...task, state: "unknown" })).toContain("старый результат не подтверждает");
     expect(nextStep({ ...task, history: "not-connected" })).toContain("подключить состояние");
+    expect(nextStep({ ...task, state: "paused", lastRun: { status: "failed" } as CatalogTask["lastRun"] })).toContain("разберите причину перед включением");
   });
   it("translates known collector receipts without discarding other evidence", () => {
     expect(resultText("Skipped: empty output")).toContain("Тихая проверка");

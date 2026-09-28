@@ -186,7 +186,7 @@ export function CatalogPage() {
           </div>
         </header>
         {data && <section className="rounded-md border bg-card p-3 space-y-1" aria-label="Сводка автоматизаций">
-          <p className="font-medium">{tasks.filter(t => category(t) === "current").length} действующих задач · {tasks.filter(t => states.get(t.key)?.attention).length} требуют проверки</p>
+          <p className="font-medium">Действующие задачи: {tasks.filter(t => category(t) === "current").length} · Требуют проверки: {tasks.filter(t => states.get(t.key)?.attention).length}</p>
           <p className="text-sm text-muted-foreground">Проверка учитывает состояние и коды завершения планировщиков. Содержимое результатов автоматически не проверяется.</p>
           <p className="text-sm text-muted-foreground">{tasks.filter(t => category(t) === "unmonitored").length} записей реестра без мониторинга — их работоспособность не подтверждена. Завершённые, отключённые и удалённые задачи доступны в отдельных разделах.</p>
           {data.sources.filter(s => s.error || !s.lastSuccessAt || now - s.lastSuccessAt > s.staleAfterMs).map(s => <p className="text-sm text-destructive" key={s.id}>Проверьте подключение: {sourceLabel(s.name)}. Свежие сведения не получены; статусы ниже могут устареть.</p>)}
