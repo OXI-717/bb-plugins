@@ -1086,6 +1086,11 @@ function AccountPoolSettings() {
   useRealtime(ACCOUNT_POOL_ACCOUNTS_CHANGED, () => {
     void refresh();
   });
+  useEffect(() => {
+    if (dialog?.kind !== "account") return;
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [dialog?.kind, refresh]);
   useRealtime(ACCOUNT_POOL_CONFIG_CHANGED, () => {
     void refreshConfig();
   });
