@@ -9,7 +9,12 @@ const automation = z.object({
   id: z.string(),
   name: z.string(),
   enabled: z.boolean(),
-  execution: z.object({ mode: z.string(), interpreter: z.string().optional() }),
+  execution: z.object({
+    mode: z.string(), interpreter: z.string().optional(),
+    providerId: z.string().nullish(), model: z.string().nullish(),
+    reasoningLevel: z.string().nullish(), serviceTier: z.string().nullish(),
+    targetThreadId: z.string().nullish(),
+  }),
   trigger: z.object({
     triggerType: z.string(),
     cron: z.string().optional(),
@@ -55,6 +60,14 @@ export async function refreshBbCatalog(catalog: Catalog, command: Command, local
       projectName: project.name,
       scheduler: "bb",
       executor: item.execution.interpreter ?? item.execution.mode,
+      agent: item.execution.mode === "agent" ? {
+        targetThreadId: item.execution.targetThreadId ?? null,
+        provider: item.execution.providerId ?? null,
+        model: item.execution.model ?? null,
+        reasoning: item.execution.reasoningLevel ?? null,
+        serviceTier: item.execution.serviceTier ?? null,
+        modelSource: item.execution.targetThreadId ? "existing-thread" as const : "automation" as const,
+      } : null,
       schedule,
       scheduleKind: item.trigger.triggerType === "once" ? "once" as const : "recurring" as const,
       nextRunAt: item.nextRunAt ?? null,

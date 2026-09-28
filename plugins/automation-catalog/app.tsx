@@ -1,3 +1,4 @@
+import { modelLabel, projectLabel, unlinkedProject } from "./lib/execution";
 import { AutomationComposer, type ComposeIntent } from "./compose";
 import { category } from "./lib/overview";
 import { useCallback, useEffect, useState } from "react";
@@ -288,7 +289,7 @@ export function CatalogPage() {
                     field === "source"
                       ? t.sourceId
                       : field === "project"
-                        ? t.projectId
+                        ? (t.projectId || unlinkedProject)
                         : field === "host" ? hostName(t)
                         : t[field],
                   )
@@ -325,8 +326,7 @@ export function CatalogPage() {
                       : field === "scope"
                         ? scopeLabel(v)
                         : field === "project"
-                          ? (tasks.find((t) => t.projectId === v)
-                              ?.projectName ?? "Проект не указан")
+                          ? (v === unlinkedProject ? "Без привязки к проекту" : projectLabel(tasks.find((t) => t.projectId === v)!))
                           : v}
                   </option>
                 ))}
@@ -413,9 +413,10 @@ export function CatalogPage() {
                             {sourceLabel(data?.sources.find((s) => s.id === t.sourceId)
                               ?.name ?? t.sourceId)}{" "}
                             {t.scope !== "unknown" && <>· {scopeLabel(t.scope)}</>}
-                            {t.projectName && <> · Проект: {t.projectName}</>}
+                            <> · Проект: {projectLabel(t)}</>
                             {hostName(t) && <> · Хост: {hostName(t)}</>}
                           </p>
+                          <p className="mt-1 break-words text-xs font-medium">{modelLabel(t)}</p>
                           <p className="mt-1 text-xs text-muted-foreground md:hidden">
                             {catalogSchedule(t.schedule)}
                           </p>

@@ -67,6 +67,17 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("shows models and allows finding tasks without a project", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const agent = { provider: "example", model: "example-model", reasoning: null, serviceTier: null, modelSource: "automation" };
+    const tasks = [{ ...task, agent }, { ...task, key: "linked", name: "Linked", projectId: "project-example", projectName: "Example" }];
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: { catalog_list: () => ({ tasks, sources: [source] }) } });
+    await slot.findByText("Модель: example-model · example");
+    fireEvent.change(slot.getByRole("combobox", { name: "Проект" }), { target: { value: "__catalog_unlinked_project__" } });
+    expect(slot.getByRole("button", { name: "Daily report" })).toBeTruthy();
+    expect(slot.queryByRole("button", { name: "Linked" })).toBeNull();
+    slot.lifecycle.unmount();
+  });
   it("shows projects separately and removes the old executor host filter", async () => {
     sessionStorage.setItem("bb:automation-catalog:filters:v2", JSON.stringify({ query: "", source: "", scope: "", host: "BB-managed agent", state: "current", project: "" }));
     const app = await loadPluginApp(() => import("./app"));

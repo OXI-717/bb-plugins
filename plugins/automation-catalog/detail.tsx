@@ -1,9 +1,10 @@
+import { modelLabel, projectLabel } from "./lib/execution";
 import { hostName } from "./lib/filters";
 import { AutomationComposer, type ComposeIntent } from "./compose";
 import { RunResult } from "./run-result";
 import { nextStep, resultText } from "./lib/overview";
 import { useEffect, useState } from "react";
-import { useRpc, useRealtime } from "@get-bb/plugin-sdk/app";
+import { useRpc, useRealtime, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Button } from "./components/ui/button";
 import { catalogSchedule } from "./lib/catalog-schedule";
 import type { CatalogDetail } from "./src/catalog-types";
@@ -20,6 +21,7 @@ import {
 
 export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
   const { task, source, runs } = detail;
+  const navigate = useBbNavigate();
   const state = health(task, source);
   const executions = runs.filter((run) => run.evidence === "execution");
   const events = runs.filter((run) => run.evidence === "state-change");
@@ -29,13 +31,24 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
         <h2 className="text-xl font-semibold">{task.name}</h2>
         <p className="mt-1 text-xs text-muted-foreground">
           {scopeLabel(task.scope)} · {sourceLabel(source.name)}
-          {` · Проект: ${task.projectName ?? "не указан"}`}
+          {` · Проект: ${projectLabel(task)}`}
           {` · Хост: ${hostName(task) ?? "не указан источником"}`}
           {task.scheduler === "bb" && task.executor === "agent" ? " · Выполнение: агент BB" : ""}
           {task.team ? ` · ${task.team}` : ""}
           {task.owner ? ` · Ответственный: ${task.owner}` : ""}
         </p>
       </header>
+      <section aria-label="Модель и стоимость запуска" className="rounded-md border p-3 space-y-2 text-sm">
+        <h3 className="font-medium">Модель и выполнение</h3>
+        <p className="font-medium">{modelLabel(task)}</p>
+        {task.agent && <p>Провайдер в настройках: {task.agent.provider || "не указан"} · Рассуждение: {task.agent.reasoning || "по умолчанию"} · Режим обслуживания: {task.agent.serviceTier || "по умолчанию"}</p>}
+        {task.agent?.modelSource === "existing-thread"
+          ? <p>Автоматизация продолжает существующий тред. Используется модель треда; показанная модель из расписания не подтверждает фактическую. Проверьте настройки треда перед запуском.</p>
+          : task.agent ? <p>Настройки следующего запуска по последним данным источника. Фактическая модель прошлых запусков и расход токенов здесь не подтверждены.</p>
+          : <p>Источник не передаёт настройки модели. Скрипт или внешний исполнитель может запускать агентов внутри; это не означает отсутствие расходов.</p>}
+        {source.managedHere && task.agent?.targetThreadId && <Button size="sm" variant="outline" onClick={() => navigate.toThread(task.agent!.targetThreadId!)}>Открыть тред и проверить модель</Button>}
+        {!task.projectId && <p>Привязка к проекту BB не передана. Проект для обсуждения в каталоге не считается проектом выполнения.</p>}
+      </section>
       <section
         className={`rounded-md border p-3 ${state.tone === "danger" ? "border-destructive/40" : ""}`}
         aria-label="Состояние автоматизации"
