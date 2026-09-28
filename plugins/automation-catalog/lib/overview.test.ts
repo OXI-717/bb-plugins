@@ -20,5 +20,6 @@ describe("operational overview", () => {
     expect(resultText("Skipped: empty output")).toContain("Тихая проверка");
     expect(resultText("launchd reported execution #12, exit code 0. More text")).not.toContain("#12");
     expect(resultText("Unexpected failure")).toBe("Unexpected failure");
+    expect(resultText("launchd reported execution #3, exit code 1. Exact start and finish times are unavailable.")).toContain("ошибка, код выхода 1");
   });
 });

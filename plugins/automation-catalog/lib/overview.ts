@@ -25,6 +25,8 @@ export function nextStep(task: CatalogTask) {
 export function resultText(summary: string) {
   if (summary === "Skipped: empty output") return "Тихая проверка: скрипт завершился без вывода.";
   if (/^launchd reported execution #\d+, exit code 0\./.test(summary)) return "Последний сохранённый результат: завершено без ошибки. Планировщик не сохранил точное время запуска.";
+  const failed = /^launchd reported execution #\d+, exit code (-?\d+)\./.exec(summary);
+  if (failed) return `Последний сохранённый результат: ошибка, код выхода ${failed[1]}. Планировщик не сохранил точное время запуска.`;
   if (/^launchd reports execution #\d+ running\./.test(summary)) return "При последней проверке задача выполнялась.";
   return summary;
 }
