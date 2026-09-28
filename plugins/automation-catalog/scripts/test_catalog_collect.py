@@ -9,6 +9,31 @@ from unittest.mock import patch
 import catalog_collect as c
 
 class CollectorTests(unittest.TestCase):
+    def test_launchd_disabled_overrides_do_not_become_unknown_or_active(self):
+        cases = [
+            ('disabled', False, False, 'paused'),
+            ('true', False, False, 'paused'),
+            ('false', True, True, 'active'),
+            ('disabled', False, True, 'paused'),
+            ('enabled', True, True, 'active'),
+            ('enabled', False, False, 'unknown'),
+            ('absent', True, False, 'paused'),
+            ('unavailable', True, False, 'unknown'),
+        ]
+        for override, plist_disabled, loaded, expected in cases:
+            with self.subTest(override=override, loaded=loaded), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'org.example.report.plist'
+                path.write_bytes(plistlib.dumps(dict(Label='org.example.report', StartInterval=300, Disabled=plist_disabled, ProgramArguments=['/bin/true'])))
+                def command(args):
+                    if args[1] == 'print-disabled':
+                        if override == 'unavailable': raise RuntimeError('Not permitted')
+                        return 'disabled services = {\n' + ('' if override == 'absent' else f'"org.example.report" => {override}\n') + '}'
+                    if not loaded: raise RuntimeError('Not loaded')
+                    return 'state = waiting\nlast exit code = 0'
+                with patch.object(c.Path, 'glob', return_value=[path]), patch.object(c, 'command', side_effect=command), patch.object(c.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
+                    tasks = c.local_tasks('mac', selection={f'gui/{os.getuid()}:org.example.report': 'Report'})
+                self.assertEqual(tasks[0]['state'], expected)
+
     def test_bb_import_reads_source_without_copying_execution_payloads(self):
         overview = {'automations': [{'project': {'id': 'proj_personal', 'name': 'Personal'}, 'automation': {
             'id': 'a1', 'name': 'Watch', 'enabled': True,

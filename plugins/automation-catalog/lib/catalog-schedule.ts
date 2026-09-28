@@ -36,6 +36,8 @@ export function catalogSchedule(schedule: string | null): string {
     const items: unknown[] = Array.isArray(value) ? value : [value];
     const labels = items.map((item) => {
       if (!item || typeof item !== "object") return null;
+      if ("kind" in item && item.kind === "event" && !("value" in item))
+        return "По событию / вручную · условия в описании расписания";
       if ("kind" in item && "value" in item && typeof item.value === "string") {
         const label =
           item.kind === "interval"
@@ -121,13 +123,17 @@ export function catalogSchedule(schedule: string | null): string {
     });
     return labels.length && labels.every((label) => label !== null)
       ? labels.join("; ") + (schedule.endsWith(suffix) ? " (часовой пояс хоста)" : "")
-      : schedule;
+      : "Формат расписания не распознан · см. технические сведения";
   } catch {
-    return schedule;
+    return /^[\[{]/.test(schedule.trim())
+      ? "Формат расписания не распознан · см. технические сведения"
+      : schedule;
   }
 }
 
 function systemCalendar(value: string): string {
+  const fullDaily = /^\*-\*-\* (\d{2}:\d{2})(?::00)?(?: (.+))?$/.exec(value);
+  if (fullDaily) return `Ежедневно в ${fullDaily[1]}${fullDaily[2] ? ` · ${fullDaily[2]}` : ""}`;
   const interval = /^\*:0\/(\d+)$/.exec(value);
   if (interval) return `Каждые ${interval[1]} мин`;
   const daily = /^(\d{2}(?:,\d{2})*):(\d{2})$/.exec(value);

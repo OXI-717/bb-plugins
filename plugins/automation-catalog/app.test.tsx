@@ -67,6 +67,23 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("offers a way out of an empty section without clearing other filters", async () => {
+    sessionStorage.setItem("bb:automation-catalog:filters:v2", JSON.stringify({ query: "Daily", source: "example", scope: "", host: "", state: "unmonitored", project: "" }));
+    const slot = await mount();
+    fireEvent.click(await slot.findByRole("button", { name: "Показать все записи по фильтрам (1)" }));
+    expect(slot.getByRole("button", { name: "Daily report" })).toBeTruthy();
+    expect((slot.getByRole("textbox", { name: "Поиск автоматизаций" }) as HTMLInputElement).value).toBe("Daily");
+    slot.lifecycle.unmount();
+  });
+  it("keeps summary counts consistent with search filters", async () => {
+    const slot = await mount();
+    await slot.findByRole("button", { name: "Daily report" });
+    expect(slot.getByRole("button", { name: "Требуют проверки: 1" })).toBeTruthy();
+    fireEvent.change(slot.getByRole("textbox", { name: "Поиск автоматизаций" }), { target: { value: "does not exist" } });
+    fireEvent.click(slot.getByRole("button", { name: "Требуют проверки: 0" }));
+    expect(slot.queryByRole("button", { name: "Daily report" })).toBeNull();
+    slot.lifecycle.unmount();
+  });
   it("opens current tasks by default and keeps registry records accessible separately", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {

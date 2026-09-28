@@ -74,6 +74,15 @@ def local_tasks(host, ledger=None, runs=None, boot=None, selection=None):
     tasks = []
     for folder, domain in [(Path.home() / 'Library/LaunchAgents', f'gui/{os.getuid()}'),
                            (Path('/Library/LaunchDaemons'), 'system')]:
+        overrides = None
+        if any(identifier.startswith(domain + ':') for identifier in selection):
+            try:
+                disabled_output = command(['launchctl', 'print-disabled', domain])
+                if 'disabled services = {' in disabled_output:
+                    overrides = {label: value in ('disabled', 'true') for label, value in
+                                 re.findall(r'^\s*"([^"\n]+)"\s*=>\s*(disabled|enabled|true|false)\s*$', disabled_output, re.M)}
+            except RuntimeError:
+                pass  # An inaccessible override database must not imply disabled.
         for path in sorted(folder.glob('*.plist')):
             if domain + ':' + path.stem not in selection:
                 continue
@@ -121,6 +130,9 @@ def local_tasks(host, ledger=None, runs=None, boot=None, selection=None):
                 task['description'] += '. Launchd retains only the latest exit result; exact run timestamps may be unavailable.'
             except RuntimeError:
                 task['description'] = 'Not loaded or inaccessible; execution state is unknown.'
+            if overrides is not None and overrides.get(label, data.get('Disabled') is True):
+                task['state'] = 'paused'
+                task['description'] = 'Расписание отключено в launchd. ' + task['description']
             tasks.append(task)
     result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=10)
     if result.returncode == 0:

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@get-bb/plugin-sdk/app", () => ({
   useRpc: vi.fn(),
   useRealtime: vi.fn(),
+  useBbNavigate: vi.fn(),
 }));
 import { CatalogDetailContent } from "./detail";
 import type { CatalogDetail } from "./src/catalog-types";
@@ -88,7 +89,7 @@ describe("detail failure states", () => {
     );
     expect(html).toContain("/plugins/automations/automations/proj_example/daily");
     expect(html).toContain("код 1");
-    expect(html).toContain("Каталог не копирует вывод скрипта");
+    expect(html).toContain("Откройте результат нужного запуска");
   });
   it("links a run's output to BB without exposing output or an internal run ID", () => {
     const html = renderToStaticMarkup(<CatalogDetailContent detail={{
@@ -101,7 +102,7 @@ describe("detail failure states", () => {
         finishedAt: 2, summary: null, exitCode: 0, evidence: "execution", observedAt: null, hasOutput: true }],
       total: 1,
     }} />);
-    expect(html).toContain("Посмотреть вывод в BB");
+    expect(html).toContain("Открыть результат");
     expect(html).not.toContain("run-secret");
     expect(html).not.toContain("Started:");
   });

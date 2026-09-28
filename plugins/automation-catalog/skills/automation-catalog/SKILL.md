@@ -25,3 +25,13 @@ The plugin preserves that choice, model, workspace and scheduled send time.
 Opening a draft never starts a thread or invokes a model. An unavailable or archived parent
 blocks submission rather than creating an orphan. Existing automation discussions carry
 their catalog task key in the plugin's thread metadata.
+
+For a locally managed BB automation, the history row's “Открыть результат” reads
+that exact run from BB on demand (up to the 200 latest retained runs). Only status,
+output availability and native navigation are returned to the panel; raw stdout and
+stderr stay server-side and are not added to catalog snapshots or storage. Agent
+runs open their corresponding thread. Script output opens in the native BB history,
+where the user selects the matching timestamp (BB has no per-run deep link). External and deleted tasks retain their existing source-specific paths.
+Local launchd collection distinguishes explicit disabled overrides from an
+unloaded or inaccessible service; an inaccessible override database does not imply
+that a task is disabled.
