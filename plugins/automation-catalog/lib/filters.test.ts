@@ -8,7 +8,7 @@ describe("catalog filters", () => {
     expect(hostName(agent)).toBeNull();
     expect(matchesFilters(agent, { ...emptyFilters, host: "BB-managed agent" })).toBe(false);
     expect(matchesFilters(agent, { ...emptyFilters, query: "Example Project" })).toBe(true);
-    Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: { getItem: () => JSON.stringify({ ...emptyFilters, host: "BB-managed agent", project: "project-example" }) } });
+    Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: { getItem: () => JSON.stringify({ ...emptyFilters, host: "team-BB-managed agent", project: "project-example" }) } });
     expect(readFilters()).toEqual({ ...emptyFilters, host: "", project: "project-example" });
     Reflect.deleteProperty(globalThis, "sessionStorage");
   });

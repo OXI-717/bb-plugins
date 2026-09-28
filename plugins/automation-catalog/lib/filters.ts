@@ -12,7 +12,7 @@ export function readFilters(): Filters {
     const value: unknown = JSON.parse(sessionStorage.getItem(storageKey) ?? "null");
     if (value && typeof value === "object" && Object.keys(emptyFilters).every(k => typeof (value as Record<string, unknown>)[k] === "string")) {
       const restored = Object.fromEntries(Object.keys(emptyFilters).map(k => [k, (value as Record<string, string>)[k]])) as Filters;
-      if (restored.host === "BB-managed agent") restored.host = "";
+      if (restored.host.endsWith("BB-managed agent")) restored.host = "";
       return restored;
     }
   } catch {}
