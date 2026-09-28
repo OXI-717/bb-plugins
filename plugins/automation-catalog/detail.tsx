@@ -1,3 +1,4 @@
+import { hostName } from "./lib/filters";
 import { AutomationComposer, type ComposeIntent } from "./compose";
 import { RunResult } from "./run-result";
 import { nextStep, resultText } from "./lib/overview";
@@ -27,7 +28,10 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
       <header>
         <h2 className="text-xl font-semibold">{task.name}</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          {scopeLabel(task.scope)} · {sourceLabel(source.name)} · {task.hostLabel ?? task.host}
+          {scopeLabel(task.scope)} · {sourceLabel(source.name)}
+          {` · Проект: ${task.projectName ?? "не указан"}`}
+          {` · Хост: ${hostName(task) ?? "не указан источником"}`}
+          {task.scheduler === "bb" && task.executor === "agent" ? " · Выполнение: агент BB" : ""}
           {task.team ? ` · ${task.team}` : ""}
           {task.owner ? ` · Ответственный: ${task.owner}` : ""}
         </p>

@@ -42,6 +42,13 @@ const fixture: CatalogDetail = {
   total: 0,
 };
 describe("detail failure states", () => {
+  it("separates the project and BB executor from the unknown machine", () => {
+    const html = renderToStaticMarkup(<CatalogDetailContent detail={{ ...fixture, task: { ...fixture.task, host: "BB-managed agent", scheduler: "bb", executor: "agent", projectName: "Alpha" } }} />);
+    expect(html).toContain("Проект: Alpha");
+    expect(html).toContain("Хост: не указан источником");
+    expect(html).toContain("Выполнение: агент BB");
+    expect(html).not.toContain("BB-managed agent");
+  });
   it("shows stale failed sources without inventing history or live state", () => {
     const html = renderToStaticMarkup(
       <CatalogDetailContent detail={fixture} />,
