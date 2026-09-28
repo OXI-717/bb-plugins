@@ -259,6 +259,7 @@ export type AccountQuota = z.infer<typeof quotaSchema>;
 export const accountSummarySchema = accountSchema.extend({
   lastUsedHostName: z.string().min(1).nullable(),
   ...quotaFieldsShape,
+  successfulRequests: z.number().int().nonnegative(),
   inFlight: z.number().int().nonnegative(),
   capLimit: z.number().nullable(),
   eligible: z.boolean(),

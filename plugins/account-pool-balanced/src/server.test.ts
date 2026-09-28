@@ -1933,6 +1933,10 @@ describe("Account Pool plugin", () => {
     expect(forwardedResponse.status).toBe(200);
     expect(await forwardedResponse.text()).toBe('{"forwarded":true}');
     expect(forwarded).toBe(1);
+    const accountsAfterRequest = z.array(accountSummarySchema).parse(
+      await host.harness.behavior.callRpc("account.list", null),
+    );
+    expect(accountsAfterRequest[0]?.successfulRequests).toBe(1);
   });
 
   it("exposes every account CLI operation", async () => {

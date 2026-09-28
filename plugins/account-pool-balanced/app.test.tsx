@@ -82,6 +82,7 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
     observedAt: 1,
     heldUntil: null,
     error: null,
+    successfulRequests: 0,
     inFlight: 0,
     capLimit: null,
     eligible: true,
@@ -626,6 +627,7 @@ describe("Account Pool settings", () => {
 
   it("explains the role, the weekly cap, and the effective skip limit in the detail dialog", async () => {
     const work = account({
+      successfulRequests: 12,
       role: "reserve",
       cap: { early: 0.15, late: 0.98 },
       capLimit: 0.45,
@@ -638,6 +640,9 @@ describe("Account Pool settings", () => {
     );
     expect(await slot.findAllByText("Резерв")).toHaveLength(2);
     expect(slot.getByText("15% → 98% · сейчас 45%")).toBeTruthy();
+    expect(slot.getByText("Запросы через пул")).toBeTruthy();
+    expect(slot.getByText("12 успешных с момента начала учёта")).toBeTruthy();
+    expect(slot.getByText((text) => text.includes("сброс") && text.includes("МСК"))).toBeTruthy();
     expect(
       slot.getByText(
         "Используется, только когда ни один основной аккаунт не подходит, или за 24 рабочих часов до его недельного сброса.",

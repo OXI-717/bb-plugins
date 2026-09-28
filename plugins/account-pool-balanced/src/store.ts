@@ -582,6 +582,19 @@ const EMPTY_QUOTA = {
 export class QuotaStore {
   constructor(private readonly db: Database.Database) {}
 
+  successfulRequests(accountId: string): number {
+    const row = this.db
+      .prepare("SELECT successful_requests FROM pool_account_requests WHERE account_id = ?")
+      .get(accountId) as { successful_requests: number } | undefined;
+    return row?.successful_requests ?? 0;
+  }
+
+  recordSuccessfulRequest(accountId: string): void {
+    this.db.prepare(`INSERT INTO pool_account_requests (account_id, successful_requests)
+      VALUES (?, 1) ON CONFLICT(account_id) DO UPDATE
+      SET successful_requests = successful_requests + 1`).run(accountId);
+  }
+
   get(accountId: string): AccountQuota {
     const row = quotaRowSchema
       .optional()
@@ -655,6 +668,7 @@ export class QuotaStore {
     this.db
       .prepare("DELETE FROM account_quota WHERE account_id = ?")
       .run(accountId);
+    this.db.prepare("DELETE FROM pool_account_requests WHERE account_id = ?").run(accountId);
   }
 }
 
@@ -781,4 +795,8 @@ export const QUOTA_MIGRATIONS = [
     account_id TEXT NOT NULL,
     last_used_at INTEGER NOT NULL
   ); INSERT INTO pool_observation SELECT * FROM pool_affinity;`,
+  `CREATE TABLE pool_account_requests (
+    account_id TEXT PRIMARY KEY,
+    successful_requests INTEGER NOT NULL DEFAULT 0
+  )`,
 ];
