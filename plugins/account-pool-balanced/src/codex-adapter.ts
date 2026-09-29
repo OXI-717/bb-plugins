@@ -185,9 +185,6 @@ const usageWindowSchema = z
 
 const usageResponseSchema = z
   .object({
-    rate_limit_reset_credits: z.object({
-      available_count: z.number().int().nonnegative(),
-    }).passthrough().nullish(),
     rate_limit: z
       .object({
         primary_window: usageWindowSchema.nullish(),
@@ -197,6 +194,12 @@ const usageResponseSchema = z
       .nullish(),
   })
   .passthrough();
+
+const resetCountSchema = z.object({
+  rate_limit_reset_credits: z.object({
+    available_count: z.number().int().nonnegative(),
+  }).passthrough().nullish(),
+}).passthrough();
 
 const resetCreditsResponseSchema = z.object({
   credits: z.array(z.object({
@@ -388,8 +391,8 @@ export function createCodexAdapter(options: {
       );
       if (quota === null) throw new Error("Сервер вернул некорректные данные квот.");
       context.quotas.put({ ...quota, error: null });
-      const usage = usageResponseSchema.safeParse(payload);
-      const availableCount = usage.success ? usage.data.rate_limit_reset_credits?.available_count : undefined;
+      const resetCount = resetCountSchema.safeParse(payload);
+      const availableCount = resetCount.success ? resetCount.data.rate_limit_reset_credits?.available_count : undefined;
       if (availableCount !== undefined) {
         let credits: ReturnType<typeof codexResetCreditDetails> = null;
         if (availableCount > 0) {

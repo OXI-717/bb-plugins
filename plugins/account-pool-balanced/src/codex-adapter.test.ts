@@ -121,6 +121,13 @@ describe("codexQuotaFromUsage", () => {
   it("returns null for a payload without rate limits", () => {
     expect(codexQuotaFromUsage(ACCOUNT_ID, {}, emptyQuota(), 1)).toBeNull();
   });
+
+  it("accepts valid quota windows when optional reset-credit metadata is malformed", () => {
+    expect(codexQuotaFromUsage(ACCOUNT_ID, {
+      rate_limit: { primary_window: { used_percent: 25 } },
+      rate_limit_reset_credits: { available_count: "unknown" },
+    }, emptyQuota(), 1)?.limitWindows[0]?.utilization).toBe(0.25);
+  });
 });
 
 describe("codex header quotas", () => {
