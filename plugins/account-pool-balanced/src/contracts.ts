@@ -190,6 +190,10 @@ export const resetCreditsSchema = z.object({
   credits: z.array(z.object({
     expiresAt: z.number().int().nullable(),
     title: z.string().nullable(),
+    remaining: z.number().int().positive().optional(),
+    limitTypes: z.array(z.string()).optional(),
+    usableNow: z.boolean().optional(),
+    requiresLimit: z.boolean().optional(),
   }).strict()).nullable(),
   observedAt: z.number().int().nonnegative(),
 }).strict();
