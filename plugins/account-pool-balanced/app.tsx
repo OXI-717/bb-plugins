@@ -253,11 +253,11 @@ function resetLabel(timestamp: number | null): string {
     timeZone: POOL_TIME_ZONE,
   }).format(timestamp)} МСК`;
   const remaining = timestamp - Date.now();
-  if (remaining <= 0) return `сброс ожидался ${exact} · обновите квоты`;
+  if (remaining <= 0) return "время автосброса устарело · обновите квоты";
   const minutes = Math.max(1, Math.round(remaining / 60_000));
   if (minutes < 1_440)
-    return `сброс ${exact} (через ${minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes} мин`})`;
-  return `сброс ${exact}`;
+    return `автосброс ${exact} (через ${minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes} мин`})`;
+  return `автосброс ${exact}`;
 }
 const STATUS_CACHE_KEY = "account-pool:status";
 
@@ -2236,6 +2236,25 @@ function AccountDialog({
           </>
         )}
       </div>
+      {account.provider === "codex" ? (
+        <div className="space-y-2 border-t border-border pt-4 text-sm">
+          <div className="font-medium">Сохранённые сбросы лимита использования</div>
+          {account.resetCredits === null ? (
+            <div className="text-muted-foreground">Данные о ручных сбросах пока недоступны.</div>
+          ) : (
+            <>
+              <div>Доступно: {account.resetCredits.availableCount} · проверено {relative(account.resetCredits.observedAt)}</div>
+              {account.resetCredits.credits === null ? (
+                <div className="text-muted-foreground">Сроки действия не удалось получить.</div>
+              ) : account.resetCredits.credits.map((credit, index) => (
+                <div key={index} className="text-muted-foreground">
+                  {credit.title ?? "Полный сброс"} · {credit.expiresAt === null ? "срок неизвестен" : `действует до ${new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", year: "numeric", timeZone: POOL_TIME_ZONE }).format(credit.expiresAt)}`}
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      ) : null}
       <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-2 border-t border-border pt-4 text-sm">
         {account.email === null ? null : (
           <>

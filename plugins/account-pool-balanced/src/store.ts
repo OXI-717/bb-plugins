@@ -11,11 +11,13 @@ import {
   hubTokenSummarySchema,
   providerSchema,
   quotaSchema,
+  resetCreditsSchema,
   type Account,
   type AccountQuota,
   type AccountSecret,
   type HubTokenSummary,
   type PoolProvider,
+  type ResetCredits,
 } from "./contracts.js";
 
 const ACCOUNTS_KEY = "accounts:v1";
@@ -582,6 +584,22 @@ const EMPTY_QUOTA = {
 export class QuotaStore {
   constructor(private readonly db: Database.Database) {}
 
+  resetCredits(accountId: string): ResetCredits | null {
+    const row = this.db.prepare("SELECT credits_json FROM pool_reset_credits WHERE account_id = ?")
+      .get(accountId) as { credits_json: string } | undefined;
+    return row === undefined ? null : resetCreditsSchema.parse(JSON.parse(row.credits_json));
+  }
+
+  putResetCredits(accountId: string, credits: ResetCredits): void {
+    this.db.prepare(`INSERT INTO pool_reset_credits (account_id, credits_json)
+      VALUES (?, ?) ON CONFLICT(account_id) DO UPDATE SET credits_json = excluded.credits_json`)
+      .run(accountId, JSON.stringify(resetCreditsSchema.parse(credits)));
+  }
+
+  clearResetCredits(accountId: string): void {
+    this.db.prepare("DELETE FROM pool_reset_credits WHERE account_id = ?").run(accountId);
+  }
+
   successfulRequests(accountId: string): number {
     const row = this.db
       .prepare("SELECT successful_requests FROM pool_account_requests WHERE account_id = ?")
@@ -669,6 +687,7 @@ export class QuotaStore {
       .prepare("DELETE FROM account_quota WHERE account_id = ?")
       .run(accountId);
     this.db.prepare("DELETE FROM pool_account_requests WHERE account_id = ?").run(accountId);
+    this.clearResetCredits(accountId);
   }
 }
 
@@ -798,5 +817,9 @@ export const QUOTA_MIGRATIONS = [
   `CREATE TABLE pool_account_requests (
     account_id TEXT PRIMARY KEY,
     successful_requests INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE TABLE pool_reset_credits (
+    account_id TEXT PRIMARY KEY,
+    credits_json TEXT NOT NULL
   )`,
 ];

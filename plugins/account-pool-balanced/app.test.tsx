@@ -83,6 +83,7 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
     heldUntil: null,
     error: null,
     successfulRequests: 0,
+    resetCredits: null,
     inFlight: 0,
     capLimit: null,
     eligible: true,
@@ -259,7 +260,7 @@ describe("Account Pool settings", () => {
     expect(slot.queryByText("FABLE")).toBeNull();
     expect(
       slot.getByText(
-        `Исчерпан · сброс ${new Intl.DateTimeFormat("ru-RU", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "Europe/Moscow" }).format(blockingResetAt)} МСК`,
+        `Исчерпан · автосброс ${new Intl.DateTimeFormat("ru-RU", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "Europe/Moscow" }).format(blockingResetAt)} МСК`,
       ),
     ).toBeTruthy();
     fireEvent.click(
@@ -651,6 +652,26 @@ describe("Account Pool settings", () => {
     expect(
       slot.getByText((text) => text.includes("пропуск при 45%")),
     ).toBeTruthy();
+  });
+
+  it("shows saved Codex resets separately from automatic usage windows", async () => {
+    const slot = render([account({
+      provider: "codex",
+      label: "codex@example.com",
+      resetCredits: {
+        availableCount: 2,
+        credits: [
+          { title: "Полный сброс", expiresAt: Date.parse("2026-10-05T00:00:00Z") },
+          { title: "Полный сброс", expiresAt: Date.parse("2026-10-22T00:00:00Z") },
+        ],
+        observedAt: Date.now(),
+      },
+    })]);
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть codex@example.com" }));
+    expect(slot.getByText("Сохранённые сбросы лимита использования")).toBeTruthy();
+    expect(slot.getByText(/Доступно: 2/)).toBeTruthy();
+    expect(slot.getByText(/действует до 5 октября 2026/)).toBeTruthy();
+    expect(slot.getByText(/действует до 22 октября 2026/)).toBeTruthy();
   });
 
   it("shows every observed family bucket in the detail dialog", async () => {

@@ -185,6 +185,17 @@ export const limitWindowSchema = z
 
 export type LimitWindow = z.infer<typeof limitWindowSchema>;
 
+export const resetCreditsSchema = z.object({
+  availableCount: z.number().int().nonnegative(),
+  credits: z.array(z.object({
+    expiresAt: z.number().int().nullable(),
+    title: z.string().nullable(),
+  }).strict()).nullable(),
+  observedAt: z.number().int().nonnegative(),
+}).strict();
+
+export type ResetCredits = z.infer<typeof resetCreditsSchema>;
+
 export const accountSchema = z
   .object({
     id: z.string().uuid(),
@@ -260,6 +271,7 @@ export const accountSummarySchema = accountSchema.extend({
   lastUsedHostName: z.string().min(1).nullable(),
   ...quotaFieldsShape,
   successfulRequests: z.number().int().nonnegative(),
+  resetCredits: resetCreditsSchema.nullable(),
   inFlight: z.number().int().nonnegative(),
   capLimit: z.number().nullable(),
   eligible: z.boolean(),

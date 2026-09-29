@@ -366,6 +366,7 @@ export class AccountPoolHub {
           lastUsedHostName: null,
           ...quotaFields,
           successfulRequests: this.options.quotas.successfulRequests(account.id),
+          resetCredits: account.provider === "codex" ? this.options.quotas.resetCredits(account.id) : null,
           inFlight: this.inFlightByAccount.get(account.id) ?? 0,
           capLimit: limit,
           eligible: eligibleIds.has(account.id),

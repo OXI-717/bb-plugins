@@ -95,6 +95,7 @@ function summary(account: CodexDeviceAccount): AccountSummary {
     heldUntil: null,
     error: null,
     successfulRequests: 0,
+    resetCredits: null,
     inFlight: 0,
     capLimit: null,
     eligible: true,

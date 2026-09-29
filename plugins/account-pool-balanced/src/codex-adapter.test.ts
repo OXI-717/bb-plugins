@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { codexQuotaFromUsage, createCodexAdapter } from "./codex-adapter.js";
+import { codexQuotaFromUsage, codexResetCreditDetails, createCodexAdapter } from "./codex-adapter.js";
 import type { AccountQuota } from "./contracts.js";
 import { isQuotaExhausted } from "./quota.js";
 
@@ -35,6 +35,16 @@ const adapter = createCodexAdapter({
 });
 
 describe("codexQuotaFromUsage", () => {
+  it("reads only available saved resets and their expiry", () => {
+    expect(codexResetCreditDetails({ credits: [
+      { status: "available", expires_at: "2026-10-05T00:00:00Z", title: "Full reset" },
+      { status: "redeemed", expires_at: "2026-10-06T00:00:00Z" },
+      { status: "available", expires_at: null },
+    ] })).toEqual([
+      { expiresAt: Date.parse("2026-10-05T00:00:00Z"), title: "Full reset" },
+      { expiresAt: null, title: null },
+    ]);
+  });
   it("keeps a Pro account's single weekly window out of the Claude slots", () => {
     const quota = codexQuotaFromUsage(
       ACCOUNT_ID,
@@ -110,6 +120,13 @@ describe("codexQuotaFromUsage", () => {
 
   it("returns null for a payload without rate limits", () => {
     expect(codexQuotaFromUsage(ACCOUNT_ID, {}, emptyQuota(), 1)).toBeNull();
+  });
+
+  it("accepts valid quota windows when optional reset-credit metadata is malformed", () => {
+    expect(codexQuotaFromUsage(ACCOUNT_ID, {
+      rate_limit: { primary_window: { used_percent: 25 } },
+      rate_limit_reset_credits: { available_count: "unknown" },
+    }, emptyQuota(), 1)?.limitWindows[0]?.utilization).toBe(0.25);
   });
 });
 
