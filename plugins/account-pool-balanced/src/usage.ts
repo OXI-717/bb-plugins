@@ -111,6 +111,10 @@ function limitBucket(
   );
 }
 
+function currentReset(reported: number | null, previous: number | null, now: number): number | null {
+  return reported ?? (previous !== null && previous > now ? previous : null);
+}
+
 export function quotaFromUsage(
   accountId: string,
   payload: object,
@@ -167,10 +171,10 @@ export function quotaFromUsage(
     ...previous,
     accountId,
     fiveHourUtilization: fiveHour?.utilization ?? previous.fiveHourUtilization,
-    fiveHourResetAt: data.five_hour == null ? previous.fiveHourResetAt : (fiveHour?.resetAt ?? null),
+    fiveHourResetAt: data.five_hour == null ? previous.fiveHourResetAt : currentReset(fiveHour?.resetAt ?? null, previous.fiveHourResetAt, now),
     fiveHourStatus: fiveHour?.status ?? previous.fiveHourStatus,
     sevenDayUtilization: sevenDay?.utilization ?? previous.sevenDayUtilization,
-    sevenDayResetAt: data.seven_day == null ? previous.sevenDayResetAt : (sevenDay?.resetAt ?? null),
+    sevenDayResetAt: data.seven_day == null ? previous.sevenDayResetAt : currentReset(sevenDay?.resetAt ?? null, previous.sevenDayResetAt, now),
     sevenDayStatus: sevenDay?.status ?? previous.sevenDayStatus,
     familyWeekly,
     observedAt: now,
