@@ -322,6 +322,11 @@ function longestCodexWindow(account: AccountSummary): LimitWindow | null {
   return longest;
 }
 
+function canProbeAccount(account: AccountSummary): boolean {
+  if (account.kind === "oauth") return true;
+  return account.provider === "kimi" || account.provider === "zai" || account.provider === "cursor";
+}
+
 function statusPresentation(
   account: AccountSummary,
   threshold: number,
@@ -357,7 +362,12 @@ function statusPresentation(
     };
   }
   if (account.status === "error")
-    return { label: "Ошибка", dot: "bg-destructive" };
+    return {
+      label: canProbeAccount(account)
+        ? "Ошибка · перепроверка раз в 5 мин"
+        : "Ошибка",
+      dot: "bg-destructive",
+    };
   if (account.status === "disabled")
     return { label: "Выключен", dot: "bg-muted-foreground" };
   return { label: "В работе", dot: "bg-success" };
