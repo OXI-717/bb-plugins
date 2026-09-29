@@ -72,6 +72,7 @@ const DEFAULT_CURSOR_USAGE_URL =
 const DEFAULT_USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1_000;
 const MAX_INLINE_HOLD_MS = 20_000;
 const MAX_REFRESH_BACKOFF_MS = 60_000;
+const HTML_REJECTION_HOLD_MS = 60_000;
 const MAX_REFRESH_BACKOFFS = 1_024;
 const MAX_FAILURE_DETAIL_BYTES = 1_024;
 const FAILURE_DISPOSAL_TIMEOUT_MS = 250;
@@ -272,9 +273,11 @@ export class AccountPoolHub {
       .refreshUsage({
         account,
         freshSecret: (rejectedAccessToken) =>
+          // A usage refresh is the account's health probe: it may reach an account
+          // marked as failed, and the adapter clears the error once the probe succeeds.
           this.freshSecret(account, adapter, rejectedAccessToken === undefined
             ? { kind: "normal" }
-            : { kind: "rejected", accessToken: rejectedAccessToken }),
+            : { kind: "rejected", accessToken: rejectedAccessToken }, true),
         accounts: this.options.accounts,
         quotas: this.options.quotas,
         fetch: (input, init) => this.options.fetch(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
@@ -582,6 +585,27 @@ export class AccountPoolHub {
             response.status === 529
           ) {
             const retryAfter = response.headers.get("retry-after");
+            if (response.status === 403 && isHtmlResponse(response.headers)) {
+              // An API rejection of the credentials is JSON. An HTML 403 is an edge
+              // (anti-bot or outage) page: marking the account as a credential error
+              // would drop it from the pool until someone re-enabled it by hand.
+              await this.discardUpstream(upstream, false);
+              signal.throwIfAborted();
+              const holdMs = Math.max(
+                HTML_REJECTION_HOLD_MS,
+                retryAfterMilliseconds(retryAfter, this.options.now()),
+              );
+              this.options.quotas.put({
+                ...observed,
+                heldUntil: this.options.now() + holdMs,
+              });
+              failure = {
+                status: 503,
+                message: `${adapter.upstreamName} returned an HTML page with HTTP 403; the account is paused and will be retried.`,
+                headers: { "retry-after": String(Math.ceil(holdMs / 1_000)) },
+              };
+              break;
+            }
             const detail = await this.discardUpstream(upstream, true);
             signal.throwIfAborted();
             failure = {
@@ -930,6 +954,7 @@ export class AccountPoolHub {
     account: Account,
     adapter: ProviderAdapter,
     use: SecretUse,
+    probe = false,
   ): Promise<AccountSecret> {
     while (true) {
       const existing = this.refreshes.get(account.id);
@@ -993,7 +1018,7 @@ export class AccountPoolHub {
               };
             }
             const error = this.options.quotas.get(account.id).error;
-            if (error !== null) throw new Error(error);
+            if (error !== null && !probe) throw new Error(error);
             if (
               backoff !== undefined &&
               this.options.now() < backoff.retryAt &&
@@ -1368,6 +1393,10 @@ export function createHub(options: {
 function readBearer(value: string | null): string | null {
   if (value === null) return null;
   return /^Bearer\s+(.+)$/iu.exec(value)?.[1] ?? null;
+}
+
+function isHtmlResponse(headers: Headers): boolean {
+  return /^\s*text\/html\b/iu.test(headers.get("content-type") ?? "");
 }
 
 function errorMessage(error: unknown): string {
