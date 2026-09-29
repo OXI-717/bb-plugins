@@ -9,7 +9,7 @@ import { AccountStore, QUOTA_MIGRATIONS, QuotaStore } from "./store.js";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()?.(); });
 
-async function fixture() {
+async function fixture(usageUrl = "https://usage.example/api/oauth/usage") {
   const dataDir = await fs.mkdtemp(path.join(tmpdir(), "bb-claude-reset-test-"));
   const host = createFakePluginHost({ pluginId: "account-pool", dataDir });
   cleanups.push(async () => { await host.harness.lifecycle.dispose(); await fs.rm(dataDir, { recursive: true, force: true }); });
@@ -22,12 +22,22 @@ async function fixture() {
   const account = await accounts.add({ provider: "claude", kind: "oauth", label: "Test account", email: null,
     accountUuid: "11111111-1111-4111-8111-111111111111", subscriptionType: null, rateLimitTier: null,
     enabled: true, priority: 100 }, secret);
-  const adapter = createClaudeAdapter({ refreshUrl: "https://auth.example/token", usageUrl: "https://usage.example/api/oauth/usage",
+  const adapter = createClaudeAdapter({ refreshUrl: "https://auth.example/token", usageUrl,
     profileUrl: "https://usage.example/profile" });
   return { quotas, account, refresh: (fetch: typeof globalThis.fetch) => adapter.refreshUsage({
     accounts, quotas, account, freshSecret: async () => secret, now: () => Date.parse("2030-04-01T12:00:00Z"), fetch,
   }) };
 }
+
+it("keeps data URL usage fixtures intact", async () => {
+  const usageUrl = 'data:application/json,{"five_hour":{"utilization":15}}';
+  const f = await fixture(usageUrl);
+  await f.refresh(async (input) => {
+    expect(String(input)).toBe(usageUrl);
+    return fetch(input);
+  });
+  expect(f.quotas.get(f.account.id).fiveHourUtilization).toBe(0.15);
+});
 
 it("reads reset offers with quota windows in one GET and persists only display fields", async () => {
   const f = await fixture();

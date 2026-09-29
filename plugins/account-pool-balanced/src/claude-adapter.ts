@@ -139,8 +139,10 @@ export function createClaudeAdapter(options: {
       const secret = await context.freshSecret();
       if (secret.kind !== "oauth") return;
       const usageUrl = new URL(options.usageUrl);
-      usageUrl.searchParams.set("cedar_ember", "1");
-      usageUrl.searchParams.set("skip_spend", "1");
+      if (usageUrl.protocol === "https:" || usageUrl.protocol === "http:") {
+        usageUrl.searchParams.set("cedar_ember", "1");
+        usageUrl.searchParams.set("skip_spend", "1");
+      }
       const requestUsage = (url: string | URL) => context.fetch(url, {
         headers: {
           authorization: `Bearer ${secret.accessToken}`,
@@ -154,7 +156,7 @@ export function createClaudeAdapter(options: {
       let response = await requestUsage(usageUrl);
       // Older compatible endpoints may reject the optional query. Do not retry
       // auth failures or throttling as if they were unsupported parameters.
-      if ([400, 404, 422].includes(response.status)) {
+      if (usageUrl.href !== options.usageUrl && [400, 404, 422].includes(response.status)) {
         await response.body?.cancel();
         response = await requestUsage(options.usageUrl);
       }
