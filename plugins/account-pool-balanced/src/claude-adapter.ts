@@ -18,10 +18,13 @@ import {
 } from "./quota.js";
 import { parseRequestBody } from "./request-body.js";
 import { quotaFromUsage } from "./usage.js";
+import { claudeResetCredits } from "./claude-reset-credits.js";
 
 const OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const OAUTH_BETA = "oauth-2025-04-20";
 const USAGE_REQUEST_TIMEOUT_MS = 10_000;
+// The OAuth usage endpoint uses the CLI surface to determine reset eligibility.
+const USAGE_USER_AGENT = "claude-cli/2.1.282 (external, cli) bb-account-pool";
 const ALLOWED_REQUEST_HEADERS = new Set([
   "accept",
   "content-type",
@@ -135,16 +138,31 @@ export function createClaudeAdapter(options: {
       if (context.account.kind !== "oauth") return;
       const secret = await context.freshSecret();
       if (secret.kind !== "oauth") return;
-      const response = await context.fetch(options.usageUrl, {
+      const usageUrl = new URL(options.usageUrl);
+      usageUrl.searchParams.set("cedar_ember", "1");
+      usageUrl.searchParams.set("skip_spend", "1");
+      const requestUsage = (url: string | URL) => context.fetch(url, {
         headers: {
           authorization: `Bearer ${secret.accessToken}`,
           "anthropic-beta": OAUTH_BETA,
           accept: "application/json",
+          "user-agent": USAGE_USER_AGENT,
+          "x-app": "cli",
         },
         signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
       });
+      let response = await requestUsage(usageUrl);
+      // Older compatible endpoints may reject the optional query. Do not retry
+      // auth failures or throttling as if they were unsupported parameters.
+      if ([400, 404, 422].includes(response.status)) {
+        await response.body?.cancel();
+        response = await requestUsage(options.usageUrl);
+      }
       if (response.ok) {
         const payload = await response.json().catch(() => null);
+        const resets = claudeResetCredits(payload, context.now());
+        if (resets === null) context.quotas.clearResetCredits(context.account.id);
+        else context.quotas.putResetCredits(context.account.id, resets);
         if (typeof payload === "object" && payload !== null) {
           const quota = quotaFromUsage(
             context.account.id,

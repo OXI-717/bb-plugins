@@ -261,6 +261,25 @@ function resetLabel(timestamp: number | null): string {
 }
 const STATUS_CACHE_KEY = "account-pool:status";
 
+function savedResetDeadline(timestamp: number | null): string {
+  if (timestamp === null) return "срок неизвестен";
+  const date = new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric", month: "long", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hourCycle: "h23", timeZone: POOL_TIME_ZONE,
+  }).format(timestamp);
+  return `${timestamp <= Date.now() ? "истёк" : "действует до"} ${date} МСК`;
+}
+
+function resetLimitLabel(limit: string): string {
+  const labels: Record<string, string> = {
+    five_hour: "5 часов", seven_day: "недельный лимит",
+    seven_day_fable: "Fable · неделя", seven_day_opus: "Opus · неделя",
+    seven_day_sonnet: "Sonnet · неделя", seven_day_haiku: "Haiku · неделя",
+  };
+  return labels[limit] ?? limit;
+}
+
 function readCachedStatus(): PoolStatus | null {
   try {
     const raw = window.localStorage.getItem(STATUS_CACHE_KEY);
@@ -2236,7 +2255,7 @@ function AccountDialog({
           </>
         )}
       </div>
-      {account.provider === "codex" ? (
+      {account.provider === "codex" || account.provider === "claude" ? (
         <div className="space-y-2 border-t border-border pt-4 text-sm">
           <div className="font-medium">Сохранённые сбросы лимита использования</div>
           {account.resetCredits === null ? (
@@ -2248,7 +2267,10 @@ function AccountDialog({
                 <div className="text-muted-foreground">Сроки действия не удалось получить.</div>
               ) : account.resetCredits.credits.map((credit, index) => (
                 <div key={index} className="text-muted-foreground">
-                  {credit.title ?? "Полный сброс"} · {credit.expiresAt === null ? "срок неизвестен" : `действует до ${new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long", year: "numeric", timeZone: POOL_TIME_ZONE }).format(credit.expiresAt)}`}
+                  <div>{credit.title ?? "Полный сброс"}{credit.remaining === undefined ? "" : ` · сбросов: ${credit.remaining}`}</div>
+                  <div>{savedResetDeadline(credit.expiresAt)}</div>
+                  {credit.limitTypes?.length ? <div>Обновляет: {credit.limitTypes.map(resetLimitLabel).join(", ")}</div> : null}
+                  {credit.usableNow === false ? <div>{credit.requiresLimit ? "Можно использовать при достижении лимита" : "Сейчас нельзя применить"}</div> : null}
                 </div>
               ))}
             </>

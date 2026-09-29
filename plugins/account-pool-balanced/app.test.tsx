@@ -661,8 +661,8 @@ describe("Account Pool settings", () => {
       resetCredits: {
         availableCount: 2,
         credits: [
-          { title: "Полный сброс", expiresAt: Date.parse("2026-10-05T00:00:00Z") },
-          { title: "Полный сброс", expiresAt: Date.parse("2026-10-22T00:00:00Z") },
+          { title: "Полный сброс", expiresAt: Date.parse("2030-10-05T20:17:35Z") },
+          { title: "Полный сброс", expiresAt: Date.parse("2030-10-22T22:12:41Z") },
         ],
         observedAt: Date.now(),
       },
@@ -670,8 +670,25 @@ describe("Account Pool settings", () => {
     fireEvent.click(await slot.findByRole("button", { name: "Открыть codex@example.com" }));
     expect(slot.getByText("Сохранённые сбросы лимита использования")).toBeTruthy();
     expect(slot.getByText(/Доступно: 2/)).toBeTruthy();
-    expect(slot.getByText(/действует до 5 октября 2026/)).toBeTruthy();
-    expect(slot.getByText(/действует до 22 октября 2026/)).toBeTruthy();
+    expect(slot.getByText(/действует до 5 октября 2030.*23:17:35 МСК/)).toBeTruthy();
+    expect(slot.getByText(/действует до 23 октября 2030.*01:12:41 МСК/)).toBeTruthy();
+  });
+
+  it("shows Claude saved reset quantity, scope, deadline and usage restriction", async () => {
+    const slot = render([account({
+      resetCredits: {
+        availableCount: 2, observedAt: Date.now(),
+        credits: [{ title: "Сброс лимитов Claude", remaining: 2,
+          expiresAt: Date.parse("2030-04-22T09:17:35Z"),
+          limitTypes: ["five_hour", "seven_day"], usableNow: false, requiresLimit: true }],
+      },
+    })]);
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    expect(slot.getByText(/Доступно: 2/)).toBeTruthy();
+    expect(slot.getByText("Сброс лимитов Claude · сбросов: 2")).toBeTruthy();
+    expect(slot.getByText(/22 апреля 2030.*12:17:35 МСК/)).toBeTruthy();
+    expect(slot.getByText("Обновляет: 5 часов, недельный лимит")).toBeTruthy();
+    expect(slot.getByText("Можно использовать при достижении лимита")).toBeTruthy();
   });
 
   it("shows every observed family bucket in the detail dialog", async () => {

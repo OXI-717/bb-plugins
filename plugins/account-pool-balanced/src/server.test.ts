@@ -3051,7 +3051,7 @@ describe("Account Pool plugin", () => {
     const authorizations: Array<string | undefined> = [];
     const usageCalls = new Map<string, number>();
     const upstream = await startUpstream(async (request, response) => {
-      if (request.url === "/usage") {
+      if (request.url === "/usage?cedar_ember=1&skip_spend=1") {
         const authorization = request.headers.authorization;
         usageCalls.set(
           authorization ?? "",
@@ -3062,6 +3062,10 @@ describe("Account Pool plugin", () => {
           JSON.stringify({
             five_hour: { utilization: 10, resets_at: "4102444800" },
             seven_day: { utilization: 20, resets_at: "4102448400" },
+            cedar_ember: { eligible: true, grants: [{
+              label: "Test reset", resets_left: authorization === "Bearer oauth-a" ? 2 : 1,
+              ends_at: "2100-01-01T12:34:56Z", clears: ["five_hour", "seven_day"],
+            }] },
             limits: [
               {
                 kind: "weekly_scoped",
@@ -3150,6 +3154,9 @@ describe("Account Pool plugin", () => {
     expect(accounts[0]?.accountUuid).toBe(
       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     );
+    expect(accounts[0]?.resetCredits?.availableCount).toBe(2);
+    expect(accounts[1]?.resetCredits?.availableCount).toBe(1);
+    expect(accounts[0]?.resetCredits?.credits?.[0]?.expiresAt).toBe(Date.parse("2100-01-01T12:34:56Z"));
 
     for (const model of ["claude-fable-5", "claude-opus-4-1"]) {
       const response = await fixture.host.harness.behavior.fetchHttp(
