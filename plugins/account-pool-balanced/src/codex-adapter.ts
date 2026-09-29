@@ -184,6 +184,9 @@ const usageWindowSchema = z
 
 const usageResponseSchema = z
   .object({
+    rate_limit_reset_credits: z.object({
+      available_count: z.number().int().nonnegative(),
+    }).passthrough().nullish(),
     rate_limit: z
       .object({
         primary_window: usageWindowSchema.nullish(),
@@ -193,6 +196,23 @@ const usageResponseSchema = z
       .nullish(),
   })
   .passthrough();
+
+const resetCreditsResponseSchema = z.object({
+  credits: z.array(z.object({
+    status: z.string(),
+    expires_at: z.string().nullish(),
+    title: z.string().nullish(),
+  }).passthrough()),
+}).passthrough();
+
+export function codexResetCreditDetails(payload: unknown): Array<{ expiresAt: number | null; title: string | null }> | null {
+  const parsed = resetCreditsResponseSchema.safeParse(payload);
+  if (!parsed.success) return null;
+  return parsed.data.credits.filter((credit) => credit.status === "available").map((credit) => {
+    const expiresAt = credit.expires_at == null ? NaN : Date.parse(credit.expires_at);
+    return { expiresAt: Number.isNaN(expiresAt) ? null : expiresAt, title: credit.title ?? null };
+  });
+}
 
 function windowFromUsage(
   slot: LimitWindowSlot,
@@ -358,14 +378,38 @@ export function createCodexAdapter(options: {
         await response.body?.cancel();
         throw new Error(`Не удалось обновить квоты: HTTP ${response.status}.${response.status === 401 ? " Требуется повторный вход в ChatGPT." : ""}`);
       }
+      const payload: unknown = await response.json().catch(() => null);
       const quota = codexQuotaFromUsage(
         context.account.id,
-        await response.json().catch(() => null),
+        payload,
         context.quotas.get(context.account.id),
         context.now(),
       );
       if (quota === null) throw new Error("Сервер вернул некорректные данные квот.");
       context.quotas.put({ ...quota, error: null });
+      const usage = usageResponseSchema.safeParse(payload);
+      const availableCount = usage.success ? usage.data.rate_limit_reset_credits?.available_count : undefined;
+      if (availableCount !== undefined) {
+        let credits: ReturnType<typeof codexResetCreditDetails> = null;
+        if (availableCount > 0) {
+          const detailsUrl = new URL(options.usageUrl);
+          detailsUrl.pathname = detailsUrl.pathname.replace(/\/usage$/u, "/rate-limit-reset-credits");
+          const details = await context.fetch(detailsUrl, {
+            headers: {
+              authorization: `Bearer ${secret.accessToken}`,
+              "chatgpt-account-id": context.account.codexAccountId,
+              originator: "bb",
+              accept: "application/json",
+            },
+            signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
+          }).catch(() => null);
+          if (details?.ok) credits = codexResetCreditDetails(await details.json().catch(() => null));
+          else await details?.body?.cancel();
+        } else credits = [];
+        context.quotas.putResetCredits(context.account.id, {
+          availableCount, credits, observedAt: context.now(),
+        });
+      } else context.quotas.clearResetCredits(context.account.id);
     },
     errorResponse(status, message, headers) {
       return Response.json(

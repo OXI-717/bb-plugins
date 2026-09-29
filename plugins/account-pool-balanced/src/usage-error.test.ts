@@ -87,6 +87,34 @@ describe("usage refresh", () => {
       limitWindows: [expect.objectContaining({ utilization: 0.4 })],
     });
 
+    const requested: string[] = [];
+    await adapter.refreshUsage({
+      account, accounts, quotas, now: () => 1_800_000_000_500,
+      freshSecret: async () => secret,
+      fetch: async (url) => {
+        requested.push(String(url));
+        if (String(url).endsWith("/rate-limit-reset-credits")) return Response.json({
+          credits: [
+            { status: "available", title: "Full reset", expires_at: "2026-10-05T00:00:00Z" },
+            { status: "redeemed", expires_at: "2026-10-01T00:00:00Z" },
+          ],
+        });
+        return Response.json({
+          rate_limit: { primary_window: { used_percent: 40 } },
+          rate_limit_reset_credits: { available_count: 1 },
+        });
+      },
+    });
+    expect(requested).toEqual([
+      "https://usage.example/wham/usage",
+      "https://usage.example/wham/rate-limit-reset-credits",
+    ]);
+    expect(quotas.resetCredits(account.id)).toEqual({
+      availableCount: 1,
+      credits: [{ title: "Full reset", expiresAt: Date.parse("2026-10-05T00:00:00Z") }],
+      observedAt: 1_800_000_000_500,
+    });
+
     const observedAt = quotas.get(account.id).observedAt;
     const tokens: Array<string | undefined> = [];
     let requests = 0;
