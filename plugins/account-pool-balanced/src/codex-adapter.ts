@@ -27,6 +27,7 @@ export const DEFAULT_CODEX_REFRESH_URL = `${CODEX_AUTH_BASE_URL}/oauth/token`;
 export const DEFAULT_CODEX_USAGE_URL =
   "https://chatgpt.com/backend-api/wham/usage";
 const USAGE_REQUEST_TIMEOUT_MS = 15_000;
+const RESET_DETAILS_TIMEOUT_MS = 3_000;
 const ALLOWED_REQUEST_HEADERS = new Set([
   "accept",
   "content-encoding",
@@ -401,7 +402,7 @@ export function createCodexAdapter(options: {
               originator: "bb",
               accept: "application/json",
             },
-            signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
+            signal: AbortSignal.timeout(RESET_DETAILS_TIMEOUT_MS),
           }).catch(() => null);
           if (details?.ok) credits = codexResetCreditDetails(await details.json().catch(() => null));
           else await details?.body?.cancel();
