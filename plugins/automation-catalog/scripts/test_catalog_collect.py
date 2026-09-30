@@ -11,13 +11,14 @@ import catalog_collect as c
 class CollectorTests(unittest.TestCase):
     def test_bb_agent_model_projection_excludes_prompt_and_marks_inheritance(self):
         for inherited in [False, True]:
-            execution = dict(mode='agent', providerId='example', model='example-model', reasoningLevel='high', serviceTier='fast', prompt='PRIVATE')
+            execution = dict(mode='agent', environment={'hostId': 'host-example'}, providerId='example', model='example-model', reasoningLevel='high', serviceTier='fast', prompt='PRIVATE')
             if inherited: execution['targetThreadId'] = 'thread-example'
             overview = dict(automations=[dict(project=dict(id='project-example', name='Example'), automation=dict(id='job', name='Job', enabled=True, execution=execution))])
-            with patch.object(c, 'command', side_effect=[json.dumps(overview), json.dumps(dict(runs=[]))]):
+            with patch.object(c, 'command', side_effect=[json.dumps(overview), json.dumps([{'id': 'host-example', 'name': 'Example Mac'}]), *([json.dumps({'environment': {'hostId': 'host-example'}})] if inherited else []), json.dumps(dict(runs=[]))]):
                 tasks, _ = c.bb_collect('http://source:1234', 'worker')
             self.assertEqual(tasks[0]['agent'], dict(targetThreadId='thread-example' if inherited else None, provider='example', model='example-model', reasoning='high', serviceTier='fast', modelSource='existing-thread' if inherited else 'automation'))
             self.assertEqual(tasks[0]['projectName'], 'Example')
+            self.assertEqual(tasks[0]['host'], 'Example Mac')
             self.assertNotIn('PRIVATE', str(tasks))
 
     def test_launchd_disabled_overrides_do_not_become_unknown_or_active(self):
@@ -52,7 +53,7 @@ class CollectorTests(unittest.TestCase):
             'execution': {'mode': 'script', 'interpreter': 'python3', 'script': 'PRIVATE'},
         }}]}
         history = {'runs': [{'id': 'r1', 'status': 'skipped', 'skipReason': 'empty output', 'startedAt': 100, 'finishedAt': 200, 'exitCode': 0, 'output': 'PRIVATE'}]}
-        with patch.object(c, 'command', side_effect=[json.dumps(overview), json.dumps(history)]) as read:
+        with patch.object(c, 'command', side_effect=[json.dumps(overview), json.dumps([]), json.dumps(history)]) as read:
             tasks, runs = c.bb_collect('http://source:1234', 'Mac')
         self.assertEqual(tasks[0]['scheduler'], 'bb')
         self.assertEqual(tasks[0]['scope'], 'personal')

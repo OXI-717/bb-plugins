@@ -11,13 +11,15 @@ describe("BB refresh", () => {
       const catalog = createCatalog(db);
       const url = "http://127.0.0.1:38886";
       catalog.publish({ source: { id: "bb-local", name: "BB", staleAfterMs: 60000, bbServerUrl: url }, observedAt: 1, error: null, tasks: [], runs: [] }, url);
-      let execution: Record<string, unknown> = { mode: "agent", providerId: "example", model: "model-one", reasoningLevel: "high", serviceTier: "fast", prompt: "PRIVATE" };
-      const command = async (...args: string[]) => args[0] === "plugin" ? { automations: [{ project: { id: "project-example", name: "Example" }, automation: { id: "job", name: "Job", enabled: true, execution, trigger: { triggerType: "schedule", cron: "0 9 * * 0", timezone: "UTC" } } }] } : { runs: [] };
+      let execution: Record<string, unknown> = { mode: "agent", environment: { hostId: "host-example" }, providerId: "example", model: "model-one", reasoningLevel: "high", serviceTier: "fast", prompt: "PRIVATE" };
+      const command = async (...args: string[]) => args[0] === "host" ? [{ id: "host-example", name: "Example Mac" }] : args[0] === "thread" ? { environment: { hostId: "host-example" } } : args[0] === "plugin" ? { automations: [{ project: { id: "project-example", name: "Example" }, automation: { id: "job", name: "Job", enabled: true, execution, trigger: { triggerType: "schedule", cron: "0 9 * * 0", timezone: "UTC" } } }] } : { runs: [] };
       await refreshBbCatalog(catalog, command, url);
       expect(catalog.list().tasks[0].agent).toEqual({ targetThreadId: null, provider: "example", model: "model-one", reasoning: "high", serviceTier: "fast", modelSource: "automation" });
-      execution = { ...execution, model: "model-two", targetThreadId: "thread-example" };
+      expect(catalog.list().tasks[0].host).toBe("Example Mac");
+      execution = { ...execution, environment: undefined, model: "model-two", targetThreadId: "thread-example" };
       await refreshBbCatalog(catalog, command, url);
       expect(catalog.list().tasks.find(t => !t.missing)?.agent).toMatchObject({ model: "model-two", modelSource: "existing-thread" });
+      expect(catalog.list().tasks.find(t => !t.missing)?.host).toBe("Example Mac");
       expect(JSON.stringify(catalog.list())).not.toContain("PRIVATE");
       execution = { mode: "script", interpreter: "bash" };
       await refreshBbCatalog(catalog, command, url);
@@ -45,7 +47,7 @@ describe("BB refresh", () => {
         execution: { mode: "script", interpreter: "python3" },
         trigger: { triggerType: "schedule", cron: "0 9 * * *", timezone: "UTC" },
       } }];
-      const command = async (...args: string[]) => args[0] === "plugin"
+      const command = async (...args: string[]) => args[0] === "host" ? [{ id: "host-example", name: "Example Mac" }] : args[0] === "thread" ? { environment: { hostId: "host-example" } } : args[0] === "plugin"
         ? { automations: entries }
         : { runs: [{ id: "run1", status: "failed", startedAt: 100, finishedAt: 200, exitCode: 1, output: "PRIVATE" }] };
       await refreshBbCatalog(catalog, command, "http://127.0.0.1:38886");
