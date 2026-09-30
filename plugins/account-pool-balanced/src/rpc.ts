@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   accountAddInputSchema,
   accountCapInputSchema,
+  accountDrainInputSchema,
   accountRoleInputSchema,
   accountPoolConfigSchema,
   accountPoolConfigSetInputSchema,
@@ -65,6 +66,10 @@ export const accountPoolRpcContract = defineRpcContract({
   },
   "account.setRole": {
     input: accountRoleInputSchema,
+    output: z.object({ account: accountSchema.nullable() }).strict(),
+  },
+  "account.setDrainOnce": {
+    input: accountDrainInputSchema,
     output: z.object({ account: accountSchema.nullable() }).strict(),
   },
   "account.setCap": {
@@ -156,6 +161,9 @@ export function createRpcHandlers(
     }),
     "account.setRole": async ({ accountId, role }) => ({
       account: await operations.setRole(accountId, role),
+    }),
+    "account.setDrainOnce": async ({ accountId, enabled }) => ({
+      account: await operations.setDrainOnce(accountId, enabled),
     }),
     "account.setCap": async ({ accountId, cap }) => ({
       account: await operations.setCap(accountId, cap),

@@ -280,6 +280,7 @@ export class AccountPoolHub {
         fetch: (input, init) => this.options.fetch(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
         now: this.options.now,
       })
+      .then(async () => { await this.settleDrain(account); })
       .finally(() => this.usageRefreshes.delete(account.id));
     this.usageRefreshes.set(account.id, refresh);
     return refresh;
@@ -312,10 +313,25 @@ export class AccountPoolHub {
     }
   }
 
+  private async settleDrain(account: Account, rejected = false): Promise<Account> {
+    if (!account.drainOnce) return account;
+    const quota = this.options.quotas.get(account.id);
+    const exhausted = rejected || (["fable", "sonnet", "opus", "haiku", "other"] as const)
+      .some((family) => isQuotaExhausted(quota, family, 1, this.options.now()));
+    if (!exhausted) return account;
+    const updated = await this.options.accounts.finishDrain(account);
+    this.options.onAccountsChanged();
+    return updated ?? account;
+  }
+
+  private async routingAccounts(): Promise<Account[]> {
+    return Promise.all((await this.options.accounts.list()).map((account) => this.settleDrain(account)));
+  }
+
   async status(): Promise<Omit<PoolStatus, "routing">> {
     const settings = this.options.getSettings();
     const now = this.options.now();
-    const accounts = (await this.options.accounts.list()).sort(
+    const accounts = (await this.routingAccounts()).sort(
       (left, right) => left.priority - right.priority,
     );
     const workWeek = {
@@ -335,8 +351,8 @@ export class AccountPoolHub {
         }))
         .filter(({ quota }) => quota.error === null)
         .filter(
-          ({ quota }) =>
-            !isSharedQuotaExhausted(quota, settings.switchThreshold, now),
+          ({ account, quota }) =>
+            !isSharedQuotaExhausted(quota, account.drainOnce ? 1 : settings.switchThreshold, now),
         );
       for (const entry of gateMembership(entries, now, drainMs, workWeek))
         eligibleIds.add(entry.account.id);
@@ -373,7 +389,7 @@ export class AccountPoolHub {
           drainOpensAt: drainOpensAt(quota, now, drainMs, workWeek),
           capReached:
             limit !== null && (weeklyUtilization(quota, now) ?? 0) >= limit,
-          status: accountStatus(account, quota, settings.switchThreshold, now),
+          status: accountStatus(account, quota, account.drainOnce ? 1 : settings.switchThreshold, now),
         };
       }),
     };
@@ -533,6 +549,7 @@ export class AccountPoolHub {
             this.options.now(),
           );
           this.options.quotas.put(observed);
+          await this.settleDrain(selected.account, response.status === 429 && adapter.isQuotaRejection(response.headers));
           if (pacing !== null && !response.ok) {
             this.releasePacing(selected.account.id, pacing);
             pacing = null;
@@ -770,7 +787,7 @@ export class AccountPoolHub {
     routing: RoutingAttempt,
     signal: AbortSignal,
   ): Promise<SelectedAccount | null> {
-    const accounts = (await this.options.accounts.list()).sort(
+    const accounts = (await this.routingAccounts()).sort(
       (left, right) => left.priority - right.priority,
     );
     signal.throwIfAborted();
@@ -790,13 +807,13 @@ export class AccountPoolHub {
           quota: this.options.quotas.get(account.id),
         }))
         .filter(({ quota }) => quota.error === null)
-        .filter(({ quota }) => !isSharedQuotaExhausted(quota, threshold, now)),
+        .filter(({ account, quota }) => !isSharedQuotaExhausted(quota, account.drainOnce ? 1 : threshold, now)),
       now,
       settings.reserveDrainHours * 60 * 60 * 1_000,
       workWeek,
     );
     const eligible = available.filter(
-      ({ quota }) => !isQuotaExhausted(quota, family, threshold, now),
+      ({ account, quota }) => !isQuotaExhausted(quota, family, account.drainOnce ? 1 : threshold, now),
     );
     const unattempted = eligible.filter(
       ({ account }) =>
@@ -839,23 +856,25 @@ export class AccountPoolHub {
       ...accounts.slice(anchorIndex + 1),
       ...accounts.slice(0, anchorIndex + 1),
     ];
+    const draining = candidates.filter(({ account }) => account.drainOnce);
+    const preferredCandidates = draining.length > 0 ? draining : candidates;
     const next = balanced
       ? rankByBalance(
-          candidates,
+          preferredCandidates,
           (accountId) => this.inFlightByAccount.get(accountId) ?? 0,
           now,
           workWeek,
         )[0]
       : ordered
           .map((account) =>
-            candidates.find((candidate) => candidate.account.id === account.id),
+            preferredCandidates.find((candidate) => candidate.account.id === account.id),
           )
           .find((candidate) => candidate !== undefined);
     const selected =
       bound !== undefined && unattempted.includes(bound)
         ? bound
         : (inherited ??
-          (!balanced &&
+          (draining.length === 0 && !balanced &&
           boundAccountId === null &&
           previousAccountId === null &&
           activeAccount !== undefined &&
@@ -1200,10 +1219,11 @@ export class AccountPoolHub {
       .flatMap((account) => {
         const quota = this.options.quotas.get(account.id);
         if (quota.error !== null) return [];
-        const quotaResetAt = blockingResetAt(quota, family, threshold, now);
+        const effectiveThreshold = account.drainOnce ? 1 : threshold;
+        const quotaResetAt = blockingResetAt(quota, family, effectiveThreshold, now);
         if (
           quotaResetAt === null &&
-          isQuotaExhausted(quota, family, threshold, now)
+          isQuotaExhausted(quota, family, effectiveThreshold, now)
         )
           return [];
         const resetAt = Math.max(quota.heldUntil ?? 0, quotaResetAt ?? 0);

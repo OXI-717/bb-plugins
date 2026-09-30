@@ -29,6 +29,7 @@ interface ProgressiveCap {
 interface PoolMembership {
   role: "primary" | "reserve";
   cap: ProgressiveCap | null;
+  drainOnce?: boolean;
 }
 
 function clampFraction(value: number): number {
@@ -190,6 +191,7 @@ function allowedUtilization(
 }
 
 function effectiveCap(account: PoolMembership): ProgressiveCap | null {
+  if (account.drainOnce) return null;
   return (
     account.cap ?? (account.role === "reserve" ? DEFAULT_RESERVE_CAP : null)
   );
@@ -261,7 +263,7 @@ export function gateMembership<
   const preferred = withinCap.filter(
     ({ entry, draining }) => entry.account.role === "primary" || draining,
   );
-  return (preferred.length > 0 ? preferred : withinCap).map(
+  return withinCap.filter((item) => item.entry.account.drainOnce || preferred.length === 0 || preferred.includes(item)).map(
     ({ entry }) => entry,
   );
 }

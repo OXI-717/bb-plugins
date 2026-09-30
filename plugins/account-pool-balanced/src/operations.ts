@@ -202,6 +202,12 @@ export class PoolOperations {
     return account;
   }
 
+  async setDrainOnce(id: string, enabled: boolean): Promise<Account | null> {
+    const account = await this.accounts.setDrainOnce(id, enabled);
+    if (account !== null) this.onAccountsChanged();
+    return account;
+  }
+
   async setCap(id: string, cap: Account["cap"]): Promise<Account | null> {
     const account = await this.accounts.setCap(id, cap);
     if (account !== null) this.onAccountsChanged();

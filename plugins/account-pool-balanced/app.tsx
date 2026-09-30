@@ -323,6 +323,7 @@ function statusPresentation(
   label: string;
   dot: string;
 } {
+  if (account.drainOnce) threshold = 1;
   if (account.status === "ready" && account.capReached) {
     const resetAt = weeklyResetAt(account);
     return {
@@ -409,6 +410,7 @@ type QuotaSlot = {
 };
 
 function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
+  if (account.drainOnce) threshold = 1;
   const weeklyLimit = Math.min(threshold, account.capLimit ?? threshold);
   if (account.provider === "codex") {
     if (account.limitWindows.length === 0)
@@ -505,6 +507,7 @@ const accountDragModifiers: Modifier[] = [restrictAccountDragToVerticalAxis];
 
 type AccountAction =
   | "toggle"
+  | "drain"
   | "priority"
   | "role"
   | "cap"
@@ -597,6 +600,7 @@ function AccountRow({
                 </span>
               )}
               <SettingsBadge>{tier(account)}</SettingsBadge>
+              {account.drainOnce ? <SettingsBadge>До исчерпания</SettingsBadge> : null}
               {account.role === "reserve" ? (
                 <SettingsBadge>Резерв</SettingsBadge>
               ) : null}
@@ -1316,6 +1320,8 @@ function AccountPoolSettings() {
         await rpc.call(account.enabled ? "account.disable" : "account.enable", {
           id: account.id,
         });
+      if (action === "drain")
+        await rpc.call("account.setDrainOnce", { accountId: account.id, enabled: !account.drainOnce });
       if (action === "refresh")
         await rpc.call("account.refreshUsage", { accountId: account.id });
     });
@@ -1801,6 +1807,7 @@ function AccountPoolSettings() {
               DEFAULT_ACCOUNT_POOL_CONFIG.reserveDrainHours
             }
             close={closeDialog}
+            pending={pending !== null}
             act={(action) => void accountAction(selectedAccount, action)}
           />
         ) : null}
@@ -2109,6 +2116,7 @@ function capSummary(account: AccountSummary): string | null {
   const curve =
     account.cap ?? (account.role === "reserve" ? DEFAULT_RESERVE_CAP : null);
   if (curve === null) return null;
+  if (account.drainOnce) return "Временно снят — до исчерпания";
   return `${percent(curve.early)} → ${percent(curve.late)}${
     account.capLimit === null ? "" : ` · сейчас ${percent(account.capLimit)}`
   }`;
@@ -2122,6 +2130,7 @@ function AccountDialog({
   drainHours,
   close,
   act,
+  pending,
 }: {
   account: AccountSummary;
   refreshError: string | null;
@@ -2129,8 +2138,10 @@ function AccountDialog({
   current: boolean;
   drainHours: number;
   close: () => void;
-  act: (action: "toggle" | "refresh" | "remove") => void;
+  act: (action: "toggle" | "refresh" | "remove" | "drain") => void;
+  pending: boolean;
 }) {
+  if (account.drainOnce) threshold = 1;
   const cap = capSummary(account);
   const weeklySkipAt =
     account.capLimit === null
@@ -2186,7 +2197,16 @@ function AccountDialog({
         </SettingsBadge>
         {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
       </div>
-      {account.role === "reserve" ? (
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={account.drainOnce === true} disabled={pending}
+          onChange={() => act("drain")} />
+        Использовать до исчерпания
+      </label>
+      <p className="text-sm text-muted-foreground">
+        Приоритет для новых запросов без недельного потолка и досрочного переключения.
+        Выключится при первом исчерпанном лимите провайдера. Сброс лимита выполняется вручную.
+      </p>
+      {account.role === "reserve" && !account.drainOnce ? (
         <p className="text-sm text-muted-foreground">
           {`Используется, только когда ни один основной аккаунт не подходит, или за ${drainHours} рабочих часов до его недельного сброса.`}
         </p>

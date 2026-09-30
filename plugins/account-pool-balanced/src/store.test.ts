@@ -60,6 +60,16 @@ describe("AccountStore", () => {
     expect(await store.list()).toEqual([
       expect.objectContaining({ accountUuid: null }),
     ]);
+    const legacy = (await store.list())[0]!;
+    expect(legacy.drainOnce ?? false).toBe(false);
+    const first = (await store.setDrainOnce(legacy.id, true))!;
+    const reloaded = new AccountStore(host.bb.storage.kv, path.join(dataDir, "secrets"));
+    expect((await reloaded.get(legacy.id))?.drainOnce).toBe(true);
+    const rearmed = (await store.setDrainOnce(legacy.id, true))!;
+    await store.finishDrain(first);
+    expect((await reloaded.get(legacy.id))?.drainGeneration).toBe(rearmed.drainGeneration);
+    await store.finishDrain(rearmed);
+    expect((await reloaded.get(legacy.id))?.drainOnce).toBe(false);
   });
 
   it("preserves both accounts added concurrently", async () => {
