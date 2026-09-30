@@ -21,6 +21,12 @@ describe("BB refresh", () => {
       expect(catalog.list().tasks.find(t => !t.missing)?.agent).toMatchObject({ model: "model-two", modelSource: "existing-thread" });
       expect(catalog.list().tasks.find(t => !t.missing)?.host).toBe("Example Mac");
       expect(JSON.stringify(catalog.list())).not.toContain("PRIVATE");
+      await refreshBbCatalog(catalog, async (...args) => {
+        if (args[0] === "thread") throw new Error("Target unavailable");
+        if (args[0] === "host") expect(args).toEqual(["host", "list", "--all"]);
+        return command(...args);
+      }, url);
+      expect(catalog.list().tasks.find(t => !t.missing)?.host).toBe("Хост не определён");
       execution = { mode: "script", interpreter: "bash" };
       await refreshBbCatalog(catalog, command, url);
       expect(catalog.list().tasks.find(t => !t.missing)?.agent).toBeNull();

@@ -250,15 +250,19 @@ def bb_collect(server, host):
     def read(argv):
         return json.loads(command(['bb', *argv, '--json'], env=env))
     overview = read(['plugin', 'rpc', 'call', 'automations', 'automations_overview'])
-    hosts = {h['id']: h['name'] for h in read(['host', 'list'])}
+    hosts = {h['id']: h['name'] for h in read(['host', 'list', '--all'])}
     tasks, runs = [], []
     for entry in overview['automations']:
         item, project = entry['automation'], entry['project']
         execution = item.get('execution', {})
         host_id = (execution.get('environment') or {}).get('hostId')
         if execution.get('targetThreadId'):
-            target = read(['thread', 'show', execution['targetThreadId']])
-            host_id = (target.get('environment') or {}).get('hostId')
+            host_id = None
+            try:
+                target = read(['thread', 'show', execution['targetThreadId']])
+                host_id = (target.get('environment') or {}).get('hostId')
+            except (RuntimeError, subprocess.SubprocessError, ValueError):
+                pass  # Missing/inaccessible target: unknown host, not stale routing.
         execution_host = host if execution.get('mode') == 'script' else hosts.get(host_id, 'Хост не определён')
         task = task_base(item['id'], item['name'], execution_host)
         trigger = item.get('trigger', {})

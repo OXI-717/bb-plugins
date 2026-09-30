@@ -43,12 +43,16 @@ export async function refreshBbCatalog(catalog: Catalog, command: Command, local
   const source = current.sources.find((item) => item.managedHere);
   if (!source) throw new Error("Источник BB не подключён к каталогу");
   const overview = overviewSchema.parse(await command("plugin", "rpc", "call", "automations", "automations_overview"));
-  const hosts = z.array(z.object({ id: z.string(), name: z.string() })).parse(await command("host", "list"));
+  const hosts = z.array(z.object({ id: z.string(), name: z.string() })).parse(await command("host", "list", "--all"));
   const tasks = await Promise.all(overview.automations.map(async ({ automation: item, project }) => {
     let hostId = item.execution.environment?.hostId;
     if (item.execution.targetThreadId) {
-      const target = z.object({ environment: z.object({ hostId: z.string() }).nullish() }).parse(await command("thread", "show", item.execution.targetThreadId));
-      hostId = target.environment?.hostId;
+      // A deleted/inaccessible target must not prevent refreshing other tasks.
+      hostId = undefined;
+      try {
+        const target = z.object({ environment: z.object({ hostId: z.string() }).nullish() }).parse(await command("thread", "show", item.execution.targetThreadId));
+        hostId = target.environment?.hostId;
+      } catch { /* Keep the host explicitly unknown; never reuse stale routing. */ }
     }
     const executionHost = item.execution.mode === "script" ? hostname() : hosts.find(h => h.id === hostId)?.name ?? "Хост не определён";
     const previous = current.tasks.find((task) => task.sourceId === source.id && task.id === item.id && !task.missing);
