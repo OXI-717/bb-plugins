@@ -6454,6 +6454,9 @@ describe("sequential pool recovery", () => {
       label: null,
       priority: 100,
     });
+    await fixture.host.harness.behavior.callRpc("account.setDrainOnce", {
+      accountId: fixture.account.id, enabled: true,
+    });
     for (const session of ["first-session", "second-session"]) {
       const response = await fixture.host.harness.behavior.fetchHttp(
         "POST",
@@ -6519,6 +6522,94 @@ describe("sequential pool recovery", () => {
     expect(
       entries.find((entry) => entry.name === "ANTHROPIC_BASE_URL")?.value,
     ).toEqual({ serverPath: "/api/v1/plugins/account-pool-balanced/http" });
+  });
+
+  it.each([
+    ["short window", 200, { "anthropic-ratelimit-unified-5h-utilization": "1" }, false],
+    ["model quota", 200, { "anthropic-ratelimit-unified-7d_opus-utilization": "1" }, false],
+    ["quota rejection", 429, { "anthropic-ratelimit-unified-7d-status": "rejected" }, false],
+    ["pacing", 429, { "retry-after": "60" }, true],
+    ["provider outage", 503, {}, true],
+  ] as const)("one-shot drain handles %s", async (_name, code, headers, remainsArmed) => {
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example",
+      options: { fetch: async () => Response.json({}, { status: code, headers }) },
+    });
+    await fixture.host.harness.behavior.callRpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: true });
+    const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/messages", {
+      headers: authHeaders(fixture.key), body: JSON.stringify({ model: "claude-opus-4" }),
+    });
+    await response.text();
+    const status = statusSchema.parse(await fixture.host.harness.behavior.callRpc("status.get", null));
+    expect(status.accounts[0]?.drainOnce).toBe(remainsArmed);
+  });
+
+  it("clears one-shot draining on Codex weekly usage refresh and never rearms after reset", async () => {
+    let used = 99;
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", provider: "codex", source: "import",
+      options: {
+        codexUsageUrl: EMPTY_USAGE_URL,
+        importCodexCredentials: async () => ({ accessToken: "test-access", refreshToken: "test-refresh", idToken: null,
+          accountId: "synthetic-codex", email: null, expiresAt: Date.now() + 86400000 }),
+        fetch: async () => Response.json({ rate_limit: { allowed: used < 100, limit_reached: used >= 100,
+          primary_window: { used_percent: used, limit_window_seconds: 604800, reset_after_seconds: 86400,
+            reset_at: Math.floor(Date.now() / 1000) + 86400 }, secondary_window: null } }),
+      },
+    });
+    const rpc = fixture.host.harness.behavior.callRpc;
+    await rpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: true });
+    const current = async () => statusSchema.parse(await rpc("status.get", null)).accounts[0]!;
+    await rpc("account.refreshUsage", { accountId: fixture.account.id });
+    expect(await current()).toMatchObject({ drainOnce: true, status: "ready", fiveHourUtilization: null });
+    expect((await current()).limitWindows).toHaveLength(1);
+    used = 100;
+    await rpc("account.refreshUsage", { accountId: fixture.account.id });
+    expect((await current()).drainOnce).toBe(false);
+    used = 0;
+    await rpc("account.refreshUsage", { accountId: fixture.account.id });
+    expect(await current()).toMatchObject({ drainOnce: false, status: "ready" });
+  });
+
+  it("drains an armed reserve past 98%, keeps affinity, and clears once at exhaustion", async () => {
+    const attempts: Array<string | null> = [];
+    let used = "0.99";
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example", apiKey: "sk-reserve",
+      options: { fetch: async (_input, init) => {
+        const key = new Headers(init?.headers).get("x-api-key");
+        attempts.push(key);
+        return Response.json({}, { headers: {
+          "anthropic-ratelimit-unified-7d-utilization": key === "sk-reserve" ? used : "0.1",
+          "anthropic-ratelimit-unified-7d-reset": String(Math.floor(Date.now() / 1000) + 86400),
+        } });
+      } },
+    });
+    await addApiAccount(fixture, "sk-primary", 0);
+    const rpc = fixture.host.harness.behavior.callRpc;
+    await rpc("account.setRole", { accountId: fixture.account.id, role: "reserve" });
+    const send = async (session: string) => {
+      const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/messages", {
+        headers: authHeaders(fixture.key),
+        body: JSON.stringify({ metadata: { user_id: JSON.stringify({ session_id: session }) } }),
+      });
+      await response.text();
+      return response.status;
+    };
+    const current = async () => statusSchema.parse(await rpc("status.get", null)).accounts.find(a => a.id === fixture.account.id)!;
+    expect(await send("bound-primary")).toBe(200);
+    await rpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: true });
+    expect(await send("new-drain")).toBe(200);
+    expect(await send("bound-primary")).toBe(200);
+    expect(await send("another-new")).toBe(200);
+    expect(attempts).toEqual(["sk-primary", "sk-reserve", "sk-primary", "sk-reserve"]);
+    expect(await current()).toMatchObject({ drainOnce: true, capLimit: null, status: "ready" });
+    used = "1";
+    expect(await send("exhausting")).toBe(200);
+    expect(await current()).toMatchObject({ drainOnce: false, role: "reserve", status: "exhausted" });
+    expect(await send("after-exhaustion")).toBe(200);
+    expect(attempts.at(-1)).toBe("sk-primary");
+    used = "0";
+    expect((await current()).drainOnce).toBe(false);
+    await expect(rpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: "yes" })).rejects.toThrow();
   });
 
   it("keeps reserve accounts out of routing while a primary account is eligible", async () => {

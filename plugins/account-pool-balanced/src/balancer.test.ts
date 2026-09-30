@@ -273,3 +273,19 @@ describe("gateMembership", () => {
     ]);
   });
 });
+
+describe("one-shot draining", () => {
+  it("keeps normally available reserves eligible for existing bindings", () => {
+    const ordinary = member("ordinary", "reserve", weekly(0, 6 * DAY));
+    const reserve = member("armed", "reserve", weekly(0.99, 6 * DAY));
+    const armed = { ...reserve, account: { ...reserve.account, drainOnce: true } };
+    expect(ids(gateMembership([ordinary, armed], NOW, DRAIN))).toEqual(["ordinary", "armed"]);
+  });
+  it("admits an armed reserve above its cap without excluding primary bindings", () => {
+    const primary = member("primary", "primary", weekly(0.2, 6 * DAY));
+    const reserve = member("reserve", "reserve", weekly(0.99, 6 * DAY));
+    const armed = { ...reserve, account: { ...reserve.account, drainOnce: true } };
+    expect(ids(gateMembership([primary, armed], NOW, DRAIN))).toEqual(["primary", "reserve"]);
+    expect(ids(gateMembership([primary, reserve], NOW, DRAIN))).toEqual(["primary"]);
+  });
+});

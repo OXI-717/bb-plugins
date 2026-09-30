@@ -164,6 +164,23 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it("toggles one-shot draining in the account card", async () => {
+    const selected = account({ drainOnce: false });
+    const slot = render([selected], { "account.setDrainOnce": () => {
+      selected.drainOnce = !selected.drainOnce;
+      return { account: selected };
+    } });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    const checkbox = slot.getByRole("checkbox", { name: "Использовать до исчерпания" });
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({
+      method: "account.setDrainOnce", input: { accountId: selected.id, enabled: true },
+    }));
+    await waitFor(() => expect((checkbox as HTMLInputElement).checked).toBe(true));
+    fireEvent.click(checkbox);
+    await waitFor(() => expect((checkbox as HTMLInputElement).checked).toBe(false));
+  });
+
   it("renders cached accounts as refreshing until live status arrives, then caches it", async () => {
     window.localStorage.setItem(
       STATUS_CACHE_KEY,

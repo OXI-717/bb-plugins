@@ -218,6 +218,8 @@ export const accountSchema = z
     lastUsedHostId: z.string().min(1).nullable().default(null),
     role: accountRoleSchema.default("primary"),
     cap: accountCapSchema.default(null),
+    drainOnce: z.boolean().optional(),
+    drainGeneration: z.string().uuid().nullable().optional(),
   })
   .strict();
 
@@ -418,6 +420,10 @@ export const accountPriorityInputSchema = z
 
 export const accountRoleInputSchema = z
   .object({ accountId: z.string().uuid(), role: accountRoleSchema })
+  .strict();
+
+export const accountDrainInputSchema = z
+  .object({ accountId: z.string().uuid(), enabled: z.boolean() })
   .strict();
 
 export const accountCapInputSchema = z

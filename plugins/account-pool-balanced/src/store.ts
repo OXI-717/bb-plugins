@@ -129,6 +129,20 @@ export class AccountStore {
     return this.update(id, (account) => ({ ...account, role }));
   }
 
+  async setDrainOnce(id: string, enabled: boolean): Promise<Account | null> {
+    return this.update(id, (account) => ({
+      ...account, drainOnce: enabled, drainGeneration: enabled ? randomUUID() : null,
+    }));
+  }
+
+  async finishDrain(account: Account): Promise<Account | null> {
+    return this.update(account.id, (current) =>
+      current.drainOnce && current.drainGeneration === account.drainGeneration
+        ? { ...current, drainOnce: false, drainGeneration: null }
+        : current,
+    );
+  }
+
   async setCap(id: string, cap: Account["cap"]): Promise<Account | null> {
     return this.update(id, (account) => ({ ...account, cap }));
   }
