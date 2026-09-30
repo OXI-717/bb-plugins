@@ -250,7 +250,14 @@ def bb_collect(server, host):
     def read(argv):
         return json.loads(command(['bb', *argv, '--json'], env=env))
     overview = read(['plugin', 'rpc', 'call', 'automations', 'automations_overview'])
-    hosts = {h['id']: h['name'] for h in read(['host', 'list', '--all'])}
+    hosts = {}
+    try:
+        inventory = read(['host', 'list', '--all'])
+        if not isinstance(inventory, list):
+            raise ValueError('Host inventory unavailable')
+        hosts = {h['id']: h['name'] for h in inventory}
+    except (RuntimeError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        pass  # Host metadata is optional; continue collecting tasks and history.
     tasks, runs = [], []
     for entry in overview['automations']:
         item, project = entry['automation'], entry['project']

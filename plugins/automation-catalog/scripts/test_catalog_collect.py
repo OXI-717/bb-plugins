@@ -28,6 +28,13 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(tasks[0]['host'], 'Хост не определён')
         self.assertIn('--all', read.call_args_list[1].args[0])
 
+    def test_bb_host_inventory_failure_preserves_tasks(self):
+        overview = {'automations': [{'project': {'id': 'example', 'name': 'Example'}, 'automation': {'id': 'job', 'name': 'Job', 'enabled': True, 'execution': {'mode': 'agent', 'environment': {'hostId': 'example'}}}}]}
+        for failure in [RuntimeError('Unavailable'), '{"ok": false}']:
+            with patch.object(c, 'command', side_effect=[json.dumps(overview), failure, '{"runs":[]}']):
+                tasks, _ = c.bb_collect('http://source:1234', 'worker')
+            self.assertEqual(tasks[0]['host'], 'Хост не определён')
+
     def test_launchd_disabled_overrides_do_not_become_unknown_or_active(self):
         cases = [
             ('disabled', False, False, 'paused'),

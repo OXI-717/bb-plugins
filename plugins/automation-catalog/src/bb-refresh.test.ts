@@ -27,6 +27,11 @@ describe("BB refresh", () => {
         return command(...args);
       }, url);
       expect(catalog.list().tasks.find(t => !t.missing)?.host).toBe("Хост не определён");
+      await refreshBbCatalog(catalog, async (...args) => {
+        if (args[0] === "host") throw new Error("Hosts unavailable");
+        return command(...args);
+      }, url);
+      expect(catalog.list().tasks.find(t => !t.missing)?.host).toBe("Хост не определён");
       execution = { mode: "script", interpreter: "bash" };
       await refreshBbCatalog(catalog, command, url);
       expect(catalog.list().tasks.find(t => !t.missing)?.agent).toBeNull();

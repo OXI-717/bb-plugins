@@ -43,7 +43,10 @@ export async function refreshBbCatalog(catalog: Catalog, command: Command, local
   const source = current.sources.find((item) => item.managedHere);
   if (!source) throw new Error("Источник BB не подключён к каталогу");
   const overview = overviewSchema.parse(await command("plugin", "rpc", "call", "automations", "automations_overview"));
-  const hosts = z.array(z.object({ id: z.string(), name: z.string() })).parse(await command("host", "list", "--all"));
+  let hosts: { id: string; name: string }[] = [];
+  try {
+    hosts = z.array(z.object({ id: z.string(), name: z.string() })).parse(await command("host", "list", "--all"));
+  } catch { /* Host metadata is optional; task and run collection must continue. */ }
   const tasks = await Promise.all(overview.automations.map(async ({ automation: item, project }) => {
     let hostId = item.execution.environment?.hostId;
     if (item.execution.targetThreadId) {
