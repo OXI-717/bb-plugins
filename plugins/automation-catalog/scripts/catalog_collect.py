@@ -250,11 +250,28 @@ def bb_collect(server, host):
     def read(argv):
         return json.loads(command(['bb', *argv, '--json'], env=env))
     overview = read(['plugin', 'rpc', 'call', 'automations', 'automations_overview'])
+    hosts = {}
+    try:
+        inventory = read(['host', 'list', '--all'])
+        if not isinstance(inventory, list):
+            raise ValueError('Host inventory unavailable')
+        hosts = {h['id']: h['name'] for h in inventory}
+    except (RuntimeError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        pass  # Host metadata is optional; continue collecting tasks and history.
     tasks, runs = [], []
     for entry in overview['automations']:
         item, project = entry['automation'], entry['project']
         execution = item.get('execution', {})
-        task = task_base(item['id'], item['name'], host if execution.get('mode') == 'script' else 'BB-managed agent')
+        host_id = (execution.get('environment') or {}).get('hostId')
+        if execution.get('targetThreadId'):
+            host_id = None
+            try:
+                target = read(['thread', 'show', execution['targetThreadId']])
+                host_id = (target.get('environment') or {}).get('hostId')
+            except (RuntimeError, subprocess.SubprocessError, ValueError):
+                pass  # Missing/inaccessible target: unknown host, not stale routing.
+        execution_host = host if execution.get('mode') == 'script' else hosts.get(host_id, 'Хост не определён')
+        task = task_base(item['id'], item['name'], execution_host)
         trigger = item.get('trigger', {})
         schedule = ((trigger.get('cron', '') + ' ' + trigger.get('timezone', '')).strip()
                     if trigger.get('triggerType') == 'schedule' else datetime.datetime.fromtimestamp(trigger['runAt'] / 1000, datetime.timezone.utc).isoformat() if trigger.get('runAt') else 'Unknown schedule')
