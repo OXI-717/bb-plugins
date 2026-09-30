@@ -6247,6 +6247,30 @@ describe("Account Pool plugin", () => {
     ).toBe(42);
   });
 
+  it("releases an aborted request even when the downstream body is not consumed", async () => {
+    const upstream = await startUpstream((_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write("data: buffered\n\n");
+    });
+    cleanups.push(upstream.close);
+    const fixture = await createFixture({ upstreamUrl: upstream.url });
+    const client = new AbortController();
+    const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/messages", {
+      headers: authHeaders(fixture.key), body: "{}", signal: client.signal,
+    });
+    // Fill the wrapper's queue without asking it to pull another chunk.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const inFlight = async () => statusSchema.parse(await fixture.host.harness.behavior.callRpc("status.get", null)).inFlight;
+    expect(await inFlight()).toBe(1);
+    client.abort();
+    try {
+      await vi.waitFor(async () => expect(await inFlight()).toBe(0));
+    } finally {
+      await response.body?.cancel();
+    }
+    expect(await inFlight()).toBe(0);
+  });
+
   it("drains completed streams and aborts a stuck stream after the stop deadline", async () => {
     const upstream = await startUpstream((_request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });

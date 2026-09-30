@@ -1102,19 +1102,20 @@ export class AccountPoolHub {
     const abortFromRequest = () => controller.abort(request.signal.reason);
     this.activeControllers.add(controller);
     this.increment(account.id);
-    if (request.signal.aborted) abortFromRequest();
-    else
-      request.signal.addEventListener("abort", abortFromRequest, {
-        once: true,
-      });
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       request.signal.removeEventListener("abort", abortFromRequest);
+      controller.signal.removeEventListener("abort", release);
       this.activeControllers.delete(controller);
       this.decrement(account.id);
     };
+    // A queued downstream chunk can stop pull() indefinitely after disconnect.
+    // Abort is terminal even when nobody reads or cancels the response body.
+    controller.signal.addEventListener("abort", release, { once: true });
+    if (request.signal.aborted) abortFromRequest();
+    else request.signal.addEventListener("abort", abortFromRequest, { once: true });
     try {
       const upstreamBody = new ArrayBuffer(body.byteLength);
       new Uint8Array(upstreamBody).set(body);
