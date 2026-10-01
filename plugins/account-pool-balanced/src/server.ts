@@ -17,6 +17,7 @@ import type {
   ImportedCodexCredentials,
 } from "./credentials.js";
 import { createHub } from "./hub.js";
+import { CURSOR_RPC_PATH_HEADER, isCursorRpcPath } from "./cursor-rpc.js";
 import {
   CURSOR_EXCHANGE_PATH,
   CURSOR_MOUNT_PREFIX,
@@ -335,6 +336,14 @@ export function createAccountPoolPlugin(
       },
       { auth: "none" },
     );
+    for (const method of ["POST", "GET"] as const) {
+      bb.http.route(method, "/cursor/rpc", (context) => {
+        if (!isCursorRpcPath(context.req.raw.headers.get(CURSOR_RPC_PATH_HEADER) ?? "")) {
+          return Response.json({ error: "Invalid Cursor RPC path." }, { status: 400 });
+        }
+        return hub.handle(context.req.raw, "cursor");
+      }, { auth: "none" });
+    }
     for (const path of CURSOR_PROXIED_PATHS) {
       if (path === CURSOR_EXCHANGE_PATH) continue;
       for (const method of ["POST", "GET"] as const) {
@@ -382,6 +391,11 @@ export function createAccountPoolPlugin(
           name: "CURSOR_API_KEY",
           value: token,
           reason: "Account Pooler hub token for this machine",
+        },
+        {
+          name: "CURSOR_POOL_RPC_GATEWAY",
+          value: "1",
+          reason: "Use the generic Cursor RPC gateway",
         },
         {
           // Without this the CLI prefers a credential it already stored on the machine —

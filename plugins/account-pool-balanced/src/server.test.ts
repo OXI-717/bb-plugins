@@ -666,7 +666,7 @@ describe("Account Pool plugin", () => {
         hostId: "host-one",
       });
     expect((await envFor("acp-oxi-cursor")).map((entry) => entry.name)).toEqual(
-      expect.arrayContaining(["CURSOR_API_ENDPOINT", "CURSOR_API_KEY"]),
+      expect.arrayContaining(["CURSOR_API_ENDPOINT", "CURSOR_API_KEY", "CURSOR_POOL_RPC_GATEWAY", "AGENT_CLI_CREDENTIAL_STORE"]),
     );
     expect(await envFor("acp-cursor")).toEqual([]);
   });
@@ -786,7 +786,7 @@ describe("Account Pool plugin", () => {
     }
   });
 
-  it("mints an access token from the pooled key and never forwards the pool token", async () => {
+  it.each(["agent.v1.AgentService/RunSSE", "aiserver.v2.FutureService/NewToolPermission"])("mints and isolates Cursor authorization for %s", async (rpcPath) => {
     const requests: Request[] = [];
     let exchanges = 0;
     const fixture = await createFixture({
@@ -820,7 +820,7 @@ describe("Account Pool plugin", () => {
     const body = JSON.stringify({ prompt: "probe" });
     const response = await fixture.host.harness.behavior.fetchHttp(
       "POST",
-      "/cursor/agent.v1.AgentService/RunSSE",
+      "/cursor/rpc",
       {
         headers: {
           "content-type": "application/connect+proto",
@@ -829,6 +829,7 @@ describe("Account Pool plugin", () => {
           "accept-encoding": "gzip",
           "content-encoding": "gzip",
           "x-unrelated-header": "dropped",
+          "x-bb-cursor-rpc-path": rpcPath,
         },
         body,
       },
@@ -838,7 +839,7 @@ describe("Account Pool plugin", () => {
     expect(exchanges).toBeGreaterThanOrEqual(1);
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe(
-      "https://upstream.example/agent.v1.AgentService/RunSSE",
+      `https://upstream.example/${rpcPath}`,
     );
     expect(requests[0]?.headers.get("authorization")).toBe(
       "Bearer minted-access-token",
@@ -850,6 +851,7 @@ describe("Account Pool plugin", () => {
     // The body travels untouched, so its own encoding header has to travel with it.
     expect(requests[0]?.headers.get("content-encoding")).toBe("gzip");
     expect(requests[0]?.headers.has("x-unrelated-header")).toBe(false);
+    expect(requests[0]?.headers.has("x-bb-cursor-rpc-path")).toBe(false);
     expect(await requests[0]?.text()).toBe(body);
   });
 
@@ -966,10 +968,16 @@ describe("Account Pool plugin", () => {
         "aiserver.v1.AiService/NameAgent",
         "aiserver.v1.AnalyticsService/BootstrapStatsig",
         "aiserver.v1.AnalyticsService/TrackEvents",
+        "aiserver.v1.AnalyticsService/SubmitLogs",
+        "aiserver.v1.DashboardService/ListMarketplaces",
+        "aiserver.v1.DashboardService/RegisterMarketplaceAndPlugins",
+        "aiserver.v1.DashboardService/GetEffectiveUserPlugins",
+        "aiserver.v1.DashboardService/GetCliDownloadUrl",
         "aiserver.v1.DashboardService/GetGlobalCommands",
         "aiserver.v1.DashboardService/GetManagedSkills",
         "aiserver.v1.DashboardService/GetMe",
         "aiserver.v1.DashboardService/GetTeamAdminSettingsOrEmptyIfNotInTeam",
+        "aiserver.v1.DashboardService/GetTeamReposOrEmptyIfNotInTeam",
         "v1/traces",
         "aiserver.v1.BidiService/BidiAppend",
         "aiserver.v1.DashboardService/GetCurrentPeriodUsage",

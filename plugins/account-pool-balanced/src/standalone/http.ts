@@ -4,6 +4,8 @@ import { pipeline } from "node:stream/promises";
 import type { PoolProvider } from "../contracts.js";
 import { DEVIN_PROXIED_PATHS, devinMachineToken } from "../devin-adapter.js";
 import type { StandalonePool } from "./runtime.js";
+import { CURSOR_EXCHANGE_PATH } from "../cursor-adapter.js";
+import { CURSOR_RPC_PATH_HEADER, isCursorRpcPath } from "../cursor-rpc.js";
 
 const routes = new Map<string, PoolProvider>([
   ["/v1/messages", "claude"], ["/v1/messages/count_tokens", "claude"],
@@ -48,11 +50,15 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
     };
     try {
       const url = new URL(req.url ?? "/", "http://pool.invalid");
-      const provider = routes.get(url.pathname);
+      const cursorPath = url.pathname.startsWith("/cursor/") ? url.pathname.slice("/cursor/".length) : null;
+      const cursorExchange = cursorPath === CURSOR_EXCHANGE_PATH;
+      const cursorGateway = cursorPath === "rpc";
+      const cursorRoute = cursorExchange || cursorGateway || (cursorPath !== null && isCursorRpcPath(cursorPath));
+      const provider = cursorRoute ? "cursor" : routes.get(url.pathname);
       const devinCreate = url.pathname === "/agents/devin/sessions" && req.method === "POST";
       const devinSession = /^\/agents\/devin\/sessions\/([A-Za-z0-9_-]{1,160})(\/messages)?$/.exec(url.pathname);
       const devinRoute = devinSession && (devinSession[2] ? req.method === "POST" : req.method === "GET" || req.method === "DELETE");
-      const modelMethod = url.pathname === "/v1/models" ? "GET" : "POST";
+      const modelMethod = cursorRoute && req.method === "GET" && !cursorExchange ? "GET" : url.pathname === "/v1/models" ? "GET" : "POST";
       if ((!provider || req.method !== modelMethod) && !devinCreate && !devinRoute) { fail(404, "Unknown pool route."); return; }
       const headers = new Headers();
       for (const [key, value] of Object.entries(req.headers)) {
@@ -63,9 +69,15 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
       const client = await pool.tokens.authenticate(credential);
       if (client === null) { fail(401, "Invalid pool token."); return; }
       headers.set("x-bb-account-pool-token", credential!);
+      if (cursorGateway && !isCursorRpcPath(headers.get(CURSOR_RPC_PATH_HEADER) ?? "")) { fail(400, "Invalid Cursor RPC path."); return; }
       if (backgroundError) { fail(503, "Pool service unavailable."); return; }
       if (Number(req.headers["content-length"] ?? 0) > MAX_BODY) { fail(413, "Request too large."); return; }
       const body = await readBody(req);
+      if (cursorExchange) {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ accessToken: credential, refreshToken: credential }));
+        return;
+      }
       if (devinCreate || devinRoute) {
         let input: unknown;
         try { input = body.length ? JSON.parse(body.toString("utf8")) : undefined; }
