@@ -83,6 +83,8 @@ jobs:
           /bin/bash --version
           /bin/bash -n scripts/upgrade-pool.sh
           /bin/bash scripts/upgrade-pool.sh --help
+      - name: Rehearse the full upgrade in sandbox
+        run: /bin/bash scripts/upgrade-pool.sh --sandbox
       - name: Test upgrade without a live BB server
         run: python3 -m unittest discover -s scripts -p test_upgrade_pool.py -v
 

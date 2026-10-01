@@ -79,6 +79,7 @@ Per-account quota protection and availability: [Account policies](plugins/accoun
 From a checkout on the BB server host, use the same command for every release:
 
 ```sh
+bash scripts/upgrade-pool.sh --sandbox
 bash scripts/upgrade-pool.sh --check
 bash scripts/upgrade-pool.sh
 ```

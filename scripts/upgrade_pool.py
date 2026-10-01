@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import traceback
 import urllib.parse
 import urllib.request
 
@@ -127,7 +128,7 @@ def save_json(path, value):
 
 def report_pool(pool, say):
     say(f"In-flight requests: {pool['inFlight']}")
-    names = {h['id']: h.get('name', h['id']) for h in pool.get('hosts', [])}
+    names = {h['hostId']: h.get('hostName') or h['hostId'] for h in pool.get('hosts', [])}
     for account in pool['accounts']:
         if account.get('inFlight', 0):
             host = account.get('lastUsedHostId')
@@ -214,6 +215,8 @@ def perform(args, data, output, say):
     say(f"Installed {info['version']}; selected {target}; commit {sha}")
     if version(target) < version(info['version']):
         raise UpgradeError('Downgrades are not supported')
+    if args.check:
+        report_pool(bb('pool', 'status'), say)
     if target == info['version']:
         if not source.get('history') or source['history'][0]['version'] != sha:
             raise UpgradeError('Installed version matches but resolved commit differs')
@@ -262,7 +265,13 @@ def main():
     parser.add_argument('--check', action='store_true', help='Validate release without waiting or updating')
     parser.add_argument('--version', help='Require this to be the latest compatible release; not a downgrade selector')
     parser.add_argument('--interrupt-now', action='store_true', help='Offer the interactive interruption prompt immediately')
+    parser.add_argument('--sandbox', action='store_true', help='Exercise the full workflow on temporary synthetic state; no live BB or network')
     args = parser.parse_args()
+    if args.sandbox:
+        if args.version or args.check or args.interrupt_now:
+            parser.error('--sandbox cannot be combined with live-operation options')
+        from upgrade_pool_sandbox import sandbox
+        return sandbox(sys.modules[__name__])
     os.umask(0o077)
     output = None
     try:
@@ -295,7 +304,9 @@ def main():
                     result = perform(args, data, output, say)
                 except (Exception, KeyboardInterrupt) as error:
                     message = 'Cancelled by user' if isinstance(error, KeyboardInterrupt) else str(error)
-                    say('FAILED: ' + message)
+                    say('FAILED: ' + type(error).__name__ + ': ' + message)
+                    traceback.print_exc(file=log)
+                    log.flush()
                     if isinstance(error, UpgradeError) and error.detail:
                         log.write('Command diagnostics (private):\n' + error.detail + '\n')
                         log.flush()
