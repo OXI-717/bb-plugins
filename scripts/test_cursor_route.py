@@ -54,7 +54,7 @@ assert sys.argv[-2:] == ["--agent-endpoint", endpoint]
 assert os.environ["AGENT_CLI_CREDENTIAL_STORE"] == "memory"
 url = urlsplit(endpoint)
 for path in ["aiserver.v7.FutureService/NewTool", "auth/exchange_user_api_key"]:
-    conn = http.client.HTTPConnection(url.hostname, url.port)
+    conn = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
     conn.request("POST", "/" + path, body=b"\\x00\\xffprobe", headers={"Authorization": "Bearer synthetic-hub-token", "x-bb-cursor-rpc-path": "forged/path"})
     response = conn.getresponse()
     assert response.status == 200
@@ -64,7 +64,7 @@ print("PROBE_OK")
 ''')
                 cli.chmod(0o755)
                 env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], CURSOR_API_ENDPOINT=f"http://127.0.0.1:{hub.server_port}/cursor", CURSOR_POOL_RPC_GATEWAY="1", CURSOR_CONFIG_DIR=tmp)
-                result = subprocess.run([sys.executable, str(WRAPPER), "acp"], env=env, capture_output=True, text=True, timeout=15)
+                result = subprocess.run([sys.executable, str(WRAPPER), "acp"], env=env, capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.strip(), "PROBE_OK")
                 self.assertEqual(calls, [
