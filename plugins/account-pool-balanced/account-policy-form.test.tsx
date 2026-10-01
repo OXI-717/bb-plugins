@@ -5,6 +5,28 @@ import { AccountPolicyForm } from './account-policy-form';
 import { accountPolicySchema, type AccountSummary } from './src/contracts.js';
 afterEach(cleanup);
 const account = { provider: 'codex', fiveHourUtilization: null, limitWindows: [], role: 'primary', policy: accountPolicySchema.parse({ enabled: true, weeklyKeep:50 }) } as unknown as AccountSummary;
+it('prefills unsaved personal settings from global values before enabling', async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  const fresh = { ...account, provider: 'claude', role: 'reserve', policy: undefined } as AccountSummary;
+  render(<AccountPolicyForm account={fresh} threshold={.875} drainHours={36} save={save} />);
+  const fiveHour = screen.getByRole('spinbutton', { name: /Оставлять квоту 5 часов/ }) as HTMLInputElement;
+  const weekly = screen.getByRole('spinbutton', { name: /Оставлять недельную квоту/ }) as HTMLInputElement;
+  expect(fiveHour.value).toBe('12.5');
+  expect(weekly.value).toBe('12.5');
+  expect(fiveHour.disabled || fiveHour.closest('fieldset')?.disabled).toBe(true);
+  expect((screen.getByRole('spinbutton', { name: /Подключать резерв/ }) as HTMLInputElement).value).toBe('36');
+  expect(save).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByLabelText('Индивидуальные настройки'));
+  await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, fiveHourKeep: 12.5, weeklyKeep: 12.5, reserveDrainHours: 36 })));
+});
+it('restores saved disabled settings when enabled again', async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  const saved = { ...account, policy: accountPolicySchema.parse({ enabled: false, weeklyKeep: 50 }) };
+  render(<AccountPolicyForm account={saved} threshold={.98} drainHours={24} save={save} />);
+  expect(screen.getByDisplayValue('50')).toBeTruthy();
+  fireEvent.click(screen.getByLabelText('Индивидуальные настройки'));
+  await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, weeklyKeep: 50 })));
+});
 it('saves disabled override without losing personal values and hides absent five-hour quota', async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   render(<AccountPolicyForm account={account} threshold={.98} drainHours={24} save={save} />);
