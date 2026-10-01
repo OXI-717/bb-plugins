@@ -4,6 +4,7 @@ Run on the BB server host, from a checkout of this repository:
 
 ```sh
 git pull --ff-only
+bash scripts/upgrade-pool.sh --sandbox
 bash scripts/upgrade-pool.sh --check
 bash scripts/upgrade-pool.sh
 ```
@@ -17,7 +18,13 @@ GitHub release. Supported ranges: caret, tilde and exact stable versions. Other
 ranges fail before mutation. An unchanged installed version and SHA return
 `ALREADY_CURRENT` without reloading.
 
-- `--check`: validate the installation and release without waiting or updating.
+- `--sandbox`: rehearse the whole workflow on temporary synthetic SQLite state
+  and a strict command/HTTP simulator. Executes the real idle reporter, backup
+  and post-update checks. Real subprocesses and network connections are blocked.
+  No BB installation or credentials are required; temporary files are removed
+  afterward. This validates control flow, not live provider availability.
+- `--check`: validate the installation, release and live diagnostic report
+  without waiting or updating.
 - `--version X.Y.Z`: require the latest compatible release to equal this version.
   This is an assertion, not an arbitrary version/downgrade selector: BB's update
   command has no version flag. A mismatch stops before update.

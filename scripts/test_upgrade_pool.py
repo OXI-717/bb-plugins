@@ -32,6 +32,20 @@ class UpgradeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout.splitlines(), [str(script.with_name('upgrade_pool.py'))])
 
+    def test_sandbox_runs_whole_workflow(self):
+        from upgrade_pool_sandbox import sandbox
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(sandbox(u), 0)
+        self.assertIn('SANDBOX PASS', output.getvalue())
+
+    def test_sandbox_blocks_direct_subprocess_escape(self):
+        from upgrade_pool_sandbox import sandbox
+        def unsafe(*args):
+            return u.subprocess.run(['bb', 'plugin', 'update', u.PLUGIN, '--yes'])
+        with patch.object(u, 'perform', side_effect=unsafe), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(sandbox(u), 1)
+        self.assertIn('forbids real subprocesses', output.getvalue())
+
     def test_no_terminal_never_approves_interruption(self):
         with patch('builtins.open', side_effect=OSError('no tty')):
             self.assertFalse(u.confirm_interrupt())
@@ -80,6 +94,24 @@ class UpgradeTests(unittest.TestCase):
             with self.assertRaises(u.UpgradeError):
                 u.source_info()
 
+    def test_idle_with_real_host_contract_without_mocking_reporter(self):
+        pool = {'inFlight': 0, 'hosts': [{'hostId': 'host-test', 'hostName': 'Test machine', 'mintedAt': 1, 'lastUsedAt': 2}], 'accounts': []}
+        def command(*args):
+            if args == ('pool', 'status'): return pool
+            if args == ('thread', 'list', '--include-hidden'): return []
+            raise AssertionError(args)
+        output = []
+        with patch.object(u, 'bb', side_effect=command), patch.object(u.time, 'sleep'):
+            self.assertFalse(u.wait_idle(output.append))
+        self.assertIn('Pool idle: three checks passed.', output)
+
+    def test_busy_report_uses_host_name_from_contract(self):
+        output = []
+        pool = {'inFlight': 1, 'hosts': [{'hostId':'host-test', 'hostName':'Test machine'}],
+                'accounts':[{'id':'account-test','provider':'codex','inFlight':1,'lastUsedHostId':'host-test'}]}
+        with patch.object(u, 'bb', return_value=[]): u.report_pool(pool, output.append)
+        self.assertTrue(any('Test machine' in line for line in output))
+
     def test_idle_requires_three_consecutive_zero_counts(self):
         with patch.object(u, 'bb', side_effect=[{'inFlight': n} for n in [0,1,0,0,0]]), patch.object(u, 'report_pool'), patch.object(u.time,'sleep'), patch.object(u,'confirm_interrupt') as confirm:
             self.assertFalse(u.wait_idle(lambda _: None))
@@ -126,6 +158,7 @@ class UpgradeTests(unittest.TestCase):
                     return {**state, 'accounts': [{**state['accounts'][0], 'drainOnce': False, 'drainGeneration': None}]}
                 return {**state, 'accounts': []} if wrong_accounts and status_reads == 3 else state
             if args[:2] == ('plugin','config'): return {'values':{'threshold':.98}}
+            if args[:2] == ('thread','list'): return []
             raise AssertionError(args)
         args=argparse.Namespace(check=check, version=None, interrupt_now=False)
         with patch.object(u,'installed',side_effect=infos), patch.object(u,'source_info',side_effect=sources), patch.object(u,'release_target',side_effect=targets), patch.object(u,'wait_idle',return_value=False) as idle, patch.object(u,'bb',side_effect=command), patch.object(u,'run',side_effect=u.UpgradeError('simulated update failure') if fail else None) as run:
