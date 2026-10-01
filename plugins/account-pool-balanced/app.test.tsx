@@ -857,28 +857,29 @@ describe("Account Pool settings", () => {
     const codeCopyButton = await slot.findByRole("button", {
       name: "Скопировать код входа Codex",
     });
-    await act(async () => {
-      fireEvent.click(codeCopyButton);
-      await writeText.mock.results[0]?.value;
-    });
-    expect(writeText).toHaveBeenCalledWith("ABCD-1234");
-    expect(slot.getByText("Код входа скопирован")).toBeTruthy();
-    expect(
-      slot
-        .getByRole("button", { name: "Скопировать код входа Codex" })
-        .querySelector('[data-icon="Check"]'),
-    ).not.toBeNull();
+    // Busy CI workers can spend longer than the 1.5-second success indicator
+    // inside React act. Control its clock after the async dialog is ready.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await act(async () => {
+        fireEvent.click(codeCopyButton);
+        await writeText.mock.results[0]?.value;
+      });
+      expect(writeText).toHaveBeenCalledWith("ABCD-1234");
+      expect(slot.getByText("Код входа скопирован")).toBeTruthy();
+      expect(codeCopyButton.querySelector('[data-icon="Check"]')).not.toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(slot.queryByText("Код входа скопирован")).toBeNull();
+      expect(codeCopyButton.querySelector('[data-icon="Check"]')).toBeNull();
 
-    fireEvent.click(
-      slot.getByRole("button", {
-        name: "Скопировать ссылку авторизации Codex",
-      }),
-    );
-    await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith(
-        "https://auth.openai.com/codex/device",
-      ),
-    );
+      await act(async () => {
+        fireEvent.click(slot.getByRole("button", { name: "Скопировать ссылку авторизации Codex" }));
+        await writeText.mock.results[1]?.value;
+      });
+      expect(writeText).toHaveBeenCalledWith("https://auth.openai.com/codex/device");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not claim success when copying the device code fails", async () => {
