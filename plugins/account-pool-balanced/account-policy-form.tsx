@@ -8,7 +8,11 @@ export function AccountPolicyForm({ account, threshold, drainHours, save, onUnsa
   save: (policy: AccountPolicy) => Promise<void>;
   onUnsavedChange?: (unsaved: boolean) => void;
 }) {
-  const [draft, setDraft] = useState<AccountPolicy>(() => account.policy ?? accountPolicySchema.parse({ enabled: false }));
+  const inheritedKeep = Number(((1 - threshold) * 100).toFixed(10));
+  const initialPolicy = () => account.policy ?? accountPolicySchema.parse({
+    enabled: false, fiveHourKeep: inheritedKeep, weeklyKeep: inheritedKeep, reserveDrainHours: drainHours,
+  });
+  const [draft, setDraft] = useState<AccountPolicy>(initialPolicy);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
@@ -35,16 +39,17 @@ export function AccountPolicyForm({ account, threshold, drainHours, save, onUnsa
     <label className="block space-y-1 text-sm">
       <span>{label}</span>
       <input className="w-full rounded border p-2" type="number" min={field === 'reserveDrainHours' ? 1 : 0} max={field === 'reserveDrainHours' ? 168 : 100}
-        value={draft[field] ?? ''} placeholder={`Общее: ${fallback}`} onChange={e => change({ [field]: e.target.value === '' ? null : Number(e.target.value) })} />
-      <span className="text-muted-foreground">{draft[field] === null ? `Общее значение: ${fallback}` : `Личное значение: ${draft[field]}`}. Пустое поле — наследовать.</span>
+        value={draft[field] ?? fallback} onChange={e => change({ [field]: e.target.value === '' ? null : Number(e.target.value) })} />
+      <span className="text-muted-foreground">{draft[field] === null ? `Общее значение: ${fallback}` : `Личное значение: ${draft[field]}`}. Очистить поле — наследовать общее значение.</span>
     </label>
   );
   return <section className="space-y-3 border-t pt-4">
     <label className="flex gap-2"><input type="checkbox" checked={draft.enabled} disabled={pending} onChange={e => change({ enabled: e.target.checked })} />Индивидуальные настройки</label>
     <p className="text-sm text-muted-foreground">{draft.enabled ? policySummary(draft) : 'Действуют общие правила. Личные значения сохраняются.'}</p>
+    {!account.policy && <p className="text-sm text-muted-foreground">Поля заполнены текущими общими значениями. При включении они сохранятся как индивидуальные.</p>}
     <fieldset disabled={!draft.enabled || pending} className="space-y-3">
-      {hasFiveHour && numberField('fiveHourKeep', 'Оставлять квоту 5 часов, %', Math.round((1 - threshold) * 100))}
-      {numberField('weeklyKeep', 'Оставлять недельную квоту, %', Math.round((1 - threshold) * 100))}
+      {hasFiveHour && numberField('fiveHourKeep', 'Оставлять квоту 5 часов, %', inheritedKeep)}
+      {numberField('weeklyKeep', 'Оставлять недельную квоту, %', inheritedKeep)}
       {account.role === 'reserve' && numberField('reserveDrainHours', 'Подключать резерв за рабочих часов до сброса', drainHours)}
       <label className="flex gap-2"><input type="checkbox" checked={draft.schedule !== null} onChange={e => change({ schedule: e.target.checked ? { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, intervals: [{ days: [1,2,3,4,5], start: '09:00', end: '18:00' }] } : null })} />Личное расписание</label>
       {draft.schedule && <div className="space-y-3">
@@ -68,7 +73,7 @@ export function AccountPolicyForm({ account, threshold, drainHours, save, onUnsa
       <p role="status">{pending ? 'Сохранение…' : dirty ? 'Ожидание сохранения…' : saved ? 'Настройки сохранены' : 'Все изменения сохранены'}</p>}
 
     {dirty && <><p className="text-sm">Карточку можно закрыть после сохранения или отмены изменений.</p><Button size="sm" variant="ghost" disabled={pending} onClick={() => {
-      setDraft(account.policy ?? accountPolicySchema.parse({ enabled: false }));
+      setDraft(initialPolicy());
       setDirty(false); setError(''); setSaved(false); onUnsavedChange?.(false);
     }}>Отменить изменения</Button></>}
   </section>;

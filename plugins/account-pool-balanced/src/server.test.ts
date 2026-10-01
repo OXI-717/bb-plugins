@@ -902,7 +902,8 @@ describe("Account Pool plugin", () => {
     expect(requests).toHaveLength(0);
   });
 
-  it("reports the Cursor billing cycle as pool headroom", async () => {
+  it.each([true, false])("refreshes Cursor billing quotas for enabled=%s accounts on manual request", async (enabled) => {
+    let usageCalls = 0;
     const fixture = await createFixture({
       upstreamUrl: "https://upstream.example",
       provider: "cursor",
@@ -920,6 +921,7 @@ describe("Account Pool plugin", () => {
             });
           }
           if (request.url.startsWith("https://usage.example/")) {
+            usageCalls += 1;
             expect(request.headers.get("authorization")).toBe(
               "Bearer minted-access-token",
             );
@@ -933,6 +935,8 @@ describe("Account Pool plugin", () => {
         },
       },
     });
+    if (!enabled) await fixture.host.harness.behavior.callRpc("account.disable", { id: fixture.account.id });
+    const before = usageCalls;
     await fixture.host.harness.behavior.callRpc("account.refreshUsage", {
       accountId: fixture.account.id,
     });
@@ -941,6 +945,8 @@ describe("Account Pool plugin", () => {
       .accounts.find((candidate) => candidate.id === fixture.account.id);
     expect(account?.sevenDayUtilization).toBeCloseTo(0.2677, 4);
     expect(account?.sevenDayResetAt).toBe(1791981275000);
+    expect(account?.enabled).toBe(enabled);
+    expect(usageCalls).toBe(before + 1);
   });
 
   it("mounts every Cursor path the CLI is known to call", async () => {
@@ -6573,6 +6579,25 @@ describe("sequential pool recovery", () => {
     await response.text();
     const status = statusSchema.parse(await fixture.host.harness.behavior.callRpc("status.get", null));
     expect(status.accounts[0]?.drainOnce).toBe(remainsArmed);
+  });
+
+  it("manually refreshes a disabled Codex OAuth account without enabling routing", async () => {
+    let used = 10;
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", provider: "codex", source: "import",
+      options: {
+        codexUsageUrl: EMPTY_USAGE_URL,
+        importCodexCredentials: async () => ({ accessToken: "test-access", refreshToken: "test-refresh", idToken: null,
+          accountId: "synthetic-codex", email: null, expiresAt: Date.now() + 86400000 }),
+        fetch: async () => Response.json({ rate_limit: { allowed: true, limit_reached: false,
+          primary_window: { used_percent: used, limit_window_seconds: 604800, reset_after_seconds: 86400,
+            reset_at: Math.floor(Date.now() / 1000) + 86400 }, secondary_window: null } }),
+      },
+    });
+    await fixture.host.harness.behavior.callRpc("account.disable", { id: fixture.account.id });
+    used = 37;
+    const refreshed = await fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id });
+    expect(refreshed).toMatchObject({ account: { enabled: false, status: "disabled",
+      limitWindows: [{ windowMinutes: 10080, utilization: .37 }] } });
   });
 
   it("clears one-shot draining on Codex weekly usage refresh and never rearms after reset", async () => {

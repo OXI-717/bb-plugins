@@ -239,7 +239,7 @@ export class AccountPoolHub {
   async refreshUsage(accountId?: string, force = false, reportErrors = false): Promise<void> {
     const accounts = (await this.options.accounts.list()).filter(
       (account) =>
-        account.enabled &&
+        (account.enabled || (force && accountId !== undefined)) &&
         (account.kind === "oauth" ||
           this.adapter(account.provider).refreshesApiKeyUsage === true) &&
         (accountId === undefined || account.id === accountId),

@@ -228,7 +228,6 @@ export class PoolOperations {
   async refreshUsage(id: string): Promise<AccountSummary | null> {
     const account = await this.accounts.get(id);
     if (account === null) return null;
-    if (!account.enabled) throw new Error("Включите аккаунт перед обновлением квот.");
     await this.hub.refreshUsage(id, true, true);
     this.onAccountsChanged();
     return (
