@@ -108,10 +108,10 @@ class UpgradeTests(unittest.TestCase):
                 self.assertEqual(copied.execute('SELECT value FROM sample').fetchone()[0],42)
             self.assertEqual((target/'secrets'/'synthetic.txt').stat().st_mode & 0o777,0o600)
 
-    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False):
+    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False, wrong_drain=False):
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         data = Path(temp.name); db=sqlite3.connect(data/'data.db'); db.close()
-        state = {'accepting':True,'inFlight':0,'accounts':[{'id':'synthetic','enabled':True,'policy':{'enabled':False}}], 'routing':{'codex':True},'enabledAccountCount':1}
+        state = {'accepting':True,'inFlight':0,'accounts':[{'id':'synthetic','enabled':True,'policy':{'enabled':False}, 'drainOnce':True, 'drainGeneration':'synthetic-generation'}], 'routing':{'codex':True},'enabledAccountCount':1}
         source = {'history':[{'version':'b'*40}], 'range':'^0.4.1'}
         updated_source = {**source,'history':[{'version':('c' if wrong_sha else 'a')*40}]}
         infos = [{'version':'0.4.6'}, {'version':'0.4.7'}]
@@ -122,12 +122,14 @@ class UpgradeTests(unittest.TestCase):
             nonlocal status_reads
             if args[:2] == ('pool','status'):
                 status_reads += 1
+                if wrong_drain and status_reads == 3:
+                    return {**state, 'accounts': [{**state['accounts'][0], 'drainOnce': False, 'drainGeneration': None}]}
                 return {**state, 'accounts': []} if wrong_accounts and status_reads == 3 else state
             if args[:2] == ('plugin','config'): return {'values':{'threshold':.98}}
             raise AssertionError(args)
         args=argparse.Namespace(check=check, version=None, interrupt_now=False)
         with patch.object(u,'installed',side_effect=infos), patch.object(u,'source_info',side_effect=sources), patch.object(u,'release_target',side_effect=targets), patch.object(u,'wait_idle',return_value=False) as idle, patch.object(u,'bb',side_effect=command), patch.object(u,'run',side_effect=u.UpgradeError('simulated update failure') if fail else None) as run:
-            if changed or fail or wrong_sha or wrong_accounts:
+            if changed or fail or wrong_sha or wrong_accounts or wrong_drain:
                 with self.assertRaises(u.UpgradeError): u.perform(args,data,data,lambda _:None)
             else:
                 self.assertEqual(u.perform(args,data,data,lambda _:None),'PREFLIGHT_PASS' if check else 'PASS')
@@ -139,6 +141,7 @@ class UpgradeTests(unittest.TestCase):
                 run.assert_called_once_with('bb','plugin','update',u.PLUGIN,'--yes',timeout=600)
                 self.assertTrue((data/'backup'/'RECOVERY.txt').exists())
 
+    def test_post_update_drain_state_loss_fails(self): self.workflow(wrong_drain=True)
     def test_post_update_sha_mismatch_fails(self): self.workflow(wrong_sha=True)
     def test_post_update_missing_account_fails(self): self.workflow(wrong_accounts=True)
     def test_check_never_updates(self): self.workflow(check=True)

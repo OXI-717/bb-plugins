@@ -55,3 +55,9 @@ restore the database and secrets with a compatible previous plugin build. Use
 saved source/configuration metadata and supported BB recovery tooling. If the
 necessary downgrade is unavailable, keep BB stopped and obtain BB support.
 A data-only restore is not a code rollback.
+
+If the highest compatible numeric tag has no immutable stable release (including
+a numeric tag marked prerelease in GitHub), the updater stops. It cannot safely
+fall back to an older release: BB resolves Git tags independently and has no
+version-selection option. Publish the intended immutable stable release or resolve
+the source/tag issue before retrying; the updater does not change remote tags.

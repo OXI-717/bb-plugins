@@ -107,12 +107,12 @@ def release_target(source, expected=None):
         release = json.load(response)
     if (release.get('tag_name') != PREFIX + 'v' + target or release.get('draft')
             or release.get('prerelease') or release.get('immutable') is not True):
-        raise UpgradeError('Selected release is not a published immutable stable release')
+        raise UpgradeError('BB would select a tag without a published immutable stable release; cannot safely fall back because BB update has no version selector')
     return target, sha
 
 
 def inventory(pool):
-    fields = ('id', 'provider', 'kind', 'enabled', 'priority', 'role', 'cap', 'policy')
+    fields = ('id', 'provider', 'kind', 'enabled', 'priority', 'role', 'cap', 'policy', 'drainOnce', 'drainGeneration')
     return {
         'accounts': sorted(({k: a.get(k) for k in fields} for a in pool['accounts']), key=lambda a: a['id']),
         'routing': pool['routing'],
