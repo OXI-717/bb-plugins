@@ -24,8 +24,19 @@ class CursorRouteTest(unittest.TestCase):
 
     def test_custom_config_still_keeps_pooled_auth_in_memory(self):
         env = {"CURSOR_API_ENDPOINT": "http://pool.example/cursor", "CURSOR_CONFIG_DIR": "/synthetic/config", "AGENT_CLI_CREDENTIAL_STORE": "system"}
-        self.assertEqual(route.build_env(env)["AGENT_CLI_CREDENTIAL_STORE"], "memory")
-        self.assertEqual(route.build_env(env)["CURSOR_CONFIG_DIR"], env["CURSOR_CONFIG_DIR"])
+        with tempfile.TemporaryDirectory() as tmp:
+            result = route.build_env(env, home=tmp)
+            self.assertEqual(result["AGENT_CLI_CREDENTIAL_STORE"], "memory")
+            self.assertNotEqual(result["CURSOR_CONFIG_DIR"], env["CURSOR_CONFIG_DIR"])
+            config = Path(result["CURSOR_CONFIG_DIR"]) / "cli-config.json"
+            self.assertTrue(json.loads(config.read_text())["network"]["useHttp1ForAgent"])
+
+    def test_explicit_endpoint_cannot_bypass_pool(self):
+        env = {"CURSOR_API_ENDPOINT": "http://pool.example/cursor"}
+        for arguments in [["acp", "--agent-endpoint", "https://other.example"], ["-p", "prompt", "--agent-endpoint=https://other.example"]]:
+            command = route.build_argv("cursor-agent", ["wrapper", *arguments], env)
+            self.assertEqual(command[-2:], ["--agent-endpoint", env["CURSOR_API_ENDPOINT"]])
+            self.assertFalse(any("other.example" in part for part in command))
 
     def test_generic_gateway_preserves_binary_stream_and_exchange(self):
         calls = []
@@ -63,7 +74,7 @@ for path in ["aiserver.v7.FutureService/NewTool", "auth/exchange_user_api_key"]:
 print("PROBE_OK")
 ''')
                 cli.chmod(0o755)
-                env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], CURSOR_API_ENDPOINT=f"http://127.0.0.1:{hub.server_port}/cursor", CURSOR_POOL_RPC_GATEWAY="1", CURSOR_CONFIG_DIR=tmp)
+                env = dict(os.environ, HOME=tmp, PATH=tmp + os.pathsep + os.environ["PATH"], CURSOR_API_ENDPOINT=f"http://127.0.0.1:{hub.server_port}/cursor", CURSOR_POOL_RPC_GATEWAY="1", CURSOR_CONFIG_DIR=tmp)
                 result = subprocess.run([sys.executable, str(WRAPPER), "acp"], env=env, capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.strip(), "PROBE_OK")

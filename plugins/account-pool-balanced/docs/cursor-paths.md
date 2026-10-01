@@ -27,9 +27,10 @@ New RPC methods in those namespaces need no catalogue update. The upstream host 
 fixed in pool settings; arbitrary URLs, traversal and authentication RPCs are rejected.
 A future change outside these namespaces or to the wire protocol may still require an update.
 
-The wrapper pins `--agent-endpoint` to the forwarder, preventing server configuration
+The wrapper replaces any caller-supplied `--agent-endpoint` with the forwarder, preventing server configuration
 from sending the agent stream directly upstream with the wrong token. Its isolated config
-uses HTTP/1 for the agent stream. Legacy exact routes remain for older wrappers.
+uses HTTP/1 for the agent stream, even when `CURSOR_CONFIG_DIR` was already set.
+The user's own config directory is not modified. Legacy exact routes remain for older wrappers.
 
 ## Authentication isolation
 

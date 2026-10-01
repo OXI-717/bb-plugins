@@ -41,13 +41,15 @@ def build_argv(executable, argv, env):
     endpoint = (env.get(ENDPOINT_VAR) or "").strip()
     if not endpoint:
         return [executable, *passthrough]
-    # An explicit endpoint from the caller wins; two of them would be ambiguous. Both
-    # spellings count — `--agent-endpoint X` and `--agent-endpoint=X`.
-    if any(
-        argument == "--agent-endpoint" or argument.startswith("--agent-endpoint=")
-        for argument in passthrough
-    ):
-        return [executable, *passthrough]
+    # Pooled auth must never go to a caller-supplied upstream endpoint.
+    filtered = []
+    arguments = iter(passthrough)
+    for argument in arguments:
+        if argument == "--agent-endpoint":
+            next(arguments, None)
+        elif not argument.startswith("--agent-endpoint="):
+            filtered.append(argument)
+    passthrough = filtered
     return [executable, *passthrough, "--agent-endpoint", endpoint]
 
 
@@ -55,7 +57,7 @@ def pooled_config_dir(env, home=None):
     """Config directory for a pooled session, created on demand.
 
     Kept apart from the machine's own `~/.cursor` so the wrapper never edits settings the
-    user owns, and skipped entirely when the caller already chose a directory.
+    user owns. Pooled sessions always use this directory to guarantee HTTP/1.
     """
     base = Path(home) if home is not None else Path.home()
     directory = base / POOLED_CONFIG_DIR
@@ -75,8 +77,6 @@ def build_env(env, home=None):
     # auth there and can clear it on rejection, replacing the user's normal login.
     # Pooled auth must remain ephemeral, including when callers provide a config dir.
     result["AGENT_CLI_CREDENTIAL_STORE"] = "memory"
-    if (result.get(CONFIG_DIR_VAR) or "").strip():
-        return result
     result[CONFIG_DIR_VAR] = str(pooled_config_dir(result, home))
     return result
 
