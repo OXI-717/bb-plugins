@@ -71,3 +71,5 @@ MIT. Account Pooler and vendored UI derive from `get-bb/bb`; upstream attributio
 ## Automation Catalog
 
 An independent panel for inventory, source freshness and execution history across schedulers. It does not execute jobs or invoke models. See [development and source setup](plugins/automation-catalog/README.md). Install through `bb plugin install automation-catalog@oxi-public`, or use the release command in its README.
+
+Per-account quota protection and availability: [Account policies](plugins/account-pool-balanced/docs/account-policies.md).

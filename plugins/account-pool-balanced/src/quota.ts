@@ -1,3 +1,4 @@
+import type { QuotaThresholds } from "./account-policy.js";
 import type {
   Account,
   AccountQuota,
@@ -154,10 +155,15 @@ function activeFamilyWindow(
   );
 }
 
+function thresholdFor(threshold: number | QuotaThresholds, minutes?: number | null): number {
+  if (typeof threshold === 'number') return threshold;
+  return minutes === 300 ? threshold.fiveHour : minutes === 10080 ? threshold.weekly : threshold.other;
+}
+
 export function blockingResetAt(
   quota: AccountQuota | AccountSummary,
   family: ModelFamily | null,
-  threshold: number,
+  threshold: number | QuotaThresholds,
   now: number,
 ): number | null {
   let latest: number | null = null;
@@ -166,8 +172,9 @@ export function blockingResetAt(
     utilization: number | null,
     status: string | null,
     resetAt: number | null,
+    minutes?: number | null,
   ) => {
-    if (!activeWindow(utilization, status, resetAt, threshold, now)) return;
+    if (!activeWindow(utilization, status, resetAt, thresholdFor(threshold, minutes), now)) return;
     if (resetAt === null) unknown = true;
     else latest = Math.max(latest ?? resetAt, resetAt);
   };
@@ -175,25 +182,27 @@ export function blockingResetAt(
     quota.fiveHourUtilization,
     quota.fiveHourStatus,
     quota.fiveHourResetAt,
+    300,
   );
   include(
     quota.sevenDayUtilization,
     quota.sevenDayStatus,
     quota.sevenDayResetAt,
+    10080,
   );
   for (const window of quota.limitWindows)
-    include(window.utilization, window.status, window.resetAt);
+    include(window.utilization, window.status, window.resetAt, window.windowMinutes);
   if (family !== null) {
     const familyQuota = quota.familyWeekly[family];
     if (familyQuota !== null)
-      include(familyQuota.utilization, familyQuota.status, familyQuota.resetAt);
+      include(familyQuota.utilization, familyQuota.status, familyQuota.resetAt, 10080);
   }
   return unknown ? null : latest;
 }
 
 export function isSharedQuotaExhausted(
   quota: AccountQuota,
-  threshold: number,
+  threshold: number | QuotaThresholds,
   now: number,
 ): boolean {
   return (
@@ -201,14 +210,14 @@ export function isSharedQuotaExhausted(
       quota.fiveHourUtilization,
       quota.fiveHourStatus,
       quota.fiveHourResetAt,
-      threshold,
+      thresholdFor(threshold, 300),
       now,
     ) ||
     activeWindow(
       quota.sevenDayUtilization,
       quota.sevenDayStatus,
       quota.sevenDayResetAt,
-      threshold,
+      thresholdFor(threshold, 10080),
       now,
     ) ||
     quota.limitWindows.some((window) =>
@@ -216,7 +225,7 @@ export function isSharedQuotaExhausted(
         window.utilization,
         window.status,
         window.resetAt,
-        threshold,
+        thresholdFor(threshold, window.windowMinutes),
         now,
       ),
     )
@@ -240,12 +249,12 @@ export function longestLimitWindow(
 export function isQuotaExhausted(
   quota: AccountQuota,
   family: ModelFamily,
-  threshold: number,
+  threshold: number | QuotaThresholds,
   now: number,
 ): boolean {
   return (
     isSharedQuotaExhausted(quota, threshold, now) ||
-    activeFamilyWindow(quota.familyWeekly[family], threshold, now)
+    activeFamilyWindow(quota.familyWeekly[family], thresholdFor(threshold, 10080), now)
   );
 }
 
@@ -278,7 +287,7 @@ export function governingWeeklyResetAt(
 export function accountStatus(
   account: Account,
   quota: AccountQuota,
-  threshold: number,
+  threshold: number | QuotaThresholds,
   now: number,
 ): AccountSummary["status"] {
   if (!account.enabled) return "disabled";

@@ -121,6 +121,10 @@ export class AccountStore {
     return this.update(id, (account) => ({ ...account, enabled }));
   }
 
+  async setPolicy(id: string, policy: Account["policy"]): Promise<Account | null> {
+    return this.update(id, account => ({ ...account, policy }));
+  }
+
   async setPriority(id: string, priority: number): Promise<Account | null> {
     return this.update(id, (account) => ({ ...account, priority }));
   }

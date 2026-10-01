@@ -200,6 +200,25 @@ export const resetCreditsSchema = z.object({
 
 export type ResetCredits = z.infer<typeof resetCreditsSchema>;
 
+const clockTimeSchema = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
+export const accountPolicySchema = z.object({
+  enabled: z.boolean(),
+  fiveHourKeep: z.number().min(0).max(100).nullable().default(null),
+  weeklyKeep: z.number().min(0).max(100).nullable().default(null),
+  reserveDrainHours: reserveDrainHoursSchema.nullable().default(null),
+  schedule: z.object({
+    timeZone: z.string().refine(value => {
+      try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; }
+    }, 'Unknown timezone'),
+    intervals: z.array(z.object({
+      days: restDaysSchema.refine(days => days.length > 0, 'Select weekdays'),
+      start: clockTimeSchema,
+      end: clockTimeSchema,
+    }).strict().refine(value => value.start !== value.end, 'Start and end must differ')).max(28),
+  }).strict().nullable().default(null),
+}).strict();
+export type AccountPolicy = z.infer<typeof accountPolicySchema>;
+
 export const accountSchema = z
   .object({
     id: z.string().uuid(),
@@ -218,6 +237,7 @@ export const accountSchema = z
     lastUsedHostId: z.string().min(1).nullable().default(null),
     role: accountRoleSchema.default("primary"),
     cap: accountCapSchema.default(null),
+    policy: accountPolicySchema.optional(),
     drainOnce: z.boolean().optional(),
     drainGeneration: z.string().uuid().nullable().optional(),
   })

@@ -1,3 +1,4 @@
+import { policyThresholds, reserveHours, scheduleAllows } from "./account-policy.js";
 import type {
   Account,
   AccountPoolConfig,
@@ -343,7 +344,7 @@ export class AccountPoolHub {
     for (const provider of providerSchema.options) {
       const entries = accounts
         .filter(
-          (account) => account.provider === provider && account.enabled,
+          (account) => account.provider === provider && account.enabled && scheduleAllows(account.policy, now),
         )
         .map((account) => ({
           account,
@@ -352,7 +353,7 @@ export class AccountPoolHub {
         .filter(({ quota }) => quota.error === null)
         .filter(
           ({ account, quota }) =>
-            !isSharedQuotaExhausted(quota, account.drainOnce ? 1 : settings.switchThreshold, now),
+            !isSharedQuotaExhausted(quota, policyThresholds(account, settings.switchThreshold), now),
         );
       for (const entry of gateMembership(entries, now, drainMs, workWeek))
         eligibleIds.add(entry.account.id);
@@ -386,10 +387,10 @@ export class AccountPoolHub {
           inFlight: this.inFlightByAccount.get(account.id) ?? 0,
           capLimit: limit,
           eligible: eligibleIds.has(account.id),
-          drainOpensAt: drainOpensAt(quota, now, drainMs, workWeek),
+          drainOpensAt: drainOpensAt(quota, now, reserveHours(account, settings.reserveDrainHours) * 3600000, workWeek),
           capReached:
             limit !== null && (weeklyUtilization(quota, now) ?? 0) >= limit,
-          status: accountStatus(account, quota, account.drainOnce ? 1 : settings.switchThreshold, now),
+          status: accountStatus(account, quota, policyThresholds(account, settings.switchThreshold), now),
         };
       }),
     };
@@ -801,19 +802,19 @@ export class AccountPoolHub {
     };
     const available = gateMembership(
       accounts
-        .filter((account) => account.provider === provider && account.enabled)
+        .filter((account) => account.provider === provider && account.enabled && scheduleAllows(account.policy, now))
         .map((account) => ({
           account,
           quota: this.options.quotas.get(account.id),
         }))
         .filter(({ quota }) => quota.error === null)
-        .filter(({ account, quota }) => !isSharedQuotaExhausted(quota, account.drainOnce ? 1 : threshold, now)),
+        .filter(({ account, quota }) => !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now)),
       now,
       settings.reserveDrainHours * 60 * 60 * 1_000,
       workWeek,
     );
     const eligible = available.filter(
-      ({ account, quota }) => !isQuotaExhausted(quota, family, account.drainOnce ? 1 : threshold, now),
+      ({ account, quota }) => !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
     );
     const unattempted = eligible.filter(
       ({ account }) =>
@@ -1214,13 +1215,16 @@ export class AccountPoolHub {
       );
     }
     const now = this.options.now();
+    if (!accounts.some(account => account.enabled && scheduleAllows(account.policy, now))) {
+      return adapter.errorResponse(403, "Every enabled Account Pooler account for this provider is outside its allowed schedule.");
+    }
     const threshold = this.options.getSettings().switchThreshold;
     const next = accounts
       .filter((account) => account.enabled)
       .flatMap((account) => {
         const quota = this.options.quotas.get(account.id);
         if (quota.error !== null) return [];
-        const effectiveThreshold = account.drainOnce ? 1 : threshold;
+        const effectiveThreshold = policyThresholds(account, threshold);
         const quotaResetAt = blockingResetAt(quota, family, effectiveThreshold, now);
         if (
           quotaResetAt === null &&
