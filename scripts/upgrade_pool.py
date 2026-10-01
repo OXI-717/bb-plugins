@@ -215,13 +215,14 @@ def perform(args, data, output, say):
     say(f"Installed {info['version']}; selected {target}; commit {sha}")
     if version(target) < version(info['version']):
         raise UpgradeError('Downgrades are not supported')
+    if args.check:
+        report_pool(bb('pool', 'status'), say)
     if target == info['version']:
         if not source.get('history') or source['history'][0]['version'] != sha:
             raise UpgradeError('Installed version matches but resolved commit differs')
         say('Already up to date.')
         return 'ALREADY_CURRENT'
     if args.check:
-        report_pool(bb('pool', 'status'), say)
         say('Preflight passed; no update performed.')
         return 'PREFLIGHT_PASS'
     forced = wait_idle(say, args.interrupt_now)

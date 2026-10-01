@@ -112,6 +112,21 @@ class UpgradeTests(unittest.TestCase):
         with patch.object(u, 'bb', return_value=[]): u.report_pool(pool, output.append)
         self.assertTrue(any('Test machine' in line for line in output))
 
+    def test_check_reports_live_status_even_when_already_current(self):
+        source = {'history':[{'version':'b'*40}]}
+        args = argparse.Namespace(check=True, version=None, interrupt_now=False)
+        def command(*args):
+            if args == ('pool','status'):
+                return {'inFlight':0, 'hosts':[{'hostId':'host-test','hostName':'Test machine'}], 'accounts':[]}
+            if args == ('thread','list','--include-hidden'): return []
+            raise AssertionError(args)
+        output = []
+        with patch.object(u,'installed',return_value={'version':'1.0.1'}), patch.object(u,'source_info',return_value=source), patch.object(u,'release_target',return_value=('1.0.1','b'*40)), patch.object(u,'bb',side_effect=command) as api, patch.object(u,'wait_idle') as idle, patch.object(u,'backup_state') as backup, patch.object(u,'run') as update:
+            self.assertEqual(u.perform(args, Path('/unused'), Path('/unused'), output.append), 'ALREADY_CURRENT')
+            api.assert_any_call('pool','status')
+            idle.assert_not_called(); backup.assert_not_called(); update.assert_not_called()
+        self.assertIn('In-flight requests: 0', output)
+
     def test_idle_requires_three_consecutive_zero_counts(self):
         with patch.object(u, 'bb', side_effect=[{'inFlight': n} for n in [0,1,0,0,0]]), patch.object(u, 'report_pool'), patch.object(u.time,'sleep'), patch.object(u,'confirm_interrupt') as confirm:
             self.assertFalse(u.wait_idle(lambda _: None))
