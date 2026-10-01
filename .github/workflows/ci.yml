@@ -66,6 +66,26 @@ jobs:
       - name: Ensure checks leave tracked files clean
         run: git diff --exit-code
 
+  upgrade-script:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check system Bash entrypoint
+        run: |
+          /bin/bash --version
+          /bin/bash -n scripts/upgrade-pool.sh
+          /bin/bash scripts/upgrade-pool.sh --help
+      - name: Test upgrade without a live BB server
+        run: python3 -m unittest discover -s scripts -p test_upgrade_pool.py -v
+
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10
