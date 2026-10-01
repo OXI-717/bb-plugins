@@ -57,8 +57,16 @@ Standalone model paths:
 | Z.ai | `POST /zai/v1/chat/completions` |
 | OpenCode Go | `POST /opencode-go/v1/chat/completions` |
 | Devin Local CLI | `POST /exa.*` Connect/protobuf RPCs (via the launcher below) |
+| Cursor CLI | `GET/POST /cursor/rpc` through `cursor-route`, or direct `/cursor/aiserver.vN.*` and `/cursor/agent.vN.*` RPC paths |
 
-Cursor remains available through the BB host's existing custom ACP integration; standalone Cursor is not implemented. This server preserves native provider protocols, and does not translate every model into Chat Completions.
+Cursor is available in both hosts starting with 0.4.9. See [Cursor routing and launcher installation](cursor-paths.md). This server preserves native provider protocols, and does not translate every model into Chat Completions.
+
+For standalone Cursor, import an account with `provider: "cursor"`, `kind: "api-key"`
+and the supported account API key in `secret.apiKey`. Issue a client token with
+`client-add`. On the client, set `CURSOR_API_ENDPOINT` to the standalone URL followed
+by `/cursor`, `CURSOR_API_KEY` to that client token, and `CURSOR_POOL_RPC_GATEWAY=1`.
+Run `cursor-route -p "your prompt"` or `cursor-route acp`. Keep provider keys only
+on the hub; supply client tokens through private environment configuration.
 
 ## Devin Local CLI through the pool
 

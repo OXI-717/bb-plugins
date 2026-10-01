@@ -87,6 +87,8 @@ jobs:
         run: /bin/bash scripts/upgrade-pool.sh --sandbox
       - name: Test upgrade without a live BB server
         run: python3 -m unittest discover -s scripts -p test_upgrade_pool.py -v
+      - name: Test Cursor gateway with a synthetic local CLI
+        run: python3 -m unittest discover -s scripts -p test_cursor_route.py -v
 
   secrets:
     runs-on: ubuntu-latest

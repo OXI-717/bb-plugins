@@ -3,15 +3,13 @@ import type { AccountSecret } from "./contracts.js";
 import type { ProviderAdapter } from "./provider-adapter.js";
 import { filterRequestHeaders, mountedUpstreamUrl } from "./provider-adapter.js";
 import { isQuotaRejection, modelFamily, quotaFromHeaders } from "./quota.js";
+import { CURSOR_RPC_PATH_HEADER, isCursorRpcPath } from "./cursor-rpc.js";
 
 export const CURSOR_MOUNT_PREFIX = "cursor/";
 export const CURSOR_EXCHANGE_PATH = "auth/exchange_user_api_key";
 
-/** Paths the Cursor CLI calls, observed on a live run through a forwarding proxy.
- *
- * The plugin HTTP router matches paths exactly, so every path the CLI may call has to
- * be mounted. A path missing here does not degrade gracefully: the machine gets a 404
- * from the hub and Cursor looks broken for no visible reason.
+/** Compatibility routes for older launchers. Current launchers use /cursor/rpc,
+ * which accepts new methods in Cursor RPC namespaces without extending this list.
  */
 export const CURSOR_PROXIED_PATHS: readonly string[] = [
   CURSOR_EXCHANGE_PATH,
@@ -21,10 +19,16 @@ export const CURSOR_PROXIED_PATHS: readonly string[] = [
   "aiserver.v1.AiService/GetDefaultModelForCli",
   "aiserver.v1.AnalyticsService/BootstrapStatsig",
   "aiserver.v1.AnalyticsService/TrackEvents",
+  "aiserver.v1.AnalyticsService/SubmitLogs",
+  "aiserver.v1.DashboardService/ListMarketplaces",
+  "aiserver.v1.DashboardService/RegisterMarketplaceAndPlugins",
+  "aiserver.v1.DashboardService/GetEffectiveUserPlugins",
+  "aiserver.v1.DashboardService/GetCliDownloadUrl",
   "aiserver.v1.DashboardService/GetGlobalCommands",
   "aiserver.v1.DashboardService/GetManagedSkills",
   "aiserver.v1.DashboardService/GetMe",
   "aiserver.v1.DashboardService/GetTeamAdminSettingsOrEmptyIfNotInTeam",
+  "aiserver.v1.DashboardService/GetTeamReposOrEmptyIfNotInTeam",
   "v1/traces",
   "aiserver.v1.BidiService/BidiAppend",
   "aiserver.v1.DashboardService/GetCurrentPeriodUsage",
@@ -163,12 +167,21 @@ export function createCursorAdapter(options: {
         forAccount: () => body,
       };
     },
-    upstreamUrl: (request, settings) =>
-      mountedUpstreamUrl(
+    upstreamUrl: (request, settings) => {
+      const rpcPath = request.headers.get(CURSOR_RPC_PATH_HEADER);
+      if (rpcPath !== null) {
+        if (!isCursorRpcPath(rpcPath)) throw new Error("Invalid Cursor RPC path.");
+        const url = new URL(request.url);
+        url.pathname = `/${CURSOR_MOUNT_PREFIX}${rpcPath}`;
+        url.search = "";
+        return mountedUpstreamUrl(new Request(url), settings.cursorUpstreamBaseUrl, CURSOR_MOUNT_PREFIX);
+      }
+      return mountedUpstreamUrl(
         request,
         settings.cursorUpstreamBaseUrl,
         CURSOR_MOUNT_PREFIX,
-      ),
+      );
+    },
     requestHeaders(inbound, _account, secret) {
       const headers = filterRequestHeaders(
         inbound,

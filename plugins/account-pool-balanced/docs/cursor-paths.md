@@ -1,75 +1,49 @@
-# Pooling Cursor: why there is a path list, and how to repair it
+# Cursor routing through the pool
 
-Cursor is the one pooled provider whose upstream surface we cannot cover generically.
-The plugin HTTP router matches a request path by exact string (`plugin-service.ts`,
-`route.path === path`), and Cursor speaks Connect RPC over many paths named after
-protobuf services — `aiserver.v1.AiService/AvailableModels`, `agent.v1.AgentService/RunSSE`
-and so on — which no prefix rule can enumerate ahead of time. So the plugin carries a
-catalogue, `CURSOR_PROXIED_PATHS` in `src/cursor-adapter.ts`, and mounts each entry.
+Use the custom ACP provider `acp-oxi-cursor` with command `cursor-route acp`.
+The built-in `acp-cursor` continues to use the machine's own login. Python 3 and
+`cursor-agent` must be on PATH on every host that launches the custom provider.
 
-## The failure this causes
+Install the wrapper from this checkout (replacing an old symlink safely):
 
-A path Cursor starts calling but we never mounted returns **404 from the hub**, not from
-Cursor. On the machine this looks like Cursor breaking for no reason: a thread errors, or
-the agent stalls, while `bb pool status` looks healthy and the account has quota. Nothing
-in the pool reports it, because from the pool's side no request ever arrived.
+```bash
+mkdir -p "$HOME/.local/bin"
+install -m 755 plugins/account-pool-balanced/scripts/cursor-route.py "$HOME/.local/bin/cursor-route.new"
+mv -f "$HOME/.local/bin/cursor-route.new" "$HOME/.local/bin/cursor-route"
+```
 
-Symptoms worth recognising:
+Configure that command in the ACP plugin's custom agents. Account Pooler contributes
+`CURSOR_API_ENDPOINT`, a revocable machine token as `CURSOR_API_KEY`, and
+`CURSOR_POOL_RPC_GATEWAY=1` for this provider. Add the Cursor account's supported API key
+on the hub; subscription credentials are never copied onto clients.
 
-- an `acp-cursor` thread fails right after start, before any model output;
-- `Connection lost, reconnecting` repeated in the thread log;
-- the same prompt works on a machine that uses Cursor directly (credential on the box).
+## How the gateway works
 
-## Recapturing the list
+BB's plugin HTTP router matches paths exactly. The wrapper starts an ephemeral localhost
+forwarder and sends Cursor's RPC paths through the single `/cursor/rpc` route, preserving
+binary request bodies and streaming responses. The hub accepts methods in `aiserver.vN`
+and `agent.vN` service namespaces, plus Cursor's settings, traces and bundle routes.
+New RPC methods in those namespaces need no catalogue update. The upstream host remains
+fixed in pool settings; arbitrary URLs, traversal and authentication RPCs are rejected.
+A future change outside these namespaces or to the wire protocol may still require an update.
 
-Run the CLI against a forwarding proxy and read the paths off the wire. Auth stays on the
-real backend, so this cannot invalidate a stored login — pointing `CURSOR_API_ENDPOINT` at
-something that answers 401 will (that is how this session once cleared a Keychain token).
+The wrapper replaces any caller-supplied `--agent-endpoint` with the forwarder, preventing server configuration
+from sending the agent stream directly upstream with the wrong token. Its isolated config
+uses HTTP/1 for the agent stream, even when `CURSOR_CONFIG_DIR` was already set.
+The user's own config directory is not modified. Legacy exact routes remain for older wrappers.
 
-1. Start a forwarder that logs `method path` and proxies to `https://api2.cursor.sh`,
-   reading chunked request bodies and writing response chunks as they arrive. A blocking
-   `read(n)` stalls Cursor's SSE stream and the client reconnects in a loop.
-2. Exercise the CLI through it, agent stream included:
+## Authentication isolation
 
-   ```bash
-   PROBE=$(mktemp -d)
-   printf '{"network":{"useHttp1ForAgent":true}}' > "$PROBE/cli-config.json"
-   CURSOR_CONFIG_DIR="$PROBE" cursor-agent --print --trust \
-     --agent-endpoint "http://127.0.0.1:<port>" "Reply with exactly: ok"
-   ```
+`auth/exchange_user_api_key` is answered locally by the hub with the client's own pool
+token as both access and refresh token. Only the hub exchanges the real account API key
+for an upstream access token. Pooled sessions always set
+`AGENT_CLI_CREDENTIAL_STORE=memory`, including when a custom config directory is supplied.
+Changing `CURSOR_CONFIG_DIR` alone does not isolate macOS Keychain.
+Without a pool endpoint the wrapper passes through to the normal local Cursor login.
 
-   `useHttp1ForAgent` keeps the agent stream on HTTP/1 so a plain proxy can carry it;
-   without it the stream goes out over HTTP/2 and bypasses the hub.
-3. Add whatever paths appear to `CURSOR_PROXIED_PATHS`, and to the pinned list in
-   `src/server.test.ts` (`mounts every Cursor path the CLI is known to call`). The test
-   pins the catalogue deliberately: iterating only the source list would stay green while
-   a path silently disappeared from it.
+## Verification
 
-## What must not be forwarded
-
-`auth/exchange_user_api_key` is answered by the hub itself. The machine sends its pool
-token as the key, and the hub replies with that same token as both `accessToken` and
-`refreshToken`. The subscription key stays here and is exchanged for a short-lived access
-token only when a request is actually forwarded upstream (`cursor-adapter.ts`, `mint`).
-Forwarding this call instead would hand the machine a real renewable Cursor credential —
-the precise thing pooling exists to prevent.
-
-## Which provider the pool routes, and why only that one
-
-Pooled credentials go to `acp-oxi-cursor` alone. That provider is not declared in this
-repository: it is a custom ACP agent whose command is a wrapper, `cursor-route`, and both
-the agent entry (the ACP plugin's `customAgents` setting) and the wrapper are supplied by
-the operator. A machine that has not configured it gets no pooled Cursor at all.
-
-The built-in `acp-cursor` is deliberately excluded. Cursor reads the address of its agent
-stream from the server config it fetches, and only `--agent-endpoint` outranks it — in the
-CLI bundle that value comes from launch options and from no environment variable or config
-key. A plugin may contribute environment but not launch arguments
-(`experimental_contributeEnv` is the whole surface), and the built-in agent's arguments are
-fixed in the ACP plugin. Contributing a hub token to it therefore sent the agent stream
-straight to Cursor carrying a credential Cursor rejects: the thread answered `Please sign
-in to continue` while `bb pool status` reported a healthy account.
-
-Hiding the built-in entry instead is not available: `acp-cursor` has `always` visibility
-and is therefore in `RESERVED_ACP_PROVIDER_IDS`, so no `customAgents` entry may take its
-id.
+The tests exercise a synthetic future RPC, authorization isolation, binary bodies and
+streaming through a local fake CLI. CI runs the wrapper checks on Linux and macOS.
+For a live check, launch a fresh pooled thread and ask it to run `echo pool-ok` and read
+one local file. Model replies alone do not prove that tool setup RPCs work.

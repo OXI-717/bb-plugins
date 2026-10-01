@@ -61,6 +61,35 @@ it("refuses a second process opening the same pool directory", async () => {
   await expect(openPool(dir)).rejects.toThrow(/already in use/);
 });
 
+it("authenticates generic and direct Cursor routes and answers exchange locally", async () => {
+  const pool = await openPool(await directory());
+  cleanups.push(() => pool.close());
+  const calls: Array<{ path: string; body: Buffer }> = [];
+  pool.hub.handle = async request => {
+    calls.push({ path: new URL(request.url).pathname, body: Buffer.from(await request.arrayBuffer()) });
+    return new Response(Buffer.from([0, 255, 1]));
+  };
+  const token = await pool.tokens.forHost("external-cursor");
+  const server = await listenPool(pool, { port: 0 });
+  cleanups.push(() => server.close());
+  const headers = { authorization: `Bearer ${token}`, "x-bb-cursor-rpc-path": "aiserver.v2.FutureService/NewTool" };
+  expect((await fetch(`${server.url}/cursor/rpc`, { method: "POST", headers: { "x-bb-cursor-rpc-path": headers["x-bb-cursor-rpc-path"] } })).status).toBe(401);
+  expect((await fetch(`${server.url}/cursor/rpc`, { method: "POST", headers: { ...headers, "x-bb-cursor-rpc-path": "https://other.example/path" } })).status).toBe(400);
+  const exchanged = await fetch(`${server.url}/cursor/auth/exchange_user_api_key`, { method: "POST", headers, body: "{}" });
+  expect(await exchanged.json()).toEqual({ accessToken: token, refreshToken: token });
+  const payload = Buffer.from([0, 128, 255]);
+  const response = await fetch(`${server.url}/cursor/rpc`, { method: "POST", headers, body: payload });
+  expect(response.status).toBe(200);
+  expect(Buffer.from(await response.arrayBuffer())).toEqual(Buffer.from([0, 255, 1]));
+  const direct = await fetch(`${server.url}/cursor/agent.v2.FutureService/GetTool`, { headers: { authorization: `Bearer ${token}` } });
+  expect(direct.status).toBe(200);
+  await direct.arrayBuffer();
+  expect(calls).toEqual([
+    { path: "/cursor/rpc", body: payload },
+    { path: "/cursor/agent.v2.FutureService/GetTool", body: Buffer.alloc(0) },
+  ]);
+});
+
 it("refuses unrelated nonempty directories, including BB state", async () => {
   const dir = await directory();
   await writeFile(path.join(dir, "bb.db"), "synthetic marker");
