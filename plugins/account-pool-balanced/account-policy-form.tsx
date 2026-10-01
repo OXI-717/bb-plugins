@@ -3,9 +3,10 @@ import { accountPolicySchema, type AccountPolicy, type AccountSummary } from './
 import { policySummary } from './src/account-policy.js';
 import { Button } from './ui/components/ui/button';
 
-export function AccountPolicyForm({ account, threshold, drainHours, save }: {
+export function AccountPolicyForm({ account, threshold, drainHours, save, onUnsavedChange }: {
   account: AccountSummary; threshold: number; drainHours: number;
   save: (policy: AccountPolicy) => Promise<void>;
+  onUnsavedChange?: (unsaved: boolean) => void;
 }) {
   const [draft, setDraft] = useState<AccountPolicy>(() => account.policy ?? accountPolicySchema.parse({ enabled: false }));
   const [pending, setPending] = useState(false);
@@ -14,19 +15,21 @@ export function AccountPolicyForm({ account, threshold, drainHours, save }: {
   const [dirty, setDirty] = useState(false);
   const saveRef = useRef(save);
   saveRef.current = save;
+  const unsavedRef = useRef(onUnsavedChange);
+  unsavedRef.current = onUnsavedChange;
   useEffect(() => {
     if (!dirty || pending || error) return;
     const timer = setTimeout(async () => {
       const parsed = accountPolicySchema.safeParse(draft);
       if (!parsed.success) { setError('Проверьте проценты, часовой пояс и интервалы расписания.'); return; }
       setPending(true);
-      try { await saveRef.current(parsed.data); setDirty(false); setSaved(true); }
+      try { await saveRef.current(parsed.data); setDirty(false); setSaved(true); unsavedRef.current?.(false); }
       catch { setError('Не удалось сохранить настройки. Повторите попытку.'); }
       finally { setPending(false); }
     }, 500);
     return () => clearTimeout(timer);
   }, [draft, dirty, pending, error]);
-  const change = (patch: Partial<AccountPolicy>) => { setDraft(p => ({ ...p, ...patch })); setSaved(false); setDirty(true); setError(''); };
+  const change = (patch: Partial<AccountPolicy>) => { setDraft(p => ({ ...p, ...patch })); setSaved(false); setDirty(true); setError(''); onUnsavedChange?.(true); };
   const hasFiveHour = account.provider === 'claude' || account.fiveHourUtilization !== null || account.limitWindows.some(w => w.windowMinutes === 300);
   const numberField = (field: 'fiveHourKeep' | 'weeklyKeep' | 'reserveDrainHours', label: string, fallback: number) => (
     <label className="block space-y-1 text-sm">
@@ -64,5 +67,9 @@ export function AccountPolicyForm({ account, threshold, drainHours, save }: {
     {error ? <><p role="alert">{error}</p><Button size="sm" onClick={() => setError('')}>Повторить сохранение</Button></> :
       <p role="status">{pending ? 'Сохранение…' : dirty ? 'Ожидание сохранения…' : saved ? 'Настройки сохранены' : 'Все изменения сохранены'}</p>}
 
+    {dirty && <><p className="text-sm">Карточку можно закрыть после сохранения или отмены изменений.</p><Button size="sm" variant="ghost" disabled={pending} onClick={() => {
+      setDraft(account.policy ?? accountPolicySchema.parse({ enabled: false }));
+      setDirty(false); setError(''); setSaved(false); onUnsavedChange?.(false);
+    }}>Отменить изменения</Button></>}
   </section>;
 }

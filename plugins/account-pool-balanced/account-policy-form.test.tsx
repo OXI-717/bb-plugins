@@ -37,3 +37,17 @@ it('coalesces edits, does not save on mount, and retries failed changes', async 
   await screen.findByText('Настройки сохранены');
   expect(save).toHaveBeenCalledTimes(2);
 });
+
+it('keeps dismissal guarded until save succeeds or edits are explicitly discarded', async () => {
+  const save = vi.fn().mockRejectedValue(new Error('offline'));
+  const guard = vi.fn();
+  render(<AccountPolicyForm account={account} threshold={.98} drainHours={24} save={save} onUnsavedChange={guard} />);
+  fireEvent.change(screen.getByDisplayValue('50'), { target: { value: '20' } });
+  expect(guard).toHaveBeenLastCalledWith(true);
+  await screen.findByRole('alert');
+  expect(guard).toHaveBeenLastCalledWith(true);
+  fireEvent.click(screen.getByText('Отменить изменения'));
+  expect(guard).toHaveBeenLastCalledWith(false);
+  expect(screen.getByDisplayValue('50')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
