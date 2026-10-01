@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { accountPolicySchema, type AccountPolicy, type AccountSummary } from './src/contracts.js';
 import { policySummary } from './src/account-policy.js';
 import { Button } from './ui/components/ui/button';
@@ -11,7 +11,22 @@ export function AccountPolicyForm({ account, threshold, drainHours, save }: {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
-  const change = (patch: Partial<AccountPolicy>) => { setDraft(p => ({ ...p, ...patch })); setSaved(false); };
+  const [dirty, setDirty] = useState(false);
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => {
+    if (!dirty || pending || error) return;
+    const timer = setTimeout(async () => {
+      const parsed = accountPolicySchema.safeParse(draft);
+      if (!parsed.success) { setError('Проверьте проценты, часовой пояс и интервалы расписания.'); return; }
+      setPending(true);
+      try { await saveRef.current(parsed.data); setDirty(false); setSaved(true); }
+      catch { setError('Не удалось сохранить настройки. Повторите попытку.'); }
+      finally { setPending(false); }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [draft, dirty, pending, error]);
+  const change = (patch: Partial<AccountPolicy>) => { setDraft(p => ({ ...p, ...patch })); setSaved(false); setDirty(true); setError(''); };
   const hasFiveHour = account.provider === 'claude' || account.fiveHourUtilization !== null || account.limitWindows.some(w => w.windowMinutes === 300);
   const numberField = (field: 'fiveHourKeep' | 'weeklyKeep' | 'reserveDrainHours', label: string, fallback: number) => (
     <label className="block space-y-1 text-sm">
@@ -45,13 +60,9 @@ export function AccountPolicyForm({ account, threshold, drainHours, save }: {
       </div>}
     </fieldset>
     {account.drainOnce && <p className="text-sm">До исчерпания: защита остатка временно отключена, расписание продолжает действовать.</p>}
-    <Button size="sm" disabled={pending} onClick={async () => {
-      setError(''); setSaved(false);
-      const parsed = accountPolicySchema.safeParse(draft);
-      if (!parsed.success) { setError('Проверьте проценты, часовой пояс и интервалы расписания.'); return; }
-      setPending(true);
-      try { await save(parsed.data); setSaved(true); } catch { setError('Не удалось сохранить настройки. Повторите попытку.'); } finally { setPending(false); }
-    }}>{pending ? 'Сохранение…' : 'Сохранить настройки'}</Button>
-    {error && <p role="alert">{error}</p>}{saved && <p role="status">Настройки сохранены</p>}
+    <p className="text-sm text-muted-foreground">Изменения сохраняются автоматически. Режим «Использовать до исчерпания» временно отменяет общий и индивидуальный запас квоты, но не расписание. После первого исчерпанного лимита режим выключается.</p>
+    {error ? <><p role="alert">{error}</p><Button size="sm" onClick={() => setError('')}>Повторить сохранение</Button></> :
+      <p role="status">{pending ? 'Сохранение…' : dirty ? 'Ожидание сохранения…' : saved ? 'Настройки сохранены' : 'Все изменения сохранены'}</p>}
+
   </section>;
 }
