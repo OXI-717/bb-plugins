@@ -289,3 +289,15 @@ describe("one-shot draining", () => {
     expect(ids(gateMembership([primary, reserve], NOW, DRAIN))).toEqual(["primary"]);
   });
 });
+
+it('uses personal reserve lead time and never drains outside schedule', () => {
+  const primary = { account: { id: 'primary', role: 'primary' as const, cap: null }, quota: weekly(.1, 72 * HOUR) };
+  const reserve = { account: { id: 'reserve', role: 'reserve' as const, cap: null,
+    policy: { enabled:true, fiveHourKeep:null, weeklyKeep:null, reserveDrainHours:48, schedule:null },
+  }, quota: weekly(.01, 36 * HOUR) };
+  expect(gateMembership([primary, reserve], NOW, DRAIN).map(x => x.account.id)).toEqual(['primary', 'reserve']);
+  reserve.account.policy.reserveDrainHours = 12;
+  expect(gateMembership([primary, reserve], NOW, DRAIN).map(x => x.account.id)).toEqual(['primary']);
+  const closed = { ...reserve, account: { ...reserve.account, drainOnce:true, policy: { ...reserve.account.policy, schedule: { timeZone:'UTC', intervals:[] } } } };
+  expect(gateMembership([closed], NOW, DRAIN)).toEqual([]);
+});

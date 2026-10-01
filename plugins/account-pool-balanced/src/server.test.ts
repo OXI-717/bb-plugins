@@ -6636,6 +6636,39 @@ describe("sequential pool recovery", () => {
     await expect(rpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: "yes" })).rejects.toThrow();
   });
 
+  it("applies account policy to sticky sessions and preserves schedule during drain", async () => {
+    const attempts: Array<string | null> = [];
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", apiKey: "sk-work", priority: 0,
+      options: { fetch: async (_input, init) => {
+        attempts.push(new Headers(init?.headers).get("x-api-key"));
+        return Response.json({}, { headers: { "anthropic-ratelimit-unified-7d-utilization": "0.6" } });
+      } },
+    });
+    await addApiAccount(fixture, "sk-fallback", 100);
+    const send = async () => {
+      const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/messages", {
+        headers: authHeaders(fixture.key), body: JSON.stringify({ metadata: { user_id: JSON.stringify({ session_id: "policy-session" }) } }),
+      });
+      expect(response.status).toBe(200); await response.text();
+    };
+    const set = async (enabled: boolean, schedule: unknown = null) => fixture.host.harness.behavior.callRpc("account.setPolicy", {
+      accountId: fixture.account.id, policy: { enabled, weeklyKeep: 50, schedule },
+    });
+    await send();
+    await set(true);
+    await send();
+    expect(attempts).toEqual(["sk-work", "sk-fallback"]);
+    const status = statusSchema.parse(await fixture.host.harness.behavior.callRpc("status.get", null));
+    expect(status.accounts.find(a => a.id === fixture.account.id)).toMatchObject({ eligible: false, policy: { enabled: true, weeklyKeep: 50 } });
+    await set(true, { timeZone: "UTC", intervals: [] });
+    await fixture.host.harness.behavior.callRpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: true });
+    await send();
+    expect(attempts.at(-1)).toBe("sk-fallback");
+    await set(false);
+    const after = statusSchema.parse(await fixture.host.harness.behavior.callRpc("status.get", null));
+    expect(after.accounts.find(a => a.id === fixture.account.id)?.eligible).toBe(true);
+  });
+
   it("keeps reserve accounts out of routing while a primary account is eligible", async () => {
     const attempts: Array<string | null> = [];
     const fixture = await createFixture({

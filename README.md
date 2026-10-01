@@ -12,7 +12,7 @@ Version 0.4.3 shows the count and individual expiry dates of saved Codex usage-l
 
 ## Install
 
-Version 0.4.6 fixes in-flight request accounting after a client disconnects with an unread buffered response, preventing cancelled requests from blocking pool upgrades and quota refreshes.
+Version 0.4.7 adds per-account quota protection, availability schedules and reserve activation overrides.
 
 Version 0.4.5 adds a per-account **Use until exhausted** switch: bypass pool caps for one cycle, then automatically return to normal routing at the first exhausted provider quota. See [one-shot draining](plugins/account-pool-balanced/docs/drain-once.md).
 
@@ -28,7 +28,7 @@ bb plugin install account-pool-balanced@oxi-public
 Or install the release directly:
 
 ```sh
-bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.4.6 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
+bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.4.7 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
 ```
 
 Do not enable BB's built-in `account-pool` at the same time: both register `bb pool` and provider routes. These install commands are for new installations. BB 0.43.3 rejects replacing an existing plugin's Git source. If migrating from another repository, keep the existing installation until you have a supported migration procedure with verified backup and restore; do not remove a live pool just to change its source.
@@ -71,3 +71,5 @@ MIT. Account Pooler and vendored UI derive from `get-bb/bb`; upstream attributio
 ## Automation Catalog
 
 An independent panel for inventory, source freshness and execution history across schedulers. It does not execute jobs or invoke models. See [development and source setup](plugins/automation-catalog/README.md). Install through `bb plugin install automation-catalog@oxi-public`, or use the release command in its README.
+
+Per-account quota protection and availability: [Account policies](plugins/account-pool-balanced/docs/account-policies.md).

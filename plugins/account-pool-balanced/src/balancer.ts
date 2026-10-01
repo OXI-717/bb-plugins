@@ -1,3 +1,5 @@
+import { reserveHours, scheduleAllows } from "./account-policy.js";
+import type { AccountPolicy } from "./contracts.js";
 import type { AccountQuota } from "./contracts.js";
 
 const MINUTE_MS = 60 * 1_000;
@@ -27,6 +29,7 @@ interface ProgressiveCap {
 }
 
 interface PoolMembership {
+  policy?: AccountPolicy;
   role: "primary" | "reserve";
   cap: ProgressiveCap | null;
   drainOnce?: boolean;
@@ -248,10 +251,10 @@ export function gateMembership<
   drainMs: number,
   week: WorkWeek = CALENDAR_WEEK,
 ): T[] {
-  const assessed = entries.map((entry) => {
+  const assessed = entries.filter(entry => scheduleAllows(entry.account.policy, now)).map((entry) => {
     const weekly = weeklyWindow(quotaWindows(entry.quota, now));
     const left = weekly === null ? null : remainingWorkMs(weekly, now, week);
-    return { entry, weekly, draining: left !== null && left <= drainMs };
+    return { entry, weekly, draining: left !== null && left <= reserveHours(entry.account, drainMs / 3600000) * 3600000 };
   });
   const withinCap = assessed.filter(({ entry, weekly }) => {
     const cap = effectiveCap(entry.account);

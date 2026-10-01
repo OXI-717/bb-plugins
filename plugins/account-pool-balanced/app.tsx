@@ -1,3 +1,6 @@
+import { AccountPolicyForm } from "./account-policy-form";
+import { policySummary, policyThresholds, reserveHours, scheduleAllows } from "./src/account-policy.js";
+import type { AccountPolicy } from "./src/contracts.js";
 import {
   useCallback,
   useEffect,
@@ -324,6 +327,7 @@ function statusPresentation(
   dot: string;
 } {
   if (account.drainOnce) threshold = 1;
+  if (account.enabled && !scheduleAllows(account.policy, Date.now())) return { label: "Вне расписания", dot: "bg-muted-foreground" };
   if (account.status === "ready" && account.capReached) {
     const resetAt = weeklyResetAt(account);
     return {
@@ -343,7 +347,7 @@ function statusPresentation(
       dot: "bg-warning",
     };
   if (account.status === "exhausted") {
-    const resetAt = blockingResetAt(account, null, threshold, Date.now());
+    const resetAt = blockingResetAt(account, null, policyThresholds(account, threshold), Date.now());
     return {
       label: `Исчерпан${resetAt === null ? "" : ` · ${resetLabel(resetAt)}`}`,
       dot: "bg-destructive",
@@ -411,7 +415,8 @@ type QuotaSlot = {
 
 function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
   if (account.drainOnce) threshold = 1;
-  const weeklyLimit = Math.min(threshold, account.capLimit ?? threshold);
+  const limits = policyThresholds(account, threshold);
+  const weeklyLimit = Math.min(limits.weekly, account.capLimit ?? limits.weekly);
   if (account.provider === "codex") {
     if (account.limitWindows.length === 0)
       return [
@@ -420,7 +425,7 @@ function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
           label: "5Ч",
           utilization: null,
           status: null,
-          limit: threshold,
+          limit: limits.fiveHour,
         },
       ];
     return account.limitWindows.map((window) => ({
@@ -432,7 +437,7 @@ function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
         (window.windowMinutes ?? (window.slot === "primary" ? 300 : 10_080)) >=
         1_440
           ? weeklyLimit
-          : threshold,
+          : window.windowMinutes === 300 ? limits.fiveHour : limits.other,
     }));
   }
   return [
@@ -441,7 +446,7 @@ function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
       label: "5Ч",
       utilization: account.fiveHourUtilization,
       status: account.fiveHourStatus,
-      limit: threshold,
+      limit: limits.fiveHour,
     },
     {
       key: "seven-day",
@@ -601,11 +606,13 @@ function AccountRow({
               )}
               <SettingsBadge>{tier(account)}</SettingsBadge>
               {account.drainOnce ? <SettingsBadge>До исчерпания</SettingsBadge> : null}
+              {account.policy?.enabled ? <SettingsBadge>Свои настройки</SettingsBadge> : null}
               {account.role === "reserve" ? (
                 <SettingsBadge>Резерв</SettingsBadge>
               ) : null}
               {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
             </div>
+            {account.policy?.enabled && <p className="text-xs text-muted-foreground">{policySummary(account.policy)}</p>}
             <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-subtle-foreground/75">
               <span className="inline-flex shrink-0 items-center gap-1.5">
                 <span className={cn("size-1.5 rounded-full", status.dot)} />
@@ -1798,6 +1805,12 @@ function AccountPoolSettings() {
       >
         {dialog?.kind === "account" && selectedAccount !== null ? (
           <AccountDialog
+            key={selectedAccount.id}
+            savePolicy={async policy => {
+              const result = await rpc.call("account.setPolicy", { accountId: selectedAccount.id, policy });
+              if (!result.account) throw new Error("Account removed");
+              await refresh();
+            }}
             account={selectedAccount}
             refreshError={error}
             threshold={threshold}
@@ -2124,6 +2137,7 @@ function capSummary(account: AccountSummary): string | null {
 
 function AccountDialog({
   account,
+  savePolicy,
   refreshError,
   threshold,
   current,
@@ -2133,6 +2147,7 @@ function AccountDialog({
   pending,
 }: {
   account: AccountSummary;
+  savePolicy: (policy: AccountPolicy) => Promise<void>;
   refreshError: string | null;
   threshold: number;
   current: boolean;
@@ -2141,12 +2156,16 @@ function AccountDialog({
   act: (action: "toggle" | "refresh" | "remove" | "drain") => void;
   pending: boolean;
 }) {
+  const limits = policyThresholds(account, threshold);
+  const inheritedThreshold = threshold;
+  const inheritedDrainHours = drainHours;
+  drainHours = reserveHours(account, drainHours);
   if (account.drainOnce) threshold = 1;
   const cap = capSummary(account);
   const weeklySkipAt =
     account.capLimit === null
-      ? undefined
-      : Math.min(threshold, account.capLimit);
+      ? limits.weekly
+      : Math.min(limits.weekly, account.capLimit);
   const shared = (
     utilization: number | null,
     resetAt: number | null,
@@ -2197,6 +2216,7 @@ function AccountDialog({
         </SettingsBadge>
         {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
       </div>
+      <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} />
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={account.drainOnce === true} disabled={pending}
           onChange={() => act("drain")} />
@@ -2229,7 +2249,7 @@ function AccountDialog({
                 key={window.slot}
                 label={windowLongLabel(window, account.provider)}
                 quota={window}
-                threshold={threshold}
+                threshold={window.windowMinutes === 300 ? limits.fiveHour : window.windowMinutes === 10080 ? limits.weekly : limits.other}
                 skipAt={
                   (window.windowMinutes ?? 0) >= 1_440
                     ? weeklySkipAt
@@ -2247,7 +2267,7 @@ function AccountDialog({
                 account.fiveHourResetAt,
                 account.fiveHourStatus,
               )}
-              threshold={threshold}
+              threshold={limits.fiveHour}
             />
             <QuotaDetail
               label="7 дней"
@@ -2256,7 +2276,7 @@ function AccountDialog({
                 account.sevenDayResetAt,
                 account.sevenDayStatus,
               )}
-              threshold={threshold}
+              threshold={limits.weekly}
               skipAt={weeklySkipAt}
             />
             {modelFamilySchema.options.flatMap((family) =>
@@ -2267,7 +2287,7 @@ function AccountDialog({
                       key={family}
                       label={FAMILY_LABELS[family]}
                       quota={account.familyWeekly[family]}
-                      threshold={threshold}
+                      threshold={limits.weekly}
                       skipAt={weeklySkipAt}
                     />,
                   ],
