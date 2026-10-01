@@ -1053,6 +1053,7 @@ function AccountPoolSettings() {
     switchThreshold: null,
   });
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [policyUnsaved, setPolicyUnsaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [optimisticOrder, setOptimisticOrder] = useState<{
@@ -1302,6 +1303,7 @@ function AccountPoolSettings() {
     account: AccountSummary,
     action: AccountAction,
   ): Promise<void> {
+    if (policyUnsaved && ["priority", "role", "cap", "remove"].includes(action)) return;
     if (action === "priority") {
       setPriority(String(account.priority));
       setDialog({ kind: "priority", accountId: account.id });
@@ -1355,6 +1357,7 @@ function AccountPoolSettings() {
     }
   }
   function closeDialog(): void {
+    if (dialog?.kind === "account" && policyUnsaved) return;
     if (dialog?.kind === "codex-login" && codexStep !== null)
       void rpc.call("codexLogin.cancel", { sessionId: codexStep.sessionId });
     if (dialog?.kind === "api-key") setApiKey("");
@@ -1806,6 +1809,7 @@ function AccountPoolSettings() {
         {dialog?.kind === "account" && selectedAccount !== null ? (
           <AccountDialog
             key={selectedAccount.id}
+            onPolicyUnsavedChange={setPolicyUnsaved}
             savePolicy={async policy => {
               const result = await rpc.call("account.setPolicy", { accountId: selectedAccount.id, policy });
               if (!result.account) throw new Error("Account removed");
@@ -2138,6 +2142,7 @@ function capSummary(account: AccountSummary): string | null {
 function AccountDialog({
   account,
   savePolicy,
+  onPolicyUnsavedChange,
   refreshError,
   threshold,
   current,
@@ -2148,6 +2153,7 @@ function AccountDialog({
 }: {
   account: AccountSummary;
   savePolicy: (policy: AccountPolicy) => Promise<void>;
+  onPolicyUnsavedChange: (unsaved: boolean) => void;
   refreshError: string | null;
   threshold: number;
   current: boolean;
@@ -2216,7 +2222,7 @@ function AccountDialog({
         </SettingsBadge>
         {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
       </div>
-      <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} />
+      <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={onPolicyUnsavedChange} />
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={account.drainOnce === true} disabled={pending}
           onChange={() => act("drain")} />

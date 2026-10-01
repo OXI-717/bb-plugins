@@ -164,6 +164,25 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it("keeps the account card open through debounce and in-flight policy save", async () => {
+    const selected = account();
+    const response = deferred<object>();
+    const slot = render([selected], { "account.setPolicy": () => response.promise });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.click(slot.getByRole("checkbox", { name: "Индивидуальные настройки" }));
+    fireEvent.click(slot.getByRole("button", { name: "Закрыть" }));
+    expect(slot.getByRole("dialog")).toBeTruthy();
+    fireEvent.keyDown(slot.getByRole("dialog"), { key: "Escape" });
+    expect(slot.getByRole("dialog")).toBeTruthy();
+    await waitFor(() => expect(slot.rpcCalls.some(call => call.method === "account.setPolicy")).toBe(true));
+    fireEvent.click(slot.getByRole("button", { name: "Закрыть" }));
+    expect(slot.getByRole("dialog")).toBeTruthy();
+    await act(async () => { response.resolve({ account: selected }); });
+    await slot.findByText("Настройки сохранены");
+    fireEvent.click(slot.getByRole("button", { name: "Закрыть" }));
+    await waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());
+  });
+
   it("toggles one-shot draining in the account card", async () => {
     const selected = account({ drainOnce: false });
     const slot = render([selected], { "account.setDrainOnce": () => {
