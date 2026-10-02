@@ -39,8 +39,8 @@ export function AutomationComposer({
         </label>
         {context && <p className="mt-2 text-sm">Обсуждение будет вложено в «{context.parentTitle}». <button className="underline" onClick={() => navigate.toThread(context.parentThreadId)}>Открыть родительский тред</button></p>}
         <p className="text-xs text-muted-foreground">
-          Опишите задачу и расписание, выберите проект и модель, затем
-          отправьте запрос для настройки.
+          Проверьте текст задачи, проект и модель. Агент запустится только
+          после отправки запроса.
         </p>
       </div>
       {error && (

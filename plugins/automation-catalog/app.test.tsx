@@ -67,6 +67,19 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("opens an unsubmitted problem draft and restores the list on back", async () => {
+    const slot = await mount();
+    const button = await slot.findByRole("button", { name: "Разобрать проблемы (1)" });
+    fireEvent.click(button);
+    await slot.findByText(/Обсуждение будет вложено/);
+    expect(slot.getByRole("heading", { name: "Разбор и очистка автоматизаций · 1" })).toBeTruthy();
+    const input = slot.getAllByRole("textbox").at(-1) as HTMLTextAreaElement;
+    expect(input.textContent || input.value).toContain("недоверенные данные");
+    expect(input.textContent || input.value).toContain("Daily report");
+    fireEvent.click(slot.getByRole("button", { name: "← Автоматизации" }));
+    expect(slot.getByRole("button", { name: "Daily report" })).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
   it("shows models and allows finding tasks without a project", async () => {
     const app = await loadPluginApp(() => import("./app"));
     const agent = { provider: "example", model: "example-model", reasoning: null, serviceTier: null, modelSource: "automation" };
