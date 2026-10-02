@@ -39,3 +39,5 @@ that a task is disabled.
 Collectors accept `--host-prefix` for project-qualified display names. Snapshots
 may carry `hostLabel`; raw `host` remains the scheduler identity. Display labels
 appear in cards and host filters and are searchable without rewriting run keys.
+
+The overview’s “Разобрать проблемы” button opens a parent-bound draft for problem diagnosis and cleanup, without starting an agent. It respects search/source/host/project/scope filters across all status sections and pages. The draft includes at most 40 metadata records and asks the agent to re-read the current inventory before changes; an intentional pause alone is not a cleanup reason. Model and project remain editable before submission.

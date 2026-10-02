@@ -1,5 +1,6 @@
 import { modelLabel, projectLabel, unlinkedProject } from "./lib/execution";
 import { AutomationComposer, type ComposeIntent } from "./compose";
+import { triageCandidates, triageIntent } from "./lib/triage";
 import { category } from "./lib/overview";
 import { useCallback, useEffect, useState } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
@@ -163,6 +164,7 @@ export function CatalogPage() {
         states.get(a.key)!.rank - states.get(b.key)!.rank ||
         a.name.localeCompare(b.name),
     );
+  const triage = data ? triageCandidates(data, filters, now) : [];
   const lastPage = Math.max(0, Math.ceil(matched.length / 50) - 1);
   const currentPage = Math.min(page, lastPage);
   return (
@@ -175,7 +177,12 @@ export function CatalogPage() {
               Что выполняется, что проверить и где посмотреть результат
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <span title="Черновик разбора по выбранным фильтрам, во всех разделах состояний. Агент запустится только после отправки.">
+            <Button size="sm" variant="outline" disabled={!data || triage.length === 0}
+              onClick={() => { if (data) setCompose(triageIntent(data, triage, filters, Date.now())); }}>
+              Разобрать проблемы ({triage.length})
+            </Button></span>
             <Button size="sm" variant="outline" disabled={refreshing} onClick={() => void refreshSources()}>
               {refreshing ? "Обновляем BB…" : "Обновить BB"}
             </Button>
