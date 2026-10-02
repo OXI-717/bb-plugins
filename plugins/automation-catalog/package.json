@@ -1,9 +1,9 @@
 {
   "name": "bb-plugin-automation-catalog",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "type": "module",
   "engines": {
-    "bb": ">=0.43.3 <0.44.0",
+    "bb": ">=0.43.3",
     "bbPluginSdk": ">=0.4.104 <0.5.0"
   },
   "bb": {
