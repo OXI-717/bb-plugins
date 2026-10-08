@@ -6,6 +6,17 @@ import { createCatalog } from "./catalog.js";
 
 const databases: Database.Database[] = [];
 describe("durable incident review", () => {
+  it("retires review after recovery even when a later failure has the same fingerprint", () => {
+    const { catalog } = setup();
+    const bad = { ...snapshot(), runs: [] }; bad.tasks[0].state = "failed";
+    catalog.publish(bad);
+    const task = catalog.list().tasks[0];
+    catalog.review(task.key, attentionFingerprint(task), "Checked");
+    catalog.publish({ ...bad, observedAt: 2000, tasks: [{ ...bad.tasks[0], state: "active" }] });
+    expect(catalog.list().tasks[0].review).toBeNull();
+    catalog.publish({ ...bad, observedAt: 3000 });
+    expect(health(catalog.list().tasks[0]).attention).toBe(true);
+  });
   it("survives refresh, rejects stale clicks and exposes the next failure", () => {
     const { catalog } = setup();
     const first = snapshot(Date.now()); first.runs[0].status = "failed";

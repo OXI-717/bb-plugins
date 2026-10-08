@@ -230,6 +230,13 @@ export function createCatalog(db: Db) {
             "INSERT INTO automation_catalog_runs VALUES (?, ?, ?, ?) ON CONFLICT(task_key,id) DO UPDATE SET started_at=excluded.started_at, data=excluded.data",
           ).run(key, run.id, run.startedAt, JSON.stringify(run));
         }
+        // Once the observed incident changes, an old review must never revive.
+        for (const task of this.list().tasks) {
+          if (task.sourceId === status.id && task.review && task.review.fingerprint !== attentionFingerprint(task)) {
+            db.prepare("UPDATE automation_catalog_tasks SET data = ? WHERE key = ?").run(
+              JSON.stringify({ ...entry(task.key), review: null }), task.key);
+          }
+        }
         return { ok: true as const };
       })();
     },
