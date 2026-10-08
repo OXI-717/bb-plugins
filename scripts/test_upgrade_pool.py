@@ -14,6 +14,13 @@ import upgrade_pool as u
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_inventory_detects_project_routing_changes(self):
+        pool = {'accounts': [{'id': 'account-test', 'projects': {'onlySelected': True, 'rules': [{'projectId': 'project-a', 'role': 'primary'}]}}],
+                'routing': {}, 'enabledAccountCount': 1}
+        before = u.inventory(pool)
+        pool['accounts'][0]['projects'] = {'onlySelected': True, 'rules': [{'projectId': 'project-b', 'role': 'reserve'}]}
+        self.assertNotEqual(before, u.inventory(pool))
+
     def test_bash_entrypoint_empty_and_explicit_arguments(self):
         script = Path(__file__).with_name('upgrade-pool.sh')
         for flags in (['--help'], ['--version', 'bad'], ['--unknown']):

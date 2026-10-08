@@ -25,3 +25,12 @@ it('combined authentication cannot assign a project to an invalid token',async()
  const dir=await mkdtemp(path.join(tmpdir(),'pool-project-combined-'));
  try{const hosts=new HubTokenStore(path.join(dir,'hosts')), clients=new HubTokenStore(path.join(dir,'clients')); const store=combinedTokens(hosts,clients);const t=await clients.forProject('external_test','project-a');expect(await store.projectForToken(t)).toBe('project-a');expect(await store.projectForToken('invalid')).toBeNull();}finally{await rm(dir,{recursive:true,force:true});}
 });
+it('revokes a project token being minted concurrently with client removal',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'pool-project-revoke-'));
+ try {
+  const store=new HubTokenStore(dir);await store.forHost('external_test');
+  const [token]=await Promise.all([store.forProject('external_test','project-a'),store.remove('external_test')]);
+  expect(await store.authenticate(token)).toBeNull();
+  expect(await new HubTokenStore(dir).authenticate(token)).toBeNull();
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

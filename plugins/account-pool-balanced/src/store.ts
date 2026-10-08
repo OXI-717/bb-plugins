@@ -277,6 +277,7 @@ export class AccountStore {
 
 export class HubTokenStore {
   private readonly hostLocks = new Map<string, Promise<void>>();
+  private readonly groupLocks = new Map<string, Promise<void>>();
   private readonly tokens = new Map<string, StoredHubToken>();
   private readonly persistedLastUsedAt = new Map<string, number | null>();
   private initialization: Promise<void> | null = null;
@@ -309,6 +310,10 @@ export class HubTokenStore {
 
   async forHost(hostId: string): Promise<string> {
     await this.initialize();
+    return this.serialized(hostId, () => this.forHostRecord(hostId), this.groupLocks);
+  }
+
+  private async forHostRecord(hostId: string): Promise<string> {
     return this.serialized(hostId, async () => {
       const existing = this.read(hostId);
       if (existing !== null) return existing.value;
@@ -321,14 +326,17 @@ export class HubTokenStore {
   async forProject(hostId: string, projectId: string | null): Promise<string> {
     if (projectId === null) return this.forHost(hostId);
     const key = `scope_${createHash("sha256").update(JSON.stringify([hostId, projectId])).digest("hex")}`;
-    await this.forHost(hostId);
-    return this.serialized(key, async () => {
-      const existing = this.read(key);
-      if (existing !== null) return existing.value;
-      const token = storedHubTokenSchema.parse({ ...this.create(key), machineHostId: hostId, projectId });
-      await this.write(key, token);
-      return token.value;
-    });
+    await this.initialize();
+    return this.serialized(hostId, async () => {
+      await this.forHostRecord(hostId);
+      return this.serialized(key, async () => {
+        const existing = this.read(key);
+        if (existing !== null) return existing.value;
+        const token = storedHubTokenSchema.parse({ ...this.create(key), machineHostId: hostId, projectId });
+        await this.write(key, token);
+        return token.value;
+      });
+    }, this.groupLocks);
   }
 
   async projectForToken(presented: string | null): Promise<string | null> {
@@ -339,9 +347,11 @@ export class HubTokenStore {
 
   async rotate(hostId: string): Promise<HubTokenSummary> {
     await this.initialize();
-    const keys = this.readAll().filter(token => token.machineHostId === hostId).map(token => token.hostId);
-    for (const key of keys) await this.rotateOne(key);
-    return this.rotateOne(hostId);
+    return this.serialized(hostId, async () => {
+      const keys = this.readAll().filter(token => token.machineHostId === hostId).map(token => token.hostId);
+      for (const key of keys) await this.rotateOne(key);
+      return this.rotateOne(hostId);
+    }, this.groupLocks);
   }
 
   private async rotateOne(hostId: string): Promise<HubTokenSummary> {
@@ -410,23 +420,19 @@ export class HubTokenStore {
   async prune(hostIds: readonly string[]): Promise<void> {
     await this.initialize();
     const enrolled = new Set(hostIds);
-    const stale = [...this.tokens.keys()].filter(
-      (hostId) => !enrolled.has(this.tokens.get(hostId)?.machineHostId ?? hostId),
-    );
-    await Promise.all(
-      stale.map((hostId) =>
-        this.serialized(hostId, async () => {
-          await fs.rm(this.tokenPath(hostId), { force: true });
-          this.tokens.delete(hostId);
-          this.persistedLastUsedAt.delete(hostId);
-        }),
-      ),
-    );
+    const stale = new Set(this.readAll().map(token => token.machineHostId ?? token.hostId).filter(hostId => !enrolled.has(hostId)));
+    await Promise.all([...stale].map(hostId => this.remove(hostId)));
   }
 
   async remove(hostId: string): Promise<void> {
     await this.initialize();
-    for (const scoped of this.readAll().filter(token => token.machineHostId === hostId)) await this.remove(scoped.hostId);
+    await this.serialized(hostId, async () => {
+      for (const scoped of this.readAll().filter(token => token.machineHostId === hostId)) await this.removeRecord(scoped.hostId);
+      await this.removeRecord(hostId);
+    }, this.groupLocks);
+  }
+
+  private async removeRecord(hostId: string): Promise<void> {
     await this.serialized(hostId, async () => {
       await fs.rm(this.tokenPath(hostId), { force: true });
       this.tokens.delete(hostId);
@@ -505,20 +511,21 @@ export class HubTokenStore {
   private async serialized<T>(
     hostId: string,
     action: () => Promise<T>,
+    locks = this.hostLocks,
   ): Promise<T> {
-    const previous = this.hostLocks.get(hostId) ?? Promise.resolve();
+    const previous = locks.get(hostId) ?? Promise.resolve();
     let release = () => {};
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
     const tail = previous.then(() => current);
-    this.hostLocks.set(hostId, tail);
+    locks.set(hostId, tail);
     await previous;
     try {
       return await action();
     } finally {
       release();
-      if (this.hostLocks.get(hostId) === tail) this.hostLocks.delete(hostId);
+      if (locks.get(hostId) === tail) locks.delete(hostId);
     }
   }
 }
