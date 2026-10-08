@@ -116,6 +116,8 @@ describe("freshness and registry signals", () => {
     expect(health({ ...task, nextRunAt: 1 }, source, 200000).label).toBe(
       "Просрочена",
     );
+    expect(health({ ...task, state: "unknown", nextRunAt: 1 }, source, 200000).attention).toBe(false);
+    expect(health({ ...task, state: "unknown", nextRunAt: 1, lastRun: { status: "failed" } as CatalogTask["lastRun"] }, source, 200000).attention).toBe(true);
     expect(
       health({ ...task, nextRunAt: 1 }, { ...source, lastSuccessAt: 1 }, 200000)
         .label,

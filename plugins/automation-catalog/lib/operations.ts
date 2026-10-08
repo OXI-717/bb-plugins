@@ -94,6 +94,7 @@ function rawHealth(
     );
   if (
     !paused &&
+    task.state !== "unknown" &&
     source &&
     task.nextRunAt != null &&
     now - task.nextRunAt > Math.max(source?.staleAfterMs ?? 60000, 60000) &&
