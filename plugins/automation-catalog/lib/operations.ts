@@ -62,7 +62,11 @@ export function health(
       true,
       "danger",
     );
-  if (task.lastRun?.status === "failed")
+  if (task.lastRun?.status === "failed") {
+    const failedAt = task.lastRun.finishedAt ?? task.lastRun.observedAt ?? null;
+    const historical =
+      failedAt != null &&
+      now - failedAt > Math.max(source?.staleAfterMs ?? 86400000, 86400000);
     return result(
       "Последний запуск завершился ошибкой",
       paused
@@ -71,9 +75,10 @@ export function health(
           ? "Включена · последний запуск с ошибкой"
           : "Последний записанный запуск с ошибкой",
       3,
-      true,
+      !historical,
       "danger",
     );
+  }
   if (source?.error)
     return result(
       "Ошибка соединения",
@@ -121,7 +126,7 @@ export function health(
         ? `В реестре указано: ${automationStateLabel(task.declaredState)}. Фактическое состояние не подключено.`
         : "Фактическое состояние и история запусков не подключены",
       9,
-      task.history !== "not-connected",
+      false,
     );
   return result(
     "Включена",

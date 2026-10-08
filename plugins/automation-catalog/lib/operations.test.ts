@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { health, creationPrompt } from "./operations";
+import type { Source } from "./operations";
 import { catalogSchedule } from "./catalog-schedule";
 import type { CatalogTask } from "../src/catalog-types";
 const task = { state: "active", missing: false, lastRun: null } as CatalogTask;
@@ -21,6 +22,49 @@ describe("operational state", () => {
     expect(
       health({ ...task, state: "unknown", history: "not-connected", declaredState: "blocked" }),
     ).toMatchObject({ label: "Только описание", attention: false });
+  });
+  it("does not demand attention for an unconfirmed state when only run history is connected", () => {
+    expect(
+      health({
+        ...task,
+        state: "unknown",
+        history: "available",
+        lastRun: { status: "unknown", finishedAt: null } as CatalogTask["lastRun"],
+      }),
+    ).toMatchObject({ label: "Состояние не подтверждено", attention: false });
+  });
+  it("stops flagging a failure once it is older than the source freshness window", () => {
+    const now = Date.now();
+    expect(
+      health(
+        {
+          ...task,
+          lastRun: {
+            status: "failed",
+            finishedAt: null,
+            observedAt: now - 3 * 86400000,
+          } as CatalogTask["lastRun"],
+        },
+        { staleAfterMs: 3600000 } as Source,
+        now,
+      ),
+    ).toMatchObject({ label: "Последний запуск завершился ошибкой", attention: false });
+  });
+  it("still flags a fresh failure on an enabled schedule", () => {
+    const now = Date.now();
+    expect(
+      health(
+        {
+          ...task,
+          lastRun: {
+            status: "failed",
+            finishedAt: now - 3600000,
+          } as CatalogTask["lastRun"],
+        },
+        { staleAfterMs: 3600000 } as Source,
+        now,
+      ),
+    ).toMatchObject({ label: "Последний запуск завершился ошибкой", attention: true });
   });
   it("does not treat a deliberate pause as failure", () => {
     expect(health({ ...task, state: "paused" })).toMatchObject({
