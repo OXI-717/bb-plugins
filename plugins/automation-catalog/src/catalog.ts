@@ -4,6 +4,7 @@ import { refreshBbCatalog } from "./bb-refresh.js";
 import { manageBbCatalog } from "./bb-management.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { closeSync, openSync, readSync } from "node:fs";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
@@ -27,6 +28,20 @@ CREATE INDEX automation_catalog_runs_time ON automation_catalog_runs(task_key, s
 `;
 const stored = z.object({ data: z.string() });
 const execFileAsync = promisify(execFile);
+function envNodeEntrypoint(path: string) {
+  try {
+    const fd = openSync(path, "r");
+    try {
+      const head = Buffer.alloc(256);
+      const length = readSync(fd, head, 0, head.length, 0);
+      return /^#![^\n]*\bnode\b/.test(head.subarray(0, length).toString("latin1"));
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
 function decode<T>(row: unknown, schema: z.ZodType<T>): T {
   return schema.parse(JSON.parse(stored.parse(row).data));
 }
@@ -313,11 +328,25 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
   }
   async function bbCli(...args: string[]) {
     const serverUrl = bb.server.loopbackBaseUrl;
-    const { stdout } = await execFileAsync(process.env.BB_CLI || "bb", [...args, "--json"], {
-      env: { ...process.env, BB_SERVER_URL: serverUrl },
-      timeout: 15000,
-      maxBuffer: args.includes("--output") ? 8 * 1024 * 1024 : 1024 * 1024,
-    });
+    const cli = process.env.BB_CLI?.trim()
+      || (process.env.BB_CLI_DIR ? `${process.env.BB_CLI_DIR}/bb` : "bb");
+    // The host may run plugins with a stripped PATH (no node): a
+    // `#!/usr/bin/env node` entrypoint cannot resolve its interpreter,
+    // so run it through the current runtime instead.
+    const viaRuntime = cli !== "bb" && envNodeEntrypoint(cli);
+    const { stdout } = await execFileAsync(
+      viaRuntime ? process.execPath : cli,
+      [...(viaRuntime ? [cli] : []), ...args, "--json"],
+      {
+        env: {
+          ...process.env,
+          ...(viaRuntime ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+          BB_SERVER_URL: serverUrl,
+        },
+        timeout: 15000,
+        maxBuffer: args.includes("--output") ? 8 * 1024 * 1024 : 1024 * 1024,
+      },
+    );
     return JSON.parse(stdout) as Record<string, unknown>;
   }
   bb.rpc.register(catalogRpcContract, {
