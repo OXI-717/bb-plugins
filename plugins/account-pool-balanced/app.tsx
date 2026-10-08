@@ -329,7 +329,7 @@ function statusPresentation(
   dot: string;
 } {
   if (account.drainOnce) threshold = 1;
-  if (account.enabled && !scheduleAllows(account.policy, Date.now())) return { label: "Вне расписания", dot: "bg-muted-foreground" };
+  if (account.enabled && !account.drainOnce && !scheduleAllows(account.policy, Date.now())) return { label: "Вне расписания", dot: "bg-muted-foreground" };
   if (account.status === "ready" && account.capReached) {
     const resetAt = weeklyResetAt(account);
     return {

@@ -1109,3 +1109,8 @@ describe("thread subscription indicator", () => {
     expect(await ui.findByText("Пул: ещё нет данных")).toBeTruthy();
   });
 });
+it('does not label an armed draining account as outside its closed schedule',async()=>{
+ const slot=render([account({drainOnce:true,policy:{enabled:true,fiveHourKeep:null,weeklyKeep:null,reserveDrainHours:null,schedule:{timeZone:'UTC',intervals:[]}}})]);
+ await slot.findByText('person@example.com');
+ expect(slot.queryByText('Вне расписания')).toBeNull();
+});
