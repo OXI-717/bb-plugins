@@ -93,6 +93,7 @@ export const catalogSnapshotSchema = z
     "Failed snapshots must not contain partial data",
   );
 export const catalogEntrySchema = catalogTaskSchema.extend({
+  review: z.object({ fingerprint: z.string().max(2000), note: z.string().trim().min(1).max(1000), at: time }).strict().nullable().optional(),
   key: id,
   sourceId: id,
   observedAt: time,

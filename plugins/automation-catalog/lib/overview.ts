@@ -2,7 +2,7 @@ import type { CatalogTask } from "../src/catalog-types";
 
 export function category(task: CatalogTask) {
   if (task.missing) return "missing";
-  if (task.history === "not-connected") return "unmonitored";
+  if (task.history === "not-connected" || task.state === "unknown") return "unmonitored";
   if (task.scheduleKind === "once" && task.state === "paused" && task.lastRun?.status === "succeeded") return "completed";
   if (task.state === "paused") return "paused";
   return "current";

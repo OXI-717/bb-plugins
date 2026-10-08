@@ -1,8 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { health, creationPrompt } from "./operations";
+import { health, creationPrompt, attentionFingerprint } from "./operations";
 import { catalogSchedule } from "./catalog-schedule";
 import type { CatalogTask } from "../src/catalog-types";
 const task = { state: "active", missing: false, lastRun: null } as CatalogTask;
+describe("incident review", () => {
+  const failed = { ...task, history: "available", lastRun: { id: "run-a", status: "failed", finishedAt: 1, exitCode: 1 } } as CatalogTask;
+  it("keeps an old weekly failure actionable", () => {
+    expect(health(failed, undefined, 30 * 86400000).attention).toBe(true);
+  });
+  it("separates unknown state from failed execution", () => {
+    expect(health({ ...task, state: "unknown", history: "available" }).attention).toBe(false);
+    expect(health({ ...failed, state: "unknown" }).attention).toBe(true);
+  });
+  it("reviews only one incident and reopens on a new failure", () => {
+    const reviewed = { ...failed, review: { fingerprint: attentionFingerprint(failed), note: "Checked", at: 10 } };
+    expect(health(reviewed)).toMatchObject({ attention: false, label: "Разобрано" });
+    expect(health({ ...reviewed, lastRun: { ...failed.lastRun!, id: "run-b" } }).attention).toBe(true);
+    expect(health({ ...reviewed, lastRun: { ...failed.lastRun!, id: "run-b", status: "succeeded" } }).attention).toBe(false);
+  });
+});
 describe("operational state", () => {
   it("keeps source deletions visible without counting them as running failures", () => {
     expect(health({ ...task, missing: true })).toMatchObject({
@@ -100,6 +116,8 @@ describe("freshness and registry signals", () => {
     expect(health({ ...task, nextRunAt: 1 }, source, 200000).label).toBe(
       "Просрочена",
     );
+    expect(health({ ...task, state: "unknown", nextRunAt: 1 }, source, 200000).attention).toBe(false);
+    expect(health({ ...task, state: "unknown", nextRunAt: 1, lastRun: { status: "failed" } as CatalogTask["lastRun"] }, source, 200000).attention).toBe(true);
     expect(
       health({ ...task, nextRunAt: 1 }, { ...source, lastSuccessAt: 1 }, 200000)
         .label,

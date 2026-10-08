@@ -68,7 +68,7 @@ describe("BB refresh", () => {
       expect(catalog.detail({ key: task.key }).total).toBe(1);
       expect(catalog.detail({ key: task.key }).runs[0].hasOutput).toBe(true);
       expect(JSON.stringify(catalog.detail({ key: task.key }))).not.toContain("PRIVATE");
-      const { key, sourceId, observedAt, missing, lastRun, ...definition } = task;
+      const { key, sourceId, observedAt, missing, lastRun, review, ...definition } = task;
       catalog.publish({ source: { id: "bb-local", name: "BB", staleAfterMs: 60000, bbServerUrl: "http://127.0.0.1:38886" }, observedAt: Date.now(), error: null, tasks: [{ ...definition, hostLabel: "team-worker" }], runs: [] }, "http://127.0.0.1:38886");
       await refreshBbCatalog(catalog, command, "http://127.0.0.1:38886");
       expect(catalog.list().tasks[0]).toMatchObject({ key, hostLabel: "team-worker", host: task.host });

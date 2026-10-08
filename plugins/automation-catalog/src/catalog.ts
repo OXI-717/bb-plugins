@@ -1,3 +1,4 @@
+import { attentionFingerprint, health } from "../lib/operations.js";
 import { composeRequestSchema, hostRequest } from "./compose";
 import { readRunResult, runResultSchema } from "./run-result";
 import { refreshBbCatalog } from "./bb-refresh.js";
@@ -88,6 +89,18 @@ export function createCatalog(db: Db) {
     };
   }
   return {
+    review(key: string, fingerprint: string, note: string | null) {
+      return db.transaction(() => {
+        const detail = this.detail({ key });
+        const task = detail.task;
+        if (fingerprint !== attentionFingerprint(task)) throw new Error("Состояние изменилось. Обновите карточку и проверьте новый результат.");
+        if (note !== null && !health({ ...task, review: null }, detail.source).attention)
+          throw new Error("У этой записи нет сбоя, требующего разбора.");
+        db.prepare("UPDATE automation_catalog_tasks SET data = ? WHERE key = ?").run(
+          JSON.stringify({ ...entry(key), review: note === null ? null : { fingerprint, note, at: Date.now() } }), key);
+        return { ok: true as const };
+      })();
+    },
     setBbState(key: string, state: "active" | "paused") {
       const task = entry(key);
       if (!source(task.sourceId).managedHere || task.scheduler !== "bb" || task.missing)
@@ -182,8 +195,11 @@ export function createCatalog(db: Db) {
         ).run(status.id);
         for (const task of snapshot.tasks) {
           const key = identityKey(task.host, task.id);
+          const previousTask = db.prepare("SELECT data FROM automation_catalog_tasks WHERE key = ?").get(key);
+          const review = previousTask ? decode(previousTask, catalogEntrySchema).review : null;
           const value = {
             ...task,
+            review,
             key,
             sourceId: status.id,
             observedAt: snapshot.observedAt,
@@ -213,6 +229,13 @@ export function createCatalog(db: Db) {
           db.prepare(
             "INSERT INTO automation_catalog_runs VALUES (?, ?, ?, ?) ON CONFLICT(task_key,id) DO UPDATE SET started_at=excluded.started_at, data=excluded.data",
           ).run(key, run.id, run.startedAt, JSON.stringify(run));
+        }
+        // Once the observed incident changes, an old review must never revive.
+        for (const task of this.list().tasks) {
+          if (task.sourceId === status.id && task.review && task.review.fingerprint !== attentionFingerprint(task)) {
+            db.prepare("UPDATE automation_catalog_tasks SET data = ? WHERE key = ?").run(
+              JSON.stringify({ ...entry(task.key), review: null }), task.key);
+          }
         }
         return { ok: true as const };
       })();
@@ -278,6 +301,10 @@ export function createCatalog(db: Db) {
 }
 
 export const catalogRpcContract = defineRpcContract({
+  catalog_review: {
+    input: z.object({ key: z.string().min(1).max(300), fingerprint: z.string().max(2000), note: z.string().trim().min(1).max(1000).nullable() }).strict(),
+    output: z.object({ ok: z.literal(true) }),
+  },
   catalog_run_result: {
     input: z.object({ key: z.string().min(1).max(300), runId: z.string().min(1).max(300) }).strict(),
     output: runResultSchema,
@@ -350,6 +377,11 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
     return JSON.parse(stdout) as Record<string, unknown>;
   }
   bb.rpc.register(catalogRpcContract, {
+    catalog_review: ({ key, fingerprint, note }) => {
+      const result = catalog.review(key, fingerprint, note);
+      bb.realtime.publish("automation-catalog", { key });
+      return result;
+    },
     catalog_run_result: ({ key, runId }) => readRunResult(catalog, bbCli, key, runId),
     catalog_refresh: async () => {
       const result = await refreshBbCatalog(catalog, bbCli, bb.server.loopbackBaseUrl);
