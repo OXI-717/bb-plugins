@@ -190,8 +190,8 @@ export class PoolOperations {
     return account;
   }
 
-  async setProjects(id: string, projects: Account["projects"]): Promise<Account | null> {
-    const account = await this.accounts.setProjects(id, projects);
+  async setProjects(id: string, projects: Account["projects"], expected?: Account["projects"] | null): Promise<Account | null> {
+    const account = await this.accounts.setProjects(id, projects, expected);
     if (account !== null) this.onAccountsChanged();
     return account;
   }

@@ -4,7 +4,7 @@ import { accountProjectsSchema, type AccountProjects, type AccountSummary } from
 export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChange }: {
   account: AccountSummary;
   loadProjects: () => Promise<Array<{ id: string; name: string }>>;
-  save: (projects: AccountProjects) => Promise<void>;
+  save: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
   onUnsavedChange?: (value: boolean) => void;
 }) {
   const [draft, setDraft] = useState<AccountProjects>(account.projects ?? { onlySelected: false, rules: [] });
@@ -13,19 +13,47 @@ export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChan
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  const dirty = useRef(false);
+  const conflicted = useRef(false);
+  const submitted = useRef<AccountProjects | null>(null);
+  const baseline = useRef(account.projects ?? null);
+  const incoming = JSON.stringify(account.projects ?? null);
+  const lastIncoming = useRef(incoming);
+  useEffect(() => {
+    if (lastIncoming.current === incoming) return;
+    lastIncoming.current = incoming;
+    const persisted: AccountProjects | null = JSON.parse(incoming);
+    if (dirty.current && incoming !== JSON.stringify(submitted.current)) {
+      conflicted.current = true; setConflict(true); setSaved(false);
+      setError('Настройки изменились в другой сессии. Загрузите актуальные настройки.');
+    } else {
+      baseline.current = persisted;
+      if (!dirty.current) { setDraft(persisted ?? { onlySelected: false, rules: [] }); setSaved(false); }
+    }
+  }, [incoming]);
   const loadRef = useRef(loadProjects); loadRef.current = loadProjects;
   useEffect(() => { let live = true; void loadRef.current().then(value => { if (!Array.isArray(value)) throw new Error("Invalid project catalog"); if (live) setCatalog(value); }).catch(() => { if (live) setCatalogError(true); }); return () => { live = false; }; }, []);
   const change = async (next: AccountProjects) => {
+    if (conflicted.current) return;
+    dirty.current = true; submitted.current = next;
     setDraft(next); setPending(true); setError(''); setSaved(false); onUnsavedChange?.(true);
-    try { await save(accountProjectsSchema.parse(next)); setSaved(true); onUnsavedChange?.(false); }
+    try {
+      await save(accountProjectsSchema.parse(next), baseline.current);
+      if (!conflicted.current) { baseline.current = next; dirty.current = false; setSaved(true); onUnsavedChange?.(false); }
+    }
     catch { setError('Не удалось сохранить проекты. Повторите попытку.'); }
-    finally { setPending(false); }
+    finally { submitted.current = null; setPending(false); }
+  };
+  const reload = () => {
+    baseline.current = account.projects ?? null; dirty.current = false; conflicted.current = false;
+    setDraft(account.projects ?? { onlySelected: false, rules: [] }); setConflict(false); setError(''); setSaved(false); onUnsavedChange?.(false);
   };
   const names = new Map(catalog.map(project => [project.id, project.name]));
   return <section className="space-y-3 border-t pt-4" aria-label="Проекты подписки">
     <div className="font-medium">Проекты</div>
     <p className="text-sm text-muted-foreground">Роль по умолчанию: {account.role === 'primary' ? 'основной' : 'резерв'}. Настройки проекта переопределяют эту роль. Квоты и расписание общие для подписки.</p>
-    <fieldset disabled={pending} className="space-y-3">
+    <fieldset disabled={pending || conflict} className="space-y-3">
       <label className="block">Где использовать <select aria-label="Где использовать" className="ml-2 rounded border p-2" value={draft.onlySelected ? 'selected' : 'all'} onChange={e => void change({ ...draft, onlySelected: e.target.value === 'selected' })}>
         <option value="all">Во всех проектах</option><option value="selected">Только в выбранных</option>
       </select></label>
@@ -44,6 +72,8 @@ export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChan
     <p className="text-sm text-muted-foreground">Порядок: основной проекта → резерв проекта → общий основной → общий резерв. «До исчерпания» временно разрешает использование везде.</p>
     {catalogError && <p role="alert" className="text-sm">Не удалось загрузить список проектов. Сохранённые привязки остаются в силе.</p>}
     {pending && <p role="status">Сохраняем…</p>}{saved && <p role="status">Сохранено</p>}
-    {error && <div role="alert">{error} <button type="button" disabled={pending} onClick={() => void change(draft)}>Повторить</button></div>}
+    {error && <div role="alert">{error} {conflict
+      ? <button type="button" disabled={pending} onClick={reload}>Загрузить актуальные настройки</button>
+      : <button type="button" disabled={pending} onClick={() => void change(draft)}>Повторить</button>}</div>}
   </section>;
 }

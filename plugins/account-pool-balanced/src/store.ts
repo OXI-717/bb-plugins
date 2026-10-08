@@ -123,8 +123,13 @@ export class AccountStore {
     return this.update(id, (account) => ({ ...account, enabled }));
   }
 
-  async setProjects(id: string, projects: Account["projects"]): Promise<Account | null> {
-    return this.update(id, account => ({ ...account, projects }));
+  async setProjects(id: string, projects: Account["projects"], expected?: Account["projects"] | null): Promise<Account | null> {
+    return this.update(id, account => {
+      if (expected !== undefined && JSON.stringify(account.projects ?? null) !== JSON.stringify(expected)) {
+        throw new Error("Project settings changed; refresh before saving.");
+      }
+      return { ...account, projects };
+    });
   }
 
   async setPolicy(id: string, policy: Account["policy"]): Promise<Account | null> {
@@ -372,6 +377,10 @@ export class HubTokenStore {
   }
 
   async authenticate(presented: string | null): Promise<string | null> {
+    return (await this.authenticateContext(presented))?.hostId ?? null;
+  }
+
+  async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null } | null> {
     if (presented === null) return null;
     await this.initialize();
     const now = this.now();
@@ -403,7 +412,7 @@ export class HubTokenStore {
       } else {
         this.tokens.set(matched.hostId, next);
       }
-      return matched.machineHostId ?? matched.hostId;
+      return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null };
     });
   }
 

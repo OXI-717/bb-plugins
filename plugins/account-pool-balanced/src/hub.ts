@@ -98,7 +98,7 @@ interface HubOptions {
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
   maxAffinityBindings: number;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
   getSettings: () => AccountPoolConfig;
   adapters: ReadonlyMap<PoolProvider, ProviderAdapter>;
   fetch: typeof fetch;
@@ -218,8 +218,11 @@ export class AccountPoolHub {
 
   async handle(request: Request, provider: PoolProvider): Promise<Response> {
     const adapter = this.adapter(provider);
-    const hostId = await this.authenticate(request, adapter);
-    if (hostId === null) {
+    const token = this.requestToken(request, adapter);
+    const context = this.options.hubTokens.authenticateContext
+      ? await this.options.hubTokens.authenticateContext(token)
+      : { hostId: await this.authenticate(request, adapter), projectId: await this.options.hubTokens.projectForToken?.(token) ?? null };
+    if (context === null || context.hostId === null) {
       return adapter.errorResponse(401, "Invalid Account Pooler bearer token.");
     }
     if (!this.accepting)
@@ -230,8 +233,7 @@ export class AccountPoolHub {
     const body = new Uint8Array(await request.arrayBuffer());
     const refusal = adapter.guardRequest?.(request, body);
     if (refusal !== null && refusal !== undefined) return refusal;
-    const projectId = await this.options.hubTokens.projectForToken?.(this.requestToken(request, adapter)) ?? null;
-    return this.forward(request, body, adapter, hostId, projectId);
+    return this.forward(request, body, adapter, context.hostId, context.projectId);
   }
 
   sessionObservation(provider: PoolProvider, hostId: string, sessionId: string, projectId: string | null = null): AccountBinding | null {
@@ -1319,7 +1321,7 @@ export function createHub(options: {
   accounts: AccountStore;
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
   getSettings: () => AccountPoolConfig;
   fetch?: typeof fetch;
   now?: () => number;

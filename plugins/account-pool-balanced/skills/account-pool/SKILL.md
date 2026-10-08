@@ -20,6 +20,7 @@ Do not enable the plugin or change accounts unless the requested task calls for 
 For external clients (including agents launched in Orca), use
 `bb pool client add <name> --output <new-private-file-on-server>` and
 `bb pool client revoke <name>`. The token file is on the BB server; transfer it
-privately, never print its contents. Client credentials authorize use of all model
-accounts in that pool. See [external clients](../../docs/external-clients.md)
+privately, never print its contents. Client credentials follow their server-side
+project binding and account policies. Use `--project <project-id>` when creating
+a project-bound client token. See [external clients](../../docs/external-clients.md)
 for standalone startup, process-scoped CLI setup and the separate Devin cloud API.

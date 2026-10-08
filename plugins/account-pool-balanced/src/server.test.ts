@@ -7068,3 +7068,31 @@ describe('project subscription routing', () => {
     const edited=await fixture.host.harness.behavior.runCli(['account','projects',fixture.account.id,'off']);expect(edited.exitCode).toBe(0);const all=await request(unknown);expect(all.status).toBe(200);await all.text();
   });
 });
+it('retains authenticated project identity if a client is revoked while reading its body',async()=>{
+ const attempts:Array<string|null>=[];
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example',apiKey:'sk-global',options:{fetch:async(_input,init)=>{attempts.push(new Headers(init?.headers).get('x-api-key'));return Response.json({});}}});
+ const assigned=await addApiAccount(fixture,'sk-assigned',200);
+ await fixture.host.harness.behavior.callRpc('account.setProjects',{accountId:assigned.id,projects:{onlySelected:true,rules:[{projectId:'project-one',role:'primary'}]}});
+ const file=path.join(fixture.dataDir,'bound.token');
+ await fixture.host.harness.behavior.runCli(['client','add','slow','--output',file,'--project','project-one']);
+ const token=(await fs.readFile(file,'utf8')).trim();
+ const original=Request.prototype.arrayBuffer;
+ const body=vi.spyOn(Request.prototype,'arrayBuffer').mockImplementationOnce(async function(this:Request){
+  await fixture.host.harness.behavior.runCli(['client','revoke','slow']);
+  return original.call(this);
+ });
+ try {
+  const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(token),body:'{}'});
+  expect(response.status).toBe(200);await response.text();expect(attempts).toEqual(['sk-assigned']);
+  const revoked=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(token),body:'{}'});expect(revoked.status).toBe(401);
+ }finally{body.mockRestore();}
+});
+it('rejects stale project settings without overwriting another editor',async()=>{
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example'}),rpc=fixture.host.harness.behavior.callRpc;
+ const a={onlySelected:true,rules:[{projectId:'project-a',role:'primary'}]};
+ const b={onlySelected:true,rules:[{projectId:'project-b',role:'reserve'}]};
+ await rpc('account.setProjects',{accountId:fixture.account.id,projects:a,expectedProjects:null});
+ await expect(rpc('account.setProjects',{accountId:fixture.account.id,projects:b,expectedProjects:null})).rejects.toThrow('Project settings changed');
+ const state=await rpc('account.list',null) as AccountSummary[];expect(state.find(value=>value.id===fixture.account.id)?.projects).toEqual(a);
+ await expect(rpc('account.setProjects',{accountId:fixture.account.id,projects:b,expectedProjects:a})).resolves.toBeTruthy();
+});

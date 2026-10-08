@@ -1814,8 +1814,10 @@ function AccountPoolSettings() {
             key={selectedAccount.id}
             onPolicyUnsavedChange={setPolicyUnsaved}
             loadProjects={() => rpc.call("projects.list", null)}
-            saveProjects={async projects => {
-              const result = await rpc.call("account.setProjects", { accountId: selectedAccount.id, projects });
+            saveProjects={async (projects, expectedProjects) => {
+              let result;
+              try { result = await rpc.call("account.setProjects", { accountId: selectedAccount.id, projects, expectedProjects }); }
+              catch (error) { await refresh(); throw error; }
               if (!result.account) throw new Error("Account removed");
               await refresh();
             }}
@@ -2163,7 +2165,7 @@ function AccountDialog({
   pending,
 }: {
   account: AccountSummary;
-  saveProjects: (projects: AccountProjects) => Promise<void>;
+  saveProjects: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
   loadProjects: () => Promise<Array<{ id: string; name: string }>>;
   savePolicy: (policy: AccountPolicy) => Promise<void>;
   onPolicyUnsavedChange: (unsaved: boolean) => void;

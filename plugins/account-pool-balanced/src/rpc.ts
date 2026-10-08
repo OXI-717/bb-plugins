@@ -64,7 +64,7 @@ export const accountPoolRpcContract = defineRpcContract({
   },
   "projects.list": { input: z.null(), output: z.array(z.object({ id: z.string(), name: z.string() }).strict()) },
   "account.setProjects": {
-    input: z.object({ accountId: z.string().uuid(), projects: accountProjectsSchema }).strict(),
+    input: z.object({ accountId: z.string().uuid(), projects: accountProjectsSchema, expectedProjects: accountProjectsSchema.nullable().optional() }).strict(),
     output: z.object({ account: accountSchema.nullable() }).strict(),
   },
   "account.setPolicy": {
@@ -157,7 +157,7 @@ export function createRpcHandlers(
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
     "projects.list": () => projectsList(),
-    "account.setProjects": async ({ accountId, projects }) => ({ account: await operations.setProjects(accountId, projects) }),
+    "account.setProjects": async ({ accountId, projects, expectedProjects }) => ({ account: await operations.setProjects(accountId, projects, expectedProjects) }),
     "thread.account": ({ threadId }) => threadAccount(threadId),
     "account.add": (input) => operations.add(input),
     "account.list": () => operations.list(),
