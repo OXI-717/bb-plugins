@@ -23,6 +23,9 @@ BB supplies a project-bound hub token automatically when it starts a routed
 provider. Project identity comes from that token, not a caller-supplied project
 header. Sessions and active-account cursors are isolated by project. Changing
 project rules takes effect on the next request, including an existing session.
+After upgrading from a version without project-bound tokens, restart existing
+provider sessions to acquire project identity. Their old tokens remain unbound;
+the hub cannot infer a project from them. Newly started sessions bind automatically.
 Project names are only display labels; rules store stable BB project IDs.
 Unavailable projects remain listed so their restrictions are not silently lost.
 
