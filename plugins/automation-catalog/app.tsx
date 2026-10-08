@@ -128,8 +128,8 @@ export function CatalogPage() {
     },
     {
       id: "unmonitored",
-      label: "Реестр без мониторинга",
-      count: filteredTasks.filter((t) => t.history === "not-connected").length,
+      label: "Без подтверждения состояния",
+      count: filteredTasks.filter((t) => category(t) === "unmonitored").length,
     },
     {
       id: "missing",
@@ -137,6 +137,7 @@ export function CatalogPage() {
       count: filteredTasks.filter((t) => t.missing).length,
     },
     { id: "completed", label: "Завершённые", count: filteredTasks.filter(t => category(t) === "completed").length },
+    { id: "reviewed", label: "Разобраны", count: filteredTasks.filter(t => states.get(t.key)?.label === "Разобрано").length },
     { id: "", label: "Все записи", count: filteredTasks.length },
   ];
   const matched = filteredTasks
@@ -145,12 +146,14 @@ export function CatalogPage() {
         !filters.state ||
         (["current", "completed"].includes(filters.state)
           ? category(t) === filters.state
+          : filters.state === "reviewed"
+          ? states.get(t.key)!.label === "Разобрано"
           : filters.state === "attention"
           ? states.get(t.key)!.attention
           : filters.state === "paused"
             ? states.get(t.key)!.paused
             : filters.state === "unmonitored"
-              ? t.history === "not-connected"
+              ? category(t) === "unmonitored"
             : filters.state === "missing"
               ? t.missing
             : filters.state === "running"
@@ -165,6 +168,7 @@ export function CatalogPage() {
         a.name.localeCompare(b.name),
     );
   const triage = data ? triageCandidates(data, filters, now) : [];
+  const unavailableSources = data?.sources.filter(s => s.error || s.lastSuccessAt === null || now - s.lastSuccessAt > s.staleAfterMs) ?? [];
   const lastPage = Math.max(0, Math.ceil(matched.length / 50) - 1);
   const currentPage = Math.min(page, lastPage);
   return (
@@ -201,11 +205,11 @@ export function CatalogPage() {
             <button className="hover:underline" onClick={() => setFilters(f => ({ ...f, state: "attention" }))}>Требуют проверки: {filteredTasks.filter(t => states.get(t.key)?.attention).length}</button>
           </div>
           <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Счётчики учитывают выбранные фильтры · Как читать состояния</summary>
-            <p className="mt-2">Проверка учитывает состояние и коды завершения планировщиков. Содержимое результатов автоматически не проверяется. Реестр без мониторинга содержит только описания. Завершённые, отключённые и удалённые задачи доступны в отдельных разделах.</p>
+            <p className="mt-2">Проверка учитывает состояние и коды завершения планировщиков. Содержимое результатов автоматически не проверяется. Записи без подтверждения состояния показаны отдельно и не считаются сбоями. Новый сбой снова требует внимания, даже если предыдущий отмечен разобранным. Завершённые, отключённые и удалённые задачи доступны в отдельных разделах.</p>
           </details>
           {data.sources.filter(s => s.error || !s.lastSuccessAt || now - s.lastSuccessAt > s.staleAfterMs).map(s => <p className="text-sm text-destructive" key={s.id}>Проверьте подключение: {sourceLabel(s.name)}. Свежие сведения не получены; статусы ниже могут устареть.</p>)}
         </section>}
-        <p className="text-sm text-muted-foreground">{filters.state === "current" ? "Текущие задачи. Откройте название, чтобы посмотреть результаты или выбрать действие." : filters.state === "unmonitored" ? "Здесь только описания задач. Отсутствие истории не означает сбой — мониторинг ещё не подключён." : filters.state === "completed" ? "Одноразовые задачи уже выполнены; новые запуски не ожидаются." : filters.state === "missing" ? "Задачи отсутствуют в последнем списке планировщика. Сохранена только их история." : "Выберите задачу, чтобы посмотреть результаты и доступные действия."}</p>
+        <p className="text-sm text-muted-foreground">{filters.state === "current" ? "Текущие задачи. Откройте название, чтобы посмотреть результаты или выбрать действие." : filters.state === "unmonitored" ? "Источник не подтвердил текущее состояние этих задач. Сохранённая история доступна в карточке; отсутствие живого состояния само по себе не означает сбой." : filters.state === "completed" ? "Одноразовые задачи уже выполнены; новые запуски не ожидаются." : filters.state === "missing" ? "Задачи отсутствуют в последнем списке планировщика. Сохранена только их история." : "Выберите задачу, чтобы посмотреть результаты и доступные действия."}</p>
         {refreshMessage && <p role="status" className="text-xs text-muted-foreground">{refreshMessage}</p>}
         {creating && (
           <section
@@ -510,9 +514,10 @@ export function CatalogPage() {
             </Button>
           </div>
         )}
-        <details className="text-xs text-muted-foreground">
+        <details open={unavailableSources.length > 0} className="text-xs text-muted-foreground">
           <summary className="cursor-pointer">
             Подключённые источники ({data?.sources.length ?? 0})
+            {unavailableSources.length > 0 ? ` · Нет свежих данных: ${unavailableSources.length}` : ""}
           </summary>
           <div className="mt-2 space-y-2">
             {data?.sources.map((s) => (

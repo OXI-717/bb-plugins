@@ -7,7 +7,7 @@ Use `bb automation-catalog list --json` to inspect up to 100 entries and the tot
 Use `bb automation-catalog detail <key> --offset 0 --json` for 25 history records.
 For the complete inventory, use `bb plugin rpc call automation-catalog catalog_list --json`.
 
-The plugin displays observations. It does not run, pause or modify jobs.
+The plugin displays observations. Connected BB tasks can be managed through catalog_manage_bb; external tasks remain owned by their original schedulers.
 A source's declared state is distinct from its observed live state. Missing times and outcomes must not be inferred.
 A stale or failed source retains its last successful inventory; do not treat this as fresh evidence.
 
@@ -41,3 +41,9 @@ may carry `hostLabel`; raw `host` remains the scheduler identity. Display labels
 appear in cards and host filters and are searchable without rewriting run keys.
 
 The overview’s “Разобрать проблемы” button opens a parent-bound draft for problem diagnosis and cleanup, without starting an agent. It respects search/source/host/project/scope filters across all status sections and pages. The draft includes at most 40 metadata records and asks the agent to re-read the current inventory before changes; an intentional pause alone is not a cleanup reason. Model and project remain editable before submission.
+
+The triage button and attention section select exactly the same unresolved execution incidents. Unknown state and missing entries have separate sections. Source freshness is displayed separately. Age alone never resolves a failure.
+
+Use catalog_forget_missing with a key object to remove a confirmed missing entry after preserving its history. Do not guess RPC names or edit the database.
+
+The detail UI supports marking a specific incident reviewed with a mandatory evidence note, and undoing that review. The catalog_review RPC accepts key, fingerprint and note (null to undo); the server rejects stale fingerprints. Review survives collector refresh, but a new failed run requires attention again. Review does not claim execution success. Never bulk-review unexplained failures to reduce the count.

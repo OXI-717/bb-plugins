@@ -1,9 +1,35 @@
 import Database from "better-sqlite3";
+import { attentionFingerprint, health } from "../lib/operations";
 import { afterEach, describe, expect, it } from "vitest";
 import { catalogMigration } from "./catalog.js";
 import { createCatalog } from "./catalog.js";
 
 const databases: Database.Database[] = [];
+describe("durable incident review", () => {
+  it("survives refresh, rejects stale clicks and exposes the next failure", () => {
+    const { catalog } = setup();
+    const first = snapshot(Date.now()); first.runs[0].status = "failed";
+    catalog.publish(first);
+    const task = catalog.list().tasks[0];
+    catalog.review(task.key, attentionFingerprint(task), "Checked: no action needed");
+    catalog.publish({ ...first, observedAt: first.observedAt + 1 });
+    expect(health(catalog.list().tasks[0]).attention).toBe(false);
+    expect(catalog.detail({ key: task.key }).task.review?.note).toBe("Checked: no action needed");
+    catalog.publish({ ...first, observedAt: first.observedAt + 2, runs: [{ ...first.runs[0], id: "run-2", startedAt: 300, finishedAt: 400 }] });
+    expect(health(catalog.list().tasks[0]).attention).toBe(true);
+    expect(() => catalog.review(task.key, attentionFingerprint(task), "Stale click")).toThrow("Состояние изменилось");
+    expect(catalog.detail({ key: task.key }).total).toBe(2);
+  });
+  it("can undo review and refuses to mark a healthy task", () => {
+    const { catalog } = setup(); catalog.publish(snapshot());
+    let task = catalog.list().tasks[0];
+    expect(() => catalog.review(task.key, attentionFingerprint(task), "Not a failure")).toThrow();
+    const bad = snapshot(2000); bad.runs[0].status = "failed"; catalog.publish(bad); task = catalog.list().tasks[0];
+    catalog.review(task.key, attentionFingerprint(task), "Checked");
+    catalog.review(task.key, attentionFingerprint(task), null);
+    expect(health(catalog.list().tasks[0]).attention).toBe(true);
+  });
+});
 function setup() {
   const db = new Database(":memory:");
   databases.push(db);
