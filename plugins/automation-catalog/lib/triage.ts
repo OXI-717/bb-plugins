@@ -4,12 +4,9 @@ import { matchesFilters, type Filters } from "./filters";
 import { health } from "./operations";
 
 export function triageCandidates(data: CatalogList, filters: Filters, now: number): CatalogTask[] {
-  return data.tasks.filter(task => matchesFilters(task, { ...filters, state: "" }) && (
-    health(task, data.sources.find(source => source.id === task.sourceId), now).attention ||
-    data.sources.some(source => source.id === task.sourceId && (source.error !== null || source.lastSuccessAt === null || now - source.lastSuccessAt > source.staleAfterMs)) ||
-    task.history === "not-connected" || task.missing ||
-    (task.scheduleKind === "once" && task.state === "paused")
-  ));
+  return data.tasks.filter(task => matchesFilters(task, { ...filters, state: "" }) &&
+    health(task, data.sources.find(source => source.id === task.sourceId), now).attention);
+
 }
 
 export function triageIntent(data: CatalogList, tasks: CatalogTask[], filters: Filters, now: number): ComposeIntent {

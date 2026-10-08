@@ -5,14 +5,14 @@ const task = { state: "active", history: "available", missing: false, lastRun: n
 describe("operational overview", () => {
   it("keeps current tasks separate from inventory, history and pauses", () => {
     expect(category(task)).toBe("current");
-    expect(category({ ...task, state: "unknown", history: "not-recorded" })).toBe("current");
+    expect(category({ ...task, state: "unknown", history: "not-recorded" })).toBe("unmonitored");
     expect(category({ ...task, history: "not-connected" })).toBe("unmonitored");
     expect(category({ ...task, state: "paused" })).toBe("paused");
     expect(category({ ...task, state: "paused", scheduleKind: "once", lastRun: { status: "succeeded" } as CatalogTask["lastRun"] })).toBe("completed");
     expect(category({ ...task, missing: true })).toBe("missing");
   });
   it("explains what to check without claiming a healthy outcome", () => {
-    expect(nextStep({ ...task, state: "unknown" })).toContain("старый результат не подтверждает");
+    expect(nextStep({ ...task, state: "unknown" })).toContain("подключить состояние");
     expect(nextStep({ ...task, history: "not-connected" })).toContain("подключить состояние");
     expect(nextStep({ ...task, state: "paused", lastRun: { status: "failed" } as CatalogTask["lastRun"] })).toContain("разберите причину перед включением");
   });

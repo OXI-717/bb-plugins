@@ -1,3 +1,4 @@
+import { attentionFingerprint } from "./lib/operations";
 import { modelLabel, projectLabel } from "./lib/execution";
 import { hostName } from "./lib/filters";
 import { AutomationComposer, type ComposeIntent } from "./compose";
@@ -239,6 +240,7 @@ export function CatalogDetailView({
   onBack: () => void;
 }) {
   const rpc = useRpc<typeof catalogRpcContract>();
+  const [reviewNote, setReviewNote] = useState("");
   const [compose, setCompose] = useState<ComposeIntent | null>(null);
   const [confirmAction, setConfirmAction] = useState<"delete" | "forget" | null>(null);
   const [actionPending, setActionPending] = useState(false);
@@ -313,6 +315,15 @@ export function CatalogDetailView({
       setActionPending(false);
     }
   }
+  async function reviewIncident(note: string | null) {
+    if (!detail) return;
+    setActionPending(true); setActionError(null);
+    try {
+      await rpc.call("catalog_review", { key: taskKey, fingerprint: attentionFingerprint(detail.task), note });
+      setReviewNote(""); setRevision(v => v + 1);
+    } catch (e) { setActionError(String(e)); }
+    finally { setActionPending(false); }
+  }
   if (compose)
     return (
       <AutomationComposer intent={compose} onBack={() => setCompose(null)} />
@@ -344,6 +355,17 @@ export function CatalogDetailView({
           </div>
         )}
       </div>
+      {detail && (health(detail.task, detail.source).attention || detail.task.review?.fingerprint === attentionFingerprint(detail.task)) && (
+        <section className="rounded-md border p-3 space-y-2" aria-label="Разбор ошибки">
+          <p className="text-sm">Если этот сбой уже проверен и действий не требует, отметьте его как разобранный. История сохранится; новый сбой снова появится во внимании.</p>
+          {detail.task.review?.fingerprint === attentionFingerprint(detail.task) ? (
+            <><p className="text-sm">{detail.task.review.note}</p><Button size="sm" variant="outline" disabled={actionPending} onClick={() => void reviewIncident(null)}>Вернуть во внимание</Button></>
+          ) : (
+            <><textarea aria-label="Почему сбой разобран" placeholder="Что проверено и почему действий не требуется" maxLength={1000} value={reviewNote} onChange={e => setReviewNote(e.target.value)} className="w-full rounded border bg-background p-2 text-sm" />
+            <Button size="sm" variant="outline" disabled={actionPending || !reviewNote.trim()} onClick={() => void reviewIncident(reviewNote.trim())}>Отметить как разобранное</Button></>
+          )}
+        </section>
+      )}
       {error && (
         <div role="alert" className="rounded-md border p-3 text-sm">
           <p>Не удалось загрузить историю запусков.</p>

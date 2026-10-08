@@ -67,6 +67,28 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("requires a reason, reviews an incident, and updates both attention counts", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    let current = { ...task, review: null as null | { fingerprint: string; note: string; at: number } };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+      catalog_list: () => ({ tasks: [current], sources: [source] }),
+      catalog_detail: () => ({ task: current, source, runs: [current.lastRun], total: 1 }),
+      catalog_review: (value: unknown) => {
+        const input = value as { fingerprint: string; note: string | null };
+        current = { ...current, review: input.note === null ? null : { fingerprint: input.fingerprint, note: input.note, at: Date.now() } };
+        return { ok: true };
+      },
+    } });
+    fireEvent.click(await slot.findByRole("button", { name: "Daily report" }));
+    const review = await slot.findByRole("button", { name: "Отметить как разобранное" });
+    expect(review.hasAttribute("disabled")).toBe(true);
+    fireEvent.change(slot.getByRole("textbox", { name: "Почему сбой разобран" }), { target: { value: "Checked against source; no further action" } });
+    fireEvent.click(review);
+    await slot.findByRole("button", { name: "Вернуть во внимание" });
+    fireEvent.click(slot.getByRole("button", { name: "← Автоматизации" }));
+    await slot.findByRole("button", { name: "Разобрать проблемы (0)" });
+    expect(slot.getByRole("button", { name: "Требуют проверки: 0" })).toBeTruthy();
+  });
   it("opens an unsubmitted problem draft and restores the list on back", async () => {
     const slot = await mount();
     const button = await slot.findByRole("button", { name: "Разобрать проблемы (1)" });
@@ -133,7 +155,7 @@ describe("automation workflows", () => {
     } });
     await slot.findByRole("button", { name: "Daily report" });
     expect(slot.queryByRole("button", { name: "Registry example" })).toBeNull();
-    fireEvent.click(slot.getByRole("button", { name: /Реестр без мониторинга/ }));
+    fireEvent.click(slot.getByRole("button", { name: /Без подтверждения состояния/ }));
     expect(slot.getByRole("button", { name: "Registry example" })).toBeTruthy();
     expect(slot.queryByRole("button", { name: "Daily report" })).toBeNull();
     slot.lifecycle.unmount();

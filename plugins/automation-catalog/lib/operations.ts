@@ -8,7 +8,7 @@ export type Health = {
   tone: "danger" | "neutral";
   paused: boolean;
 };
-export function health(
+function rawHealth(
   task: CatalogTask,
   source?: Source,
   now = Date.now(),
@@ -94,6 +94,7 @@ export function health(
     );
   if (
     !paused &&
+    task.state !== "unknown" &&
     source &&
     task.nextRunAt != null &&
     now - task.nextRunAt > Math.max(source?.staleAfterMs ?? 60000, 60000) &&
@@ -121,7 +122,7 @@ export function health(
         ? `В реестре указано: ${automationStateLabel(task.declaredState)}. Фактическое состояние не подключено.`
         : "Фактическое состояние и история запусков не подключены",
       9,
-      task.history !== "not-connected",
+      false,
     );
   return result(
     "Включена",
@@ -133,6 +134,20 @@ export function health(
     10,
     false,
   );
+}
+// Bind review to one incident, never to an automation forever.
+export function attentionFingerprint(task: CatalogTask): string {
+  return JSON.stringify([task.state, task.missing, task.lastRun?.id ?? null,
+    task.lastRun?.status ?? null, task.lastRun?.finishedAt ?? null,
+    task.lastRun?.exitCode ?? null, task.nextRunAt ?? null]);
+}
+export function health(task: CatalogTask, source?: Source, now = Date.now()): Health {
+  const state = rawHealth(task, source, now);
+  if (state.attention && task.review?.fingerprint === attentionFingerprint(task)) {
+    return { ...state, attention: false, tone: "neutral", label: "Разобрано",
+      reason: `Отмечено как разобранное: ${task.review.note}. Это не подтверждение успешного запуска. Новая ошибка снова потребует внимания.` };
+  }
+  return state;
 }
 export function runLabel(status: string) {
   return (
