@@ -14,14 +14,17 @@ const options = process.argv.slice(2, separator < 0 ? undefined : separator);
 if (separator < 0 || options.length !== 4 || options[0] !== '--pool-url' || options[2] !== '--token-file') {
   console.error(usage); process.exit(2);
 }
-const poolUrl = new URL(options[1]);
+const poolUrl = new URL(process.env.OXI_DEVIN_POOL_URL || options[1]);
 if (poolUrl.protocol !== 'https:' && !(poolUrl.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(poolUrl.hostname))) {
   throw new Error('Use HTTPS for a remote pool. HTTP is permitted only on loopback.');
 }
 if (poolUrl.search || poolUrl.hash || poolUrl.username || poolUrl.password) throw new Error('Pool URL must not contain credentials, query or fragment.');
-const tokenStat = await fs.stat(options[3]);
-if (!tokenStat.isFile() || (tokenStat.mode & 0o077) !== 0) throw new Error('Pool token file must be a private regular file (mode 0600).');
-const token = (await fs.readFile(options[3], 'utf8')).trim();
+let token = process.env.OXI_DEVIN_POOL_TOKEN?.trim();
+if (!token) {
+  const tokenStat = await fs.stat(options[3]);
+  if (!tokenStat.isFile() || (tokenStat.mode & 0o077) !== 0) throw new Error('Pool token file must be a private regular file (mode 0600).');
+  token = (await fs.readFile(options[3], 'utf8')).trim();
+}
 if (!/^[A-Za-z0-9_-]{32,256}$/u.test(token)) throw new Error('Invalid pool token file.');
 const localKey = randomBytes(32).toString('base64url');
 const sessionId = randomBytes(16).toString('base64url');
@@ -66,7 +69,7 @@ try {
   await fs.writeFile(path.join(dataHome, 'devin', 'credentials.toml'),
     `windsurf_api_key = "${localKey}"\napi_server_url = "http://127.0.0.1:${address.port}"\n`, { mode: 0o600 });
   child = spawn('devin', process.argv.slice(separator + 1), {
-    env: { ...process.env, XDG_DATA_HOME: dataHome, XDG_CONFIG_HOME: configHome },
+    env: { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !["OXI_DEVIN_POOL_TOKEN", "OXI_DEVIN_POOL_URL"].includes(name))), XDG_DATA_HOME: dataHome, XDG_CONFIG_HOME: configHome },
     stdio: 'inherit',
   });
   const forward = (signal) => { if (child && !child.killed) child.kill(signal); };

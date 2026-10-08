@@ -2,6 +2,7 @@ import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
 import { setTimeout as wait } from "node:timers/promises";
 import {
   accountAddInputSchema,
+  accountProjectsSchema,
   accountCapInputSchema,
   accountIdInputSchema,
   accountRoleInputSchema,
@@ -50,6 +51,7 @@ const HELP = [
   "  bb pool account disable <id>",
   "  bb pool account priority <id> <n>",
   "  bb pool account role <id> <primary|reserve>",
+  '  bb pool account projects <id> <JSON|off>',
   "  bb pool account cap <id> <early> <late>",
   "  bb pool account cap <id> off",
   "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor|devin> <id>...",
@@ -59,7 +61,7 @@ const HELP = [
   "  bb pool config",
   "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays> <value>",
   "  bb pool token rotate --machine <id-or-name>",
-  "  bb pool client add <name> --output <new-private-file-on-server>",
+  "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>]",
   "  bb pool client revoke <name>",
   "  bb pool bypass <thread-id> [--off]",
   "",
@@ -362,6 +364,11 @@ export function registerPoolCli(
         usage: "bb pool account priority <id> <n>",
       },
       {
+        name: "account-projects",
+        summary: "Set project scope and per-project account roles",
+        usage: "bb pool account projects <id> <JSON|off>",
+      },
+      {
         name: "account-reorder",
         summary: "Set the complete failover order for one provider",
         usage: "bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor|devin> <id>...",
@@ -424,6 +431,14 @@ export function registerPoolCli(
             exitCode: 0,
             stdout: `Set ${account.label} priority to ${account.priority}.\n`,
           };
+        }
+        if (argv[0] === "account" && argv[1] === "projects") {
+          if (argv.length !== 4) throw new Error(HELP);
+          const { id } = accountIdInputSchema.parse({ id: argv[2] });
+          const projects = accountProjectsSchema.parse(argv[3] === "off" ? { onlySelected: false, rules: [] } : JSON.parse(argv[3]!));
+          const account = await operations.setProjects(id, projects);
+          if (account === null) throw new Error("Account not found.");
+          return { exitCode: 0, stdout: "Account project routing updated.\n" };
         }
         if (argv[0] === "account" && argv[1] === "role") {
           if (argv.length !== 4) throw new Error(HELP);
@@ -703,10 +718,11 @@ export function registerPoolCli(
         }
         if (argv[0] === "client" && externalClients) {
           if (argv[1] === "add" && argv[2]) {
-            const flags = parseFlags(argv.slice(3), [], ["output"]);
+            const flags = parseFlags(argv.slice(3), [], ["output", "project"]);
             const output = flags.values.get("output");
             if (!output) throw new Error("--output is required (path on the BB server).");
-            await externalClients.add(argv[2], output);
+            const projectId = flags.values.get("project") ?? null;
+            await externalClients.add(argv[2], output, projectId);
             return { exitCode: 0, stdout: "External client token saved to private file on the BB server.\n" };
           }
           if (argv[1] === "revoke" && argv.length === 3) {

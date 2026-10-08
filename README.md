@@ -12,6 +12,8 @@ Version 0.4.3 shows the count and individual expiry dates of saved Codex usage-l
 
 ## Install
 
+Version 0.4.11 adds project-specific account roles and restrictions, project-bound clients and isolated project routing. See [Project routing](plugins/account-pool-balanced/docs/project-routing.md).
+
 Version 0.4.10 permits manual quota refresh for disabled accounts without enabling routing. New individual account settings are prefilled from global quota protection and reserve timing; disabling overrides preserves their saved values.
 
 Version 0.4.9 adds a generic Cursor RPC gateway and a public launcher that keeps pooled login out of local Keychain. New methods in Cursor RPC namespaces no longer need a route-list update. See [Cursor setup](plugins/account-pool-balanced/docs/cursor-paths.md).
@@ -34,7 +36,7 @@ bb plugin install account-pool-balanced@oxi-public
 Or install the release directly:
 
 ```sh
-bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.4.10 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
+bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.4.11 --subdirectory plugins/account-pool-balanced --tag-prefix account-pool-balanced/
 ```
 
 Do not enable BB's built-in `account-pool` at the same time: both register `bb pool` and provider routes. These install commands are for new installations. BB 0.43.3 rejects replacing an existing plugin's Git source. If migrating from another repository, keep the existing installation until you have a supported migration procedure with verified backup and restore; do not remove a live pool just to change its source.
@@ -48,6 +50,8 @@ Access from a computer or phone is provided by BB and its authenticated remote a
 BB is optional: run the standalone server, or connect external clients to accounts already managed by BB. Claude Code uses Messages; Codex uses Responses. Other clients must support the corresponding native protocol and a configurable base URL/token.
 
 The [external-client quickstart](plugins/account-pool-balanced/docs/external-clients.md) includes copyable Claude/Codex commands, standalone installation, remote access and troubleshooting. No private launcher or custom Orca plugin is required. BB-routed Claude Code threads preserve Opus 5.5's 1M context automatically. For external Claude Code clients, select `claude-opus-5-5[1m]` to avoid the client's 200K context default. Client usage screens do not aggregate pool balances.
+
+Project-specific account roles and restrictions are described in [Project routing](plugins/account-pool-balanced/docs/project-routing.md).
 
 ## Update
 

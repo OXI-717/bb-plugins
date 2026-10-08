@@ -155,6 +155,14 @@ export function createAccountPoolPlugin(
         bb.realtime.publish(ACCOUNT_POOL_ACCOUNTS_CHANGED, {}),
     });
     if (transport !== null) {
+      bb.providers.experimental_contributeEnv("acp-oxi-devin-pool", async context => {
+        if (!(await operations.isRoutingEnabled("devin")) || await routing.isBypassed(context.threadId) ||
+          !(await operations.hasUsableEnabledAccount("devin"))) return [];
+        return [
+          { name: "OXI_DEVIN_POOL_TOKEN", value: await hubTokens.forProject(context.hostId, context.projectId), reason: "Project-bound Account Pooler token" },
+          { name: "OXI_DEVIN_POOL_URL", value: { serverPath: hubBasePath(bb.pluginId) }, reason: "Account Pooler route" },
+        ];
+      });
       bb.onDispose(async () => {
         await hub.stop();
         await transport.destroy();
@@ -212,11 +220,11 @@ export function createAccountPoolPlugin(
             break;
           }
         }
-        const observation = sessionId === null ? null : hub.sessionObservation(provider, hostId, sessionId);
+        const observation = sessionId === null ? null : hub.sessionObservation(provider, hostId, sessionId, thread.projectId);
         if (observation === null) return { state: "unobserved", ...empty };
         const account = (await operations.list()).find((item) => item.id === observation.accountId) ?? null;
         return { state: "observed", account, lastUsedAt: observation.lastUsedAt };
-      }),
+      }, async () => (await bb.sdk.projects.list({ includePersonal: true })).map(project => ({ id: project.id, name: project.name }))),
     );
     registerPoolCli(bb, operations, login, codexLogin, config, externalClients);
     registerUsageSource(bb, hub);
@@ -237,7 +245,7 @@ export function createAccountPoolPlugin(
       ) {
         return [];
       }
-      const token = await hubTokens.forHost(context.hostId);
+      const token = await hubTokens.forProject(context.hostId, context.projectId);
       await routing.recordRouted(context.threadId, context.hostId);
       return [
         {
@@ -275,7 +283,7 @@ export function createAccountPoolPlugin(
       ) {
         return [];
       }
-      const token = await hubTokens.forHost(context.hostId);
+      const token = await hubTokens.forProject(context.hostId, context.projectId);
       return [
         {
           name: "CODEX_OPENAI_BASE_URL",
@@ -329,9 +337,7 @@ export function createAccountPoolPlugin(
             { status: 401 },
           );
         }
-        const token = hostId.startsWith("external_")
-          ? await externalClients.tokens.forHost(hostId)
-          : await hubTokens.forHost(hostId);
+        const token = hub.requestToken(context.req.raw)!;
         return Response.json({ accessToken: token, refreshToken: token });
       },
       { auth: "none" },
@@ -375,7 +381,7 @@ export function createAccountPoolPlugin(
       ) {
         return [];
       }
-      const token = await hubTokens.forHost(context.hostId);
+      const token = await hubTokens.forProject(context.hostId, context.projectId);
       return [
         {
           name: "CURSOR_API_ENDPOINT",
@@ -431,7 +437,7 @@ export function createAccountPoolPlugin(
           ) {
             return [];
           }
-          const token = await hubTokens.forHost(context.hostId);
+          const token = await hubTokens.forProject(context.hostId, context.projectId);
           return [
             {
               name: entry.baseUrlEnv,
@@ -464,7 +470,7 @@ export function createAccountPoolPlugin(
         ) {
           return [];
         }
-        const token = await hubTokens.forHost(context.hostId);
+        const token = await hubTokens.forProject(context.hostId, context.projectId);
         return [
           {
             name: "OXI_KIMI_BASE_URL",
