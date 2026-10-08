@@ -6626,7 +6626,7 @@ describe("sequential pool recovery", () => {
     expect(await current()).toMatchObject({ drainOnce: false, status: "ready" });
   });
 
-  it("drains an armed reserve past 98%, keeps affinity, and clears once at exhaustion", async () => {
+  it("drains an armed reserve past 98%, overrides weaker affinity, and clears once at exhaustion", async () => {
     const attempts: Array<string | null> = [];
     let used = "0.99";
     const fixture = await createFixture({
@@ -6657,7 +6657,7 @@ describe("sequential pool recovery", () => {
     expect(await send("new-drain")).toBe(200);
     expect(await send("bound-primary")).toBe(200);
     expect(await send("another-new")).toBe(200);
-    expect(attempts).toEqual(["sk-primary", "sk-reserve", "sk-primary", "sk-reserve"]);
+    expect(attempts).toEqual(["sk-primary", "sk-reserve", "sk-reserve", "sk-reserve"]);
     expect(await current()).toMatchObject({ drainOnce: true, capLimit: null, status: "ready" });
     used = "1";
     expect(await send("exhausting")).toBe(200);
@@ -6669,7 +6669,7 @@ describe("sequential pool recovery", () => {
     await expect(rpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: "yes" })).rejects.toThrow();
   });
 
-  it("applies account policy to sticky sessions and preserves schedule during drain", async () => {
+  it("applies account policy to sticky sessions and overrides schedule during drain", async () => {
     const attempts: Array<string | null> = [];
     const fixture = await createFixture({ upstreamUrl: "https://upstream.example", apiKey: "sk-work", priority: 0,
       options: { fetch: async (_input, init) => {
@@ -6696,7 +6696,7 @@ describe("sequential pool recovery", () => {
     await set(true, { timeZone: "UTC", intervals: [] });
     await fixture.host.harness.behavior.callRpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: true });
     await send();
-    expect(attempts.at(-1)).toBe("sk-fallback");
+    expect(attempts.at(-1)).toBe("sk-work");
     await set(false);
     const after = statusSchema.parse(await fixture.host.harness.behavior.callRpc("status.get", null));
     expect(after.accounts.find(a => a.id === fixture.account.id)?.eligible).toBe(true);
@@ -7002,4 +7002,69 @@ it("drains a streamed response before disposing the owned transport", async () =
     await reader.cancel().catch(() => undefined);
     await disposing;
   }
+});
+
+describe('project subscription routing', () => {
+  it('prefers project reserve to a global primary, isolates concurrent project affinity, and rechecks edited scopes', async () => {
+    const attempts: Array<string|null> = [];
+    const fixture = await createFixture({upstreamUrl:'https://upstream.example',apiKey:'sk-global',priority:0,
+      options:{fetch:async(_input,init)=>{attempts.push(new Headers(init?.headers).get('x-api-key'));return Response.json({});}}});
+    const rpc=fixture.host.harness.behavior.callRpc;
+    const projectPrimary=await addApiAccount(fixture,'sk-project-primary',100);
+    const projectReserve=await addApiAccount(fixture,'sk-project-reserve',200);
+    const project = {onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]};
+    await rpc('account.setProjects',{accountId:projectPrimary.id,projects:project});
+    await rpc('account.setProjects',{accountId:projectReserve.id,projects:project});
+    await rpc('account.setRole',{accountId:projectReserve.id,role:'reserve'});
+    const tokenFor=async(projectId:string)=>{
+      const env=await fixture.host.harness.behavior.resolveProviderEnv('claude-code',{threadId:`thread-${projectId}`,hostId:'host-one',projectId});
+      return env.find(e=>e.name==='ANTHROPIC_AUTH_TOKEN')!.value as string;
+    };
+    const other=await tokenFor('project-two');
+    const send=async(token:string,session='same-session')=>{
+      const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(token),'x-bb-project-id':'project-one'},body:JSON.stringify({metadata:{user_id:JSON.stringify({session_id:session})}})});
+      expect(response.status).toBe(200);await response.text();
+    };
+    await send(other);await send(fixture.key);await send(other);await send(fixture.key);
+    expect(attempts).toEqual(['sk-global','sk-project-primary','sk-global','sk-project-primary']);
+    await rpc('account.disable',{id:projectPrimary.id});await send(fixture.key);
+    expect(attempts.at(-1)).toBe('sk-project-reserve');
+    await rpc('account.disable',{id:projectReserve.id});await send(fixture.key);
+    expect(attempts.at(-1)).toBe('sk-global');
+    await rpc('account.enable',{id:projectPrimary.id});await send(fixture.key);
+    expect(attempts.at(-1)).toBe('sk-project-primary');
+    await rpc('account.setProjects',{accountId:projectPrimary.id,projects:{onlySelected:true,rules:[{projectId:'project-two',role:'reserve'}]}});
+    await send(fixture.key);expect(attempts.at(-1)).toBe('sk-global');
+    await send(other);expect(attempts.at(-1)).toBe('sk-project-primary');
+    const stored=accountSchema.parse((await rpc('account.setProjects',{accountId:projectPrimary.id,projects:{onlySelected:false,rules:[{projectId:'project-two',role:'reserve'}]}}) as {account:unknown}).account);
+    expect(stored.role).toBe('primary');expect(stored.projects?.rules[0]?.role).toBe('reserve');
+  });
+
+  it('drain overrides scope, schedule and existing pins but not disabled state', async()=>{
+    const attempts:Array<string|null>=[];
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',apiKey:'sk-general',priority:0,options:{fetch:async(_input,init)=>{attempts.push(new Headers(init?.headers).get('x-api-key'));return Response.json({});}}});
+    const draining=await addApiAccount(fixture,'sk-drain',200),rpc=fixture.host.harness.behavior.callRpc;
+    await rpc('account.setProjects',{accountId:draining.id,projects:{onlySelected:true,rules:[{projectId:'project-other',role:'reserve'}]}});
+    await rpc('account.setPolicy',{accountId:draining.id,policy:{enabled:true,schedule:{timeZone:'UTC',intervals:[]},weeklyKeep:90}});
+    const send=async()=>{const r=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:JSON.stringify({metadata:{user_id:JSON.stringify({session_id:'sticky'})}})});expect(r.status).toBe(200);await r.text();};
+    await send();await rpc('account.setDrainOnce',{accountId:draining.id,enabled:true});await send();
+    expect(attempts).toEqual(['sk-general','sk-drain']);
+    await rpc('account.disable',{id:draining.id});await send();expect(attempts.at(-1)).toBe('sk-general');
+    await rpc('account.enable',{id:draining.id});await rpc('account.setDrainOnce',{accountId:draining.id,enabled:false});await send();expect(attempts.at(-1)).toBe('sk-general');
+  });
+
+  it('unknown clients cannot claim project identity; project-bound external tokens can use assigned accounts',async()=>{
+    let calls=0;
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:async()=>{calls++;return Response.json({});}}}),rpc=fixture.host.harness.behavior.callRpc;
+    await rpc('account.setProjects',{accountId:fixture.account.id,projects:{onlySelected:true,rules:[{projectId:'project-one',role:'primary'}]}});
+    const unknownFile=path.join(fixture.dataDir,'unknown.token');const boundFile=path.join(fixture.dataDir,'bound.token');
+    expect((await fixture.host.harness.behavior.runCli(['client','add','unknown','--output',unknownFile])).exitCode).toBe(0);
+    expect((await fixture.host.harness.behavior.runCli(['client','add','bound','--output',boundFile,'--project','project-one'])).exitCode).toBe(0);
+    const unknown=(await fs.readFile(unknownFile,'utf8')).trim(),bound=(await fs.readFile(boundFile,'utf8')).trim();
+    const request=async(token:string)=>fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(token),'x-bb-project-id':'project-one'},body:'{}'});
+    const refused=await request(unknown);expect(refused.status).toBe(403);expect(await refused.text()).toContain('allowed for this project');expect(calls).toBe(0);
+    const accepted=await request(bound);expect(accepted.status).toBe(200);await accepted.text();expect(calls).toBe(1);
+    await fixture.host.harness.behavior.runCli(['client','revoke','bound']);const revoked=await request(bound);expect(revoked.status).toBe(401);
+    const edited=await fixture.host.harness.behavior.runCli(['account','projects',fixture.account.id,'off']);expect(edited.exitCode).toBe(0);const all=await request(unknown);expect(all.status).toBe(200);await all.text();
+  });
 });

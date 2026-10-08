@@ -5,10 +5,10 @@ import { HubTokenStore } from "./store.js";
 export class ExternalClients {
   readonly tokens: HubTokenStore;
   constructor(directory: string) { this.tokens = new HubTokenStore(directory); }
-  async add(name: string, outputFile: string) {
+  async add(name: string, outputFile: string, projectId: string | null = null) {
     const id = this.id(name);
     const file = await fs.open(outputFile, "wx", 0o600);
-    try { await file.writeFile(`${await this.tokens.forHost(id)}\n`); }
+    try { await file.writeFile(`${await this.tokens.forProject(id, projectId)}\n`); }
     finally { await file.close(); }
   }
   async revoke(name: string) {
@@ -17,9 +17,10 @@ export class ExternalClients {
   private id(name: string) { return `external_${z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).parse(name)}`; }
 }
 
-export function combinedTokens(hosts: HubTokenStore, clients: HubTokenStore): Pick<HubTokenStore, "authenticate" | "list"> {
+export function combinedTokens(hosts: HubTokenStore, clients: HubTokenStore): Pick<HubTokenStore, "authenticate" | "list" | "projectForToken"> {
   return {
     async authenticate(token) { return await hosts.authenticate(token) ?? await clients.authenticate(token); },
+    async projectForToken(token) { return await hosts.projectForToken(token) ?? await clients.projectForToken(token); },
     async list() { return [...await hosts.list(), ...await clients.list()]; },
   };
 }

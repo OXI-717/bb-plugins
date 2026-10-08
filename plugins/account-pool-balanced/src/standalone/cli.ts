@@ -10,7 +10,7 @@ const help = `Standalone account pool (Node 22+)
   npm run pool -- --data-dir DIRECTORY import-account < account.json
   npm run pool -- --data-dir DIRECTORY import-devin < devin-account.json
   npm run pool -- --data-dir DIRECTORY import-login --provider claude|codex
-  npm run pool -- --data-dir DIRECTORY client-add --client NAME --output PRIVATE_FILE
+  npm run pool -- --data-dir DIRECTORY client-add --client NAME --output PRIVATE_FILE [--project PROJECT_ID]
   npm run pool -- --data-dir DIRECTORY client-revoke --client NAME
   npm run pool -- --data-dir DIRECTORY accounts
 Stop the standalone server before administrative commands. Never use BB's data directory.
@@ -21,7 +21,7 @@ async function main() {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     "data-dir": { type: "string" }, config: { type: "string" }, port: { type: "string", default: "8787" },
     host: { type: "string", default: "127.0.0.1" }, client: { type: "string" }, output: { type: "string" },
-    provider: { type: "string" }, help: { type: "boolean" },
+    project: { type: "string" }, provider: { type: "string" }, help: { type: "boolean" },
   } });
   if (values.help) { console.log(help); return; }
   const command = positionals[0];
@@ -61,7 +61,7 @@ async function main() {
       if (!values.output) throw new Error("--output is required.");
       // Exclusive creation prevents symlink following and accidental overwrite.
       const file = await fs.open(values.output, "wx", 0o600);
-      try { await file.writeFile(`${await pool.tokens.forHost(client)}\n`); } finally { await file.close(); }
+      try { await file.writeFile(`${await pool.tokens.forProject(client, values.project ?? null)}\n`); } finally { await file.close(); }
       console.log("Client token saved to private output file.");
     } else if (command === "client-revoke") {
       const client = z.string().min(1).parse(values.client);

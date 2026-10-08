@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type Database from "better-sqlite3";
@@ -38,6 +38,8 @@ const storedHubTokenSchema = z
   .object({
     hostId: z.string().min(1),
     value: tokenValueSchema,
+    machineHostId: z.string().min(1).optional(),
+    projectId: z.string().min(1).max(200).optional(),
     mintedAt: z.number().int().nonnegative(),
     lastUsedAt: z.number().int().nonnegative().nullable(),
     previous: z.array(priorHubTokenSchema),
@@ -119,6 +121,10 @@ export class AccountStore {
 
   async setEnabled(id: string, enabled: boolean): Promise<Account | null> {
     return this.update(id, (account) => ({ ...account, enabled }));
+  }
+
+  async setProjects(id: string, projects: Account["projects"]): Promise<Account | null> {
+    return this.update(id, account => ({ ...account, projects }));
   }
 
   async setPolicy(id: string, policy: Account["policy"]): Promise<Account | null> {
@@ -312,12 +318,38 @@ export class HubTokenStore {
     });
   }
 
+  async forProject(hostId: string, projectId: string | null): Promise<string> {
+    if (projectId === null) return this.forHost(hostId);
+    const key = `scope_${createHash("sha256").update(JSON.stringify([hostId, projectId])).digest("hex")}`;
+    await this.forHost(hostId);
+    return this.serialized(key, async () => {
+      const existing = this.read(key);
+      if (existing !== null) return existing.value;
+      const token = storedHubTokenSchema.parse({ ...this.create(key), machineHostId: hostId, projectId });
+      await this.write(key, token);
+      return token.value;
+    });
+  }
+
+  async projectForToken(presented: string | null): Promise<string | null> {
+    if (presented === null) return null;
+    await this.initialize();
+    return this.readAll().find(token => matchesStoredToken(token, presented, this.now()))?.projectId ?? null;
+  }
+
   async rotate(hostId: string): Promise<HubTokenSummary> {
+    await this.initialize();
+    const keys = this.readAll().filter(token => token.machineHostId === hostId).map(token => token.hostId);
+    for (const key of keys) await this.rotateOne(key);
+    return this.rotateOne(hostId);
+  }
+
+  private async rotateOne(hostId: string): Promise<HubTokenSummary> {
     await this.initialize();
     return this.serialized(hostId, async () => {
       const current = this.read(hostId);
       const now = this.now();
-      const next = this.create(hostId);
+      const next = { ...this.create(hostId), ...(current?.machineHostId ? { machineHostId: current.machineHostId, projectId: current.projectId } : {}) };
       if (current !== null) {
         next.previous = [
           { value: current.value, expiresAt: now + HUB_TOKEN_GRACE_MS },
@@ -361,14 +393,17 @@ export class HubTokenStore {
       } else {
         this.tokens.set(matched.hostId, next);
       }
-      return matched.hostId;
+      return matched.machineHostId ?? matched.hostId;
     });
   }
 
   async list(): Promise<HubTokenSummary[]> {
     await this.initialize();
     return this.readAll()
-      .map((token) => this.summary(token))
+      .filter(token => !token.projectId)
+      .map(token => this.summary({ ...token, lastUsedAt: this.readAll()
+        .filter(scoped => scoped.machineHostId === token.hostId)
+        .reduce<number | null>((last, scoped) => scoped.lastUsedAt === null ? last : Math.max(last ?? 0, scoped.lastUsedAt), token.lastUsedAt) }))
       .sort((left, right) => left.hostId.localeCompare(right.hostId));
   }
 
@@ -376,7 +411,7 @@ export class HubTokenStore {
     await this.initialize();
     const enrolled = new Set(hostIds);
     const stale = [...this.tokens.keys()].filter(
-      (hostId) => !enrolled.has(hostId),
+      (hostId) => !enrolled.has(this.tokens.get(hostId)?.machineHostId ?? hostId),
     );
     await Promise.all(
       stale.map((hostId) =>
@@ -391,6 +426,7 @@ export class HubTokenStore {
 
   async remove(hostId: string): Promise<void> {
     await this.initialize();
+    for (const scoped of this.readAll().filter(token => token.machineHostId === hostId)) await this.remove(scoped.hostId);
     await this.serialized(hostId, async () => {
       await fs.rm(this.tokenPath(hostId), { force: true });
       this.tokens.delete(hostId);
@@ -776,6 +812,17 @@ export class PoolAffinityStore {
     );
   }
 
+  loadProjectActiveAccounts(): Map<string, { accountId: string }> {
+    const rows = z.array(z.object({ provider: providerSchema, project_id: z.string(), account_id: z.string().uuid() }))
+      .parse(this.db.prepare("SELECT * FROM pool_project_active_account").all());
+    return new Map(rows.map(row => [`${row.provider}:${row.project_id}`, { accountId: row.account_id }]));
+  }
+
+  putProjectActiveAccount(provider: PoolProvider, projectId: string, accountId: string): void {
+    this.db.prepare(`INSERT INTO pool_project_active_account (provider, project_id, account_id) VALUES (?, ?, ?)
+      ON CONFLICT(provider, project_id) DO UPDATE SET account_id = excluded.account_id`).run(provider, projectId, accountId);
+  }
+
   putBinding(key: string, binding: AccountBinding): void {
     this.db
       .prepare(
@@ -839,5 +886,9 @@ export const QUOTA_MIGRATIONS = [
   `CREATE TABLE pool_reset_credits (
     account_id TEXT PRIMARY KEY,
     credits_json TEXT NOT NULL
+  )`,
+  `CREATE TABLE pool_project_active_account (
+    provider TEXT NOT NULL, project_id TEXT NOT NULL, account_id TEXT NOT NULL,
+    PRIMARY KEY(provider, project_id)
   )`,
 ];

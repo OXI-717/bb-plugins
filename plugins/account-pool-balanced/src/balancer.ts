@@ -251,7 +251,7 @@ export function gateMembership<
   drainMs: number,
   week: WorkWeek = CALENDAR_WEEK,
 ): T[] {
-  const assessed = entries.filter(entry => scheduleAllows(entry.account.policy, now)).map((entry) => {
+  const assessed = entries.filter(entry => (entry.account.drainOnce || scheduleAllows(entry.account.policy, now))).map((entry) => {
     const weekly = weeklyWindow(quotaWindows(entry.quota, now));
     const left = weekly === null ? null : remainingWorkMs(weekly, now, week);
     return { entry, weekly, draining: left !== null && left <= reserveHours(entry.account, drainMs / 3600000) * 3600000 };

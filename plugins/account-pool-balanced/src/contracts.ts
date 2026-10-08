@@ -219,6 +219,16 @@ export const accountPolicySchema = z.object({
 }).strict();
 export type AccountPolicy = z.infer<typeof accountPolicySchema>;
 
+export const accountProjectsSchema = z.object({
+  onlySelected: z.boolean(),
+  rules: z.array(z.object({
+    projectId: z.string().min(1).max(200),
+    role: z.enum(["inherit", "primary", "reserve"]),
+  }).strict()).max(200),
+}).strict().refine(value => new Set(value.rules.map(rule => rule.projectId)).size === value.rules.length,
+  "Include each project only once");
+export type AccountProjects = z.infer<typeof accountProjectsSchema>;
+
 export const accountSchema = z
   .object({
     id: z.string().uuid(),
@@ -238,6 +248,7 @@ export const accountSchema = z
     role: accountRoleSchema.default("primary"),
     cap: accountCapSchema.default(null),
     policy: accountPolicySchema.optional(),
+    projects: accountProjectsSchema.optional(),
     drainOnce: z.boolean().optional(),
     drainGeneration: z.string().uuid().nullable().optional(),
   })

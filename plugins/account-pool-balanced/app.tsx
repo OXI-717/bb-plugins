@@ -1,3 +1,5 @@
+import type { AccountProjects } from "./src/contracts.js";
+import { AccountProjectsForm } from "./account-projects-form";
 import { AccountPolicyForm } from "./account-policy-form";
 import { policySummary, policyThresholds, reserveHours, scheduleAllows } from "./src/account-policy.js";
 import type { AccountPolicy } from "./src/contracts.js";
@@ -607,6 +609,7 @@ function AccountRow({
               <SettingsBadge>{tier(account)}</SettingsBadge>
               {account.drainOnce ? <SettingsBadge>До исчерпания</SettingsBadge> : null}
               {account.policy?.enabled ? <SettingsBadge>Свои настройки</SettingsBadge> : null}
+              {account.projects?.rules.length ? <SettingsBadge>{account.projects.onlySelected ? "Только проекты" : "Роли проектов"} · {account.projects.rules.length}</SettingsBadge> : null}
               {account.role === "reserve" ? (
                 <SettingsBadge>Резерв</SettingsBadge>
               ) : null}
@@ -1810,6 +1813,12 @@ function AccountPoolSettings() {
           <AccountDialog
             key={selectedAccount.id}
             onPolicyUnsavedChange={setPolicyUnsaved}
+            loadProjects={() => rpc.call("projects.list", null)}
+            saveProjects={async projects => {
+              const result = await rpc.call("account.setProjects", { accountId: selectedAccount.id, projects });
+              if (!result.account) throw new Error("Account removed");
+              await refresh();
+            }}
             savePolicy={async policy => {
               const result = await rpc.call("account.setPolicy", { accountId: selectedAccount.id, policy });
               if (!result.account) throw new Error("Account removed");
@@ -2142,6 +2151,8 @@ function capSummary(account: AccountSummary): string | null {
 function AccountDialog({
   account,
   savePolicy,
+  saveProjects,
+  loadProjects,
   onPolicyUnsavedChange,
   refreshError,
   threshold,
@@ -2152,6 +2163,8 @@ function AccountDialog({
   pending,
 }: {
   account: AccountSummary;
+  saveProjects: (projects: AccountProjects) => Promise<void>;
+  loadProjects: () => Promise<Array<{ id: string; name: string }>>;
   savePolicy: (policy: AccountPolicy) => Promise<void>;
   onPolicyUnsavedChange: (unsaved: boolean) => void;
   refreshError: string | null;
@@ -2162,6 +2175,9 @@ function AccountDialog({
   act: (action: "toggle" | "refresh" | "remove" | "drain") => void;
   pending: boolean;
 }) {
+  const [projectsUnsaved, setProjectsUnsaved] = useState(false);
+  const [quotaUnsaved, setQuotaUnsaved] = useState(false);
+  useEffect(() => { onPolicyUnsavedChange(projectsUnsaved || quotaUnsaved); }, [projectsUnsaved, quotaUnsaved, onPolicyUnsavedChange]);
   const limits = policyThresholds(account, threshold);
   const inheritedThreshold = threshold;
   const inheritedDrainHours = drainHours;
@@ -2222,14 +2238,15 @@ function AccountDialog({
         </SettingsBadge>
         {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
       </div>
-      <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={onPolicyUnsavedChange} />
+      <AccountProjectsForm account={account} loadProjects={loadProjects} save={saveProjects} onUnsavedChange={setProjectsUnsaved} />
+      <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={account.drainOnce === true} disabled={pending}
           onChange={() => act("drain")} />
         Использовать до исчерпания
       </label>
       <p className="text-sm text-muted-foreground">
-        Приоритет для новых запросов без недельного потолка и досрочного переключения.
+        Приоритет во всех проектах без ограничения по проектам, роли, расписанию, недельному потолку и досрочному переключению.
         Выключится при первом исчерпанном лимите провайдера. Сброс лимита выполняется вручную.
       </p>
       {account.role === "reserve" && !account.drainOnce ? (

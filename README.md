@@ -49,6 +49,8 @@ BB is optional: run the standalone server, or connect external clients to accoun
 
 The [external-client quickstart](plugins/account-pool-balanced/docs/external-clients.md) includes copyable Claude/Codex commands, standalone installation, remote access and troubleshooting. No private launcher or custom Orca plugin is required. BB-routed Claude Code threads preserve Opus 5.5's 1M context automatically. For external Claude Code clients, select `claude-opus-5-5[1m]` to avoid the client's 200K context default. Client usage screens do not aggregate pool balances.
 
+Project-specific account roles and restrictions are described in [Project routing](plugins/account-pool-balanced/docs/project-routing.md).
+
 ## Update
 
 ```sh
