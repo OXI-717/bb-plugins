@@ -1,3 +1,4 @@
+import { AccountSettingsStyle } from './account-settings-style';
 import type { AccountProjects } from "./src/contracts.js";
 import { AccountProjectsForm } from "./account-projects-form";
 import { AccountPolicyForm } from "./account-policy-form";
@@ -981,14 +982,14 @@ function DialogFrame({
     >
       <DialogHeader className="flex-row items-start justify-between gap-4 space-y-0">
         <DialogTitle>{title}</DialogTitle>
-        <DialogClose className="-mr-1 shrink-0 cursor-pointer rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2">
+        <DialogClose aria-label="Закрыть" className="-mr-1 shrink-0 cursor-pointer rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2">
           <Icon name="X" className="size-4" />
           <span className="sr-only">Закрыть</span>
         </DialogClose>
       </DialogHeader>
       <div className="min-h-0 space-y-5 overflow-y-auto">{children}</div>
       {footer === null ? null : (
-        <DialogFooter className="flex-row items-center gap-2 sm:space-x-0">
+        <DialogFooter className="pool-settings-footer flex-row items-center gap-2 sm:space-x-0">
           {footer}
         </DialogFooter>
       )}
@@ -2208,7 +2209,7 @@ function AccountDialog({
   return (
     <DialogFrame
       title={account.label}
-      className="sm:max-w-xl"
+      className="pool-settings sm:max-w-xl"
       footer={
         <>
           <Button size="sm" variant="outline" onClick={() => act("toggle")}>
@@ -2217,7 +2218,6 @@ function AccountDialog({
           <Button size="sm" variant="outline" onClick={() => act("refresh")}>
             Обновить квоты
           </Button>
-          <span className="flex-1" />
           <Button
             size="sm"
             variant="ghost"
@@ -2229,6 +2229,7 @@ function AccountDialog({
         </>
       }
     >
+      <AccountSettingsStyle />
       {refreshError === null ? null : <p role="alert" className="text-sm text-destructive-text">{refreshError}</p>}
       <div className="flex flex-wrap items-center gap-2">
         <SettingsBadge>{tier(account)}</SettingsBadge>
@@ -2242,15 +2243,17 @@ function AccountDialog({
       </div>
       <AccountProjectsForm account={account} loadProjects={loadProjects} save={saveProjects} onUnsavedChange={setProjectsUnsaved} />
       <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
-      <label className="flex items-center gap-2 text-sm">
+      <section className="pool-settings-section">
+      <label className="pool-settings-toggle">
         <input type="checkbox" checked={account.drainOnce === true} disabled={pending}
           onChange={() => act("drain")} />
         Использовать до исчерпания
       </label>
-      <p className="text-sm text-muted-foreground">
+      <p className="pool-settings-help">
         Приоритет во всех проектах без ограничения по проектам, роли, расписанию, недельному потолку и досрочному переключению.
         Выключится при первом исчерпанном лимите провайдера. Сброс лимита выполняется вручную.
       </p>
+      </section>
       {account.role === "reserve" && !account.drainOnce ? (
         <p className="text-sm text-muted-foreground">
           {`Используется, только когда ни один основной аккаунт не подходит, или за ${drainHours} рабочих часов до его недельного сброса.`}

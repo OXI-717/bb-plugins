@@ -1,0 +1,3 @@
+# Account card visual standard
+
+Use host theme colours and inherited font family. Body and section titles are 14px; help and save status are 12px. All controls share 36px height (40px on touch devices); actions use 160px width and icon actions are square. Labels sit above fields. Selects fill the row; numeric fields stay compact. Keep equal side padding, consistent checkboxes and no horizontal overflow. Schedule intervals use one row: day preset, start, separator, end, removal icon. Custom weekdays are disclosed on demand. Preserve routing, autosave, conflict handling and saved schedules. Validate synthetic previews in the browser at 320px and 390px before publication.
