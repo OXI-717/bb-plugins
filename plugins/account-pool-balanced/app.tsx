@@ -357,7 +357,7 @@ function statusPresentation(
     };
   }
   if (account.status === "error")
-    return { label: "Ошибка", dot: "bg-destructive" };
+    return { label: "Ошибка · перепроверка раз в 5 мин", dot: "bg-destructive" };
   if (account.status === "disabled")
     return { label: "Выключен", dot: "bg-muted-foreground" };
   return { label: "В работе", dot: "bg-success" };

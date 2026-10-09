@@ -3355,6 +3355,93 @@ describe("Account Pool plugin", () => {
     },
   );
 
+  it("pauses instead of failing an account on an HTML 403 edge page", async () => {
+    const attempts: Array<string | undefined> = [];
+    const upstream = await startUpstream(async (request, response) => {
+      await readRequestBody(request);
+      const key = request.headers["x-api-key"];
+      attempts.push(typeof key === "string" ? key : undefined);
+      if (key === "sk-first") {
+        response.writeHead(403, { "content-type": "text/html; charset=utf-8" });
+        response.end("<html><body>challenge</body></html>");
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"result":"second"}');
+    });
+    cleanups.push(upstream.close);
+    const fixture = await createFixture({
+      upstreamUrl: upstream.url,
+      apiKey: "sk-first",
+      priority: 0,
+    });
+    await addApiAccount(fixture, "sk-second", 100);
+    const before = Date.now();
+    const response = await fixture.host.harness.behavior.fetchHttp(
+      "POST",
+      "/v1/messages",
+      { headers: authHeaders(fixture.key), body: "{}" },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ result: "second" });
+    expect(attempts).toEqual(["sk-first", "sk-second"]);
+    const first = statusSchema
+      .parse(await fixture.host.harness.behavior.callRpc("status.get", null))
+      .accounts.find((account) => account.id === fixture.account.id);
+    expect(first?.error).toBeNull();
+    expect(first?.status).toBe("held");
+    expect(first?.heldUntil ?? 0).toBeGreaterThanOrEqual(before + 60_000);
+  });
+
+  it("returns a failed account to the pool once its usage probe succeeds", async () => {
+    let usageOk = false;
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "kimi",
+      source: "api-key",
+      apiKey: "sk-kimi-subscription",
+      options: {
+        kimiUsagesUrl: "https://usages.example/coding/v1/usages",
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          if (request.url.startsWith("https://usages.example/")) {
+            return usageOk
+              ? Response.json({ usage: { limit: "100", used: "10", remaining: "90" } })
+              : new Response("unavailable", { status: 503 });
+          }
+          return Response.json(
+            { error: { message: "key rejected" } },
+            { status: 403 },
+          );
+        },
+      },
+    });
+    const env = await resolveKimiEnv(fixture.host, "acp-opencode-kimi");
+    const rejected = await fixture.host.harness.behavior.fetchHttp(
+      "POST",
+      "/kimi/v1/messages",
+      {
+        headers: {
+          "content-type": "application/json",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": env.token,
+        },
+        body: JSON.stringify({ model: "k3-256k", messages: [] }),
+      },
+    );
+    expect(rejected.status).toBe(403);
+    const accountStatus = async () =>
+      statusSchema
+        .parse(await fixture.host.harness.behavior.callRpc("status.get", null))
+        .accounts.find((account) => account.id === fixture.account.id);
+    expect((await accountStatus())?.status).toBe("error");
+    usageOk = true;
+    await fixture.host.harness.behavior.callRpc("account.refreshUsage", {
+      accountId: fixture.account.id,
+    });
+    expect(await accountStatus()).toMatchObject({ status: "ready", error: null });
+  });
+
   describe.each<{ provider: "claude" | "codex"; route: string }>([
     { provider: "claude", route: "/v1/messages" },
     { provider: "codex", route: "/v1/responses" },
