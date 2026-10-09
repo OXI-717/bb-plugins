@@ -57,7 +57,7 @@ export const accountSettingsCss = `
  .pool-settings-interval input::-webkit-calendar-picker-indicator { display:none; }
  .pool-settings-interval .pool-settings-remove { width:28px!important; }
 }
-@media(pointer:coarse) { .pool-settings { --pool-control:40px; } .pool-settings-control { font-size:16px; } }
+@media(pointer:coarse) { .pool-settings { --pool-control:40px; } .pool-settings-control, .pool-settings-interval .pool-settings-control { font-size:16px; } }
 `;
 
 export function AccountSettingsStyle() {
