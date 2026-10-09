@@ -73,3 +73,30 @@ it('keeps dismissal guarded until save succeeds or edits are explicitly discarde
   expect(screen.getByDisplayValue('50')).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
 });
+
+it('autosaves schedule time edits without losing timezone or selected days', async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  const scheduled = { ...account, policy: accountPolicySchema.parse({ enabled: true, weeklyKeep: 50,
+    schedule: { timeZone: 'Europe/Berlin', intervals: [{ days: [1,2,3,4,5], start: '09:00', end: '18:00' }] } }) };
+  render(<AccountPolicyForm account={scheduled} threshold={.98} drainHours={24} save={save} />);
+  fireEvent.change(screen.getByLabelText('Начало интервала 1'), { target: { value: '10:30' } });
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ schedule: {
+    timeZone: 'Europe/Berlin', intervals: [{ days: [1,2,3,4,5], start: '10:30', end: '18:00' }],
+  } })));
+});
+
+it('shows weekday preset and expands custom days without changing the saved schedule', async () => {
+  const save = vi.fn().mockResolvedValue(undefined);
+  const scheduled = { ...account, policy: accountPolicySchema.parse({ enabled: true, weeklyKeep: 50,
+    schedule: { timeZone: 'Europe/Berlin', intervals: [{ days: [1,2,3,4,5], start: '09:00', end: '18:00' }] } }) };
+  render(<AccountPolicyForm account={scheduled} threshold={.98} drainHours={24} save={save} />);
+  expect((screen.getByLabelText('Дни интервала 1') as HTMLSelectElement).value).toBe('weekdays');
+  expect(screen.queryByLabelText('Пн')).toBeNull();
+  fireEvent.change(screen.getByLabelText('Дни интервала 1'), { target: { value: 'custom' } });
+  expect((screen.getByLabelText('Пн') as HTMLInputElement).checked).toBe(true);
+  expect(save).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText('Дни интервала 1'), { target: { value: 'daily' } });
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ schedule: {
+    timeZone: 'Europe/Berlin', intervals: [{ days: [0,1,2,3,4,5,6], start: '09:00', end: '18:00' }],
+  } })));
+});
