@@ -26,19 +26,44 @@ export function vpnStateFromPayload(payload: unknown, now: number): VpnState {
   return parsed.data.state;
 }
 
+const pendingReads = new Map<string, Promise<unknown>>();
+const MAX_PENDING_READS = 16;
+const READ_TIMEOUT_MS = 1_000;
+
 /** Open without following symlinks; validate the opened inode before reading. */
-export async function readVpnState(file: string, now: number): Promise<VpnState> {
+async function readTrustedPayload(file: string): Promise<unknown> {
   let handle;
   try {
     handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 || stat.size > 4096) return 'unknown';
+    if (!stat.isFile() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 || stat.size > 4096) return null;
     const buffer = Buffer.alloc(4097);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    if (bytesRead > 4096) return 'unknown';
-    return vpnStateFromPayload(JSON.parse(buffer.subarray(0, bytesRead).toString('utf8')), now);
-  } catch { return 'unknown'; }
+    if (bytesRead > 4096) return null;
+    return JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'));
+  } catch { return null; }
   finally { await handle?.close().catch(() => undefined); }
+}
+
+export async function readVpnState(file: string, now: number | (() => number)): Promise<VpnState> {
+  let result = pendingReads.get(file);
+  if (result === undefined) {
+    if (pendingReads.size >= MAX_PENDING_READS) return 'unknown';
+    const reading = readTrustedPayload(file);
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<null>(resolve => {
+      timer = setTimeout(() => resolve(null), READ_TIMEOUT_MS);
+    });
+    result = Promise.race([reading, timeout]);
+    pendingReads.set(file, result);
+    const current = result;
+    void reading.finally(() => {
+      clearTimeout(timer);
+      if (pendingReads.get(file) === current) pendingReads.delete(file);
+    }).catch(() => undefined);
+  }
+  const payload = await result;
+  return vpnStateFromPayload(payload, typeof now === "number" ? now : now());
 }
 
 export function createVpnPolicy(
@@ -47,7 +72,7 @@ export function createVpnPolicy(
   injectedState?: () => Promise<VpnState>,
 ) {
   const readState = injectedState ?? (() => readVpnState(
-    settings().vpnStatusFile ?? path.join(homedir(), '.local', 'state', 'vpnks', 'vpn-state.json'), now(),
+    settings().vpnStatusFile ?? path.join(homedir(), '.local', 'state', 'vpnks', 'vpn-state.json'), now,
   ));
   const state = async (): Promise<VpnState> => {
     try { return await readState(); } catch { return 'unknown'; }

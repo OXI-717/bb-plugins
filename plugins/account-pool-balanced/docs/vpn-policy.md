@@ -18,7 +18,7 @@ The file must be a root-owned regular file, not a symlink, at most 4096 bytes, w
 }
 ```
 
-Only `connected` with a timestamp between now and 60 seconds ago allows protected traffic. Future timestamps also deny traffic. Use `disconnected` otherwise. Extra writer metadata is permitted. A server without a configured writer will correctly refuse protected providers, including after suspend.
+Only `connected` with a timestamp between now and 60 seconds ago allows protected traffic. Future timestamps also deny traffic. Use `disconnected` otherwise. Extra writer metadata is permitted. Reads, including cleanup, have a one-second deadline; overlapping reads of the same file share one operation, and a stalled operation returns `unknown` without spawning more reads. A server without a configured writer will correctly refuse protected providers, including after suspend.
 
 ## Configuration
 
