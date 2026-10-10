@@ -6,6 +6,7 @@ import { DEVIN_PROXIED_PATHS, devinMachineToken } from "../devin-adapter.js";
 import type { StandalonePool } from "./runtime.js";
 import { CURSOR_EXCHANGE_PATH } from "../cursor-adapter.js";
 import { CURSOR_RPC_PATH_HEADER, isCursorRpcPath } from "../cursor-rpc.js";
+import { VpnRequiredError } from "../vpn-policy.js";
 
 const routes = new Map<string, PoolProvider>([
   ["/v1/messages", "claude"], ["/v1/messages/count_tokens", "claude"],
@@ -71,6 +72,7 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
       headers.set("x-bb-account-pool-token", credential!);
       if (cursorGateway && !isCursorRpcPath(headers.get(CURSOR_RPC_PATH_HEADER) ?? "")) { fail(400, "Invalid Cursor RPC path."); return; }
       if (backgroundError) { fail(503, "Pool service unavailable."); return; }
+      if (!cursorExchange) await pool.hub.assertNetworkAllowed(provider ?? "devin");
       if (Number(req.headers["content-length"] ?? 0) > MAX_BODY) { fail(413, "Request too large."); return; }
       const body = await readBody(req);
       if (cursorExchange) {
@@ -97,6 +99,11 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
       if (response.body) await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), res);
       else res.end();
     } catch (error) {
+      if (error instanceof VpnRequiredError && !res.headersSent && !res.destroyed) {
+        res.setHeader("x-bb-pool-error", error.code);
+        fail(403, error.message);
+        return;
+      }
       if (!res.headersSent && !res.destroyed) fail(error instanceof BodyTooLarge ? 413 : 502, error instanceof BodyTooLarge ? "Request too large." : "Pool request failed.");
       else res.destroy();
     } finally {

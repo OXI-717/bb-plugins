@@ -61,6 +61,18 @@ it("refuses a second process opening the same pool directory", async () => {
   await expect(openPool(dir)).rejects.toThrow(/already in use/);
 });
 
+it.each(["/v1/messages", "/agents/devin/sessions"])("denies %s at standalone admission when VPN status is missing", async route => {
+  const dir = await directory();
+  const pool = await openPool(dir, { vpnStatusFile: path.join(dir, "missing-vpn-state.json") });
+  cleanups.push(() => pool.close());
+  const token = await pool.tokens.forHost("vpn-test-client");
+  const server = await listenPool(pool, { port: 0 });
+  cleanups.push(() => server.close());
+  const response = await fetch(`${server.url}${route}`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}" });
+  expect(response.status).toBe(403);
+  expect(response.headers.get("x-bb-pool-error")).toBe("VPN_REQUIRED");
+});
+
 it("authenticates generic and direct Cursor routes and answers exchange locally", async () => {
   const pool = await openPool(await directory(), { vpnOnlyProviders: [] });
   cleanups.push(() => pool.close());
