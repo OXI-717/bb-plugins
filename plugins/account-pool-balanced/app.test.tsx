@@ -141,6 +141,8 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     routingStrategy: "sequential",
     reserveDrainHours: 24,
     restDays: [0, 6],
+    vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
+    vpnStatusFile: null,
     ...overrides,
   };
 }
