@@ -12,6 +12,8 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   routingStrategy: "sequential" as const,
   reserveDrainHours: 24,
   restDays: [0, 6],
+  vpnOnlyProviders: ["codex", "claude", "cursor", "devin"] as Array<"codex" | "claude" | "cursor" | "devin">,
+  vpnStatusFile: null as string | null,
 };
 
 const httpUrlSchema = z
@@ -88,6 +90,8 @@ export const accountPoolConfigSchema = z
       DEFAULT_ACCOUNT_POOL_CONFIG.reserveDrainHours,
     ),
     restDays: restDaysSchema.default(DEFAULT_ACCOUNT_POOL_CONFIG.restDays),
+    vpnOnlyProviders: z.array(z.enum(["codex", "claude", "cursor", "devin"])).max(4).refine(v => new Set(v).size === v.length).default(DEFAULT_ACCOUNT_POOL_CONFIG.vpnOnlyProviders),
+    vpnStatusFile: z.string().min(1).nullable().default(null),
   })
   .strict();
 
@@ -106,6 +110,8 @@ export const accountPoolConfigSetInputSchema = z
     routingStrategy: routingStrategySchema.optional(),
     reserveDrainHours: reserveDrainHoursSchema.optional(),
     restDays: restDaysSchema.optional(),
+    vpnOnlyProviders: z.array(z.enum(["codex", "claude", "cursor", "devin"])).max(4).refine(v => new Set(v).size === v.length).optional(),
+    vpnStatusFile: z.string().min(1).nullable().optional(),
   })
   .strict();
 
@@ -345,6 +351,7 @@ export type RoutedThreadStatus = z.infer<typeof routedThreadStatusSchema>;
 export const statusSchema = z
   .object({
     route: z.string(),
+    vpn: z.object({ state: z.enum(["connected", "disconnected", "unknown"]), blockedProviders: z.array(providerSchema) }).strict().optional(),
     enabledAccountCount: z.number().int().nonnegative(),
     inFlight: z.number().int().nonnegative(),
     accepting: z.boolean(),

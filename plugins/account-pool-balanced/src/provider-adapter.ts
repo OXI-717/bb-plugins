@@ -1,3 +1,4 @@
+import { VpnRequiredError } from "./vpn-policy.js";
 import type {
   Account,
   AccountPoolConfig,
@@ -139,7 +140,8 @@ export async function fetchOAuthRefresh(
           }),
         timedOut,
       ]);
-    } catch {
+    } catch (error) {
+      if (error instanceof VpnRequiredError) throw error;
       throw new TransientOAuthRefreshError(
         "OAuth refresh failed due to a network error or timeout.",
         0,
@@ -153,6 +155,7 @@ export async function fetchOAuthRefresh(
       );
       void response.body?.cancel().catch(() => undefined);
       if (
+        response.status === 403 ||
         response.status === 408 ||
         response.status === 429 ||
         response.status >= 500

@@ -24,3 +24,7 @@ privately, never print its contents. Client credentials follow their server-side
 project binding and account policies. Use `--project <project-id>` when creating
 a project-bound client token. See [external clients](../../docs/external-clients.md)
 for standalone startup, process-scoped CLI setup and the separate Devin cloud API.
+
+For VPN-only provider switches, local status-writer requirements, and temporary
+network recovery, see [VPN policy](../../docs/vpn-policy.md). Protected
+providers deny every upstream operation when the server VPN state is unknown.
