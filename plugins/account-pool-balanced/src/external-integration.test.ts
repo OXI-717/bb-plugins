@@ -9,7 +9,8 @@ it("BB CLI provisions an external client that shares the pool and can be revoked
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "bb-external-"));
   const host = createFakePluginHost({ pluginId: "account-pool-balanced", dataDir, sdk: { hosts: { list: async () => [] }, system: { providerStates: async () => ({ providers: [] }) } } });
   const seen: string[] = [];
-  await createAccountPoolPlugin({ fetch: (async (_url, init) => {
+  let connected = false;
+  await createAccountPoolPlugin({ vpnState: async () => connected ? "connected" : "disconnected", fetch: (async (_url, init) => {
     seen.push(new Headers(init?.headers).get("x-api-key") ?? "");
     return Response.json({ content: [{ type: "text", text: "ok" }] });
   }) as typeof fetch })(host.bb);
@@ -24,6 +25,11 @@ it("BB CLI provisions an external client that shares the pool and can be revoked
     // Status prunes departed BB hosts; external clients must survive it.
     await host.harness.behavior.runCli(["status"]);
     const request = () => host.harness.behavior.fetchHttp("POST", "/v1/messages", { headers: { "x-api-key": token, "content-type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet", max_tokens: 10, messages: [{ role: "user", content: "test" }] }) });
+    const blocked = await request();
+    expect(blocked.status).toBe(403);
+    expect(blocked.headers.get("x-bb-pool-error")).toBe("VPN_REQUIRED");
+    expect(seen).toEqual([]);
+    connected = true;
     const result = await request();
     expect(result.status).toBe(200);
     await result.text();
