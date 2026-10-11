@@ -1,0 +1,52 @@
+{
+  "name": "bb-plugin-vpn-guard",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "bb": ">=0.46",
+    "bbPluginSdk": ">=0.6.37"
+  },
+  "bb": {
+    "name": "VPN Guard",
+    "description": "Observe and gate protected BB providers by host-local VPN state.",
+    "branding": {
+      "icon": "Shield"
+    },
+    "server": "./server.ts",
+    "host": "./host.ts",
+    "skills": [
+      "skills"
+    ],
+    "app": "./app.tsx"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.37",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "better-sqlite3": "^12.11.1",
+    "cron-parser": "^5.10.2",
+    "hono": "^4.13.13",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.11"
+  },
+  "description": "Observe and gate protected BB providers by host-local VPN state.",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OXI-717/bb-plugins.git",
+    "directory": "plugins/vpn-guard"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "bb plugin build ."
+  }
+}

@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['account-pool-balanced/v*', 'automation-catalog/v*']
+    tags: ['account-pool-balanced/v*', 'automation-catalog/v*', 'vpn-guard/v*']
   pull_request:
   workflow_dispatch:
 
@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        plugin: [account-pool-balanced, automation-catalog]
+        plugin: [account-pool-balanced, automation-catalog, vpn-guard]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
@@ -61,8 +61,13 @@ jobs:
         working-directory: plugins/automation-catalog/scripts
         run: python3 -m unittest test_catalog_collect test_catalog_history test_catalog_sync
       - name: Build with the published BB CLI
+        if: matrix.plugin != 'vpn-guard'
         working-directory: plugins/${{ matrix.plugin }}
         run: npm exec --yes --package=bb-app@0.43.3 -- bb plugin build .
+      - name: Build VPN Guard with BB 0.46
+        if: matrix.plugin == 'vpn-guard'
+        working-directory: plugins/vpn-guard
+        run: npm exec --yes --package=bb-app@0.46.0 -- bb plugin build .
       - name: Ensure checks leave tracked files clean
         run: git diff --exit-code
 
