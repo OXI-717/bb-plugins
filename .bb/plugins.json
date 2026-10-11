@@ -10,6 +10,10 @@
     {
       "name": "automation-catalog",
       "source": "./plugins/automation-catalog"
+    },
+    {
+      "name": "vpn-guard",
+      "source": "./plugins/vpn-guard"
     }
   ]
 }

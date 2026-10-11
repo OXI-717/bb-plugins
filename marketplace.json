@@ -52,6 +52,30 @@
           "tagPrefix": "automation-catalog/"
         }
       }
+    },
+    {
+      "id": "vpn-guard",
+      "icon": {
+        "url": "./icons/vpn-guard.svg"
+      },
+      "displayName": "VPN Guard",
+      "description": "Observe host-local VPN status and guard selected BB machines.",
+      "author": {
+        "name": "OXI",
+        "github": "OXI-717"
+      },
+      "tags": [
+        "agents",
+        "network"
+      ],
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/vpn-guard",
+          "range": "^0.1.0",
+          "tagPrefix": "vpn-guard/"
+        }
+      }
     }
   ]
 }

@@ -41,6 +41,7 @@ export default async function plugin(bb: BbPluginApi) {
   let tail:Promise<void>=Promise.resolve();
   let previousStates=new Map<string,VpnState>();
   let policyVersion=0;
+  let recheckDirty=false;
 
   function serial<T>(operation:()=>Promise<T>):Promise<T> {
     const run=tail.then(operation,operation);
@@ -68,6 +69,7 @@ export default async function plugin(bb: BbPluginApi) {
     await bb.storage.kv.set(CONFIG,next);
     config=next;
     policyVersion++;
+    recheckDirty=true;
   }
   async function saveOwned() {await bb.storage.kv.set(JOURNAL,[...owned]);}
   async function savePending() {await bb.storage.kv.set(PENDING,[...pending]);}
@@ -80,13 +82,16 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         pending.add(id);
         policyVersion++;
+        recheckDirty=true;
         await savePending();
         await bb.sdk.plugins.disable({pluginId:id});
         owned.add(id);
         policyVersion++;
+        recheckDirty=true;
         await saveOwned();
         pending.delete(id);
         policyVersion++;
+        recheckDirty=true;
         await savePending();
       } catch(error) {failures.push(new Error(`${id}: ${String(error)}`));}
     }
@@ -102,6 +107,7 @@ export default async function plugin(bb: BbPluginApi) {
       if(!entry.enabled) await bb.sdk.plugins.enable({pluginId:id});
       owned.delete(id);
       policyVersion++;
+      recheckDirty=true;
       await saveOwned();
     }
   }
@@ -134,10 +140,11 @@ export default async function plugin(bb: BbPluginApi) {
       }
       failures.push(...await stopProtected(states));
     }
-    if([...states].some(([id,state])=>previousStates.get(id)!==state) || previousStates.size!==states.size) {
+    if(recheckDirty || [...states].some(([id,state])=>previousStates.get(id)!==state) || previousStates.size!==states.size) {
       try {
         await bb.experimental_hooks.recheck('message.dispatch');
         previousStates=states;
+        recheckDirty=false;
       } catch(error) {failures.push(new Error(`dispatch recheck: ${String(error)}`));}
     }
     if(failures.length) throw new AggregateError(failures,`VPN Guard reconcile failed: ${failures.map(error=>error.message).join('; ')}`);
@@ -146,13 +153,14 @@ export default async function plugin(bb: BbPluginApi) {
     if(next.mode==='enforce' && next.hostIds.length===0) throw new Error('Select at least one machine before enforcement.');
     await saveConfig(next);
     await reconcile();
-    await bb.experimental_hooks.recheck('message.dispatch');
     return status();
   }
   async function setHosts(hostIds:string[]) {
     const unique=[...new Set(hostIds)];
-    const available=new Set((await bb.sdk.hosts.list()).map(h=>h.id));
-    if(unique.some(id=>!available.has(id) && !config.hostIds.includes(id))) throw new Error('A newly selected machine is not enrolled.');
+    if(unique.some(id=>!config.hostIds.includes(id))) {
+      const available=new Set((await bb.sdk.hosts.list()).map(h=>h.id));
+      if(unique.some(id=>!available.has(id) && !config.hostIds.includes(id))) throw new Error('A newly selected machine is not enrolled.');
+    }
     return update({...config,hostIds:unique});
   }
   async function acknowledgeAmbiguous(pluginId:string,reviewed:boolean) {
@@ -162,6 +170,9 @@ export default async function plugin(bb: BbPluginApi) {
     await bb.storage.kv.set(PENDING,[...next]);
     pending=next;
     policyVersion++;
+    recheckDirty=true;
+    await bb.experimental_hooks.recheck('message.dispatch');
+    recheckDirty=false;
     return status();
   }
   function nativePluginFor(providerId:string) {
@@ -191,7 +202,7 @@ export default async function plugin(bb: BbPluginApi) {
       if(enabled && !acknowledgeGlobalImpact) throw new Error('Global native plugin suspension needs explicit acknowledgment.');
       return update({...config,suspendNativePluginsGlobally:enabled});
     }),
-    restoreOwned:()=>serial(async()=>{await restoreOwned();await bb.experimental_hooks.recheck('message.dispatch');return status();}),
+    restoreOwned:()=>serial(async()=>{await restoreOwned();await bb.experimental_hooks.recheck('message.dispatch');recheckDirty=false;return status();}),
     acknowledgeAmbiguous:({pluginId,acknowledgeReviewed})=>serial(()=>acknowledgeAmbiguous(pluginId,acknowledgeReviewed)),
   });
   bb.cli.register({
@@ -217,7 +228,7 @@ export default async function plugin(bb: BbPluginApi) {
           result=await serial(()=>setHosts(hostIds));
         } else if(command==='global-suspend' && ((args.length===2 && args[0]==='on' && args[1]==='--ack-global')||(args.length===1 && args[0]==='off'))) {
           result=await serial(()=>update({...config,suspendNativePluginsGlobally:args[0]==='on'}));
-        } else if(command==='restore-owned' && args.length===0) result=await serial(async()=>{await restoreOwned();await bb.experimental_hooks.recheck('message.dispatch');return status();});
+        } else if(command==='restore-owned' && args.length===0) result=await serial(async()=>{await restoreOwned();await bb.experimental_hooks.recheck('message.dispatch');recheckDirty=false;return status();});
         else if(command==='acknowledge-ambiguous' && args.length===2 && args[1]==='--reviewed') result=await serial(()=>acknowledgeAmbiguous(args[0],true));
         else return {exitCode:1,stderr:'Usage: bb vpn-guard status|hosts|enforce|observe|global-suspend|restore-owned|acknowledge-ambiguous'};
         return {exitCode:0,stdout:JSON.stringify(result)};

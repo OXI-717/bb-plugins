@@ -281,6 +281,23 @@ describe('guard admission and reconciliation',()=>{
     expect(fake.harness.recheckCount).toBeGreaterThan(before);
     await fake.harness.lifecycle.dispose();
   });
+  it('retries a failed policy-only wake after switching to Observe',async()=>{
+    const {fake}=await setup();
+    await select(fake,['host-a']);
+    await mode(fake,'enforce');
+    const original=fake.bb.experimental_hooks.recheck.bind(fake.bb.experimental_hooks);
+    let once=true;
+    fake.bb.experimental_hooks.recheck=async hook=>{
+      if(once){once=false;throw Error('wake failed');}
+      return original(hook);
+    };
+    await expect(mode(fake,'observe')).rejects.toThrow('wake failed');
+    const before=fake.harness.recheckCount;
+    const retry=fake.harness.behavior.runService('reconcile');
+    await Promise.resolve();retry.controller.abort();await retry.done;
+    expect(fake.harness.recheckCount).toBeGreaterThan(before);
+    await fake.harness.lifecycle.dispose();
+  });
   it('acknowledges a reviewed ambiguous entry without enabling any plugin',async()=>{
     const {fake,enabled,dispatch}=await setup({failDisable:true});
     await select(fake,['host-a']);
@@ -288,7 +305,10 @@ describe('guard admission and reconciliation',()=>{
     await expect(mode(fake,'enforce')).rejects.toThrow();
     expect(await dispatch('codex','host-b')).toMatchObject({action:'wait'});
     await expect(fake.harness.behavior.callRpc('acknowledgeAmbiguous',{pluginId:'provider-codex',acknowledgeReviewed:false})).rejects.toThrow();
+    const beforeAck=fake.harness.recheckCount;
     await fake.harness.behavior.callRpc('acknowledgeAmbiguous',{pluginId:'provider-codex',acknowledgeReviewed:true});
+    const afterAck=fake.harness.recheckCount;
+    expect(afterAck).toBeGreaterThan(beforeAck);
     expect(await dispatch('codex','host-b')).toEqual({action:'proceed'});
     expect(enabled.get('provider-codex')).toBe(true);
     expect(await fake.bb.storage.kv.get('pending-native-plugin-changes-v2')).toEqual([]);
@@ -296,6 +316,7 @@ describe('guard admission and reconciliation',()=>{
     await expect(mode(fake,'enforce')).rejects.toThrow();
     const cleared=await fake.harness.behavior.runCli(['acknowledge-ambiguous','provider-codex','--reviewed']);
     expect(cleared.exitCode).toBe(0);
+    expect(fake.harness.recheckCount).toBeGreaterThan(afterAck);
     expect(enabled.get('provider-codex')).toBe(true);
     expect(await fake.bb.storage.kv.get('pending-native-plugin-changes-v2')).toEqual([]);
     const reloaded=await fake.harness.lifecycle.reload(plugin);
@@ -303,13 +324,15 @@ describe('guard admission and reconciliation',()=>{
     await reloaded.harness.lifecycle.dispose();
   });
   it('lets a removed selected machine be taken out of scope while another remains missing',async()=>{
-    const {fake,available}=await setup();
+    const {fake,available,setFailHostList}=await setup();
     await select(fake,['host-a','host-b']);
     available.delete('host-a');
+    setFailHostList(true);
     await select(fake,['host-a']);
     expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({hostIds:['host-a']});
     await select(fake,[]);
     expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({hostIds:[]});
+    setFailHostList(false);
     await expect(select(fake,['host-a'])).rejects.toThrow('newly selected');
     await fake.harness.lifecycle.dispose();
   });
