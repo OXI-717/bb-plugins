@@ -1,3 +1,5 @@
+import { createVpnPolicy, VpnRequiredError, type VpnState } from "./vpn-policy.js";
+import { isRecoverableAccessError } from "./recoverable-access.js";
 import { projectTier, projectRole } from "./project-policy.js";
 import { policyThresholds, reserveHours, scheduleAllows } from "./account-policy.js";
 import type {
@@ -100,6 +102,7 @@ interface HubOptions {
   maxAffinityBindings: number;
   hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
   getSettings: () => AccountPoolConfig;
+  vpnState?: () => Promise<VpnState>;
   adapters: ReadonlyMap<PoolProvider, ProviderAdapter>;
   fetch: typeof fetch;
   now: () => number;
@@ -172,7 +175,19 @@ export class AccountPoolHub {
   private readonly lastUsageRefreshAt = new Map<string, number>();
   private readonly drainWaiters = new Set<() => void>();
 
-  constructor(private readonly options: HubOptions) {}
+  private readonly vpn;
+  constructor(private readonly options: HubOptions) {
+    this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnState);
+  }
+
+  async assertNetworkAllowed(provider: PoolProvider): Promise<void> { await this.vpn.assert(provider); }
+
+  outboundFetch(provider: PoolProvider): typeof fetch {
+    return async (input, init) => {
+      await this.assertNetworkAllowed(provider);
+      return this.options.fetch(input, init);
+    };
+  }
 
   async start(signal: AbortSignal): Promise<void> {
     this.affinityBindings = this.options.affinity.loadBindings(
@@ -230,6 +245,11 @@ export class AccountPoolHub {
         503,
         "Account Pooler is not accepting requests.",
       );
+    try { await this.assertNetworkAllowed(provider); }
+    catch (error) {
+      if (error instanceof VpnRequiredError) return adapter.errorResponse(403, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
+      throw error;
+    }
     const body = new Uint8Array(await request.arrayBuffer());
     const refusal = adapter.guardRequest?.(request, body);
     if (refusal !== null && refusal !== undefined) return refusal;
@@ -257,6 +277,7 @@ export class AccountPoolHub {
     account: Account,
     force: boolean,
   ): Promise<void> {
+    await this.assertNetworkAllowed(account.provider);
     const adapter = this.adapter(account.provider);
     if ((this.inFlightByAccount.get(account.id) ?? 0) > 0) {
       if (force) throw new Error("Аккаунт занят запросом. Повторите обновление квот после его завершения.");
@@ -282,7 +303,7 @@ export class AccountPoolHub {
             : { kind: "rejected", accessToken: rejectedAccessToken }),
         accounts: this.options.accounts,
         quotas: this.options.quotas,
-        fetch: (input, init) => this.options.fetch(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
+        fetch: (input, init) => this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
         now: this.options.now,
       })
       .then(async () => { await this.settleDrain(account); })
@@ -336,6 +357,7 @@ export class AccountPoolHub {
   async status(): Promise<Omit<PoolStatus, "routing">> {
     const settings = this.options.getSettings();
     const now = this.options.now();
+    const vpnState = await this.vpn.state();
     const accounts = (await this.routingAccounts()).sort(
       (left, right) => left.priority - right.priority,
     );
@@ -366,6 +388,7 @@ export class AccountPoolHub {
       [...this.activeAccounts].filter(([key]) => key.startsWith(`${provider}:`)).at(-1)?.[1].accountId ?? null;
     return {
       route: this.options.route,
+      vpn: { state: vpnState, blockedProviders: vpnState === "connected" ? [] : settings.vpnOnlyProviders },
       enabledAccountCount: accounts.filter((account) => account.enabled).length,
       inFlight: this.inFlightCount(),
       accepting: this.accepting,
@@ -506,6 +529,7 @@ export class AccountPoolHub {
             signal,
           );
         } catch (error) {
+          if (error instanceof VpnRequiredError) throw error;
           if (pacing !== null) {
             this.releasePacing(selected.account.id, pacing);
             pacing = null;
@@ -636,6 +660,7 @@ export class AccountPoolHub {
                   signal,
                 );
               } catch (error) {
+                if (error instanceof VpnRequiredError) throw error;
                 signal.throwIfAborted();
                 if (error instanceof TransientOAuthRefreshError) {
                   failure = {
@@ -655,7 +680,10 @@ export class AccountPoolHub {
               }
               continue;
             }
-            if (response.status === 401 || response.status === 403) {
+            if (response.status === 403 && (/text\/html/iu.test(response.headers.get('content-type') ?? '') || isRecoverableAccessError(detail))) {
+              const quota = this.options.quotas.get(selected.account.id);
+              this.options.quotas.put({ ...quota, error: null, heldUntil: Math.max(quota.heldUntil ?? 0, this.options.now() + 60_000) });
+            } else if (response.status === 401 || response.status === 403) {
               await this.markAuthError(
                 selected.account,
                 secret,
@@ -681,6 +709,7 @@ export class AccountPoolHub {
             failure.headers,
           );
     } catch (error) {
+      if (error instanceof VpnRequiredError) return adapter.errorResponse(403, error.message, { "x-bb-pool-error": error.code, "retry-after": "10" });
       if (!signal.aborted) throw error;
       return adapter.errorResponse(
         request.signal.aborted ? 499 : 503,
@@ -1035,7 +1064,7 @@ export class AccountPoolHub {
               };
             }
             const error = this.options.quotas.get(account.id).error;
-            if (error !== null) throw new Error(error);
+            if (error !== null && !isRecoverableAccessError(error)) throw new Error(error);
             if (
               backoff !== undefined &&
               this.options.now() < backoff.retryAt &&
@@ -1057,7 +1086,7 @@ export class AccountPoolHub {
                 secret,
                 accounts: this.options.accounts,
                 quotas: this.options.quotas,
-                fetch: (input, init) => this.options.fetch(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
+                fetch: (input, init) => this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
                 now: this.options.now,
                 forceRefresh,
               });
@@ -1144,8 +1173,7 @@ export class AccountPoolHub {
       new Uint8Array(upstreamBody).set(body);
       const url = adapter.upstreamUrl(request, this.options.getSettings());
       const headers = adapter.requestHeaders(request.headers, account, secret);
-      const response = await this.options
-        .fetch(url, {
+      const response = await this.outboundFetch(account.provider)(url, {
           method: request.method,
           headers,
           ...(request.method === "GET" || request.method === "HEAD"
@@ -1154,6 +1182,7 @@ export class AccountPoolHub {
           signal: controller.signal,
         })
         .catch((cause: unknown) => {
+          if (cause instanceof VpnRequiredError) throw cause;
           if (!controller.signal.aborted)
             this.options.onUpstreamError(adapter.provider, cause);
           throw new UpstreamConnectionError("Upstream connection failed.", {
@@ -1323,6 +1352,7 @@ export function createHub(options: {
   affinity: PoolAffinityStore;
   hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
   getSettings: () => AccountPoolConfig;
+  vpnState?: () => Promise<VpnState>;
   fetch?: typeof fetch;
   now?: () => number;
   refreshUrl?: string;
@@ -1409,6 +1439,7 @@ export function createHub(options: {
     maxAffinityBindings: options.maxAffinityBindings ?? MAX_AFFINITY_BINDINGS,
     hubTokens: options.hubTokens,
     getSettings: options.getSettings,
+    vpnState: options.vpnState,
     adapters,
     fetch: options.fetch ?? fetch,
     now: options.now ?? Date.now,

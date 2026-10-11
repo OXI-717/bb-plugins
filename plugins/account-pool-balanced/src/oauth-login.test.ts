@@ -129,7 +129,7 @@ describe("Claude OAuth login", () => {
 
     const shapes: Array<"url" | "hash" | "bare"> = ["url", "hash", "bare"];
     for (const shape of shapes) {
-      const started = login.start();
+      const started = await login.start();
       const authorize = new URL(started.authorizeUrl);
       expect(await (await fetch(started.authorizeUrl)).text()).toBe(
         "authorize",
@@ -192,7 +192,7 @@ describe("Claude OAuth login", () => {
       tokenUrl: serverUrl,
       addAccount: async (authenticated) => savedAccount(authenticated),
     });
-    const started = login.start();
+    const started = await login.start();
     await expect(
       login.complete({
         sessionId: started.sessionId,
@@ -208,7 +208,7 @@ describe("Claude OAuth login", () => {
       now: () => now,
       addAccount: async (authenticated) => savedAccount(authenticated),
     });
-    const started = login.start();
+    const started = await login.start();
     now += 10 * 60 * 1_000;
     await expect(
       login.complete({ sessionId: started.sessionId, pasted: "code" }),
@@ -224,7 +224,7 @@ describe("Claude OAuth login", () => {
       tokenUrl: serverUrl,
       addAccount: async (authenticated) => savedAccount(authenticated),
     });
-    const started = login.start();
+    const started = await login.start();
     await expect(
       login.complete({ sessionId: started.sessionId, pasted: "bad-code" }),
     ).rejects.toThrow("Claude token exchange failed (HTTP 400). Start again.");
@@ -242,7 +242,7 @@ describe("Claude OAuth login", () => {
       tokenUrl: serverUrl,
       addAccount: async (authenticated) => savedAccount(authenticated),
     });
-    const started = login.start();
+    const started = await login.start();
     const completion = login.complete({
       sessionId: started.sessionId,
       pasted: "authorization-code",

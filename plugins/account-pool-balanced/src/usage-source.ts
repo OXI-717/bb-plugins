@@ -88,7 +88,9 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
           )
         )
           throw new Error("Usage resource no longer exists.");
-        await hub.refreshUsage(resourceId, refresh);
+        const account = (await hub.status()).accounts.find(account => account.id === resourceId);
+        if (account) await hub.assertNetworkAllowed(account.provider);
+        await hub.refreshUsage(resourceId, refresh, true);
         const { accounts: allAccounts } = await hub.status();
         const accounts = allAccounts.filter(
           (account) => account.id === resourceId,

@@ -63,6 +63,7 @@ export interface ClaudeOAuthAccount {
 }
 
 export interface ClaudeOAuthLoginOptions {
+  beforeStart?: () => Promise<void>;
   fetch?: typeof fetch;
   now?: () => number;
   authorizeUrl?: string;
@@ -134,7 +135,8 @@ export class ClaudeOAuthLogin {
     this.profileUrl = options.profileUrl ?? OAUTH_PROFILE_URL;
   }
 
-  start(): OAuthLoginStart {
+  async start(): Promise<OAuthLoginStart> {
+    await this.options.beforeStart?.();
     const codeVerifier = randomBytes(32).toString("base64url");
     const codeChallenge = createHash("sha256")
       .update(codeVerifier)

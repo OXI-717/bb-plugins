@@ -59,7 +59,7 @@ export async function openPool(dataDir: string, config: Partial<AccountPoolConfi
     let running: Promise<void> | undefined;
     let closing: Promise<void> | undefined;
     return {
-      accounts, tokens, hub, devin: new DevinPool(kv, path.join(dataDir, "devin"), transport.fetch),
+      accounts, tokens, hub, devin: new DevinPool(kv, path.join(dataDir, "devin"), hub.outboundFetch("devin")),
       start() { running ??= hub.start(controller.signal); return running; },
       close() {
         return closing ??= (async () => {

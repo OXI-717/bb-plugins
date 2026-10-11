@@ -1,3 +1,4 @@
+import { VpnRequiredError } from "../vpn-policy.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -97,7 +98,8 @@ export class DevinPool {
       if (!size) return Response.json({ ok: true });
       const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       return Response.json(payload);
-    } catch {
+    } catch (cause) {
+      if (cause instanceof VpnRequiredError) return Response.json({ error: cause.message }, { status: 403, headers: { "x-bb-pool-error": cause.code } });
       return error(502, "Devin request failed; its outcome may be unknown. Check Devin before retrying. No automatic retry was attempted.");
     }
   }

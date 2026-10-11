@@ -253,6 +253,7 @@ async function createFixture(args: {
     devinUpstreamBaseUrl: args.upstreamUrl,
   });
   const plugin = createAccountPoolPlugin({
+    vpnState: async () => "connected",
     usageUrl: "data:application/json,{}",
     ...args.options,
   });
@@ -437,6 +438,8 @@ describe("Account Pool config schema", () => {
       routingStrategy: "sequential",
       reserveDrainHours: 24,
       restDays: [0, 6],
+      vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
+      vpnStatusFile: null,
     });
     expect(
       accountPoolConfigSetInputSchema.safeParse({
@@ -463,7 +466,7 @@ describe("Account Pool plugin", () => {
       dataDir,
       sdk: sdkStubs(),
     });
-    await createAccountPoolPlugin()(host.bb);
+    await createAccountPoolPlugin({ vpnState: async () => "connected" })(host.bb);
     cleanups.push(async () => {
       await host.harness.lifecycle.dispose();
       await fs.rm(dataDir, { recursive: true, force: true });
@@ -509,6 +512,8 @@ describe("Account Pool plugin", () => {
       routingStrategy: "sequential",
       reserveDrainHours: 24,
       restDays: [0, 6],
+      vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
+      vpnStatusFile: null,
     });
     expect(
       accountPoolConfigSchema.parse(await host.bb.storage.kv.get("config")),
@@ -1481,6 +1486,7 @@ describe("Account Pool plugin", () => {
       codexUpstreamBaseUrl: upstream.url,
     });
     await createAccountPoolPlugin({
+    vpnState: async () => "connected",
       codexRefreshUrl: `${upstream.url}/oauth`,
       codexUsageUrl: `${upstream.url}/usage`,
       importCodexCredentials,
@@ -1732,6 +1738,7 @@ describe("Account Pool plugin", () => {
       codexUpstreamBaseUrl: "https://example.com",
     });
     await createAccountPoolPlugin({
+    vpnState: async () => "connected",
       fetch: upstreamFetch,
       codexUsageUrl: CODEX_USAGE_STUB_URL,
       importCodexCredentials: async () => ({
@@ -1813,7 +1820,7 @@ describe("Account Pool plugin", () => {
       dataDir,
       sdk: sdkStubs(),
     });
-    await createAccountPoolPlugin()(host.bb);
+    await createAccountPoolPlugin({ vpnState: async () => "connected" })(host.bb);
     cleanups.push(async () => {
       await host.harness.lifecycle.dispose();
       await fs.rm(dataDir, { recursive: true, force: true });
@@ -1891,7 +1898,7 @@ describe("Account Pool plugin", () => {
     await host.bb.storage.kv.set("config", {
       anthropicUpstreamBaseUrl: upstream.url,
     });
-    await createAccountPoolPlugin()(host.bb);
+    await createAccountPoolPlugin({ vpnState: async () => "connected" })(host.bb);
     const service = host.harness.behavior.runService("hub");
     cleanups.push(async () => {
       service.controller.abort();
@@ -2095,6 +2102,7 @@ describe("Account Pool plugin", () => {
       sdk: sdkStubs(),
     });
     await createAccountPoolPlugin({
+    vpnState: async () => "connected",
       oauthAuthorizeUrl: `${oauth.url}/authorize`,
       oauthTokenUrl: `${oauth.url}/token`,
       oauthProfileUrl: `${oauth.url}/profile`,
@@ -2257,6 +2265,7 @@ describe("Account Pool plugin", () => {
       sdk: sdkStubs(),
     });
     await createAccountPoolPlugin({
+    vpnState: async () => "connected",
       codexAuthBaseUrl: auth.url,
       codexUsageUrl: EMPTY_USAGE_URL,
       usageUrl: "data:application/json,{}",
@@ -4404,6 +4413,7 @@ describe("Account Pool plugin", () => {
         outage = false;
         host = await host.harness.lifecycle.reload(
           createAccountPoolPlugin({
+    vpnState: async () => "connected",
             fetch: upstreamFetch,
             now: () => 1_800_000_000_000,
             usageUrl: EMPTY_USAGE_URL,
@@ -5899,6 +5909,12 @@ describe("Account Pool plugin", () => {
         expectedStatus: 503,
       },
       {
+        name: "recovers OAuth 403 after network disruption without toggling enabled",
+        elapsedMinutes: 11,
+        failureStatus: 403,
+        expectedStatus: 503,
+      },
+      {
         name: "keeps invalid_grant accounts excluded despite a valid access token",
         elapsedMinutes: 6,
         failureStatus: 400,
@@ -6527,7 +6543,8 @@ describe("sequential pool recovery", () => {
       dataDir,
       sdk: sdkStubs(),
     });
-    await createAccountPoolPlugin({ usageUrl: "data:application/json,{}" })(
+    await createAccountPoolPlugin({
+    vpnState: async () => "connected", usageUrl: "data:application/json,{}" })(
       host.bb,
     );
     const service = host.harness.behavior.runService("hub");
@@ -7095,4 +7112,108 @@ it('rejects stale project settings without overwriting another editor',async()=>
  await expect(rpc('account.setProjects',{accountId:fixture.account.id,projects:b,expectedProjects:null})).rejects.toThrow('Project settings changed');
  const state=await rpc('account.list',null) as AccountSummary[];expect(state.find(value=>value.id===fixture.account.id)?.projects).toEqual(a);
  await expect(rpc('account.setProjects',{accountId:fixture.account.id,projects:b,expectedProjects:a})).resolves.toBeTruthy();
+});
+
+describe("VPN-only outbound protection", () => {
+  it.each(["claude", "codex", "cursor", "devin"] as const)("blocks %s model calls without poisoning the account and recovers", async provider => {
+    let connected = false;
+    const outbound = vi.fn(async () => Response.json({}));
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", provider, source: provider === "codex" ? "import" : undefined, options: { importCodexCredentials: async () => ({ accessToken: "synthetic", refreshToken: "refresh", idToken: null, accountId: "fixture-account", email: "fixture@example.com", expiresAt: Date.now() + 3600_000 }), fetch: outbound, vpnState: async () => connected ? "connected" : "disconnected" } });
+    const routes = { claude: "/v1/messages", codex: "/v1/responses", cursor: "/cursor/agent.v1.AgentService/Run", devin: "/devin/exa.seat_management_pb.SeatManagementService/GetUserStatus" };
+    // Use the actual hub routes; the early VPN refusal precedes protocol parsing.
+    const key = new TextEncoder().encode(fixture.key);
+    const metadata = Uint8Array.of(0x1a, key.length, ...key);
+    const protobuf = Buffer.from(Uint8Array.of(0x0a, metadata.length, ...metadata));
+    const request = () => fixture.host.harness.behavior.fetchHttp("POST", routes[provider], { headers: { authorization: `${provider === "devin" ? "Basic" : "Bearer"} ${fixture.key}`, "x-api-key": fixture.key, "content-type": provider === "devin" ? "application/proto" : "application/json" }, body: provider === "devin" ? protobuf : "{}" });
+    const denied = await request();
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get("x-bb-pool-error")).toBe("VPN_REQUIRED");
+    expect(outbound).not.toHaveBeenCalled();
+    const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
+    expect(accounts[0]?.error).toBeNull();
+    connected = true;
+    const allowed = await request();
+    expect(allowed.headers.get("x-bb-pool-error")).toBeNull();
+    await allowed.text();
+    expect(outbound).toHaveBeenCalled();
+  });
+  it("blocks background quotas, manual quotas and Codex login before transport", async () => {
+    let connected = false;
+    const outbound = vi.fn(async () => Response.json({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 604800 } } }));
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", provider: "codex", source: "import", options: { fetch: outbound, vpnState: async () => connected ? "connected" : "unknown", importCodexCredentials: async () => ({ accessToken: "synthetic", refreshToken: "refresh", idToken: null, accountId: "fixture-account", email: "fixture@example.com", expiresAt: Date.now() + 3600_000 }) } });
+    expect(outbound).not.toHaveBeenCalled();
+    await expect(fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id })).rejects.toThrow("VPN_REQUIRED");
+    await expect(fixture.host.harness.behavior.callRpc("codexLogin.start", null)).rejects.toThrow("VPN_REQUIRED");
+    await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", { resourceId: fixture.account.id, refresh: true })).rejects.toThrow("VPN_REQUIRED");
+    await expect(fixture.host.harness.behavior.callRpc("login.start", null)).rejects.toThrow("VPN_REQUIRED");
+    expect(outbound).not.toHaveBeenCalled();
+    connected = true;
+    await fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id });
+    expect(outbound).toHaveBeenCalled();
+  });
+});
+
+describe("recovery from persisted edge errors", () => {
+  it.each(["OAuth refresh failed with HTTP 403.", "<html><body>temporary edge block</body></html>"])("rechecks %s without disabling the account", async failure => {
+    const outbound = vi.fn(async () => Response.json({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 604800 } } }));
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", provider: "codex", source: "import", options: { fetch: outbound, importCodexCredentials: async () => ({ accessToken: "synthetic", refreshToken: "refresh", idToken: null, accountId: "fixture-account", email: "fixture@example.com", expiresAt: Date.now() + 3600_000 }) } });
+    await fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id });
+    fixture.host.bb.storage.database().prepare("UPDATE account_quota SET error = ? WHERE account_id = ?").run(failure, fixture.account.id);
+    outbound.mockClear();
+    await fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id });
+    expect(outbound).toHaveBeenCalled();
+    const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
+    expect(accounts[0]?.error).toBeNull();
+    expect(accounts[0]?.enabled).toBe(true);
+  });
+  it("keeps genuine credential rejection excluded", async () => {
+    const outbound = vi.fn(async () => Response.json({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 604800 } } }));
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", provider: "codex", source: "import", options: { fetch: outbound, importCodexCredentials: async () => ({ accessToken: "synthetic", refreshToken: "refresh", idToken: null, accountId: "fixture-account", email: "fixture@example.com", expiresAt: Date.now() + 3600_000 }) } });
+    await fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id });
+    outbound.mockClear();
+    fixture.host.bb.storage.database().prepare("UPDATE account_quota SET error = ? WHERE account_id = ?").run("OAuth refresh failed with HTTP 401.", fixture.account.id);
+    await expect(fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id })).rejects.toThrow("HTTP 401");
+    const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
+    expect(accounts[0]?.error).toContain("HTTP 401");
+    expect(outbound).not.toHaveBeenCalled();
+  });
+});
+
+describe("network policy boundaries", () => {
+  it.each(["kimi", "zai"] as const)("keeps %s available when VPN is disconnected", async provider => {
+    const outbound = vi.fn(async () => Response.json({}));
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", provider, options: { fetch: outbound, vpnState: async () => "disconnected" } });
+    outbound.mockClear();
+    const response = await fixture.host.harness.behavior.fetchHttp("POST", provider === "kimi" ? "/kimi/v1/messages" : "/zai/v1/chat/completions", { headers: { authorization: `Bearer ${fixture.key}`, "x-api-key": fixture.key, "content-type": "application/json" }, body: JSON.stringify({ model: "fixture", max_tokens: 10, messages: [{ role: "user", content: "test" }] }) });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(outbound).toHaveBeenCalledOnce();
+  });
+  it("rechecks VPN immediately before forwarding after initial admission", async () => {
+    let checks = 0;
+    const outbound = vi.fn(async () => Response.json({}));
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", options: { fetch: outbound, vpnState: async () => ++checks === 1 ? "connected" : "disconnected" } });
+    checks = 0;
+    const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/messages", { headers: authHeaders(fixture.key), body: "{}" });
+    expect(response.status).toBe(403);
+    expect(response.headers.get("x-bb-pool-error")).toBe("VPN_REQUIRED");
+    expect(outbound).not.toHaveBeenCalled();
+    const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
+    expect(accounts[0]?.error).toBeNull();
+  });
+  it("recovers an HTML edge denial after a bounded pause", async () => {
+    let now = 1_800_000_000_000;
+    const outbound = vi.fn().mockResolvedValueOnce(new Response("<html>temporary block</html>", { status: 403, headers: { "content-type": "text/html" } })).mockResolvedValueOnce(Response.json({}));
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example", options: { fetch: outbound, now: () => now } });
+    const request = () => fixture.host.harness.behavior.fetchHttp("POST", "/v1/messages", { headers: authHeaders(fixture.key), body: "{}" });
+    expect((await request()).status).toBe(403);
+    const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
+    expect(accounts[0]?.error).toBeNull();
+    expect(accounts[0]?.heldUntil).toBe(now + 60_000);
+    now += 60_001;
+    const recovered = await request();
+    expect(recovered.status).toBe(200);
+    await recovered.text();
+    expect(outbound).toHaveBeenCalledTimes(2);
+  });
 });

@@ -97,7 +97,7 @@ type DialogState =
 
 type ConfigField = Exclude<
   keyof AccountPoolConfig,
-  "routingStrategy" | "reserveDrainHours" | "restDays"
+  "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile"
 >;
 
 const PROVIDERS: Array<{
@@ -1393,6 +1393,7 @@ function AccountPoolSettings() {
         Хаб {status?.accepting ? "принимает" : "не принимает"} ·{" "}
         {status?.inFlight ?? 0} в работе · используют {hubHosts}
         {statusIsCached ? " · обновляю…" : null}
+        {status?.vpn?.blockedProviders.length ? " · VPN не подтверждён: защищённые провайдеры заблокированы" : null}
       </p>
       <p className="flex flex-wrap gap-x-3 text-xs text-subtle-foreground/75">
         {PROVIDERS.map((provider) => (
@@ -1484,6 +1485,12 @@ function AccountPoolSettings() {
                     })
                   }
                 />
+                {["codex", "claude", "cursor", "devin"].includes(provider.id) && <label className="flex items-center gap-1 text-xs">
+                  <input type="checkbox" aria-label={`Только через VPN ${provider.title}`} checked={config?.vpnOnlyProviders?.some(value => value === provider.id) ?? true} disabled={config === null || pending !== null}
+                    onChange={e => void saveRouting({ vpnOnlyProviders: e.target.checked
+                      ? [...(config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id), provider.id as "codex" | "claude" | "cursor" | "devin"]
+                      : (config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id) })} />Только VPN
+                </label>}
                 <AddAccountMenu
                   provider={provider.id}
                   onChoose={(choice) => void chooseAdd(provider.id, choice)}

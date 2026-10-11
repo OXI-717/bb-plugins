@@ -56,6 +56,7 @@ describe("OAuth refresh transport", () => {
   it.each([
     { status: 400, transient: false },
     { status: 401, transient: false },
+    { status: 403, transient: true },
     { status: 408, transient: true },
     { status: 429, transient: true },
     { status: 500, transient: true },

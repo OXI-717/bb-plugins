@@ -1,3 +1,4 @@
+import type { VpnState } from "./vpn-policy.js";
 import {
   createUpstreamTransport,
   transportErrorCode,
@@ -49,6 +50,7 @@ import {
 
 export interface AccountPoolPluginOptions {
   fetch?: typeof fetch;
+  vpnState?: () => Promise<VpnState>;
   now?: () => number;
   refreshUrl?: string;
   codexRefreshUrl?: string;
@@ -132,6 +134,7 @@ export function createAccountPoolPlugin(
       hubTokens: combinedTokens(hubTokens, externalClients.tokens),
       getSettings: () => currentSettings,
       fetch: upstreamFetch,
+      vpnState: options.vpnState,
       now,
       refreshUrl: options.refreshUrl,
       codexRefreshUrl: options.codexRefreshUrl,
@@ -182,7 +185,8 @@ export function createAccountPoolPlugin(
       (accountId) => hub.refreshUsage(accountId, true),
     );
     const login = new ClaudeOAuthLogin({
-      fetch: upstreamFetch,
+      beforeStart: () => hub.assertNetworkAllowed("claude"),
+      fetch: hub.outboundFetch("claude"),
       now,
       authorizeUrl: options.oauthAuthorizeUrl,
       tokenUrl: options.oauthTokenUrl,
@@ -190,7 +194,7 @@ export function createAccountPoolPlugin(
       addAccount: (authenticated) => operations.addOAuth(authenticated),
     });
     const codexLogin = new CodexDeviceLogin({
-      fetch: upstreamFetch,
+      fetch: hub.outboundFetch("codex"),
       now,
       authBaseUrl: options.codexAuthBaseUrl,
       addAccount: (authenticated) => operations.addCodexOAuth(authenticated),
