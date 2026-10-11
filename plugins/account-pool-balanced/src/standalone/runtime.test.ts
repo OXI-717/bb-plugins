@@ -1,10 +1,11 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
 import { openPool } from "./runtime.js";
 import { listenPool } from "./http.js";
+import { VpnRequiredError } from "../vpn-policy.js";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
@@ -71,6 +72,22 @@ it.each(["/v1/messages", "/agents/devin/sessions"])("denies %s at standalone adm
   const response = await fetch(`${server.url}${route}`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}" });
   expect(response.status).toBe(403);
   expect(response.headers.get("x-bb-pool-error")).toBe("VPN_REQUIRED");
+});
+
+it("preserves VPN_REQUIRED when Devin is blocked after standalone admission", async () => {
+  const pool = await openPool(await directory());
+  cleanups.push(() => pool.close());
+  await pool.devin.add({ id: "fixture", organizationId: "fixture-org", maxAcuLimit: 1, apiKey: "synthetic-cloud-key" });
+  const token = await pool.tokens.forHost("vpn-test-client");
+  const gate = vi.spyOn(pool.hub, "assertNetworkAllowed").mockResolvedValueOnce(undefined).mockRejectedValue(new VpnRequiredError("devin"));
+  const server = await listenPool(pool, { port: 0 });
+  cleanups.push(() => server.close());
+  try {
+    const response = await fetch(`${server.url}/agents/devin/sessions`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ prompt: "test" }) });
+    expect(response.status).toBe(403);
+    expect(response.headers.get("x-bb-pool-error")).toBe("VPN_REQUIRED");
+    expect(gate).toHaveBeenCalledTimes(2);
+  } finally { gate.mockRestore(); }
 });
 
 it("authenticates generic and direct Cursor routes and answers exchange locally", async () => {

@@ -87,7 +87,7 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
         const response = devinCreate
           ? await pool.devin.create(client, input, controller.signal)
           : await pool.devin.session(client, devinSession![1], req.method as "GET" | "POST" | "DELETE", input, controller.signal);
-        res.writeHead(response.status, { "content-type": "application/json", "cache-control": "no-store" });
+        res.writeHead(response.status, { ...Object.fromEntries(response.headers), "cache-control": "no-store" });
         res.end(await response.text());
         return;
       }
