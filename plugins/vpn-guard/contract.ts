@@ -30,4 +30,5 @@ export const rpcContract = defineRpcContract({
   setHosts: {input:z.object({hostIds:z.array(z.string().min(1)).max(256)}),output:statusSchema},
   setGlobalSuspension: {input:z.object({enabled:z.boolean(),acknowledgeGlobalImpact:z.boolean()}),output:statusSchema},
   restoreOwned: {input:z.null(),output:statusSchema},
+  acknowledgeAmbiguous: {input:z.object({pluginId:z.string(),acknowledgeReviewed:z.boolean()}),output:statusSchema},
 });

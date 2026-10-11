@@ -31,7 +31,7 @@ export function GuardPage() {
       <h2 className="font-semibold">Machines in scope</h2>
       <p>Select every machine that may run protected work before enabling enforcement. An unavailable selected machine is treated as unknown. Other machines do not affect this policy.</p>
       <ul>{status?.hosts.map(h=><li key={h.id}>
-        <label><input type="checkbox" checked={h.selected} disabled={busy||!h.available} onChange={e=>void selectHost(h.id,e.target.checked)}/> {h.name}</label>
+        <label><input type="checkbox" checked={h.selected} disabled={busy||(!h.available&&!h.selected)} onChange={e=>void selectHost(h.id,e.target.checked)}/> {h.name}</label>
         {' — '}{h.selected ? h.vpn : 'outside scope'}{!h.available?' (unavailable)':''}
       </li>)}</ul>
     </section>
@@ -50,7 +50,8 @@ export function GuardPage() {
       <p>When a selected machine is blocked, this disables the Codex and Claude native plugins across ALL BB machines, including healthy machines. It may stop their background usage and OAuth registrations; termination of existing bridge processes and in-flight requests is unproven. Cursor and Devin share ACP with other providers and are not suspended this way.</p>
       <label><input type="checkbox" checked={status?.suspendNativePluginsGlobally??false} disabled={busy} onChange={e=>void change(()=>rpc.call('setGlobalSuspension',{enabled:e.target.checked,acknowledgeGlobalImpact:e.target.checked}))}/> Suspend native plugins globally during a block</label>
       <p>Guard-owned disabled plugins: {status?.ownedDisabledPlugins.join(', ')||'none'}. Recovery does not restore them automatically: BB cannot distinguish a redundant manual disable made while Guard owned one. Review current plugin settings before explicit restore.</p>
-      <p>Changes interrupted by a crash, requiring manual review: {status?.ambiguousPluginChanges.join(', ')||'none'}.</p>
+      <p>Changes interrupted by a crash, requiring manual review: {status?.ambiguousPluginChanges.join(', ')||'none'}. Their provider dispatches remain held until reviewed and acknowledged. Acknowledgment clears only the journal entry; it does not enable a plugin.</p>
+      {status?.ambiguousPluginChanges.map(id=><button key={id} type="button" disabled={busy} onClick={()=>void change(()=>rpc.call('acknowledgeAmbiguous',{pluginId:id,acknowledgeReviewed:true}))} className="rounded border px-3 py-2">I reviewed {id}; clear its ambiguous journal entry</button>)}
       <button type="button" disabled={busy||!status?.ownedDisabledPlugins.length} onClick={()=>void change(()=>rpc.call('restoreOwned',null))} className="rounded border px-3 py-2">Restore Guard-owned plugins after review</button>
     </section>
     <details><summary>Limits</summary><ul>{status?.limitations.map(l=><li key={l}>{l}</li>)}</ul></details>

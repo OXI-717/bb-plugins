@@ -10,3 +10,6 @@ optional `global-suspend on --ack-global` disables Codex and Claude native
 plugins across every BB machine during a selected-host block. Disabled plugins
 need explicit review and `restore-owned`; redundant manual disables cannot be
 distinguished. Read `docs/operations.md` before enabling.
+Use `bb vpn-guard acknowledge-ambiguous <plugin-id> --reviewed` only after
+reviewing an interrupted native plugin change; it clears the journal entry
+without changing plugin state.
