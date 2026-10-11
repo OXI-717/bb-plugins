@@ -15,5 +15,5 @@ export function vpnStateFromPayload(payload: unknown, nowMs: number): VpnState {
 }
 
 export function protectedProvider(id: string): boolean {
-  return ['codex', 'claude', 'claude-code', 'cursor', 'devin'].includes(id);
+  return ['codex', 'claude', 'claude-code', 'cursor', 'acp-cursor', 'devin', 'acp-devin'].includes(id);
 }

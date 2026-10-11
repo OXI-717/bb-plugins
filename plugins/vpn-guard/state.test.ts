@@ -12,7 +12,7 @@ describe('VPN state contract', () => {
     expect(vpnStateFromPayload(value, now)).toBe('unknown');
   });
   it('protects only named provider families', () => {
-    expect(['codex','claude-code','cursor','devin'].every(protectedProvider)).toBe(true);
+    expect(['codex','claude-code','cursor','acp-cursor','devin','acp-devin'].every(protectedProvider)).toBe(true);
     expect(['kimi','zai','z-ai','opencode-go'].some(protectedProvider)).toBe(false);
   });
 });
