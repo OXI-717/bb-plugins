@@ -92,6 +92,8 @@ describe("automation workflows", () => {
     expect(slot.getByText("Check team messages")).toBeTruthy();
     expect(slot.getByRole("link", { name: "Открыть расписание в BB" }).getAttribute("href")).toContain("auto_sample");
     expect(slot.getByRole("button", { name: "Отключить" })).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "← Автоматизации" }));
+    expect(slot.navigateCalls.at(-1)).toMatchObject({ method: "toPluginPanel", path: "catalog", options: { replace: true } });
   });
   it("requires a reason, reviews an incident, and updates both attention counts", async () => {
     const app = await loadPluginApp(() => import("./app"));

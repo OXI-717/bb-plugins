@@ -3,7 +3,7 @@ import { AutomationComposer, type ComposeIntent } from "./compose";
 import { triageCandidates, triageIntent } from "./lib/triage";
 import { category } from "./lib/overview";
 import { useCallback, useEffect, useState } from "react";
-import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { definePluginApp, useRealtime, useRpc, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import type { catalogRpcContract } from "./src/catalog";
 import type { CatalogList } from "./src/catalog-types";
 import { CatalogDetailView } from "./detail";
@@ -29,6 +29,7 @@ import {
 
 export function CatalogPage({ subPath = "" }: { subPath?: string }) {
   const rpc = useRpc<typeof catalogRpcContract>();
+  const navigate = useBbNavigate();
   const [compose, setCompose] = useState<ComposeIntent | null>(null);
   const [data, setData] = useState<CatalogList | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -108,7 +109,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
         <CatalogDetailView
           key={selected}
           taskKey={selected}
-          onBack={() => { setSelected(null); void refresh(); }}
+          onBack={() => { setSelected(null); navigate.toPluginPanel("catalog", { replace: true }); void refresh(); }}
         />
       </div>
     );
@@ -443,7 +444,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
                         <td className="max-w-64 px-3 py-3 align-top">
                           <button
                             className="text-left font-medium hover:underline focus-visible:ring-2 focus-visible:ring-ring"
-                            onClick={() => setSelected(t.key)}
+                            onClick={() => { setSelected(t.key); navigate.toPluginPanel("catalog", { subPath: t.key }); }}
                           >
                             {t.name}
                           </button>

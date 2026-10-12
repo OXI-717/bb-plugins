@@ -429,6 +429,7 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
     catalog_detail: (input) => catalog.detail(input),
     catalog_publish: (input) => {
       const result = catalog.publish(input, bb.server.loopbackBaseUrl);
+      discovery.clear();
       bb.realtime.publish("automation-catalog", { sourceId: input.source.id });
       return result;
     },
