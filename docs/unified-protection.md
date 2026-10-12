@@ -18,6 +18,8 @@ Configure an absolute path to an operator-installed `oxi-auto` executable on the
 
 Guard manual block, or VPN denial in Enforce, acquires its durable hold. Unblock releases only that owner. A manual Raycast hold, emergency hold or pending recovery remains. Removal never automatically resumes schedules. Guard journals its controller binding before requesting a hold and retries interrupted operations. Changing a binding while a hold exists is refused. Controller errors remain visible and must not be interpreted as complete protection.
 
+Exit 1 with a valid status and explicit `errors` is a partial-action report; signals, timeouts and other exit codes are failures even after valid output. Guard confirms its owner is present after hold and absent after release. An unsuccessful release retains the durable binding for retry. Unrelated recovery errors remain visible after confirmed release and do not prevent explicit recovery.
+
 Ручная пауза, аварийная остановка и причина VPN Guard независимы. После снятия Guard-блока расписания ждут кнопки «Возобновить». Ранее отключённые пользователем расписания не включаются. Неоднозначные или изменённые паузы требуют проверки; список сохранённых расписаний доступен в панели. Raycast и панель используют один контроллер.
 
 The adapter manages the controller on the BB server and its BB schedules. Standalone schedulers on other machines are not automatically covered. Their own controller deployment and policy are separate; do not infer fleet-wide blocking from a local status.

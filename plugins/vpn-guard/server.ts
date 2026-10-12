@@ -166,11 +166,14 @@ export default async function plugin(bb: BbPluginApi) {
         if(!automationBinding){await bb.storage.kv.set('automation-hold-binding-v1',binding);automationBinding=binding;}
         // Hold is idempotent and retries failed or newly enabled schedules.
         const report=await controller('hold',binding);
+        if(!report.holds.some(h=>h.owner===`vpn-guard:${instanceId}`))throw Error('Automation controller did not confirm the protection hold');
         if(report.errors.length)throw Error('Automation pause is incomplete; inspect controller status');
         if(report.activeRuns.length)automationError='Active automation runs may continue or are unverified';
       } else if(automationBinding) {
-        await controller('release',automationBinding);
+        const report=await controller('release',automationBinding);
+        if(report.holds.some(h=>h.owner===`vpn-guard:${instanceId}`))throw Error('Automation protection hold was not released; retry required');
         await bb.storage.kv.set('automation-hold-binding-v1',null);automationBinding=null;
+        if(report.errors.length)automationError='Automation recovery is incomplete; inspect controller status';
       } else if(config.coordinateAutomations&&snapshot.serverHostId&&config.automationControllerPath) {
         await controller('status',{hostId:snapshot.serverHostId,executable:config.automationControllerPath});
       }

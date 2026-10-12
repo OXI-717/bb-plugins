@@ -3,6 +3,25 @@ import {createFakePluginHost,makeHostResponse} from '@get-bb/plugin-sdk/testing'
 import plugin from './server.js';
 import {statusSchema} from './contract.js';
 
+it('retains ownership and retries when release leaves its hold active',async()=>{
+ let owner='';let releases=0;
+ const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{system:{config:async()=>({primaryHostId:'host-a'}) as never},hosts:{list:async()=>[makeHostResponse({id:'host-a'})]},threads:{listRunning:async()=>[]}},experimental_callHostRpc:async({method,input})=>{
+  if(method==='readState')return {state:'connected'};
+  const args=input as {action:string;instanceId:string};
+  if(args.action==='hold')owner='vpn-guard:'+args.instanceId;
+  if(args.action==='release')releases++;
+  return {schema:'oxi-auto/protection-status/1',blocked:true,holds:owner?[{owner,reason:'Protection'}]:[],recoveryPending:true,pausedCount:0,activeRuns:[],errors:args.action==='release'?['Release incomplete']:[],legacyBlocked:false};
+ }});
+ await plugin(fake.bb);
+ await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});
+ await fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'});
+ await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+ await expect(fake.harness.behavior.callRpc('setManualBlock',{blocked:false})).rejects.toThrow();
+ expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.held).toBe(true);
+ await expect(fake.harness.behavior.callRpc('setManualBlock',{blocked:false})).rejects.toThrow();
+ expect(releases).toBe(2);
+});
+
 it('requires both host proof and strict pool transport under verified enforcement',async()=>{
  let poolStrict=false;
  let verified=true;

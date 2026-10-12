@@ -14,7 +14,10 @@ export async function automationCommand(input:unknown) {
   execFile(parsed.executable,args,{timeout:30_000,maxBuffer:262144,encoding:'utf8'},(error,stdout)=>{
    try{
     const status=automationStatusSchema.safeParse(JSON.parse(stdout));
-    if(status.success){resolve(status.data);return;}
+    // Exit 1 is the protocol's explicit partial-action report. A timeout,
+    // signal, other failure, or exit 1 without reported errors is not success.
+    const partial=error&&error.code===1&&!error.killed&&!error.signal&&status.success&&status.data.errors.length>0;
+    if(status.success&&(!error||partial)){resolve(status.data);return;}
    }catch{}
    reject(new Error(error?'Automation controller unavailable or timed out.':'Invalid automation controller response.'));
   });
