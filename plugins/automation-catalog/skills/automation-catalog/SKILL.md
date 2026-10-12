@@ -5,6 +5,20 @@ description: Inspect the unified automation inventory, source freshness and exec
 
 Use `bb automation-catalog list --json` to inspect up to 100 entries and the total count.
 Use `bb automation-catalog detail <key> --offset 0 --json` for 25 history records.
+The panel search accepts prompt text or a target thread ID/URL as well as names.
+For connected BB tasks it reads current definitions on demand with catalog_search
+(query string, 2–2000 characters). Results include matching catalog keys and short
+excerpts; unavailable text coverage is reported. It invokes no models. Metadata
+search remains available for external sources; their prompt text is not indexed.
+The catalog_definition RPC (key) shows the current prompt and target thread for
+agent tasks and literal `bb thread tell` relay scripts. It does not execute scripts.
+Relay .md/.txt message files must be inside the resolved script working directory
+and at most 64 KiB. Unsupported/dynamic scripts are reported as such.
+The detail panel separates the scheduling host from the target agent host, links
+to the target thread and native BB schedule, and copies a direct catalog link.
+Prompt text is not persisted in shared catalog snapshots. Search uses a 30-second
+in-memory cache; “Обновить BB” invalidates it. Sending a prompt successfully is not
+proof that the receiving agent completed its work.
 For the complete inventory, use `bb plugin rpc call automation-catalog catalog_list --json`.
 
 The plugin displays observations. Connected BB tasks can be managed through catalog_manage_bb; external tasks remain owned by their original schedulers.

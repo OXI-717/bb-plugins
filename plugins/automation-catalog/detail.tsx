@@ -1,4 +1,5 @@
 import { attentionFingerprint } from "./lib/operations";
+import { AutomationDefinition } from "./definition";
 import { modelLabel, projectLabel } from "./lib/execution";
 import { hostName } from "./lib/filters";
 import { AutomationComposer, type ComposeIntent } from "./compose";
@@ -393,6 +394,7 @@ export function CatalogDetailView({
       {detail && (
         <>
           <CatalogDetailContent detail={detail} />
+          {detail.source.managedHere && detail.task.scheduler === "bb" && !detail.task.missing && <AutomationDefinition taskKey={taskKey} schedulerHost={hostName(detail.task) ?? "Не определён"} />}
           <section className="space-y-2 rounded-md border p-3" aria-label="Управление автоматизацией">
             <h3 className="text-sm font-semibold">Управление автоматизацией</h3>
             {detail.task.missing ? (

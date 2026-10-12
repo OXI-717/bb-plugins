@@ -27,7 +27,7 @@ import {
   creationPrompt,
 } from "./lib/operations";
 
-export function CatalogPage() {
+export function CatalogPage({ subPath = "" }: { subPath?: string }) {
   const rpc = useRpc<typeof catalogRpcContract>();
   const [compose, setCompose] = useState<ComposeIntent | null>(null);
   const [data, setData] = useState<CatalogList | null>(null);
@@ -35,7 +35,11 @@ export function CatalogPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
   const [filters, setFilters] = useState(readFilters);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(() => /^\/?ext_[a-zA-Z0-9_-]+$/.test(subPath) ? subPath.replace(/^\//, "") : null);
+  useEffect(() => { setSelected(/^\/?ext_[a-zA-Z0-9_-]+$/.test(subPath) ? subPath.replace(/^\//, "") : null); }, [subPath]);
+  const [discovered, setDiscovered] = useState<{ query: string; matches: { key: string; excerpt: string }[]; unavailable: number } | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
   const [page, setPage] = useState(0);
   const [now, setNow] = useState(Date.now);
   const [creating, setCreating] = useState(false);
@@ -56,6 +60,19 @@ export function CatalogPage() {
   }, [rpc]);
   useEffect(() => { void refresh(); }, [refresh]);
   useRealtime("automation-catalog", () => { void refresh(); });
+  useEffect(() => {
+    let cancelled = false;
+    setSearchError(null); setDiscovered(null);
+    if (filters.query.trim().length < 2) { setSearching(false); return; }
+    setSearching(true);
+    const timer = setTimeout(() => {
+      rpc.call("catalog_search", { query: filters.query.trim() }).then(result => {
+        if (!cancelled) setDiscovered({ query: filters.query, ...result });
+      }, () => { if (!cancelled) setSearchError("Поиск по заданиям BB недоступен. Показаны совпадения по данным каталога."); })
+        .finally(() => { if (!cancelled) setSearching(false); });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [rpc, filters.query, data]);
   async function refreshSources() {
     setRefreshing(true);
     setRefreshMessage(null);
@@ -106,7 +123,9 @@ export function CatalogPage() {
       ),
     ]),
   );
-  const filteredTasks = tasks.filter((task) => matchesFilters(task, { ...filters, state: "" }));
+  const discoveredMatches = discovered?.query === filters.query ? discovered.matches : [];
+  const discoveredKeys = new Set(discoveredMatches.map(m => m.key));
+  const filteredTasks = tasks.filter((task) => matchesFilters(task, { ...filters, state: "" }, discoveredKeys));
   const views = [
     { id: "current", label: "Текущие", count: filteredTasks.filter(t => category(t) === "current").length },
     {
@@ -167,7 +186,7 @@ export function CatalogPage() {
         states.get(a.key)!.rank - states.get(b.key)!.rank ||
         a.name.localeCompare(b.name),
     );
-  const triage = data ? triageCandidates(data, filters, now) : [];
+  const triage = data ? triageCandidates(data, filters, now, discoveredKeys) : [];
   const unavailableSources = data?.sources.filter(s => s.error || s.lastSuccessAt === null || now - s.lastSuccessAt > s.staleAfterMs) ?? [];
   const lastPage = Math.max(0, Math.ceil(matched.length / 50) - 1);
   const currentPage = Math.min(page, lastPage);
@@ -286,9 +305,10 @@ export function CatalogPage() {
           <Input
             className="h-8 w-full sm:w-64"
             aria-label="Поиск автоматизаций"
-            placeholder="Поиск автоматизаций…"
+            placeholder="Название, задание или ссылка на тред…"
+            maxLength={2000}
             value={filters.query}
-            onChange={(e) => setFilters({ ...filters, query: e.target.value })}
+            onChange={(e) => setFilters({ ...filters, query: e.target.value, state: "" })}
           />
           <Button className="sm:hidden" size="sm" variant="outline" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(value => !value)}>Фильтры{[filters.source, filters.scope, filters.host, filters.project].filter(Boolean).length ? ` (${[filters.source, filters.scope, filters.host, filters.project].filter(Boolean).length})` : ""}</Button>
           <div className={`${filtersOpen ? "flex" : "hidden"} flex-wrap gap-2 sm:flex`}>
@@ -366,6 +386,13 @@ export function CatalogPage() {
           </div>
         )}
         {data === null && !error && <p role="status">Загрузка автоматизаций…</p>}
+        {filters.query.trim().length >= 2 && <div className="text-xs text-muted-foreground space-y-1">
+          <p>Поиск по названию, описанию, заданию BB и целевому треду. Задания внешних планировщиков не подключены к текстовому поиску.</p>
+          {searching && <p role="status">Ищем в заданиях BB…</p>}
+          {searchError && <p role="alert">{searchError}</p>}
+          {discovered?.query === filters.query && discovered.unavailable > 0 && <p>Текст задания недоступен у {discovered.unavailable} записей BB; они по-прежнему находятся по названию.</p>}
+          {[filters.source, filters.scope, filters.host, filters.project, filters.state].some(Boolean) && <button className="underline" onClick={() => setFilters({ ...emptyFilters, query: filters.query })}>Искать во всех разделах и проектах</button>}
+        </div>}
         {data && (
           <p className="text-xs text-muted-foreground">
             Показано: {matched.length} из {filteredTasks.length}
@@ -420,6 +447,7 @@ export function CatalogPage() {
                           >
                             {t.name}
                           </button>
+                          {discoveredMatches.find(m => m.key === t.key) && <p className="mt-1 text-xs text-muted-foreground">{discoveredMatches.find(m => m.key === t.key)!.excerpt}</p>}
                           <p className="mt-1 break-words text-xs text-muted-foreground">
                             {sourceLabel(data?.sources.find((s) => s.id === t.sourceId)
                               ?.name ?? t.sourceId)}{" "}

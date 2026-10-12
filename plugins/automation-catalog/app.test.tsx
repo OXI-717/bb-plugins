@@ -67,6 +67,32 @@ async function mount() {
   );
 }
 describe("automation workflows", () => {
+  it("finds a paused task by prompt text across lifecycle sections", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const paused = { ...task, key: "ext_paused", state: "paused" };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+      catalog_list: () => ({ tasks: [paused], sources: [source] }),
+      catalog_search: () => ({ matches: [{ key: paused.key, excerpt: "Задание: Check team messages" }], unavailable: 0, checkedAt: Date.now() }),
+    } });
+    await slot.findByRole("button", { name: /Все записи/ });
+    expect(slot.queryByRole("button", { name: "Daily report" })).toBeNull();
+    fireEvent.change(slot.getByRole("textbox", { name: "Поиск автоматизаций" }), { target: { value: "Check team messages" } });
+    expect(await slot.findByRole("button", { name: "Daily report" })).toBeTruthy();
+    expect(await slot.findByText("Задание: Check team messages")).toBeTruthy();
+    expect(slot.getByRole("button", { name: "Разобрать проблемы (1)" })).toBeTruthy();
+  });
+  it("opens a catalog deep link and displays relay origin without starting a task", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "ext_sample" }, { rpc: {
+      catalog_list: () => ({ tasks: [task], sources: [source] }),
+      catalog_detail: () => ({ task: { ...task, projectId: "project_sample" }, source: { ...source, managedHere: true }, runs: [task.lastRun], total: 1 }),
+      catalog_definition: () => ({ kind: "relay", prompt: "Check team messages", targetThreadId: "thr_target", targetTitle: "Team monitor", targetHost: "Remote worker", note: "Отправка задания в тред", nativeUrl: "/plugins/automations/automations/project_sample/auto_sample" }),
+    } });
+    expect(await slot.findByRole("button", { name: "Team monitor" })).toBeTruthy();
+    expect(slot.getByText("Check team messages")).toBeTruthy();
+    expect(slot.getByRole("link", { name: "Открыть расписание в BB" }).getAttribute("href")).toContain("auto_sample");
+    expect(slot.getByRole("button", { name: "Отключить" })).toBeTruthy();
+  });
   it("requires a reason, reviews an incident, and updates both attention counts", async () => {
     const app = await loadPluginApp(() => import("./app"));
     let current = { ...task, review: null as null | { fingerprint: string; note: string; at: number } };

@@ -3,8 +3,8 @@ import type { ComposeIntent } from "../compose";
 import { matchesFilters, type Filters } from "./filters";
 import { health } from "./operations";
 
-export function triageCandidates(data: CatalogList, filters: Filters, now: number): CatalogTask[] {
-  return data.tasks.filter(task => matchesFilters(task, { ...filters, state: "" }) &&
+export function triageCandidates(data: CatalogList, filters: Filters, now: number, discovered?: ReadonlySet<string>): CatalogTask[] {
+  return data.tasks.filter(task => matchesFilters(task, { ...filters, state: "" }, discovered) &&
     health(task, data.sources.find(source => source.id === task.sourceId), now).attention);
 
 }
