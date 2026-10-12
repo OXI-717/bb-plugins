@@ -24,6 +24,9 @@ describe("automation discovery", () => {
     await symlink(join(root, "outside.md"), join(workspace, "link.md"));
     await expect(readPromptFile("link.md", workspace)).rejects.toThrow("outside");
     await expect(readPromptFile("../outside.md", workspace)).rejects.toThrow("outside");
+    await writeFile(join(workspace, ".env"), "SYNTHETIC_PRIVATE_VALUE");
+    await symlink(join(workspace, ".env"), join(workspace, "disguised.md"));
+    await expect(readPromptFile("disguised.md", workspace)).rejects.toThrow("resolved");
     await expect(readPromptFile(".env", workspace)).rejects.toThrow();
     await writeFile(join(workspace, "large.md"), "x".repeat(65537));
     await expect(readPromptFile("large.md", workspace)).rejects.toThrow();
@@ -55,5 +58,19 @@ describe("automation discovery", () => {
     discovery.clear(); await discovery.search("team chats"); expect(command).toHaveBeenCalledTimes(2);
     const unavailable = createDiscovery(catalog, async () => { throw Error("offline"); });
     expect(await unavailable.search("anything")).toMatchObject({ matches: [], unavailable: 1 });
+  });
+  it("does not restore an in-flight cache after explicit refresh", async () => {
+    let resolveOld!: (value: unknown) => void;
+    const old = new Promise<unknown>(resolve => { resolveOld = resolve; });
+    const current = { ...automation, execution: { ...automation.execution, prompt: "New definition" } };
+    const command = vi.fn().mockImplementationOnce(() => old).mockResolvedValue(current);
+    const discovery = createDiscovery(catalog, command);
+    const first = discovery.search("team chats");
+    discovery.clear();
+    expect((await discovery.search("New definition")).matches).toHaveLength(1);
+    resolveOld(automation); await first;
+    expect((await discovery.search("New definition")).matches).toHaveLength(1);
+    expect((await discovery.search("team chats")).matches).toHaveLength(0);
+    expect(command).toHaveBeenCalledTimes(2);
   });
 });

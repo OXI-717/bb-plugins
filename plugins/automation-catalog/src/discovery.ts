@@ -47,6 +47,7 @@ export async function readPromptFile(file: string, directory: string): Promise<s
   if (!isAbsolute(directory) || ![".md", ".txt"].includes(extname(file).toLowerCase())) throw new Error("unsupported prompt file");
   const root = await realpath(directory);
   const path = await realpath(resolve(root, file));
+  if (![".md", ".txt"].includes(extname(path).toLowerCase())) throw new Error("unsupported resolved prompt file");
   const within = relative(root, path);
   if (!within || within === ".." || within.startsWith("../") || isAbsolute(within)) throw new Error("outside working directory");
   const handle = await open(path, "r");
@@ -117,10 +118,12 @@ export function createDiscovery(catalog: Catalog, command: Command) {
   type Cache = { until: number; entries: { key: string; definition: Definition }[]; unavailable: number; checkedAt: number };
   let cached: Cache | null = null;
   let loading: Promise<Cache> | null = null;
+  let generation = 0;
   async function load() {
     if (cached && cached.until > Date.now()) return cached;
     if (loading) return loading;
-    loading = (async () => {
+    const startedGeneration = generation;
+    const pending = (async () => {
       const data = catalog.list();
       const tasks = data.tasks.filter(t => !t.missing && t.scheduler === "bb" && data.sources.some(s => s.id === t.sourceId && s.managedHere));
       const entries: Cache["entries"] = [];
@@ -137,7 +140,12 @@ export function createDiscovery(catalog: Catalog, command: Command) {
       }));
       return { entries, unavailable, checkedAt: Date.now(), until: Date.now() + 30000 };
     })();
-    try { cached = await loading; return cached; } finally { loading = null; }
+    loading = pending;
+    try {
+      const result = await pending;
+      if (generation === startedGeneration) cached = result;
+      return result;
+    } finally { if (loading === pending) loading = null; }
   }
   return {
     async search(query: string) {
@@ -145,6 +153,6 @@ export function createDiscovery(catalog: Catalog, command: Command) {
       const matches = data.entries.flatMap(e => { const excerpt = definitionMatch(e.definition, query); return excerpt ? [{ key: e.key, excerpt }] : []; });
       return { matches, unavailable: data.unavailable, checkedAt: data.checkedAt };
     },
-    clear() { cached = null; },
+    clear() { generation++; cached = null; loading = null; },
   };
 }
