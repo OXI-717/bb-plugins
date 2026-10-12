@@ -1,10 +1,11 @@
 import { attentionFingerprint } from "./lib/operations";
+import { AutomationDefinition } from "./definition";
 import { modelLabel, projectLabel } from "./lib/execution";
 import { hostName } from "./lib/filters";
 import { AutomationComposer, type ComposeIntent } from "./compose";
 import { RunResult } from "./run-result";
 import { nextStep, resultText } from "./lib/overview";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useRpc, useRealtime, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Button } from "./components/ui/button";
 import { catalogSchedule } from "./lib/catalog-schedule";
@@ -20,7 +21,7 @@ import {
   automationStateLabel,
 } from "./lib/operations";
 
-export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
+export function CatalogDetailContent({ detail, children }: { detail: CatalogDetail; children?: ReactNode }) {
   const { task, source, runs } = detail;
   const navigate = useBbNavigate();
   const state = health(task, source);
@@ -39,6 +40,7 @@ export function CatalogDetailContent({ detail }: { detail: CatalogDetail }) {
           {task.owner ? ` · Ответственный: ${task.owner}` : ""}
         </p>
       </header>
+      {children}
       <section aria-label="Модель и стоимость запуска" className="rounded-md border p-3 space-y-2 text-sm">
         <h3 className="font-medium">Модель и выполнение</h3>
         <p className="font-medium">{modelLabel(task)}</p>
@@ -392,7 +394,9 @@ export function CatalogDetailView({
       )}
       {detail && (
         <>
-          <CatalogDetailContent detail={detail} />
+          <CatalogDetailContent detail={detail}>
+            {detail.source.managedHere && detail.task.scheduler === "bb" && !detail.task.missing && <AutomationDefinition taskKey={taskKey} schedulerHost={hostName(detail.task) ?? "Не определён"} />}
+          </CatalogDetailContent>
           <section className="space-y-2 rounded-md border p-3" aria-label="Управление автоматизацией">
             <h3 className="text-sm font-semibold">Управление автоматизацией</h3>
             {detail.task.missing ? (

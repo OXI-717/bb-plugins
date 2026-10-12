@@ -1,4 +1,5 @@
 import { attentionFingerprint, health } from "../lib/operations.js";
+import { createDiscovery, readDefinition, definitionSchema, discoverySchema } from "./discovery";
 import { composeRequestSchema, hostRequest } from "./compose";
 import { readRunResult, runResultSchema } from "./run-result";
 import { refreshBbCatalog } from "./bb-refresh.js";
@@ -301,6 +302,14 @@ export function createCatalog(db: Db) {
 }
 
 export const catalogRpcContract = defineRpcContract({
+  catalog_search: {
+    input: z.object({ query: z.string().trim().min(2).max(2000) }).strict(),
+    output: discoverySchema,
+  },
+  catalog_definition: {
+    input: z.object({ key: z.string().min(1).max(300) }).strict(),
+    output: definitionSchema,
+  },
   catalog_review: {
     input: z.object({ key: z.string().min(1).max(300), fingerprint: z.string().max(2000), note: z.string().trim().min(1).max(1000).nullable() }).strict(),
     output: z.object({ ok: z.literal(true) }),
@@ -376,7 +385,11 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
     );
     return JSON.parse(stdout) as Record<string, unknown>;
   }
+  const discovery = createDiscovery(catalog, bbCli);
+  bb.onDispose(() => discovery.clear());
   bb.rpc.register(catalogRpcContract, {
+    catalog_search: ({ query }) => discovery.search(query),
+    catalog_definition: ({ key }) => readDefinition(catalog, bbCli, key),
     catalog_review: ({ key, fingerprint, note }) => {
       const result = catalog.review(key, fingerprint, note);
       bb.realtime.publish("automation-catalog", { key });
@@ -385,6 +398,7 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
     catalog_run_result: ({ key, runId }) => readRunResult(catalog, bbCli, key, runId),
     catalog_refresh: async () => {
       const result = await refreshBbCatalog(catalog, bbCli, bb.server.loopbackBaseUrl);
+      discovery.clear();
       for (const sourceId of result.refreshed) bb.realtime.publish("automation-catalog", { sourceId });
       return result;
     },
@@ -415,6 +429,7 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
     catalog_detail: (input) => catalog.detail(input),
     catalog_publish: (input) => {
       const result = catalog.publish(input, bb.server.loopbackBaseUrl);
+      discovery.clear();
       bb.realtime.publish("automation-catalog", { sourceId: input.source.id });
       return result;
     },
