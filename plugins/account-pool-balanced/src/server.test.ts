@@ -441,6 +441,7 @@ describe("Account Pool config schema", () => {
       vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
       vpnStatusFile: null,
       vpnGuardEnabled: false,
+      requireVerifiedVpn:false,
     });
     expect(
       accountPoolConfigSetInputSchema.safeParse({
@@ -516,6 +517,7 @@ describe("Account Pool plugin", () => {
       vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
       vpnStatusFile: null,
       vpnGuardEnabled: false,
+      requireVerifiedVpn:false,
     });
     expect(
       accountPoolConfigSchema.parse(await host.bb.storage.kv.get("config")),

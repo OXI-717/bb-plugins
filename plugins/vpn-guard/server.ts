@@ -1,3 +1,5 @@
+import {randomUUID} from 'node:crypto';
+import {automationStatusSchema,type AutomationStatus} from './automation-contract.js';
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { configurationSchema, hostContract, rpcContract } from './contract.js';
@@ -20,9 +22,20 @@ const LIMITATIONS = [
   'VPN Guard is BB admission control, not a packet firewall.',
 ];
 type Configuration = z.infer<typeof configurationSchema>;
-const initialConfiguration: Configuration = {mode:'observe',manualBlock:false,hostIds:[],suspendNativePluginsGlobally:false};
+const initialConfiguration: Configuration = {mode:'observe',manualBlock:false,hostIds:[],suspendNativePluginsGlobally:false,requireVerifiedVpn:false,coordinateAutomations:false,automationControllerPath:null};
 
 export default async function plugin(bb: BbPluginApi) {
+  const storedInstance=await bb.storage.kv.get<string>('protection-instance-v1');
+  const instanceId=storedInstance&&/^[a-zA-Z0-9_-]{1,80}$/.test(storedInstance)?storedInstance:randomUUID();
+  if(storedInstance!==instanceId)await bb.storage.kv.set('protection-instance-v1',instanceId);
+  let automationStatus:AutomationStatus|null=null;
+  let automationError:string|null=null;
+  const rawHold=await bb.storage.kv.get('automation-hold-binding-v1');
+  const storedHold=z.object({hostId:z.string(),executable:z.string()}).nullable().safeParse(rawHold);
+  const bindingCorrupt=rawHold!==null&&rawHold!==undefined&&!storedHold.success;
+  if(bindingCorrupt)automationError='Automation ownership journal is malformed; manual review required';
+  let automationBinding=storedHold.success?storedHold.data:null;
+  let automationDesired:boolean|null=null;
   const host = bb.hosts.experimental_client({contract:hostContract});
   const loaded=configurationSchema.safeParse(await bb.storage.kv.get<unknown>(CONFIG));
   let config:Configuration=loaded.success ? loaded.data : initialConfiguration;
@@ -48,7 +61,7 @@ export default async function plugin(bb: BbPluginApi) {
     return run;
   }
   async function vpn(hostId:string):Promise<VpnState> {
-    try {return (await host.call('readState',null,{hostId,timeoutMs:1500})).state;}
+    try {const result=await host.call('readState',null,{hostId,timeoutMs:1500});return config.requireVerifiedVpn&&result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state;}
     catch {return 'unknown';}
   }
   async function status() {
@@ -58,13 +71,17 @@ export default async function plugin(bb: BbPluginApi) {
     try {listed=await bb.sdk.hosts.list();}
     catch {listed=[];}
     const selected=new Set(config.hostIds);
-    const hosts=await Promise.all(listed.map(async h=>({
-      id:h.id,name:h.name,selected:selected.has(h.id),available:true,
-      vpn:selected.has(h.id)?await vpn(h.id):null,
-    })));
-    for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,vpn:'unknown'});
-    return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,
-      hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],limitations:LIMITATIONS};
+    const hosts=await Promise.all(listed.map(async h=>{
+      let result:Awaited<ReturnType<typeof host.call<'readState'>>>|undefined;
+      if(selected.has(h.id))try{result=await host.call('readState',null,{hostId:h.id,timeoutMs:1500});}catch{}
+      return {id:h.id,name:h.name,selected:selected.has(h.id),available:true,evidence:result?.evidence??null,
+        vpn:selected.has(h.id)?(!result?'unknown':config.requireVerifiedVpn&&result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state):null};
+    }));
+    for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,vpn:'unknown',evidence:null});
+    let pool:{linked:boolean|null,requireVerified:boolean|null,error:string|null}={linked:null,requireVerified:null,error:null};
+    try {const raw=await bb.sdk.plugins.callRpc({pluginId:'account-pool-balanced',method:'config.get',input:null,outputSchema:z.object({vpnGuardEnabled:z.boolean(),requireVerifiedVpn:z.boolean().optional()}),signal:AbortSignal.timeout(1000)});pool={linked:raw.vpnGuardEnabled,requireVerified:raw.requireVerifiedVpn??false,error:null};}catch{pool.error='Pooler linkage unavailable';}
+    return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,requireVerifiedVpn:config.requireVerifiedVpn,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,
+      hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],limitations:LIMITATIONS,pool,automations:{status:automationStatus,error:automationError,held:automationBinding!==null||bindingCorrupt,needsReconcile:automationDesired===null}};
   }
   async function saveConfig(next:Configuration) {
     await bb.storage.kv.set(CONFIG,next);
@@ -131,6 +148,38 @@ export default async function plugin(bb: BbPluginApi) {
     }
     return failures;
   }
+  async function controller(action:'status'|'hold'|'release'|'pause'|'resume',binding:{hostId:string;executable:string},reviewed=false,restoreRevision:string|null=null) {
+    if(bindingCorrupt)throw Error('Automation ownership journal is malformed; manual review required');
+    const value=await host.call('automation',{action,instanceId,executable:binding.executable,reviewed,restoreRevision},{hostId:binding.hostId,timeoutMs:32_000});
+    automationStatus=automationStatusSchema.parse(value);automationError=null;
+    return automationStatus;
+  }
+  async function coordinate(snapshot:Awaited<ReturnType<typeof status>>) {
+    if(bindingCorrupt)throw Error('Automation ownership journal is malformed; manual review required');
+    const server=snapshot.hosts.find(h=>h.id===snapshot.serverHostId);
+    const wants=config.coordinateAutomations&&!!server?.selected&&(config.manualBlock||(config.mode==='enforce'&&server.vpn!=='connected'));
+    try {
+      if(wants) {
+        if(!snapshot.serverHostId||!config.automationControllerPath)throw Error('Automation controller and server host must be configured');
+        const binding={hostId:snapshot.serverHostId,executable:config.automationControllerPath};
+        if(automationBinding&&(automationBinding.hostId!==binding.hostId||automationBinding.executable!==binding.executable))throw Error('Release the previous controller hold before changing its binding');
+        if(!automationBinding){await bb.storage.kv.set('automation-hold-binding-v1',binding);automationBinding=binding;}
+        // Hold is idempotent and retries failed or newly enabled schedules.
+        const report=await controller('hold',binding);
+        if(!report.holds.some(h=>h.owner===`vpn-guard:${instanceId}`))throw Error('Automation controller did not confirm the protection hold');
+        if(report.errors.length)throw Error('Automation pause is incomplete; inspect controller status');
+        if(report.activeRuns.length)automationError='Active automation runs may continue or are unverified';
+      } else if(automationBinding) {
+        const report=await controller('release',automationBinding);
+        if(report.holds.some(h=>h.owner===`vpn-guard:${instanceId}`))throw Error('Automation protection hold was not released; retry required');
+        await bb.storage.kv.set('automation-hold-binding-v1',null);automationBinding=null;
+        if(report.errors.length)automationError='Automation recovery is incomplete; inspect controller status';
+      } else if(config.coordinateAutomations&&snapshot.serverHostId&&config.automationControllerPath) {
+        await controller('status',{hostId:snapshot.serverHostId,executable:config.automationControllerPath});
+      }
+      automationDesired=wants;
+    } catch(error){automationError=String(error);automationDesired=null;throw error;}
+  }
   async function reconcile() {
     const snapshot=await status();
     const states=new Map(snapshot.hosts.filter(h=>h.selected).map(h=>[h.id,h.vpn??'unknown'] as const));
@@ -142,6 +191,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       failures.push(...await stopProtected(states));
     }
+    try{await coordinate(snapshot);}catch(error){failures.push(new Error(`automation coordination: ${String(error)}`));}
     if(recheckDirty || [...states].some(([id,state])=>previousStates.get(id)!==state) || previousStates.size!==states.size) {
       try {
         await bb.experimental_hooks.recheck('message.dispatch');
@@ -206,6 +256,12 @@ export default async function plugin(bb: BbPluginApi) {
       if(!config.hostIds.includes(hostId)) return decision(true,'outside_scope');
       if(config.manualBlock) return decision(false,'manual_block');
       if(config.mode==='observe') return decision(true,'observe');
+      if(config.requireVerifiedVpn) {
+        try {
+          const pool=await bb.sdk.plugins.callRpc({pluginId:'account-pool-balanced',method:'config.get',input:null,outputSchema:z.object({requireVerifiedVpn:z.boolean(),vpnOnlyProviders:z.array(z.string())}),signal:AbortSignal.timeout(1000)});
+          if(!pool.requireVerifiedVpn||!pool.vpnOnlyProviders.includes(provider))return decision(false,'vpn_unavailable');
+        }catch{return decision(false,'vpn_unavailable');}
+      }
       let available=false;
       try {available=(await bb.sdk.hosts.list()).some(h=>h.id===hostId);} catch {}
       const state=available?await vpn(hostId):'unknown';
@@ -214,9 +270,25 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
   bb.rpc.register(rpcContract,{
+    automationIdentity:()=>({instanceId}),
+    setAutomationCoordination:({enabled,executable})=>serial(async()=>{
+      if(enabled&&(!executable||!executable.startsWith('/')))throw Error('An absolute automation controller path is required');
+      if(enabled){const primary=(await bb.sdk.system.config()).primaryHostId;if(!primary||!config.hostIds.includes(primary))throw Error('Select the BB server host before connecting automation protection');}
+      if(automationBinding&&executable!==config.automationControllerPath)throw Error('Release the controller hold before changing the executable');
+      return update({...config,coordinateAutomations:enabled,automationControllerPath:executable});
+    }),
+    automationAction:({action,reviewed,restoreRevision})=>serial(async()=>{
+      const snapshot=await status();
+      if(!config.coordinateAutomations||!snapshot.serverHostId||!config.automationControllerPath)throw Error('Automation controller is not configured');
+      if(action==='resume'&&(config.manualBlock||automationBinding||snapshot.hosts.some(h=>h.selected&&h.vpn!=='connected')))throw Error('Release protection blocks and verify VPN before resuming');
+      const report=await controller(action,{hostId:snapshot.serverHostId,executable:config.automationControllerPath},reviewed,restoreRevision);
+      if(report.errors.length)throw Error('Automation action incomplete; inspect controller status');
+      return status();
+    }),
     networkDecision:({hostId,provider})=>networkDecision(hostId,provider),
     status:()=>status(),
     setManualBlock:({blocked})=>serial(()=>update({...config,manualBlock:blocked})),
+    setVerifiedVpn:({enabled})=>serial(()=>update({...config,requireVerifiedVpn:enabled})),
     setMode:({mode})=>serial(()=>update({...config,mode})),
     setHosts:({hostIds})=>serial(()=>setHosts(hostIds)),
     setGlobalSuspension:({enabled,acknowledgeGlobalImpact})=>serial(()=>{
@@ -247,6 +319,7 @@ export default async function plugin(bb: BbPluginApi) {
         else if((command==='block'||command==='unblock') && args.length===0) result=await serial(()=>update({...config,manualBlock:command==='block'}));
         else if(command==='enforce' && args.length===0) result=await serial(()=>update({...config,mode:'enforce'}));
         else if(command==='observe' && args.length===0) result=await serial(()=>update({...config,mode:'observe'}));
+        else if(command==='verified-vpn' && args.length===1 && ['on','off'].includes(args[0]!)) result=await serial(()=>update({...config,requireVerifiedVpn:args[0]==='on'}));
         else if(command==='hosts' && args.length>0) {
           const hostIds=args.length===1 && args[0]==='none'?[]:args;
           result=await serial(()=>setHosts(hostIds));

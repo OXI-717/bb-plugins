@@ -16,6 +16,9 @@ export function GuardPage() {
   const [status,setStatus]=useState<Status|null>(null);
   const [error,setError]=useState<string|null>(null);
   const [busy,setBusy]=useState(false);
+  const [controllerPath,setControllerPath]=useState('');
+  const [reviewedSchedules,setReviewedSchedules]=useState(false);
+  useEffect(()=>setReviewedSchedules(false),[status?.automations.status?.restoreRevision]);
   const requests=useRef(createStatusRequests());
   const refresh=useCallback(async()=>{
     const requestRevision=requests.current.start();
@@ -56,9 +59,35 @@ export function GuardPage() {
       </div><p className="vg-help">{t.modeHelp}</p>
       <p className="vg-help">{t.stopped}: {status?.stoppedThreadIds.length??0}</p>
     </section>
+    <section><h2>{t.overview}</h2>
+      <dl className="vg-overview">
+        <div><dt>{t.pool}</dt><dd>{status?.pool.linked===true?`${t.linked} · ${status.pool.requireVerified?t.verifiedIpv4:t.ordinaryTransport}`:status?.pool.linked===false?t.notLinked:t.unavailable}</dd></div>
+        <div><dt>{t.automations}</dt><dd>{!status?.coordinateAutomations?t.notLinked:status.automations.error||status.automations.status?.activeRuns.length?t.partial:!status.automations.status?t.unknown:status.automations.status.blocked?t.paused:t.available}</dd></div>
+        <div><dt>{t.recovery}</dt><dd>{status?.automations.status?.recoveryPending?t.pendingRecovery:t.none}</dd></div>
+        <div><dt>{t.pausedSchedules}</dt><dd>{status?.automations.status?.pausedCount??0}</dd></div>
+      </dl>
+      {status?.automations.status?.holds.map(hold=><p className="vg-help" key={hold.owner}>{hold.owner.startsWith('vpn-guard:')?t.guardHold:hold.owner==='emergency'?t.emergencyHold:t.manualHold}</p>)}
+      {!!status?.automations.status?.legacyBlocked&&<p className="vg-help">{t.legacyPause}</p>}
+      {!!status?.automations.error&&<div className="vg-error" role="status">{t.partial}<details><summary>{t.errorDetails}</summary><pre className="vg-error-detail">{status.automations.error}</pre></details></div>}
+      {!!status?.automations.status?.errors.length&&<details><summary>{t.errorDetails}</summary><pre className="vg-error-detail">{status.automations.status.errors.join("\n")}</pre></details>}
+      {!!status?.automations.status?.activeRuns.length&&<details><summary>{t.activeRun}: {status.automations.status.activeRuns.length}</summary><pre className="vg-error-detail">{status.automations.status.activeRuns.join("\n")}</pre></details>}
+      <div className="vg-actions">
+        <button disabled={!ready||!status.coordinateAutomations} onClick={()=>void change(()=>rpc.call('automationAction',{action:'pause',reviewed:false}))}>{t.pauseAutomations}</button>
+        <button disabled={!ready||!status.coordinateAutomations||status.manualBlock||status.automations.held} onClick={()=>void change(()=>rpc.call('automationAction',{action:'resume',reviewed:reviewedSchedules,restoreRevision:status?.automations.status?.restoreRevision??null}))}>{t.resumeAutomations}</button>
+      </div>
+      <p className="vg-help">{t.restoreAutomationsHelp}</p>
+      {!!status?.automations.status?.pendingRestore.length&&<details><summary>{t.restoreInventory}</summary>{status.automations.status.pendingRestore.map(r=><p className="vg-help" key={r.projectId+':'+r.id}>{r.name}</p>)}</details>}
+      <label className="vg-check"><input type="checkbox" checked={reviewedSchedules} onChange={e=>setReviewedSchedules(e.target.checked)}/><span>{t.reviewedSchedules}</span></label>
+      <details><summary>{t.controllerSetup}</summary>
+        <label className="vg-field"><span>{t.controllerPath}</span><input value={controllerPath||status?.automationControllerPath||''} onChange={e=>setControllerPath(e.target.value)} placeholder="/absolute/path/to/oxi-auto"/></label>
+        <div className="vg-actions"><button disabled={!ready} onClick={()=>void change(()=>rpc.call('setAutomationCoordination',{enabled:true,executable:controllerPath||status?.automationControllerPath||null}))}>{t.connectController}</button>
+        <button disabled={!ready||!status.coordinateAutomations} onClick={()=>void change(()=>rpc.call('setAutomationCoordination',{enabled:false,executable:status?.automationControllerPath??null}))}>{t.disconnectController}</button></div>
+      </details>
+    </section>
     <section><h2>{t.machines}</h2><p className="vg-help">{t.machinesHelp}</p>
+      <label className="vg-check"><input type="checkbox" checked={status?.requireVerifiedVpn??false} disabled={!ready} onChange={e=>void change(()=>rpc.call('setVerifiedVpn',{enabled:e.target.checked}))}/><span>{t.verifiedVpn}</span></label><p className="vg-help">{t.verifiedHelp}</p>
       <ul className="vg-machines">{status?.hosts.map(h=><li key={h.id}><label className="vg-check"><input type="checkbox" checked={h.selected} disabled={busy||(!h.available&&!h.selected)} onChange={e=>void selectHost(h.id,e.target.checked)}/><span>{h.name}</span></label>
-        <span className="vg-help">{h.selected?t[h.vpn??'unknown']:t.outside}{!h.available?` · ${t.unavailable}`:''}</span></li>)}</ul>
+        <span className="vg-help">{h.selected?t[h.vpn??'unknown']:t.outside}{h.evidence?` · ${h.evidence.assurance==='verified_ipv4'?t.verifiedIpv4:h.evidence.assurance==='legacy'?t.legacyVpn:t.unverifiedVpn}`:''}{!h.available?` · ${t.unavailable}`:''}</span></li>)}</ul>
     </section>
     <section><h2>{t.native}</h2><p className="vg-help">{t.nativeHelp}</p>
       <label className="vg-check"><input type="checkbox" checked={status?.suspendNativePluginsGlobally??false} disabled={!ready} onChange={e=>void change(()=>rpc.call('setGlobalSuspension',{enabled:e.target.checked,acknowledgeGlobalImpact:e.target.checked}))}/><span>{t.suspend}</span></label>

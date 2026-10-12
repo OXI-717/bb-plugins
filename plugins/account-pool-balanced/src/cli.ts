@@ -227,6 +227,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `cursorUpstreamBaseUrl: ${config.cursorUpstreamBaseUrl}`,
     `devinUpstreamBaseUrl: ${config.devinUpstreamBaseUrl}`,
     `vpnGuardEnabled: ${config.vpnGuardEnabled}`,
+    `requireVerifiedVpn: ${config.requireVerifiedVpn}`,
     `vpnOnlyProviders: ${config.vpnOnlyProviders.join(",") || "none"}`,
     `vpnStatusFile: ${config.vpnStatusFile ?? "default local guard file"}`,
     `switchThreshold: ${config.switchThreshold}`,
@@ -293,6 +294,7 @@ function parseConfigUpdate(
       reserveDrainHours: Number(value),
     });
   }
+  if(key==="requireVerifiedVpn"&&["true","false"].includes(value))return accountPoolConfigSetInputSchema.parse({requireVerifiedVpn:value==="true"});
   if (key === "vpnGuardEnabled" && ["true","false"].includes(value)) return accountPoolConfigSetInputSchema.parse({vpnGuardEnabled:value==="true"});
   if (key === "vpnOnlyProviders") return accountPoolConfigSetInputSchema.parse({ vpnOnlyProviders: value === "none" ? [] : value.split(",") });
   if (key === "vpnStatusFile") return accountPoolConfigSetInputSchema.parse({ vpnStatusFile: value === "default" ? null : value });

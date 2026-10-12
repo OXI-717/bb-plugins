@@ -107,6 +107,7 @@ interface HubOptions {
   guardCheck?: (provider:PoolProvider)=>Promise<void>;
   adapters: ReadonlyMap<PoolProvider, ProviderAdapter>;
   fetch: typeof fetch;
+  fetchIpv4?:typeof fetch;
   now: () => number;
   drainTimeoutMs: number;
   onAccountsChanged: () => void;
@@ -181,10 +182,10 @@ export class AccountPoolHub {
   private readonly networkFlights:NetworkFlights;
   constructor(private readonly options: HubOptions) {
     this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnState,options.guardCheck);
-    this.networkFlights=new NetworkFlights(options.fetch,()=>this.stopped.signal,provider=>this.assertNetworkAllowed(provider));
+    this.networkFlights=new NetworkFlights(options.fetch,()=>this.stopped.signal,provider=>this.assertNetworkAllowed(provider),provider=>options.getSettings().requireVerifiedVpn&&options.getSettings().vpnOnlyProviders.some(value=>value===provider)?options.fetchIpv4!:options.fetch);
   }
 
-  async assertNetworkAllowed(provider: PoolProvider): Promise<void> { await this.vpn.assert(provider); }
+  async assertNetworkAllowed(provider: PoolProvider): Promise<void> { await this.vpn.assert(provider);if(this.options.getSettings().requireVerifiedVpn&&this.options.getSettings().vpnOnlyProviders.some(value=>value===provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
 
   outboundFetch(provider: PoolProvider): typeof fetch {
     return (input,init)=>this.networkFlights.fetch(provider,input,init);
@@ -361,6 +362,7 @@ export class AccountPoolHub {
     const settings = this.options.getSettings();
     const now = this.options.now();
     const vpnState = await this.vpn.state();
+    const vpnEvidence=await this.vpn.evidence();
     const blockedProviders:PoolProvider[]=[];
     for(const provider of ["codex","claude","cursor","devin"] as const) {
       try {await this.assertNetworkAllowed(provider);} catch {blockedProviders.push(provider);}
@@ -395,7 +397,7 @@ export class AccountPoolHub {
       [...this.activeAccounts].filter(([key]) => key.startsWith(`${provider}:`)).at(-1)?.[1].accountId ?? null;
     return {
       route: this.options.route,
-      vpn: { state: vpnState, blockedProviders,guardEnabled:settings.vpnGuardEnabled },
+      vpn: { state: vpnState, blockedProviders,guardEnabled:settings.vpnGuardEnabled,requireVerified:settings.requireVerifiedVpn,assurance:vpnEvidence.assurance,reason:vpnEvidence.reason },
       enabledAccountCount: accounts.filter((account) => account.enabled).length,
       inFlight: this.inFlightCount(),
       accepting: this.accepting,
@@ -1362,6 +1364,7 @@ export function createHub(options: {
   vpnState?: () => Promise<VpnState>;
   guardCheck?: (provider:PoolProvider)=>Promise<void>;
   fetch?: typeof fetch;
+  fetchIpv4?:typeof fetch;
   now?: () => number;
   refreshUrl?: string;
   codexRefreshUrl?: string;
@@ -1450,7 +1453,7 @@ export function createHub(options: {
     vpnState: options.vpnState,
     guardCheck: options.guardCheck,
     adapters,
-    fetch: options.fetch ?? fetch,
+    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),

@@ -46,7 +46,9 @@ jobs:
           cache: npm
           cache-dependency-path: plugins/${{ matrix.plugin }}/package-lock.json
       - name: Check publication manifests
-        run: node scripts/check-manifests.mjs
+        run: |
+          node scripts/check-manifests.mjs
+          node scripts/check-vpn-contract.mjs
       - name: Install dependencies
         working-directory: plugins/${{ matrix.plugin }}
         run: npm ci
