@@ -1,5 +1,13 @@
 # VPN Guard
 
-A BB 0.46+ plugin for host-local VPN observation and selected-machine admission control. It starts in observation mode with no machines selected. Enforcement holds ordinary protected dispatches and stops protected running turns on selected machines with bad or unknown VPN state. Kimi and Z.ai remain available.
+## Русский
 
-An optional, separately acknowledged global suspension disables the Codex and Claude native plugins during a selected-machine block. Network denial for active bridges and in-flight requests is not established. See [operations and limits](docs/operations.md) for controls, ownership recovery, isolated evidence and boundaries. Built from the public BB Plugin SDK. VPN state reading follows the Account Pool Balanced policy in this repository (MIT).
+Плагин BB 0.46+ управляет запуском Codex, Claude, Cursor и Devin на выбранных машинах. Начинает с наблюдения. В режиме защиты недоступный VPN удерживает новые сообщения в очереди и останавливает защищённые треды. Кнопка **«Заблокировать»** включает постоянный ручной блок даже при подключённом VPN и в режиме наблюдения. **«Снять блок»** возвращает выбранный режим. Kimi и Z.ai остаются доступны.
+
+В панели можно выбрать RU/EN. Дополнительное глобальное отключение встроенных Codex/Claude включается отдельно и требует ручного восстановления. Это управление BB: Send-now обходит очередь, завершение открытых соединений и bridge-процессов не гарантируется. [Управление и ограничения](docs/operations.md). [Общий стандарт интерфейсов](../../docs/plugin-ui-standard.md).
+
+## English
+
+BB 0.46+ selected-machine admission control for Codex, Claude, Cursor and Devin. Starts in Observe. Enforce holds new protected messages and stops running protected threads on unavailable VPN. **Block** persists a manual override even with connected VPN and in Observe. **Unblock** returns to the selected mode. Kimi and Z.ai remain available. The panel provides RU/EN.
+
+Optional global native Codex/Claude suspension requires separate opt-in and explicit restore. Send-now bypasses admission; active connections and bridges are not proven stopped. See [operations and limits](docs/operations.md). Built from the public BB Plugin SDK; state reading follows Account Pooler policy (MIT).

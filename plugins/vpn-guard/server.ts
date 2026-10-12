@@ -21,13 +21,13 @@ const LIMITATIONS = [
   'VPN Guard is BB admission control, not a packet firewall.',
 ];
 type Configuration = z.infer<typeof configurationSchema>;
-const initialConfiguration: Configuration = {mode:'observe',hostIds:[],suspendNativePluginsGlobally:false};
+const initialConfiguration: Configuration = {mode:'observe',manualBlock:false,hostIds:[],suspendNativePluginsGlobally:false};
 
 export default async function plugin(bb: BbPluginApi) {
   const host = bb.hosts.experimental_client({contract:hostContract});
   const loaded=configurationSchema.safeParse(await bb.storage.kv.get<unknown>(CONFIG));
   let config:Configuration=loaded.success ? loaded.data : initialConfiguration;
-  if (config.mode==='enforce' && config.hostIds.length===0) config={...config,mode:'observe'};
+  if ((config.mode==='enforce' || config.manualBlock) && config.hostIds.length===0) config={...config,mode:'observe',manualBlock:false};
   const storedOwned=z.array(z.string()).safeParse(await bb.storage.kv.get<unknown>(JOURNAL));
   const storedPending=z.array(z.string()).safeParse(await bb.storage.kv.get<unknown>(PENDING));
   const storedStopped=z.array(z.string()).safeParse(await bb.storage.kv.get<unknown>(STOPPED));
@@ -62,7 +62,7 @@ export default async function plugin(bb: BbPluginApi) {
       vpn:selected.has(h.id)?await vpn(h.id):null,
     })));
     for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,vpn:'unknown'});
-    return {mode:config.mode,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,
+    return {mode:config.mode,manualBlock:config.manualBlock,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,
       hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],limitations:LIMITATIONS};
   }
   async function saveConfig(next:Configuration) {
@@ -98,6 +98,7 @@ export default async function plugin(bb: BbPluginApi) {
     return failures;
   }
   async function restoreOwned() {
+    if(config.manualBlock) throw new Error("Release the manual block before restoring native plugins.");
     const snapshot=await status();
     if(snapshot.hosts.some(h=>h.selected && h.vpn!=='connected')) throw new Error('Selected machines must be connected before restoring native plugins.');
     const {plugins}=await bb.sdk.plugins.list();
@@ -117,7 +118,7 @@ export default async function plugin(bb: BbPluginApi) {
     try {runningThreads=await bb.sdk.threads.listRunning();}
     catch(error) {return [new Error(`threads.listRunning: ${String(error)}`)];}
     for(const running of runningThreads) {
-      if(!running.hostId || !config.hostIds.includes(running.hostId) || states.get(running.hostId)==='connected') continue;
+      if(!running.hostId || !config.hostIds.includes(running.hostId) || (!config.manualBlock && states.get(running.hostId)==='connected')) continue;
       try {
         const thread=await bb.sdk.threads.get({threadId:running.id});
         if(!protectedProvider(thread.providerId)) continue;
@@ -133,7 +134,7 @@ export default async function plugin(bb: BbPluginApi) {
     const snapshot=await status();
     const states=new Map(snapshot.hosts.filter(h=>h.selected).map(h=>[h.id,h.vpn??'unknown'] as const));
     const failures:Error[]=[];
-    if(config.mode==='enforce' && [...states.values()].some(state=>state!=='connected')) {
+    if(config.manualBlock || (config.mode==='enforce' && [...states.values()].some(state=>state!=='connected'))) {
       if(config.suspendNativePluginsGlobally) {
         try {failures.push(...await suspendNativePlugins());}
         catch(error) {failures.push(new Error(`native suspension: ${String(error)}`));}
@@ -150,7 +151,7 @@ export default async function plugin(bb: BbPluginApi) {
     if(failures.length) throw new AggregateError(failures,`VPN Guard reconcile failed: ${failures.map(error=>error.message).join('; ')}`);
   }
   async function update(next:Configuration) {
-    if(next.mode==='enforce' && next.hostIds.length===0) throw new Error('Select at least one machine before enforcement.');
+    if((next.mode==='enforce' || next.manualBlock) && next.hostIds.length===0) throw new Error('Select at least one machine before enforcement.');
     await saveConfig(next);
     await reconcile();
     return status();
@@ -185,7 +186,9 @@ export default async function plugin(bb: BbPluginApi) {
     while(true) {
       const version=policyVersion;
       if(owned.has(nativePluginFor(id)) || pending.has(nativePluginFor(id))) return {action:'wait',reason:'VPN Guard: native plugin change awaits review or restore'};
-      if(config.mode!=='enforce' || !hostId || !config.hostIds.includes(hostId)) return {action:'proceed'};
+      if(!hostId || !config.hostIds.includes(hostId)) return {action:'proceed'};
+      if(config.manualBlock) return {action:'wait',reason:'VPN Guard: manual block on selected host'};
+      if(config.mode!=='enforce') return {action:'proceed'};
       let available=false;
       try {available=(await bb.sdk.hosts.list()).some(h=>h.id===hostId);}
       catch { /* unavailable host catalog fails closed */ }
@@ -196,6 +199,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   bb.rpc.register(rpcContract,{
     status:()=>status(),
+    setManualBlock:({blocked})=>serial(()=>update({...config,manualBlock:blocked})),
     setMode:({mode})=>serial(()=>update({...config,mode})),
     setHosts:({hostIds})=>serial(()=>setHosts(hostIds)),
     setGlobalSuspension:({enabled,acknowledgeGlobalImpact})=>serial(()=>{
@@ -208,6 +212,8 @@ export default async function plugin(bb: BbPluginApi) {
   bb.cli.register({
     name:'vpn-guard',summary:'Observe and guard selected BB machines',
     commands:[
+      {name:'block',summary:'Block selected machines regardless of VPN',usage:'bb vpn-guard block'},
+      {name:'unblock',summary:'Release manual block and retain current mode',usage:'bb vpn-guard unblock'},
       {name:'status',summary:'Show scope, VPN decisions and actions',usage:'bb vpn-guard status [--json]'},
       {name:'hosts',summary:'Select protected machines',usage:'bb vpn-guard hosts <host-id>... | none'},
       {name:'enforce',summary:'Enforce on selected machines',usage:'bb vpn-guard enforce'},
@@ -221,6 +227,7 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         let result;
         if(command==='status' && args.length===0) result=await status();
+        else if((command==='block'||command==='unblock') && args.length===0) result=await serial(()=>update({...config,manualBlock:command==='block'}));
         else if(command==='enforce' && args.length===0) result=await serial(()=>update({...config,mode:'enforce'}));
         else if(command==='observe' && args.length===0) result=await serial(()=>update({...config,mode:'observe'}));
         else if(command==='hosts' && args.length>0) {
@@ -230,7 +237,7 @@ export default async function plugin(bb: BbPluginApi) {
           result=await serial(()=>update({...config,suspendNativePluginsGlobally:args[0]==='on'}));
         } else if(command==='restore-owned' && args.length===0) result=await serial(async()=>{await restoreOwned();await bb.experimental_hooks.recheck('message.dispatch');recheckDirty=false;return status();});
         else if(command==='acknowledge-ambiguous' && args.length===2 && args[1]==='--reviewed') result=await serial(()=>acknowledgeAmbiguous(args[0],true));
-        else return {exitCode:1,stderr:'Usage: bb vpn-guard status|hosts|enforce|observe|global-suspend|restore-owned|acknowledge-ambiguous'};
+        else return {exitCode:1,stderr:'Usage: bb vpn-guard status|hosts|block|unblock|enforce|observe|global-suspend|restore-owned|acknowledge-ambiguous'};
         return {exitCode:0,stdout:JSON.stringify(result)};
       } catch(error) {return {exitCode:1,stderr:String(error)};}
     },

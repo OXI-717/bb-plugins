@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-vpn-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "engines": {
     "bb": ">=0.46",
@@ -8,7 +8,7 @@
   },
   "bb": {
     "name": "VPN Guard",
-    "description": "Observe and gate protected BB providers by host-local VPN state.",
+    "description": "Защита агентов по VPN и ручной блок / VPN protection and manual block",
     "branding": {
       "icon": "Shield"
     },
@@ -36,7 +36,7 @@
     "typescript": "^5.7.0",
     "vitest": "^4.1.11"
   },
-  "description": "Observe and gate protected BB providers by host-local VPN state.",
+  "description": "Защита агентов по VPN и ручной блок / VPN protection and manual block",
   "license": "MIT",
   "private": true,
   "repository": {

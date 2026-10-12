@@ -1,60 +1,71 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { definePluginApp, useRpc, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './contract.js';
+import { copy, readableError, type Language } from './copy.js';
+import { createStatusRequests } from './status-requests.js';
+import './app.css';
 
 type Status = StandardSchemaV1InferOutput<(typeof rpcContract)['status']['output']>;
-
+function initialLanguage():Language {
+  try {return localStorage.getItem('vpn-guard-language')==='en'?'en':'ru';} catch {return 'ru';}
+}
 export function GuardPage() {
   const rpc=useRpc<typeof rpcContract>();
+  const [language,setLanguage]=useState<Language>(initialLanguage);
+  const t=copy[language];
   const [status,setStatus]=useState<Status|null>(null);
   const [error,setError]=useState<string|null>(null);
   const [busy,setBusy]=useState(false);
+  const requests=useRef(createStatusRequests());
   const refresh=useCallback(async()=>{
-    try {setStatus(await rpc.call('status'));setError(null);} catch(e){setError(String(e));}
+    const requestRevision=requests.current.start();
+    try {const next=await rpc.call('status');if(requests.current.isCurrent(requestRevision)){setStatus(next);setError(null);}} catch(e){if(requests.current.isCurrent(requestRevision))setError(String(e));}
   },[rpc]);
   useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>clearInterval(timer);},[refresh]);
   async function change(action:()=>Promise<Status>) {
+    requests.current.invalidate();
     setBusy(true);
-    try {setStatus(await action());setError(null);} catch(e){setError(String(e));}
-    finally {setBusy(false);}
+    try {setStatus(await action());setError(null);} catch(e){setError(String(e));await refresh();setError(String(e));}
+    finally {requests.current.invalidate();setBusy(false);}
   }
   async function selectHost(id:string,selected:boolean) {
     const ids=new Set(status?.hostIds??[]);
     if(selected) ids.add(id); else ids.delete(id);
     await change(()=>rpc.call('setHosts',{hostIds:[...ids]}));
   }
-  return <main className="mx-auto max-w-3xl space-y-5 overflow-y-auto p-5">
-    <h1 className="text-xl font-semibold">VPN Guard</h1>
-    <p>Selected machines are checked using their own VPN status. Codex, Claude, Cursor and Devin are protected; Kimi and Z.ai stay available. Observation is the default.</p>
-    {error && <p role="alert" className="text-red-500">{error}</p>}
-    <section className="space-y-2">
-      <h2 className="font-semibold">Machines in scope</h2>
-      <p>Select every machine that may run protected work before enabling enforcement. An unavailable selected machine is treated as unknown. Other machines do not affect this policy.</p>
-      <ul>{status?.hosts.map(h=><li key={h.id}>
-        <label><input type="checkbox" checked={h.selected} disabled={busy||(!h.available&&!h.selected)} onChange={e=>void selectHost(h.id,e.target.checked)}/> {h.name}</label>
-        {' — '}{h.selected ? h.vpn : 'outside scope'}{!h.available?' (unavailable)':''}
-      </li>)}</ul>
+  function chooseLanguage(next:Language) {
+    setLanguage(next);try {localStorage.setItem('vpn-guard-language',next);} catch { /* session language still works */ }
+  }
+  const ready=!!status&&!busy;
+  return <main className="vpn-guard" lang={language}>
+    <header className="vg-header"><h1>{t.title}</h1><div className="vg-languages" role="group" aria-label={t.language}>
+      {(['ru','en'] as const).map(l=><button key={l} type="button" className="vg-language" aria-pressed={language===l} onClick={()=>chooseLanguage(l)}>{l.toUpperCase()}</button>)}
+    </div></header>
+    <p className="vg-help">{t.description}</p>
+    {error&&<div role="alert" className="vg-error"><p>{readableError(error,language)}</p><details><summary>{t.errorDetails}</summary><pre className="vg-error-detail">{error}</pre></details></div>}
+    <section><h2>{t.control}</h2>
+      <p role="status" className={status?.manualBlock?'vg-blocked':'vg-help'}>{status ? status.manualBlock?t.blocked:t.notBlocked :t.loading}</p>
+      <div className="vg-actions"><button type="button" className="vg-danger" disabled={!ready||!status.hostIds.length} onClick={()=>void change(()=>rpc.call('setManualBlock',{blocked:!status?.manualBlock}))}>{status?.manualBlock?t.unblock:t.block}</button>
+        <button type="button" disabled={busy} onClick={()=>void refresh()}>{t.refresh}</button></div>
+      <p className="vg-help">{t.blockHelp}</p>
+      <div className="vg-actions" role="group" aria-label={t.mode}>
+        <button type="button" aria-pressed={status?.mode==='observe'} disabled={!ready} onClick={()=>void change(()=>rpc.call('setMode',{mode:'observe'}))}>{t.observe}</button>
+        <button type="button" aria-pressed={status?.mode==='enforce'} disabled={!ready||!status.hostIds.length} onClick={()=>void change(()=>rpc.call('setMode',{mode:'enforce'}))}>{t.enforce}</button>
+      </div><p className="vg-help">{t.modeHelp}</p>
+      <p className="vg-help">{t.stopped}: {status?.stoppedThreadIds.length??0}</p>
     </section>
-    <section className="space-y-2">
-      <h2 className="font-semibold">Admission and running turns</h2>
-      <p>Enforcement holds normal sends and stops protected running turns on selected machines with disconnected or unknown VPN. Stopped turns are never replayed automatically. Send-now bypasses the dispatch hook.</p>
-      <div className="flex gap-2">
-        <button type="button" disabled={busy} onClick={()=>void change(()=>rpc.call('setMode',{mode:'observe'}))} className="rounded border px-3 py-2">Observe</button>
-        <button type="button" disabled={busy||!status?.hostIds.length} onClick={()=>void change(()=>rpc.call('setMode',{mode:'enforce'}))} className="rounded border px-3 py-2">Enforce selected machines</button>
-        <button type="button" disabled={busy} onClick={()=>void refresh()} className="rounded border px-3 py-2">Refresh</button>
-      </div>
-      <p>Mode: <strong>{status?.mode??'loading'}</strong>. Stopped turns recorded: {status?.stoppedThreadIds.length??0}.</p>
+    <section><h2>{t.machines}</h2><p className="vg-help">{t.machinesHelp}</p>
+      <ul className="vg-machines">{status?.hosts.map(h=><li key={h.id}><label className="vg-check"><input type="checkbox" checked={h.selected} disabled={busy||(!h.available&&!h.selected)} onChange={e=>void selectHost(h.id,e.target.checked)}/><span>{h.name}</span></label>
+        <span className="vg-help">{h.selected?t[h.vpn??'unknown']:t.outside}{!h.available?` · ${t.unavailable}`:''}</span></li>)}</ul>
     </section>
-    <section className="space-y-2">
-      <h2 className="font-semibold">Optional global native plugin suspension</h2>
-      <p>When a selected machine is blocked, this disables the Codex and Claude native plugins across ALL BB machines, including healthy machines. It may stop their background usage and OAuth registrations; termination of existing bridge processes and in-flight requests is unproven. Cursor and Devin share ACP with other providers and are not suspended this way.</p>
-      <label><input type="checkbox" checked={status?.suspendNativePluginsGlobally??false} disabled={busy} onChange={e=>void change(()=>rpc.call('setGlobalSuspension',{enabled:e.target.checked,acknowledgeGlobalImpact:e.target.checked}))}/> Suspend native plugins globally during a block</label>
-      <p>Guard-owned disabled plugins: {status?.ownedDisabledPlugins.join(', ')||'none'}. Recovery does not restore them automatically: BB cannot distinguish a redundant manual disable made while Guard owned one. Review current plugin settings before explicit restore.</p>
-      <p>Changes interrupted by a crash, requiring manual review: {status?.ambiguousPluginChanges.join(', ')||'none'}. Their provider dispatches remain held until reviewed and acknowledged. Acknowledgment clears only the journal entry; it does not enable a plugin.</p>
-      {status?.ambiguousPluginChanges.map(id=><button key={id} type="button" disabled={busy} onClick={()=>void change(()=>rpc.call('acknowledgeAmbiguous',{pluginId:id,acknowledgeReviewed:true}))} className="rounded border px-3 py-2">I reviewed {id}; clear its ambiguous journal entry</button>)}
-      <button type="button" disabled={busy||!status?.ownedDisabledPlugins.length} onClick={()=>void change(()=>rpc.call('restoreOwned',null))} className="rounded border px-3 py-2">Restore Guard-owned plugins after review</button>
+    <section><h2>{t.native}</h2><p className="vg-help">{t.nativeHelp}</p>
+      <label className="vg-check"><input type="checkbox" checked={status?.suspendNativePluginsGlobally??false} disabled={!ready} onChange={e=>void change(()=>rpc.call('setGlobalSuspension',{enabled:e.target.checked,acknowledgeGlobalImpact:e.target.checked}))}/><span>{t.suspend}</span></label>
+      <p className="vg-help">{t.owned}: {status?.ownedDisabledPlugins.join(', ')||t.none}</p>
+      <p className="vg-help">{t.restoreHelp}</p>
+      <div className="vg-actions"><button type="button" disabled={!ready||status.manualBlock||!status.ownedDisabledPlugins.length} onClick={()=>void change(()=>rpc.call('restoreOwned',null))}>{t.restore}</button></div>
+      {!!status?.ambiguousPluginChanges.length&&<><p className="vg-help">{t.ambiguous}</p>{status.ambiguousPluginChanges.map(id=><div key={id} className="vg-journal"><code>{id}</code><button type="button" disabled={busy} onClick={()=>void change(()=>rpc.call('acknowledgeAmbiguous',{pluginId:id,acknowledgeReviewed:true}))}>{t.ack}</button></div>)}</>}
     </section>
-    <details><summary>Limits</summary><ul>{status?.limitations.map(l=><li key={l}>{l}</li>)}</ul></details>
+    <details><summary>{t.limits}</summary><p className="vg-help">{t.limitText}</p></details>
   </main>;
 }
 export default definePluginApp(app=>{
