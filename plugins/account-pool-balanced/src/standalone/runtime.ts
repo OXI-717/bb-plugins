@@ -54,7 +54,7 @@ export async function openPool(dataDir: string, config: Partial<AccountPoolConfi
     await accounts.initialize();
     await tokens.initialize();
     transport = createUpstreamTransport();
-    const hub = createHub({ route: "/", accounts, quotas: new QuotaStore(database), affinity: new PoolAffinityStore(database), hubTokens: tokens, getSettings: () => settings, fetch: transport.fetch });
+    const hub = createHub({ route: "/", accounts, quotas: new QuotaStore(database), affinity: new PoolAffinityStore(database), hubTokens: tokens, getSettings: () => settings, fetch: transport.fetch,fetchIpv4:transport.fetchIpv4 });
     const controller = new AbortController();
     let running: Promise<void> | undefined;
     let closing: Promise<void> | undefined;

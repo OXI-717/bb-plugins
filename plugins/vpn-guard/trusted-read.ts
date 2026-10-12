@@ -1,7 +1,7 @@
 // Adapted from account-pool-balanced/src/vpn-policy.ts in this repository (MIT).
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { vpnStateFromPayload, type VpnState } from './state.js';
+import {evaluateVpnEvidence,type VpnState,type VpnEvidence} from './vpn-evidence.js';
 
 type Opener = typeof open;
 const pending = new Map<string, Promise<unknown>>();
@@ -19,10 +19,10 @@ export async function trustedRead(file: string, opener: Opener = open): Promise<
   } catch { return null; }
   finally { await handle?.close().catch(()=>undefined); }
 }
-export async function readVpnState(file: string, now: () => number = Date.now, opener: Opener = open): Promise<VpnState> {
+export async function readVpnEvidence(file: string, now: () => number = Date.now, opener: Opener = open): Promise<VpnEvidence> {
   let result = pending.get(file);
   if (!result) {
-    if (pending.size >= MAX_PENDING) return 'unknown';
+    if (pending.size >= MAX_PENDING) return evaluateVpnEvidence(null,now());
     const reading = trustedRead(file, opener);
     let timer: ReturnType<typeof setTimeout>;
     result = Promise.race([reading, new Promise<null>(resolve => { timer = setTimeout(()=>resolve(null), 1000); })]);
@@ -33,5 +33,7 @@ export async function readVpnState(file: string, now: () => number = Date.now, o
       if (pending.get(file) === current) pending.delete(file);
     }).catch(()=>undefined);
   }
-  return vpnStateFromPayload(await result, now());
+  return evaluateVpnEvidence(await result, now());
 }
+
+export async function readVpnState(file:string,now:()=>number=Date.now,opener:Opener=open):Promise<VpnState> {return (await readVpnEvidence(file,now,opener)).state;}

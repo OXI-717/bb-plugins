@@ -52,6 +52,7 @@ import {
 
 export interface AccountPoolPluginOptions {
   fetch?: typeof fetch;
+  fetchIpv4?:typeof fetch;
   vpnState?: () => Promise<VpnState>;
   now?: () => number;
   refreshUrl?: string;
@@ -135,7 +136,7 @@ export function createAccountPoolPlugin(
       affinity: new PoolAffinityStore(db),
       hubTokens: combinedTokens(hubTokens, externalClients.tokens),
       getSettings: () => currentSettings,
-      fetch: upstreamFetch,
+      fetch: upstreamFetch,fetchIpv4:options.fetchIpv4??transport?.fetchIpv4,
       vpnState: options.vpnState,
       guardCheck:createGuardNetworkCheck(async provider=>{
         const signal=AbortSignal.timeout(1000);

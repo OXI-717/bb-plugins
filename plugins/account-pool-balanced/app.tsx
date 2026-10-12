@@ -97,7 +97,7 @@ type DialogState =
 
 type ConfigField = Exclude<
   keyof AccountPoolConfig,
-  "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "vpnGuardEnabled"
+  "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "vpnGuardEnabled" | "requireVerifiedVpn"
 >;
 
 const PROVIDERS: Array<{
@@ -1401,6 +1401,8 @@ function AccountPoolSettings() {
         Подчиняться VPN Guard
       </label>
       <p className="text-xs text-subtle-foreground">Блокирует сетевые вызовы пула к Codex, Claude, Cursor и Devin по решению Guard. Если Guard недоступен — отказ до отправки. Kimi и Z.ai не затрагиваются.</p>
+      <label className="flex min-h-9 items-center gap-2"><input type="checkbox" className="h-4 w-4 shrink-0" checked={config?.requireVerifiedVpn??false} disabled={config===null||pending!==null} onChange={e=>void saveRouting({requireVerifiedVpn:e.target.checked})}/><span>Требовать подтверждённый VPN /2</span></label>
+      <p className="text-xs text-muted-foreground">Включать после обновления VPN-гарда. Старый /1 будет отклонён. Защищённые запросы пула используют IPv4; китайские провайдеры сохраняют обычный транспорт.</p>
       </div>
       <p className="flex flex-wrap gap-x-3 text-xs text-subtle-foreground/75">
         {PROVIDERS.map((provider) => (
