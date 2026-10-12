@@ -16,6 +16,15 @@ import {
 const cleanups: Array<() => Promise<void>> = [];
 const nativeFetch = globalThis.fetch;
 
+it('verified transport connects over IPv4 and rejects IPv6 literals before fetch',async()=>{
+  const origin=await upstream();
+  const transport=createUpstreamTransport();
+  cleanups.push(()=>transport.destroy());
+  const url=origin.url.replace('127.0.0.1','localhost');
+  expect(await (await transport.fetchIpv4(url)).text()).toBe('OK');
+  expect(()=>transport.fetchIpv4('http://[::1]:1')).toThrow('IPv6 literals');
+});
+
 beforeEach(() => {
   vi.stubEnv("NO_PROXY", "*");
   vi.stubEnv("no_proxy", "*");

@@ -2,26 +2,14 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { z } from 'zod';
+import {evaluateVpnEvidence,type VpnEvidence} from './vpn-evidence.js';
 import { GUARD_PROVIDERS } from './guard-network.js';
 import {GuardRequiredError,VpnRequiredError} from './network-errors.js';
 import type { AccountPoolConfig, PoolProvider } from './contracts.js';
 
 export type VpnState = 'connected' | 'disconnected' | 'unknown';
-const stateSchema = z.object({
-  schema: z.literal('oxi-vpnks/vpn-state/1'),
-  updated_unix: z.number().int().nonnegative(),
-  state: z.enum(['connected', 'disconnected']),
-});
 export {VpnRequiredError} from './network-errors.js';
-
-export function vpnStateFromPayload(payload: unknown, now: number): VpnState {
-  const parsed = stateSchema.safeParse(payload);
-  if (!parsed.success) return 'unknown';
-  const age = now - parsed.data.updated_unix * 1000;
-  if (age < 0 || age > 60_000) return 'unknown';
-  return parsed.data.state;
-}
+export function vpnStateFromPayload(payload:unknown,now:number):VpnState{return evaluateVpnEvidence(payload,now).state;}
 
 const pendingReads = new Map<string, Promise<unknown>>();
 const MAX_PENDING_READS = 16;
@@ -42,10 +30,10 @@ async function readTrustedPayload(file: string): Promise<unknown> {
   finally { await handle?.close().catch(() => undefined); }
 }
 
-export async function readVpnState(file: string, now: number | (() => number)): Promise<VpnState> {
+export async function readVpnEvidence(file: string, now: number | (() => number)): Promise<VpnEvidence> {
   let result = pendingReads.get(file);
   if (result === undefined) {
-    if (pendingReads.size >= MAX_PENDING_READS) return 'unknown';
+    if (pendingReads.size >= MAX_PENDING_READS) return evaluateVpnEvidence(null,typeof now==='number'?now:now());
     const reading = readTrustedPayload(file);
     let timer: ReturnType<typeof setTimeout>;
     const timeout = new Promise<null>(resolve => {
@@ -60,8 +48,10 @@ export async function readVpnState(file: string, now: number | (() => number)): 
     }).catch(() => undefined);
   }
   const payload = await result;
-  return vpnStateFromPayload(payload, typeof now === "number" ? now : now());
+  return evaluateVpnEvidence(payload, typeof now === "number" ? now : now());
 }
+
+export async function readVpnState(file:string,now:number|(()=>number)):Promise<VpnState>{return (await readVpnEvidence(file,now)).state;}
 
 export function createVpnPolicy(
   settings: () => AccountPoolConfig,
@@ -75,14 +65,16 @@ export function createVpnPolicy(
   const state = async (): Promise<VpnState> => {
     try { return await readState(); } catch { return 'unknown'; }
   };
+  const evidence=async()=>readVpnEvidence(settings().vpnStatusFile??path.join(homedir(),'.local','state','vpnks','vpn-state.json'),now);
   return {
-    state,
+    state, evidence,
     async assert(provider: PoolProvider) {
       if(settings().vpnGuardEnabled && GUARD_PROVIDERS.some(p=>p===provider)) {
         if(!guardCheck) throw new GuardRequiredError(provider,true);
         await guardCheck(provider);
       }
       if (!settings().vpnOnlyProviders.some(value => value === provider)) return;
+      if(settings().requireVerifiedVpn&&(await evidence()).assurance!=='verified_ipv4') throw new VpnRequiredError(provider);
       if (await state() !== 'connected') throw new VpnRequiredError(provider);
     },
   };

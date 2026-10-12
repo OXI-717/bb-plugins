@@ -26,3 +26,5 @@
 @media(max-width:480px) {.vpn-guard {padding:16px}.vpn-guard button {min-height:40px}.vg-actions {display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.vg-actions button {width:100%}.vg-machines li {align-items:flex-start;flex-direction:column;gap:0}.vg-machines li>span {text-align:left;margin-left:24px}}
 
 .vg-error-detail {white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin:8px 0}
+
+.vg-overview{margin:0}.vg-overview>div{display:grid;grid-template-columns:minmax(120px,1fr) minmax(0,2fr);gap:12px;padding:8px 0;border-bottom:1px solid var(--border,#8883)}.vg-overview dd{margin:0;overflow-wrap:anywhere}.vg-field{display:grid;gap:6px;margin:12px 0}.vg-field input{font:inherit;min-height:36px;width:100%;padding:6px 10px;border:1px solid var(--border,#8886);border-radius:6px;background:var(--background,transparent);color:inherit}

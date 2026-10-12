@@ -1,14 +1,25 @@
-import { EnvHttpProxyAgent } from "undici";
+import { EnvHttpProxyAgent,buildConnector } from "undici";
 
 export function createUpstreamTransport() {
   const dispatcher = new EnvHttpProxyAgent({ allowH2: false });
+  const proxyEndpoints=['HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy'].map(key=>process.env[key]).filter((v):v is string=>!!v);
+  const ipv4Tls={family:4} as Parameters<typeof buildConnector>[0];
+  const ipv4Dispatcher=new EnvHttpProxyAgent({allowH2:false,connect:{family:4},proxyTls:ipv4Tls,requestTls:ipv4Tls});
+  const ipv4Fetch:typeof fetch=(input,init)=>{
+    const url=new URL(input instanceof Request?input.url:String(input));
+    for(const proxy of proxyEndpoints){
+      if(new URL(proxy).hostname.includes(':'))throw new Error('IPv6 proxy endpoints are not covered by VPN IPv4 evidence.');
+    }
+    if(url.hostname.includes(':')) throw new Error('IPv6 literals are not covered by VPN IPv4 evidence.');
+    return fetch(input,{...init,dispatcher:ipv4Dispatcher} as RequestInit);
+  };
   const upstreamFetch: typeof fetch = (input, init) => {
     const options = { ...init, dispatcher };
     return fetch(input, options);
   };
   return {
-    fetch: upstreamFetch,
-    destroy: () => dispatcher.destroy(),
+    fetch: upstreamFetch,fetchIpv4:ipv4Fetch,
+    destroy: async () => {await Promise.all([dispatcher.destroy(),ipv4Dispatcher.destroy()]);},
   };
 }
 
