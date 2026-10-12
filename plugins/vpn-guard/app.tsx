@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { definePluginApp, useRpc, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './contract.js';
 import { copy, readableError, type Language } from './copy.js';
+import { createStatusRequests } from './status-requests.js';
 import './app.css';
 
 type Status = StandardSchemaV1InferOutput<(typeof rpcContract)['status']['output']>;
@@ -15,17 +16,17 @@ export function GuardPage() {
   const [status,setStatus]=useState<Status|null>(null);
   const [error,setError]=useState<string|null>(null);
   const [busy,setBusy]=useState(false);
-  const revision=useRef(0);
+  const requests=useRef(createStatusRequests());
   const refresh=useCallback(async()=>{
-    const requestRevision=revision.current;
-    try {const next=await rpc.call('status');if(requestRevision===revision.current){setStatus(next);setError(null);}} catch(e){if(requestRevision===revision.current)setError(String(e));}
+    const requestRevision=requests.current.start();
+    try {const next=await rpc.call('status');if(requests.current.isCurrent(requestRevision)){setStatus(next);setError(null);}} catch(e){if(requests.current.isCurrent(requestRevision))setError(String(e));}
   },[rpc]);
   useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>clearInterval(timer);},[refresh]);
   async function change(action:()=>Promise<Status>) {
-    revision.current++;
+    requests.current.invalidate();
     setBusy(true);
     try {setStatus(await action());setError(null);} catch(e){setError(String(e));await refresh();setError(String(e));}
-    finally {revision.current++;setBusy(false);}
+    finally {requests.current.invalidate();setBusy(false);}
   }
   async function selectHost(id:string,selected:boolean) {
     const ids=new Set(status?.hostIds??[]);
@@ -41,7 +42,7 @@ export function GuardPage() {
       {(['ru','en'] as const).map(l=><button key={l} type="button" className="vg-language" aria-pressed={language===l} onClick={()=>chooseLanguage(l)}>{l.toUpperCase()}</button>)}
     </div></header>
     <p className="vg-help">{t.description}</p>
-    {error&&<p role="alert" className="vg-error">{t.error}: {readableError(error,language)}</p>}
+    {error&&<div role="alert" className="vg-error"><p>{readableError(error,language)}</p><details><summary>{t.errorDetails}</summary><pre className="vg-error-detail">{error}</pre></details></div>}
     <section><h2>{t.control}</h2>
       <p role="status" className={status?.manualBlock?'vg-blocked':'vg-help'}>{status ? status.manualBlock?t.blocked:t.notBlocked :t.loading}</p>
       <div className="vg-actions"><button type="button" className="vg-danger" disabled={!ready||!status.hostIds.length} onClick={()=>void change(()=>rpc.call('setManualBlock',{blocked:!status?.manualBlock}))}>{status?.manualBlock?t.unblock:t.block}</button>

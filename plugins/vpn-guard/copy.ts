@@ -14,7 +14,7 @@ export const copy = {
     restoreHelp:'Восстановление только вручную. BB не отличает повторное ручное отключение от отключения Guard: перед восстановлением проверьте настройки плагинов.',
     restore:'Восстановить',ack:'Проверено: снять отметку',limits:'Границы защиты',
     limitText:'«Отправить сейчас» обходит очередь. Уже выполняющиеся скрипты, сетевые запросы и bridge-процессы не гарантированно останавливаются. Другие ACP ID не защищены. Это управление BB, а не сетевой firewall. Обнаружение потери VPN занимает до 5 секунд плюс время проверки машины и остановки.',
-    error:'Не удалось выполнить действие',loading:'Загрузка',mode:'Режим',
+    errorDetails:'Технические подробности',error:'Не удалось выполнить действие',loading:'Загрузка',mode:'Режим',
   },
   en: {
     title:'VPN Guard',description:'Controls Codex, Claude, Cursor and Devin on selected machines. Kimi and Z.ai remain available.',
@@ -30,12 +30,13 @@ export const copy = {
     restoreHelp:'Restore is manual. BB cannot distinguish a redundant manual disable from Guard ownership: review plugin settings before restoring.',
     restore:'Restore',ack:'Reviewed: clear entry',limits:'Protection limits',
     limitText:'Send-now bypasses admission. Running scripts, network requests and bridge processes are not guaranteed stopped. Other ACP IDs are outside scope. This controls BB, not a network firewall. VPN-loss detection takes up to 5 seconds plus host-check and stop latency.',
-    error:'Action failed',loading:'Loading',mode:'Mode',
+    errorDetails:'Technical details',error:'Action failed',loading:'Loading',mode:'Mode',
   },
 } as const;
 
 export function readableError(message:string,language:Language):string {
-  if(language==='en') return message;
+  const fallback=language==='ru'?'Не удалось выполнить действие. Проверьте подробности ошибки.':'Action failed. Check the error details.';
+  if(language==='en') return fallback;
   const translations:[string,string][]=[
     ['Select at least one machine before enforcement.','Сначала выберите хотя бы одну машину.'],
     ['A newly selected machine is not enrolled.','Выбранная машина не подключена к BB.'],
@@ -43,5 +44,5 @@ export function readableError(message:string,language:Language):string {
     ['Selected machines must be connected before restoring native plugins.','Для восстановления плагинов VPN должен быть подключён на всех выбранных машинах.'],
     ['Global native plugin suspension needs explicit acknowledgment.','Подтвердите глобальное отключение встроенных плагинов.'],
   ];
-  return translations.find(([source])=>message.includes(source))?.[1]??message;
+  return translations.find(([source])=>message.includes(source))?.[1]??fallback;
 }
