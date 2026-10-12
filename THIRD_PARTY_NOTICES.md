@@ -5,3 +5,8 @@ Account Pooler and vendored UI are derived from get-bb/bb, MIT License, Copyrigh
 UI files are copied only with their transitive source dependencies. npm dependencies retain their respective package licenses.
 
 Automation Catalog reuses catalog storage, schema, history display and schedule formatting developed against get-bb/bb, together with scaffolded UI. The upstream MIT notice in LICENSE applies to derived portions.
+
+BB Projects (`oxi-projects`) is derived from Mateo Cerquetella's Taskboard in
+[MateoCerquetella/bb-plugins](https://github.com/MateoCerquetella/bb-plugins),
+MIT License, Copyright (c) 2026 Mateo Cerquetella. Its full notice is retained
+in [plugins/oxi-projects/LICENSE](plugins/oxi-projects/LICENSE).

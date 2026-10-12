@@ -2,6 +2,13 @@
 
 Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory and versioned release tags. GitHub Release immutability is enabled for releases published after 0.3.0; the earlier 0.3.0 release is not protected retroactively. This repository ships **Account Pool Balanced**. **Automation Catalog** adds a unified view across schedulers.
 
+## BB Projects
+
+Tasks, repositories and agent sessions for each BB project. GitHub accounts are
+selected per repository; Linear and Jira can be connected independently. Task
+buttons open beside the conversation. Memory, autopilot and Obsidian tasks are
+optional and start disabled. See [BB Projects setup](plugins/oxi-projects/README.md).
+
 ## VPN Guard
 
 A separate observation-first plugin holds protected BB dispatches and stops protected turns by host-local VPN state. See [VPN Guard operations](plugins/vpn-guard/docs/operations.md). It does not replace a network kill switch.
