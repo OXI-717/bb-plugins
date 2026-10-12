@@ -14,6 +14,7 @@ export const configurationSchema = z.object({
 export const statusSchema = z.object({
   mode: modeSchema,
   manualBlock: z.boolean(),
+  serverHostId:z.string().nullable(),
   hostIds: z.array(z.string()),
   suspendNativePluginsGlobally: z.boolean(),
   hosts: z.array(z.object({
@@ -27,6 +28,7 @@ export const statusSchema = z.object({
   limitations: z.array(z.string()),
 });
 export const rpcContract = defineRpcContract({
+  networkDecision: {input:z.object({hostId:z.string().min(1),provider:z.enum(['codex','claude','cursor','devin'])}).strict(),output:z.object({schema:z.literal('bb-vpn-guard/network-decision/1'),allowed:z.boolean(),reason:z.enum(['manual_block','vpn_unavailable','outside_scope','observe','connected','restore_required'])}).strict()},
   status: {input:z.null(),output:statusSchema},
   setManualBlock: {input:z.object({blocked:z.boolean()}),output:statusSchema},
   setMode: {input:z.object({mode:modeSchema}),output:statusSchema},

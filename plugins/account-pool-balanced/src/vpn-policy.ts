@@ -3,6 +3,8 @@ import { open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
+import { GUARD_PROVIDERS } from './guard-network.js';
+import {GuardRequiredError,VpnRequiredError} from './network-errors.js';
 import type { AccountPoolConfig, PoolProvider } from './contracts.js';
 
 export type VpnState = 'connected' | 'disconnected' | 'unknown';
@@ -11,12 +13,7 @@ const stateSchema = z.object({
   updated_unix: z.number().int().nonnegative(),
   state: z.enum(['connected', 'disconnected']),
 });
-export class VpnRequiredError extends Error {
-  readonly code = 'VPN_REQUIRED';
-  constructor(readonly provider: PoolProvider) {
-    super(`VPN_REQUIRED: ${provider} requires a confirmed VPN connection on the pool server.`);
-  }
-}
+export {VpnRequiredError} from './network-errors.js';
 
 export function vpnStateFromPayload(payload: unknown, now: number): VpnState {
   const parsed = stateSchema.safeParse(payload);
@@ -70,6 +67,7 @@ export function createVpnPolicy(
   settings: () => AccountPoolConfig,
   now: () => number,
   injectedState?: () => Promise<VpnState>,
+  guardCheck?: (provider:PoolProvider)=>Promise<void>,
 ) {
   const readState = injectedState ?? (() => readVpnState(
     settings().vpnStatusFile ?? path.join(homedir(), '.local', 'state', 'vpnks', 'vpn-state.json'), now,
@@ -80,6 +78,10 @@ export function createVpnPolicy(
   return {
     state,
     async assert(provider: PoolProvider) {
+      if(settings().vpnGuardEnabled && GUARD_PROVIDERS.some(p=>p===provider)) {
+        if(!guardCheck) throw new GuardRequiredError(provider,true);
+        await guardCheck(provider);
+      }
       if (!settings().vpnOnlyProviders.some(value => value === provider)) return;
       if (await state() !== 'connected') throw new VpnRequiredError(provider);
     },

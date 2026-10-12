@@ -15,3 +15,5 @@ reviewing an interrupted native plugin change; it clears the journal entry
 without changing plugin state.
 
 `bb vpn-guard block` сохраняет ручной блок на выбранных машинах независимо от VPN и режима наблюдения. `bb vpn-guard unblock` снимает его, сохраняя режим. `manualBlock` показан отдельно в status. Ручной блок останавливает защищённые треды; они не повторяются автоматически. Global suspension остаётся отдельным opt-in. При активном блоке нельзя восстанавливать native plugins. Эти команды не закрывают известные обходы Send-now и выполняющихся сетевых запросов.
+
+Pooler0.4.14+: `bb pool config set vpnGuardEnabled true` включает fail-closed связь с Guard0.1.2+ на машине сервера пула. Настройка также доступна в UI. Удаление Guard не открывает трафик связанного пула; удаление/отключение этой связи явно снимает дополнительный барьер. Китайские провайдеры независимы.

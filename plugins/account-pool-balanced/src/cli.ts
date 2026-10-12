@@ -59,7 +59,7 @@ const HELP = [
   "  bb pool status [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|cursor|devin> [--off]",
   "  bb pool config",
-  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile> <value>",
+  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
   "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>]",
   "  bb pool client revoke <name>",
@@ -226,6 +226,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `opencodeGoUpstreamBaseUrl: ${config.opencodeGoUpstreamBaseUrl}`,
     `cursorUpstreamBaseUrl: ${config.cursorUpstreamBaseUrl}`,
     `devinUpstreamBaseUrl: ${config.devinUpstreamBaseUrl}`,
+    `vpnGuardEnabled: ${config.vpnGuardEnabled}`,
     `vpnOnlyProviders: ${config.vpnOnlyProviders.join(",") || "none"}`,
     `vpnStatusFile: ${config.vpnStatusFile ?? "default local guard file"}`,
     `switchThreshold: ${config.switchThreshold}`,
@@ -292,6 +293,7 @@ function parseConfigUpdate(
       reserveDrainHours: Number(value),
     });
   }
+  if (key === "vpnGuardEnabled" && ["true","false"].includes(value)) return accountPoolConfigSetInputSchema.parse({vpnGuardEnabled:value==="true"});
   if (key === "vpnOnlyProviders") return accountPoolConfigSetInputSchema.parse({ vpnOnlyProviders: value === "none" ? [] : value.split(",") });
   if (key === "vpnStatusFile") return accountPoolConfigSetInputSchema.parse({ vpnStatusFile: value === "default" ? null : value });
   if (key === "restDays") {
@@ -303,7 +305,7 @@ function parseConfigUpdate(
     });
   }
   throw new Error(
-    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, or vpnStatusFile.",
+    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, or vpnGuardEnabled.",
   );
 }
 
@@ -401,7 +403,7 @@ export function registerPoolCli(
         name: "config-set",
         summary: "Update one Account Pooler routing configuration value",
         usage:
-          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile> <value>",
+          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|vpnGuardEnabled> <value>",
       },
       {
         name: "token-rotate",

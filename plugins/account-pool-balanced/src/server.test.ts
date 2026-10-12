@@ -440,6 +440,7 @@ describe("Account Pool config schema", () => {
       restDays: [0, 6],
       vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
       vpnStatusFile: null,
+      vpnGuardEnabled: false,
     });
     expect(
       accountPoolConfigSetInputSchema.safeParse({
@@ -7216,4 +7217,70 @@ describe("network policy boundaries", () => {
     await recovered.text();
     expect(outbound).toHaveBeenCalledTimes(2);
   });
+});
+
+describe('VPN Guard linked network policy',()=>{
+  it('blocks model, quota, login and status refresh before any upstream when Guard denies',async()=>{
+    const outbound=vi.fn(async()=>Response.json({}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
+    let blocked=true;
+    const call=vi.fn(async(args:{input?:unknown})=>{
+      expect(args.input).toMatchObject({hostId:'pool-host'});
+      return {schema:'bb-vpn-guard/network-decision/1',allowed:!blocked,reason:blocked?'manual_block':'observe'};
+    });
+    fixture.host.harness.sdk.stub('plugins.callRpc',call);
+    await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true,vpnOnlyProviders:[]});
+    const request=()=>fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
+    const denied=await request();expect(denied.status).toBe(403);expect(denied.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_BLOCKED');
+    await fixture.host.harness.behavior.callRpc('account.refreshUsage',{accountId:fixture.account.id});
+    await expect(fixture.host.harness.behavior.callRpc('login.start',null)).rejects.toThrow('VPN_GUARD_BLOCKED');
+    expect(outbound).not.toHaveBeenCalled();
+    blocked=false;const allowed=await request();expect(allowed.status).toBe(200);await allowed.text();expect(outbound).toHaveBeenCalledTimes(1);
+  });
+  it('reports Guard outage as local refusal without upstream or account poisoning',async()=>{
+    const outbound=vi.fn(async()=>Response.json({}));const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));fixture.host.harness.sdk.stub('plugins.callRpc',async()=>{throw Error('Guard offline');});
+    await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
+    const denied=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
+    expect(denied.status).toBe(403);expect(denied.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_UNAVAILABLE');expect(outbound).not.toHaveBeenCalled();
+    const accounts=z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc('account.list',null));expect(accounts[0]?.error).toBeNull();
+  });
+});
+
+
+it('blocks Guard-linked OAuth quotas and login without corrupting account eligibility',async()=>{
+ const outbound=vi.fn(async()=>Response.json({}));
+ const fixture=await createFixture({
+   upstreamUrl:'https://upstream.example',provider:'codex',source:'import',
+   options:{fetch:outbound,importCodexCredentials:async()=>({
+     accessToken:'synthetic',refreshToken:'refresh',idToken:null,
+     accountId:'fixture-account',email:'fixture@example.com',expiresAt:Date.now()+3600000,
+   })},
+ });
+ fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
+ fixture.host.harness.sdk.stub('plugins.callRpc',async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}));
+ await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});outbound.mockClear();
+ for(const method of ['account.refreshUsage','provider-usage.v1.getResource'] as const) {
+   const input=method==='account.refreshUsage'?{accountId:fixture.account.id}:{resourceId:fixture.account.id,refresh:true};
+   await expect(fixture.host.harness.behavior.callRpc(method,input)).rejects.toThrow('VPN_GUARD_BLOCKED');
+ }
+ await expect(fixture.host.harness.behavior.callRpc('codexLogin.start',null)).rejects.toThrow('VPN_GUARD_BLOCKED');
+ expect(outbound).not.toHaveBeenCalled();
+});
+
+it('cancels a retained linked protected stream through the actual policy service',async()=>{
+ let blocked=false;
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:async()=>new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('first'));}}))}});
+ fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
+ fixture.host.harness.sdk.stub('plugins.callRpc',async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:!blocked,reason:blocked?'manual_block':'observe'}));
+ await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
+ const service=fixture.host.harness.behavior.runService('network-policy');
+ try {
+   const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
+   const reader=response.body!.getReader();expect(new TextDecoder().decode((await reader.read()).value)).toBe('first');
+   blocked=true;
+   const ended=await reader.read().then(r=>r.done,()=>true);expect(ended).toBe(true);
+   await vi.waitFor(async()=>{const value=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));expect(value.inFlight).toBe(0);});
+ }finally{service.controller.abort();await service.done;}
 });

@@ -1,3 +1,5 @@
+import {createGuardNetworkCheck} from "./guard-network.js";
+import {z} from "zod";
 import type { VpnState } from "./vpn-policy.js";
 import {
   createUpstreamTransport,
@@ -135,6 +137,12 @@ export function createAccountPoolPlugin(
       getSettings: () => currentSettings,
       fetch: upstreamFetch,
       vpnState: options.vpnState,
+      guardCheck:createGuardNetworkCheck(async provider=>{
+        const signal=AbortSignal.timeout(1000);
+        const hostId=(await bb.sdk.system.config({signal})).primaryHostId;
+        if(!hostId) throw new Error("Pool server machine unknown");
+        return bb.sdk.plugins.callRpc({pluginId:"vpn-guard",method:"networkDecision",input:{hostId,provider},outputSchema:z.unknown(),signal});
+      }),
       now,
       refreshUrl: options.refreshUrl,
       codexRefreshUrl: options.codexRefreshUrl,
@@ -171,6 +179,12 @@ export function createAccountPoolPlugin(
         await transport.destroy();
       });
     }
+    bb.background.service("network-policy",{async start(signal){
+      while(!signal.aborted){await hub.enforceNetworkPolicy();await new Promise<void>(resolve=>{
+        const done=()=>{clearTimeout(timer);signal.removeEventListener("abort",done);resolve();};
+        const timer=setTimeout(done,1000);signal.addEventListener("abort",done,{once:true});if(signal.aborted)done();
+      });}
+    }});
     const operations = new PoolOperations(
       accounts,
       quotas,

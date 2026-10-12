@@ -142,6 +142,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     reserveDrainHours: 24,
     restDays: [0, 6],
     vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
+    vpnGuardEnabled: false,
     vpnStatusFile: null,
     ...overrides,
   };
@@ -1115,4 +1116,12 @@ it('does not label an armed draining account as outside its closed schedule',asy
  const slot=render([account({drainOnce:true,policy:{enabled:true,fiveHourKeep:null,weeklyKeep:null,reserveDrainHours:null,schedule:{timeZone:'UTC',intervals:[]}}})]);
  await slot.findByText('person@example.com');
  expect(slot.queryByText('Вне расписания')).toBeNull();
+});
+
+it('enables fail-closed VPN Guard linkage through the existing autosave config RPC',async()=>{
+  const slot=render([],{'config.set':()=>config({vpnGuardEnabled:true})});
+  const checkbox=await slot.findByRole('checkbox',{name:'Подчиняться VPN Guard'});
+  fireEvent.click(checkbox);
+  await waitFor(()=>expect(slot.rpcCalls).toContainEqual(expect.objectContaining({method:'config.set',input:{vpnGuardEnabled:true}})));
+  slot.unmount();
 });

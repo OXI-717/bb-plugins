@@ -48,6 +48,8 @@ export function GuardPage() {
       <div className="vg-actions"><button type="button" className="vg-danger" disabled={!ready||!status.hostIds.length} onClick={()=>void change(()=>rpc.call('setManualBlock',{blocked:!status?.manualBlock}))}>{status?.manualBlock?t.unblock:t.block}</button>
         <button type="button" disabled={busy} onClick={()=>void refresh()}>{t.refresh}</button></div>
       <p className="vg-help">{t.blockHelp}</p>
+      <p className="vg-help">{t.poolHelp}</p>
+      {status&&(!status.serverHostId||!status.hostIds.includes(status.serverHostId))&&<p className="vg-error" role="status">{t.serverScopeWarning}</p>}
       <div className="vg-actions" role="group" aria-label={t.mode}>
         <button type="button" aria-pressed={status?.mode==='observe'} disabled={!ready} onClick={()=>void change(()=>rpc.call('setMode',{mode:'observe'}))}>{t.observe}</button>
         <button type="button" aria-pressed={status?.mode==='enforce'} disabled={!ready||!status.hostIds.length} onClick={()=>void change(()=>rpc.call('setMode',{mode:'enforce'}))}>{t.enforce}</button>
