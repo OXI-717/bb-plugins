@@ -6,11 +6,15 @@
 
 В панели можно выбрать RU/EN. Дополнительное глобальное отключение встроенных Codex/Claude включается отдельно и требует ручного восстановления. Это управление BB: Send-now обходит очередь, завершение открытых соединений и bridge-процессов не гарантируется. [Управление и ограничения](docs/operations.md). [Общий стандарт интерфейсов](../../docs/plugin-ui-standard.md).
 
+Guard работает самостоятельно и вместе с Pooler без контроллера автоматизаций. Подключение собственного совместимого контроллера — необязательное расширение для паузы и восстановления расписаний. Контроллер не входит в комплект; статус автоматизаций «Не подключено» без него нормален.
+
 ## English
 
 BB 0.46+ selected-machine admission control for Codex, Claude, Cursor and Devin. Starts in Observe. Enforce holds new protected messages and stops running protected threads on unavailable VPN. **Block** persists a manual override even with connected VPN and in Observe. **Unblock** returns to the selected mode. Kimi and Z.ai remain available. The panel provides RU/EN.
 
 Optional global native Codex/Claude suspension requires separate opt-in and explicit restore. Send-now bypasses admission; active connections and bridges are not proven stopped. See [operations and limits](docs/operations.md). Built from the public BB Plugin SDK; state reading follows Account Pooler policy (MIT).
+
+Guard works independently and with Pooler without an automation controller. Connecting your own compatible controller is optional and adds scheduler pause and recovery. No controller is bundled; an automation status of **Not linked** is normal without one.
 
 
 ## Защита без изменения BB / Plugin-only network protection

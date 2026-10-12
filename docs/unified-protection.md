@@ -2,6 +2,14 @@
 
 VPN Guard coordinates protection on explicitly selected hosts. Account Pooler independently enforces its own provider traffic. An optional host-side automation controller owns scheduler holds and recovery; the default plugin install does not enable it.
 
+## Public setup / Публичная установка
+
+VPN Guard and Account Pooler can be installed and used together without an automation controller. Configure the local VPN state source and selected hosts, then enable Pooler's Guard linkage as described in [plugin-only protection](vpn-plugin-protection-limits.md). This provides the documented protected-thread admission and Pooler request policy. The optional automation controller is not bundled with these public plugins and is not an installation dependency.
+
+VPN Guard и Account Pooler можно установить и использовать вместе без контроллера автоматизаций. Настройте источник VPN-статуса, выберите машины и включите связь Pooler с Guard. Контроллер не входит в комплект публичных плагинов и не является обязательной зависимостью. Без него доступны описанные управление защищёнными тредами и политика запросов пула; общее приостановление и восстановление расписаний не подключено.
+
+The panel's automation status **Not linked** is normal when no controller is configured; it does not indicate a failure of Guard or Pooler protection. **Не подключено** в строке автоматизаций — нормальное состояние без дополнительного контроллера, а не ошибка VPN-защиты.
+
 ## VPN evidence / Подтверждение VPN
 
 Both plugins consume `oxi-vpnks/vpn-state/2`: trusted root-owned non-writable regular file, no symlink, bounded read, file freshness 90 seconds, probe freshness 390 seconds, no future timestamps. Connected requires known `ok` reason, IPv4 coverage, utun244, a positive core PID, successful probe and matching epochs. A malformed or inconsistent sample is unknown and denied. Fixed limits are not replaced by values supplied in JSON.
@@ -14,7 +22,9 @@ The canonical TypeScript predicate is `shared/vpn-evidence.ts`. Identical genera
 
 ## Automation controller / Контроллер автоматизаций
 
-Configure an absolute path to an operator-installed `oxi-auto` executable on the selected BB server host. The executable must implement protocol `oxi-auto/protection-status/1` and the bounded commands `protection status|hold|release|pause|resume --server <instance-id> --json`. Guard holds use `--owner vpn-guard:<instance-id>`; the controller must verify it is connected to that BB instance before scheduler changes. Optional `--reviewed` is explicit operator acknowledgement of ambiguous restoration.
+This is an advanced opt-in integration for an operator's own automation setup, not a required public component. Leave `coordinateAutomations` off unless you already have a compatible controller. Это дополнительная интеграция с собственными автоматизациями: оставьте её выключенной, если совместимого контроллера у вас нет.
+
+To opt in, configure an absolute path to an independently installed `oxi-auto` executable on the selected BB server host. The executable must implement protocol `oxi-auto/protection-status/1` and the bounded commands `protection status|hold|release|pause|resume --server <instance-id> --json`. Guard holds use `--owner vpn-guard:<instance-id>`; the controller must verify it is connected to that BB instance before scheduler changes. Optional `--reviewed` is explicit operator acknowledgement of ambiguous restoration.
 
 Guard manual block, or VPN denial in Enforce, acquires its durable hold. Unblock releases only that owner. A manual Raycast hold, emergency hold or pending recovery remains. Removal never automatically resumes schedules. Guard journals its controller binding before requesting a hold and retries interrupted operations. Changing a binding while a hold exists is refused. Controller errors remain visible and must not be interpreted as complete protection.
 
@@ -30,14 +40,14 @@ Pause disables future scheduled ticks and cooperatively holds controller-aware b
 
 Controller status and restoration operate on at most the documented bounded inventory; incomplete inspection is reported. Snapshot intent survives process failure. Restoration never replays expired one-shots and skips ambiguous pauses unless explicitly reviewed.
 
-See [existing plugin-only limits](vpn-plugin-protection-limits.md). Test the actual writer-to-consumer-to-controller chain in an isolated instance before deployment. Do not activate strict mode against a legacy writer or an unavailable controller.
+See [existing plugin-only limits](vpn-plugin-protection-limits.md). Test the actual writer-to-consumer chain in an isolated instance before deployment; include the controller only if you opt into automation coordination. Do not activate strict mode against a legacy writer, or automation coordination against an unavailable controller.
 
 ## Deployment / Развёртывание
 
-1. Upgrade Guard, Pooler and the compatible automation controller with activation flags off.
+1. Upgrade Guard and Pooler with activation flags off. Upgrade a compatible automation controller only if you use the optional integration.
 2. Deploy the accepted VPN writer in a coordinated idle window.
 3. Confirm a fresh `/2` sample and IPv4 proof on the actual server.
 4. Enable Pooler verification for protected providers, then Guard verification and Enforce; verify explicit denials and recovery.
-5. Opt in to automation coordination and test independent manual/Guard holds. Keep recovery manual.
+5. Optional: connect your compatible automation controller, opt in to coordination and test independent manual/Guard holds. Keep recovery manual. Skip this step for the public Guard + Pooler setup without a controller.
 
 This development cycle prepares code and isolated verification only. Production VPN, pool and automation state are not switched automatically.
