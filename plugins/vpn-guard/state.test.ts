@@ -16,3 +16,8 @@ describe('VPN state contract', () => {
     expect(['kimi','zai','z-ai','opencode-go'].some(protectedProvider)).toBe(false);
   });
 });
+
+it('protects pool aliases without changing Chinese providers',()=>{
+  for(const id of ['acp-oxi-cursor','acp-oxi-devin-pool']) expect(protectedProvider(id)).toBe(true);
+  for(const id of ['acp-opencode-zai','acp-opencode-kimi','acp-opencode']) expect(protectedProvider(id)).toBe(false);
+});

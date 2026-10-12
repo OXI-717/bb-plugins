@@ -1,8 +1,8 @@
 export type Language = 'ru' | 'en';
 export const copy = {
   ru: {
-    title:'VPN Guard', description:'Управляет запуском Codex, Claude, Cursor и Devin на выбранных машинах. Kimi и Z.ai продолжают работать.',
-    language:'Язык', machines:'Машины', machinesHelp:'Выберите машины для защиты. Статус VPN читается на каждой из них отдельно.',
+    serverScopeWarning:'Машина сервера не выбрана или не определена: ручной блок Guard не защищает сетевые вызовы пула на ней.',poolHelp:'В Pooler включите «Подчиняться VPN Guard»: тогда ручной блок закроет также сетевые вызовы пула. Без этой связи Guard управляет только тредами BB.',title:'VPN Guard', description:'Управляет запуском Codex, Claude, Cursor и Devin на выбранных машинах. Kimi и Z.ai продолжают работать.',
+    language:'Язык', machines:'Машины', machinesHelp:'Выберите машины для защиты, включая сервер пула. Статус VPN читается на каждой из них отдельно.',
     connected:'VPN подключён',disconnected:'VPN отключён',unknown:'VPN неизвестен',outside:'Вне защиты',unavailable:'Недоступна',
     control:'Управление',observe:'Наблюдение',enforce:'Защита по VPN',refresh:'Обновить',
     modeHelp:'Наблюдение не блокирует работу. Защита по VPN удерживает новые сообщения и останавливает защищённые треды при потере VPN.',
@@ -13,12 +13,12 @@ export const copy = {
     suspend:'Отключать встроенные плагины глобально',owned:'Отключены Guard',ambiguous:'Нужна ручная проверка',none:'Нет',
     restoreHelp:'Восстановление только вручную. BB не отличает повторное ручное отключение от отключения Guard: перед восстановлением проверьте настройки плагинов.',
     restore:'Восстановить',ack:'Проверено: снять отметку',limits:'Границы защиты',
-    limitText:'«Отправить сейчас» обходит очередь. Уже выполняющиеся скрипты, сетевые запросы и bridge-процессы не гарантированно останавливаются. Другие ACP ID не защищены. Это управление BB, а не сетевой firewall. Обнаружение потери VPN занимает до 5 секунд плюс время проверки машины и остановки.',
+    limitText:'«Отправить сейчас» обходит очередь. Уже выполняющиеся скрипты, сетевые запросы и bridge-процессы не гарантированно останавливаются. Другие ACP ID, кроме перечисленных Cursor/Devin и их Pool-алиасов, не защищены. Это управление BB, а не сетевой firewall. Обнаружение потери VPN занимает до 5 секунд плюс время проверки машины и остановки.',
     errorDetails:'Технические подробности',error:'Не удалось выполнить действие',loading:'Загрузка',mode:'Режим',
   },
   en: {
-    title:'VPN Guard',description:'Controls Codex, Claude, Cursor and Devin on selected machines. Kimi and Z.ai remain available.',
-    language:'Language',machines:'Machines',machinesHelp:'Select protected machines. Each machine supplies its own VPN status.',
+    serverScopeWarning:'The server machine is not selected or unknown: Guard manual block does not cover pool network calls there.',poolHelp:'Enable Follow VPN Guard in Pooler to also gate its provider-network calls. Without linkage, Guard controls BB threads only.',title:'VPN Guard',description:'Controls Codex, Claude, Cursor and Devin on selected machines. Kimi and Z.ai remain available.',
+    language:'Language',machines:'Machines',machinesHelp:'Select protected machines, including the pool server. Each machine supplies its own VPN status.',
     connected:'VPN connected',disconnected:'VPN disconnected',unknown:'VPN unknown',outside:'Outside scope',unavailable:'Unavailable',
     control:'Controls',observe:'Observe',enforce:'Enforce VPN',refresh:'Refresh',
     modeHelp:'Observe does not block work. Enforce VPN holds new messages and stops protected threads when VPN is unavailable.',

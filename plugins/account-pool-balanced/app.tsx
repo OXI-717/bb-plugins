@@ -97,7 +97,7 @@ type DialogState =
 
 type ConfigField = Exclude<
   keyof AccountPoolConfig,
-  "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile"
+  "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "vpnGuardEnabled"
 >;
 
 const PROVIDERS: Array<{
@@ -1393,8 +1393,15 @@ function AccountPoolSettings() {
         Хаб {status?.accepting ? "принимает" : "не принимает"} ·{" "}
         {status?.inFlight ?? 0} в работе · используют {hubHosts}
         {statusIsCached ? " · обновляю…" : null}
-        {status?.vpn?.blockedProviders.length ? " · VPN не подтверждён: защищённые провайдеры заблокированы" : null}
+        {status?.vpn?.blockedProviders.length ? " · защищённые провайдеры заблокированы политикой сети" : null}
       </p>
+      <div className="space-y-2">
+      <label className="flex min-h-9 items-center gap-2 text-sm">
+        <input type="checkbox" className="h-4 w-4 shrink-0" checked={config?.vpnGuardEnabled??false} disabled={config===null||pending!==null} onChange={e=>void saveRouting({vpnGuardEnabled:e.target.checked})}/>
+        Подчиняться VPN Guard
+      </label>
+      <p className="text-xs text-subtle-foreground">Блокирует сетевые вызовы пула к Codex, Claude, Cursor и Devin по решению Guard. Если Guard недоступен — отказ до отправки. Kimi и Z.ai не затрагиваются.</p>
+      </div>
       <p className="flex flex-wrap gap-x-3 text-xs text-subtle-foreground/75">
         {PROVIDERS.map((provider) => (
           <span key={provider.id}>

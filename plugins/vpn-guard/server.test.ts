@@ -423,3 +423,27 @@ describe('manual block CLI and native suspension',()=>{
     await fake.harness.lifecycle.dispose();
   });
 });
+
+it('reports network policy on the actual pool server host independently of provider queue',async()=>{
+  const {fake,states,dispatch}=await setup();
+  states.set('host-a','connected');await select(fake,['host-a']);
+  await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+  expect(await dispatch('acp-oxi-cursor','host-a')).toMatchObject({action:'wait'});
+  expect(await dispatch('acp-oxi-devin-pool','host-a')).toMatchObject({action:'wait'});
+  expect(await fake.harness.behavior.callRpc('networkDecision',{hostId:'host-a',provider:'cursor'})).toMatchObject({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'});
+  expect(await fake.harness.behavior.callRpc('networkDecision',{hostId:'host-b',provider:'cursor'})).toMatchObject({allowed:true,reason:'outside_scope'});
+  await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
+  states.set('host-a','disconnected');
+  expect(await fake.harness.behavior.callRpc('networkDecision',{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:true,reason:'observe'});
+  await mode(fake,'enforce');
+  expect(await fake.harness.behavior.callRpc('networkDecision',{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:false,reason:'vpn_unavailable'});
+  await fake.harness.lifecycle.dispose();
+});
+
+it('stops running pool aliases and preserves Chinese sessions',async()=>{
+  const {fake,stopped,states}=await setup();states.set('host-a','connected');
+  fake.harness.sdk.stub('threads.listRunning',async()=>[{id:'cursor-pool',hostId:'host-a'},{id:'devin-pool',hostId:'host-a'},{id:'chinese',hostId:'host-a'}]);
+  fake.harness.sdk.stub('threads.get',async({threadId})=>makeThreadResponse({id:threadId,providerId:threadId==='cursor-pool'?'acp-oxi-cursor':threadId==='devin-pool'?'acp-oxi-devin-pool':'acp-opencode-zai'}));
+  await select(fake,['host-a']);await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+  expect(stopped).toEqual(['cursor-pool','devin-pool']);await fake.harness.lifecycle.dispose();
+});

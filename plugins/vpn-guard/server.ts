@@ -2,14 +2,13 @@ import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { configurationSchema, hostContract, rpcContract } from './contract.js';
 import { abortableDelay } from './delay.js';
-import { protectedProvider, type VpnState } from './state.js';
+import { protectedProvider, PROTECTED_PROVIDERS, type VpnState } from './state.js';
 
 const CONFIG = 'configuration-v2';
 const JOURNAL = 'owned-disabled-native-plugins-v2';
 const PENDING = 'pending-native-plugin-changes-v2';
 const STOPPED = 'stopped-thread-ids-v1';
 const NATIVE_PLUGINS = ['provider-codex','provider-claude-code'] as const;
-const PROTECTED_PROVIDERS = ['codex','claude','claude-code','cursor','acp-cursor','devin','acp-devin'];
 const LIMITATIONS = [
   'Send-now bypasses message.dispatch.',
   'Native plugin suspension is global across hosts and requires separate opt-in.',
@@ -53,6 +52,8 @@ export default async function plugin(bb: BbPluginApi) {
     catch {return 'unknown';}
   }
   async function status() {
+    let serverHostId:string|null=null;
+    try {serverHostId=(await bb.sdk.system.config()).primaryHostId;} catch {}
     let listed:Awaited<ReturnType<typeof bb.sdk.hosts.list>>;
     try {listed=await bb.sdk.hosts.list();}
     catch {listed=[];}
@@ -62,7 +63,7 @@ export default async function plugin(bb: BbPluginApi) {
       vpn:selected.has(h.id)?await vpn(h.id):null,
     })));
     for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,vpn:'unknown'});
-    return {mode:config.mode,manualBlock:config.manualBlock,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,
+    return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,
       hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],limitations:LIMITATIONS};
   }
   async function saveConfig(next:Configuration) {
@@ -197,7 +198,23 @@ export default async function plugin(bb: BbPluginApi) {
       return state==='connected'?{action:'proceed'}:{action:'wait',reason:`VPN Guard: ${state} on selected host`};
     }
   });
+  async function networkDecision(hostId:string,provider:string) {
+    while(true) {
+      const version=policyVersion;
+      const decision=(allowed:boolean,reason:'manual_block'|'vpn_unavailable'|'outside_scope'|'observe'|'connected'|'restore_required')=>({schema:'bb-vpn-guard/network-decision/1' as const,allowed,reason});
+      if(owned.has(nativePluginFor(provider)) || pending.has(nativePluginFor(provider))) return decision(false,'restore_required');
+      if(!config.hostIds.includes(hostId)) return decision(true,'outside_scope');
+      if(config.manualBlock) return decision(false,'manual_block');
+      if(config.mode==='observe') return decision(true,'observe');
+      let available=false;
+      try {available=(await bb.sdk.hosts.list()).some(h=>h.id===hostId);} catch {}
+      const state=available?await vpn(hostId):'unknown';
+      if(version!==policyVersion) continue;
+      return state==='connected'?decision(true,'connected'):decision(false,'vpn_unavailable');
+    }
+  }
   bb.rpc.register(rpcContract,{
+    networkDecision:({hostId,provider})=>networkDecision(hostId,provider),
     status:()=>status(),
     setManualBlock:({blocked})=>serial(()=>update({...config,manualBlock:blocked})),
     setMode:({mode})=>serial(()=>update({...config,mode})),

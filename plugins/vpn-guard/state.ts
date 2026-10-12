@@ -14,6 +14,7 @@ export function vpnStateFromPayload(payload: unknown, nowMs: number): VpnState {
   return age >= 0 && age <= 60_000 ? parsed.data.state : 'unknown';
 }
 
+export const PROTECTED_PROVIDERS = ['codex','claude','claude-code','cursor','acp-cursor','acp-oxi-cursor','devin','acp-devin','acp-oxi-devin-pool'];
 export function protectedProvider(id: string): boolean {
-  return ['codex', 'claude', 'claude-code', 'cursor', 'acp-cursor', 'devin', 'acp-devin'].includes(id);
+  return PROTECTED_PROVIDERS.includes(id);
 }
