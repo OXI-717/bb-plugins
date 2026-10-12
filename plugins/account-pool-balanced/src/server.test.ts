@@ -515,6 +515,7 @@ describe("Account Pool plugin", () => {
       restDays: [0, 6],
       vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
       vpnStatusFile: null,
+      vpnGuardEnabled: false,
     });
     expect(
       accountPoolConfigSchema.parse(await host.bb.storage.kv.get("config")),
