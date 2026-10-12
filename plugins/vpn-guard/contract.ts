@@ -7,11 +7,13 @@ export const hostContract = defineRpcContract({
 export const modeSchema = z.enum(['observe','enforce']);
 export const configurationSchema = z.object({
   mode: modeSchema,
+  manualBlock: z.boolean().default(false),
   hostIds: z.array(z.string().min(1)).max(256),
   suspendNativePluginsGlobally: z.boolean(),
 }).strict();
 export const statusSchema = z.object({
   mode: modeSchema,
+  manualBlock: z.boolean(),
   hostIds: z.array(z.string()),
   suspendNativePluginsGlobally: z.boolean(),
   hosts: z.array(z.object({
@@ -26,6 +28,7 @@ export const statusSchema = z.object({
 });
 export const rpcContract = defineRpcContract({
   status: {input:z.null(),output:statusSchema},
+  setManualBlock: {input:z.object({blocked:z.boolean()}),output:statusSchema},
   setMode: {input:z.object({mode:modeSchema}),output:statusSchema},
   setHosts: {input:z.object({hostIds:z.array(z.string().min(1)).max(256)}),output:statusSchema},
   setGlobalSuspension: {input:z.object({enabled:z.boolean(),acknowledgeGlobalImpact:z.boolean()}),output:statusSchema},

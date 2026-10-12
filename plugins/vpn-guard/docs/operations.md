@@ -39,3 +39,16 @@ In an isolated BB 0.46 instance with separate data directory and port, disabling
 The Account Pooler independently gates its own model, OAuth, usage, profile, reset and background requests. VPN Guard does not change pool settings, accounts or secrets. It does not intercept arbitrary cross-plugin fetches. Already-running script automations are not stopped; future agent automations use the ordinary admission path, while script-mode network activity is outside this guard. Explicit Send-now bypasses `message.dispatch`. Detection of running turns takes up to five seconds plus host RPC and stop latency. In-flight connections can continue. This is BB control, not a packet firewall or VPN kill switch.
 
 The plugin's focused tests cover state file validation, admission, host scope, stop selection, queue recheck, ownership across restart, interrupted disable, concurrent mode writes and abort listener cleanup. Build and tests do not install or enable it on a working BB.
+
+## Ручная блокировка / Manual block
+
+В панели **«Заблокировать»** (EN: **Block**) блокирует защищённую работу на выбранных машинах даже при подключённом VPN и в режиме наблюдения. Настройка сохраняется после перезапуска. В статусе `manualBlock` показывается отдельно от фактического VPN; данные VPN не подменяются. Требуется хотя бы одна выбранная машина.
+
+```
+bb vpn-guard block
+bb vpn-guard unblock
+```
+
+**«Снять блок»** (EN: **Unblock**) сохраняет текущий режим Observe/Enforce и перечитывает очередь. Уже остановленные задачи не повторяются. Наблюдение не снимает ручной блок: для этого нужна отдельная кнопка или команда `unblock`. При включённом ручном блоке нельзя очистить весь список машин или восстановить встроенные плагины. Если включена дополнительная глобальная блокировка, она действует и при ручном блоке. Снятие блока не восстанавливает эти плагины автоматически.
+
+The persistent `manualBlock` override blocks protected dispatches and stops protected running turns on selected machines even with connected VPN and in Observe. Real VPN status remains visible. At least one selected machine is required. Unblock retains Observe/Enforce and rechecks the queue without replaying stopped turns. Observe does not release a manual block. Global native suspension, when explicitly enabled, also applies during manual block; restore is forbidden until unblock and remains manual. All existing Send-now, script, bridge and in-flight limitations still apply.

@@ -13,3 +13,5 @@ distinguished. Read `docs/operations.md` before enabling.
 Use `bb vpn-guard acknowledge-ambiguous <plugin-id> --reviewed` only after
 reviewing an interrupted native plugin change; it clears the journal entry
 without changing plugin state.
+
+`bb vpn-guard block` сохраняет ручной блок на выбранных машинах независимо от VPN и режима наблюдения. `bb vpn-guard unblock` снимает его, сохраняя режим. `manualBlock` показан отдельно в status. Ручной блок останавливает защищённые треды; они не повторяются автоматически. Global suspension остаётся отдельным opt-in. При активном блоке нельзя восстанавливать native plugins. Эти команды не закрывают известные обходы Send-now и выполняющихся сетевых запросов.

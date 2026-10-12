@@ -337,3 +337,89 @@ describe('guard admission and reconciliation',()=>{
     await fake.harness.lifecycle.dispose();
   });
 });
+
+describe('manual block',()=>{
+  it('blocks connected selected hosts in observe and preserves exclusions',async()=>{
+    const {fake,states,dispatch,stopped}=await setup();
+    states.set('host-a','connected');
+    await select(fake,['host-a']);
+    expect(await fake.harness.behavior.callRpc('setManualBlock',{blocked:true})).toMatchObject({mode:'observe',manualBlock:true});
+    expect(await dispatch('codex','host-a')).toMatchObject({action:'wait',reason:expect.stringContaining('manual')});
+    expect(await dispatch('codex','host-b')).toEqual({action:'proceed'});
+    expect(await dispatch('kimi','host-a')).toEqual({action:'proceed'});
+    expect(stopped).toEqual(['protected']);
+    await fake.harness.lifecycle.dispose();
+  });
+  it('persists block across reload and forbids restore until unblock',async()=>{
+    const {fake}=await setup();
+    await select(fake,['host-b']);
+    await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+    const reloaded=await fake.harness.lifecycle.reload(plugin);
+    expect(await reloaded.harness.behavior.callRpc('status',null)).toMatchObject({manualBlock:true,mode:'observe',hostIds:['host-b']});
+    await expect(reloaded.harness.behavior.callRpc('restoreOwned',null)).rejects.toThrow('manual');
+    await reloaded.harness.lifecycle.dispose();
+  });
+  it('unblocks into previous mode and rechecks queue',async()=>{
+    const {fake,states,dispatch}=await setup();
+    states.set('host-a','connected');
+    await select(fake,['host-a']);await mode(fake,'enforce');
+    await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+    states.set('host-a','disconnected');
+    const before=fake.harness.recheckCount;
+    expect(await fake.harness.behavior.callRpc('setManualBlock',{blocked:false})).toMatchObject({manualBlock:false,mode:'enforce'});
+    expect(fake.harness.recheckCount).toBeGreaterThan(before);
+    expect(await dispatch('codex','host-a')).toMatchObject({action:'wait'});
+    await mode(fake,'observe');
+    expect(await dispatch('codex','host-a')).toEqual({action:'proceed'});
+    await fake.harness.lifecycle.dispose();
+  });
+  it('requires nonempty scope while blocked',async()=>{
+    const {fake}=await setup();
+    await expect(fake.harness.behavior.callRpc('setManualBlock',{blocked:true})).rejects.toThrow('machine');
+    await select(fake,['host-b']);await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+    await expect(select(fake,[])).rejects.toThrow('machine');
+    await fake.harness.lifecycle.dispose();
+  });
+  it('migrates predecessor configuration without losing scope',async()=>{
+    const {fake}=await setup();
+    await fake.bb.storage.kv.set('configuration-v2',{mode:'enforce',hostIds:['host-b'],suspendNativePluginsGlobally:false});
+    const reloaded=await fake.harness.lifecycle.reload(plugin);
+    expect(await reloaded.harness.behavior.callRpc('status',null)).toMatchObject({mode:'enforce',hostIds:['host-b'],manualBlock:false});
+    await reloaded.harness.lifecycle.dispose();
+  });
+});
+
+
+describe('manual block CLI and native suspension',()=>{
+  it('uses the same CLI block policy and only suspends native plugins with explicit opt-in',async()=>{
+    const {fake,enabled,states,mutations}=await setup();
+    states.set('host-b','connected');
+    await select(fake,['host-b']);
+    const blocked=await fake.harness.behavior.runCli(['block']);
+    expect(blocked.exitCode).toBe(0);
+    expect(JSON.parse(blocked.stdout!)).toMatchObject({manualBlock:true,mode:'observe'});
+    expect(mutations).toEqual([]);
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});
+    expect(enabled.get('provider-codex')).toBe(false);
+    expect(enabled.get('provider-acp')).toBe(true);
+    await expect(fake.harness.behavior.callRpc('restoreOwned',null)).rejects.toThrow('manual');
+    expect((await fake.harness.behavior.runCli(['unblock'])).exitCode).toBe(0);
+    expect(enabled.get('provider-codex')).toBe(false);
+    await fake.harness.behavior.callRpc('restoreOwned',null);
+    expect(enabled.get('provider-codex')).toBe(true);
+    await fake.harness.lifecycle.dispose();
+  });
+  it('rechecks a delayed connected decision after manual block is committed',async()=>{
+    const {fake,dispatch}=await setup();
+    await select(fake,['host-b']);await mode(fake,'enforce');
+    let release!:()=>void;let entered!:()=>void;
+    const paused=new Promise<void>(r=>entered=r);
+    const gate=new Promise<void>(r=>release=r);
+    let first=true;
+    fake.harness.sdk.stub('hosts.list',async()=>{if(first){first=false;entered();await gate;}return [makeHostResponse({id:"host-b",name:"host-b"})];});
+    const result=dispatch('codex','host-b');await paused;
+    await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+    release();expect(await result).toMatchObject({action:'wait'});
+    await fake.harness.lifecycle.dispose();
+  });
+});

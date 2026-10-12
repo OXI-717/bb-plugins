@@ -1,0 +1,26 @@
+.vpn-guard {box-sizing:border-box;max-width:768px;margin:0 auto;padding:20px;font:inherit;font-size:14px;line-height:1.5;color:var(--foreground,inherit)}
+.vpn-guard *, .vpn-guard *::before,.vpn-guard *::after {box-sizing:border-box}
+.vpn-guard h1 {font-size:20px;margin:0;font-weight:600}
+.vpn-guard h2 {font-size:14px;margin:0 0 8px;font-weight:600}
+.vpn-guard p {margin:8px 0;overflow-wrap:anywhere}
+.vpn-guard section,.vpn-guard details {border-top:1px solid var(--border,#8884);margin-top:20px;padding-top:16px}
+.vg-header {display:flex;align-items:center;justify-content:space-between;gap:12px}
+.vg-help {font-size:12px;color:var(--muted-foreground,inherit)}
+.vg-actions {display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.vpn-guard button {font:inherit;font-size:14px;min-height:36px;width:160px;max-width:100%;padding:6px 12px;border:1px solid var(--border,#8886);border-radius:6px;background:var(--background,transparent);color:inherit;cursor:pointer}
+.vpn-guard button:disabled {opacity:.45;cursor:not-allowed}
+.vpn-guard button:focus-visible,.vpn-guard input:focus-visible {outline:2px solid var(--ring,currentColor);outline-offset:2px}
+.vpn-guard button[aria-pressed=true] {background:var(--accent,#8882);font-weight:600}
+.vpn-guard .vg-danger {border-color:var(--destructive,#ba3434);color:var(--destructive,#ba3434)}
+.vg-error,.vg-blocked {color:var(--destructive,#ba3434)}
+.vg-languages {display:flex;gap:4px}
+.vpn-guard .vg-language {width:44px;padding:6px}
+.vg-check {display:flex;align-items:center;gap:8px;min-height:36px;cursor:pointer}
+.vg-check input {width:16px;height:16px;margin:0;flex:0 0 16px;accent-color:var(--primary,currentColor)}
+.vg-check span {overflow-wrap:anywhere;min-width:0}
+.vg-machines {list-style:none;margin:0;padding:0}
+.vg-machines li {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border,#8883)}
+.vg-machines li>span {text-align:right;flex-shrink:0}
+.vg-journal {display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+.vg-journal code {overflow-wrap:anywhere;min-width:0}
+@media(max-width:480px) {.vpn-guard {padding:16px}.vpn-guard button {min-height:40px}.vg-actions {display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.vg-actions button {width:100%}.vg-machines li {align-items:flex-start;flex-direction:column;gap:0}.vg-machines li>span {text-align:left;margin-left:24px}}
