@@ -6,6 +6,10 @@ Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its 
 
 A separate observation-first plugin holds protected BB dispatches and stops protected turns by host-local VPN state. See [VPN Guard operations](plugins/vpn-guard/docs/operations.md). It does not replace a network kill switch.
 
+VPN Guard and Account Pooler work together without an automation controller. The optional controller integration adds scheduler pause and recovery; no controller is bundled or required for the plugins' VPN protection. See [public setup and optional integrations](docs/unified-protection.md).
+
+VPN Guard и Account Pooler работают вместе без контроллера автоматизаций. Дополнительное подключение контроллера позволяет приостанавливать и восстанавливать расписания. Контроллер не входит в комплект и не требуется для VPN-защиты плагинов.
+
 ## Account Pool Balanced
 
 Use multiple accounts of the same provider, track available quota and switch accounts when needed. Sequential and balanced routing, primary/reserve accounts, per-account caps and session affinity are supported.
