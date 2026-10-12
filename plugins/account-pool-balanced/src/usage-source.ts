@@ -64,6 +64,12 @@ const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
   devin: "Devin",
 };
 
+// Devin's adapter has no quota collector. Do not advertise an unmeasurable
+// resource as a failed collection; the account remains available for routing.
+function reportsUsage(account: Pick<AccountSummary, "provider">): boolean {
+  return account.provider !== "devin";
+}
+
 export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
   bb.rpc.register(
     usageSourceRpcContract,
@@ -72,7 +78,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
         const { accounts } = await hub.status();
         return {
           label: "Account Pooler",
-          resources: accounts.map((account) => ({
+          resources: accounts.filter(reportsUsage).map((account) => ({
             id: account.id,
             accountKey: accountKey(account),
             providerId: USAGE_PROVIDER_IDS[account.provider],
@@ -82,18 +88,14 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
         };
       },
       async [usageFetchMethod]({ resourceId, refresh }) {
-        if (
-          !(await hub.status()).accounts.some(
-            (account) => account.id === resourceId,
-          )
-        )
-          throw new Error("Usage resource no longer exists.");
         const account = (await hub.status()).accounts.find(account => account.id === resourceId);
-        if (account) await hub.assertNetworkAllowed(account.provider);
+        if (!account) throw new Error("Usage resource no longer exists.");
+        if (!reportsUsage(account)) throw new Error("Quota reporting is not available for Devin.");
+        await hub.assertNetworkAllowed(account.provider);
         await hub.refreshUsage(resourceId, refresh, true);
         const { accounts: allAccounts } = await hub.status();
         const accounts = allAccounts.filter(
-          (account) => account.id === resourceId,
+          (account) => account.id === resourceId && reportsUsage(account),
         );
         if (accounts.length === 0)
           throw new Error("Usage resource no longer exists.");

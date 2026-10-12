@@ -718,6 +718,33 @@ describe("Account Pool plugin", () => {
     expect(exchanged.accessToken).not.toBe("cursor-subscription-key");
   });
 
+  it("omits unsupported Devin quota resources without removing the pooled account", async () => {
+    const outbound = vi.fn(async () => Response.json({}));
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "devin",
+      apiKey: "cog_test_pat",
+      options: { fetch: outbound },
+    });
+    const supported = accountSchema.parse(await fixture.host.harness.behavior.callRpc("account.add", {
+      provider: "kimi",
+      source: { kind: "api-key", apiKey: "kimi_test_key" },
+      label: null,
+      priority: 100,
+    }));
+    const inventory = await fixture.host.harness.behavior.callRpc("provider-usage.v1.listResources", {});
+    expect(inventory).toMatchObject({ label: "Account Pooler", resources: [{ id: supported.id }] });
+    const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
+    expect(accounts.some(account => account.id === fixture.account.id && account.enabled)).toBe(true);
+    outbound.mockClear(); // Ignore the supported account's initial quota collection.
+    for (const refresh of [false, true]) {
+      await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
+        resourceId: fixture.account.id, refresh,
+      })).rejects.toThrow("Quota reporting is not available for Devin.");
+    }
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
   it("routes Devin protobuf RPCs with the selected PAT and keeps the machine token upstream-private", async () => {
     const requests: Request[] = [];
     const fixture = await createFixture({
