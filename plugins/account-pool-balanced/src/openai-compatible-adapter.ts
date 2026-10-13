@@ -1,3 +1,4 @@
+import { poolErrorResponse } from "./pool-errors.js";
 import type {
   AccountPoolConfig,
   AccountQuota,
@@ -172,17 +173,8 @@ export function createOpenAiCompatibleAdapter(
       );
       if (quota !== null) context.quotas.put(quota);
     },
-    errorResponse(status, message, headers) {
-      return Response.json(
-        {
-          error: {
-            message,
-            type: status === 429 ? "rate_limit_error" : "api_error",
-            code: status === 429 ? "rate_limit_exceeded" : null,
-          },
-        },
-        { status, headers },
-      );
+    errorResponse(status, message, headers, request) {
+      return poolErrorResponse(options.provider, status, message, headers, request);
     },
   };
 }

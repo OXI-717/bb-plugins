@@ -1,3 +1,4 @@
+import { poolErrorResponse } from "./pool-errors.js";
 import { z } from "zod";
 import { parseCodexRequestBody } from "./request-body.js";
 import {
@@ -415,17 +416,8 @@ export function createCodexAdapter(options: {
         });
       } else context.quotas.clearResetCredits(context.account.id);
     },
-    errorResponse(status, message, headers) {
-      return Response.json(
-        {
-          error: {
-            message,
-            type: status === 429 ? "rate_limit_error" : "api_error",
-            code: status === 429 ? "rate_limit_exceeded" : null,
-          },
-        },
-        { status, headers },
-      );
+    errorResponse(status, message, headers, request) {
+      return poolErrorResponse("codex", status, message, headers, request);
     },
   };
 }

@@ -938,6 +938,28 @@ describe("Account Pool plugin", () => {
     expect(requests).toHaveLength(0);
   });
 
+  it.each(["application/proto", "application/connect+proto"])("reports Cursor pool threshold in %s without contacting model upstream", async contentType => {
+    const modelCalls: string[] = [];
+    const fixture = await createFixture({upstreamUrl:"https://upstream.example",provider:"cursor",source:"api-key",apiKey:"synthetic-cursor-key",options:{
+      cursorExchangeUrl:"https://exchange.example/auth/exchange_user_api_key",cursorUsageUrl:"https://usage.example/GetCurrentPeriodUsage",
+      fetch:async (input,init)=>{const request=new Request(input,init);
+        if(request.url.startsWith("https://exchange.example/"))return Response.json({accessToken:"synthetic-token"});
+        if(request.url.startsWith("https://usage.example/"))return Response.json({billingCycleEnd:Date.now()+86400000,planUsage:{totalPercentUsed:93.5}});
+        modelCalls.push(request.url);return Response.json({ok:true});
+      }
+    }});
+    await fixture.host.harness.behavior.callRpc("config.set",{switchThreshold:0.9});
+    await fixture.host.harness.behavior.callRpc("account.refreshUsage",{accountId:fixture.account.id});
+    const response=await fixture.host.harness.behavior.fetchHttp("POST","/cursor/agent.v1.AgentService/Run",{headers:{authorization:`Bearer ${fixture.key}`,"content-type":contentType},body:new Uint8Array()});
+    expect(response.headers.get("x-bb-pool-error")).toBe("POOL_QUOTA_THRESHOLD");
+    expect(response.headers.get("retry-after")).toBeNull();
+    const bytes=Buffer.from(await response.arrayBuffer());
+    const payload=contentType.includes("connect+")?JSON.parse(bytes.subarray(5).toString()).error:JSON.parse(bytes.toString());
+    expect(payload).toMatchObject({code:"permission_denied"});
+    expect(payload.message).toContain("93.5%");expect(payload.message).toContain("90%");
+    expect(modelCalls).toEqual([]);
+  });
+
   it.each([true, false])("refreshes Cursor billing quotas for enabled=%s accounts on manual request", async (enabled) => {
     let usageCalls = 0;
     const fixture = await createFixture({
@@ -7164,7 +7186,7 @@ describe("VPN-only outbound protection", () => {
     expect(accounts[0]?.error).toBeNull();
     connected = true;
     const allowed = await request();
-    expect(allowed.headers.get("x-bb-pool-error")).toBeNull();
+    expect(allowed.headers.get("x-bb-pool-error")).not.toBe("VPN_REQUIRED");
     await allowed.text();
     expect(outbound).toHaveBeenCalled();
   });

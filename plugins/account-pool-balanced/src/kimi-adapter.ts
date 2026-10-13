@@ -1,3 +1,4 @@
+import { poolErrorResponse } from "./pool-errors.js";
 import type { ProviderAdapter } from "./provider-adapter.js";
 import { filterRequestHeaders, mountedUpstreamUrl } from "./provider-adapter.js";
 import { kimiQuotaFromUsages } from "./kimi-usage.js";
@@ -80,17 +81,8 @@ export function createKimiAdapter(options: { usagesUrl: string }): ProviderAdapt
       );
       if (quota !== null) context.quotas.put(quota);
     },
-    errorResponse(status, message, headers) {
-      const type =
-        status === 401
-          ? "authentication_error"
-          : status === 429
-            ? "rate_limit_error"
-            : "api_error";
-      return Response.json(
-        { type: "error", error: { type, message } },
-        { status, headers },
-      );
+    errorResponse(status, message, headers, request) {
+      return poolErrorResponse("kimi", status, message, headers, request);
     },
   };
 }
