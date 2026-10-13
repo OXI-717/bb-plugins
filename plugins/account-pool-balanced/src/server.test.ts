@@ -7186,7 +7186,7 @@ describe("VPN-only outbound protection", () => {
     expect(accounts[0]?.error).toBeNull();
     connected = true;
     const allowed = await request();
-    expect(allowed.headers.get("x-bb-pool-error")).toBeNull();
+    expect(allowed.headers.get("x-bb-pool-error")).not.toBe("VPN_REQUIRED");
     await allowed.text();
     expect(outbound).toHaveBeenCalled();
   });

@@ -16,7 +16,7 @@ export function poolErrorResponse(provider:PoolProvider,status:number,message:st
  if(provider==='cursor'){
   const code=status===401?'unauthenticated':status===403?'permission_denied':status===429?'resource_exhausted':status===499?'canceled':status>=500?'unavailable':'invalid_argument';
   const error={code,message:text};
-  const contentType=request?.headers.get('content-type')?.split(';')[0]?.trim();
+  const contentType=request?.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
   if(contentType==='application/connect+proto'||contentType==='application/connect+json'){
    const payload=new TextEncoder().encode(JSON.stringify({error}));
    const frame=new Uint8Array(5+payload.length);frame[0]=2;new DataView(frame.buffer).setUint32(1,payload.length);frame.set(payload,5);

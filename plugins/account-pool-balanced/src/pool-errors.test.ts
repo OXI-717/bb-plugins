@@ -5,9 +5,9 @@ it('renders Cursor unary Connect errors with a stable policy reason',async()=>{
  expect(r.status).toBe(403);expect(r.headers.get('retry-after')).toBeNull();
  expect(await r.json()).toMatchObject({code:'permission_denied',message:expect.stringContaining('POOL_QUOTA_THRESHOLD')});
 });
-it.each(['proto','json'])('renders framed Cursor %s streaming EndStream errors',async codec=>{
+it.each(['proto','json','Proto'])('renders framed Cursor %s streaming EndStream errors',async codec=>{
  const r=poolErrorResponse('cursor',403,'Quota policy blocked',{'x-bb-pool-error':'POOL_QUOTA_THRESHOLD'},new Request('http://fixture.test',{headers:{'content-type':'application/connect+'+codec}}));
- expect(r.status).toBe(200);expect(r.headers.get('content-type')).toBe('application/connect+'+codec);
+ expect(r.status).toBe(200);expect(r.headers.get('content-type')).toBe('application/connect+'+codec.toLowerCase());
  const bytes=Buffer.from(await r.arrayBuffer());expect(bytes[0]).toBe(2);expect(bytes.readUInt32BE(1)).toBe(bytes.length-5);
  expect(JSON.parse(bytes.subarray(5).toString())).toMatchObject({error:{code:'permission_denied',message:expect.stringContaining('POOL_QUOTA_THRESHOLD')}});
 });

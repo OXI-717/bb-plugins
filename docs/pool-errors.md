@@ -8,6 +8,8 @@ Pooler-owned failures have a stable reason in `x-bb-pool-error`, in the message 
 | POOL_QUOTA_EXHAUSTED | Provider quota exhausted / Исчерпан лимит провайдера |
 | POOL_RATE_LIMITED | Temporary pacing / Временное ограничение частоты |
 | POOL_AUTH_REQUIRED | Authentication rejected or unavailable / Ошибка авторизации |
+| POOL_ACCESS_DENIED | Provider or access-policy refusal / Отказ провайдера или политики доступа |
+| POOL_REQUEST_REJECTED | Other request rejection / Запрос отклонён |
 | POOL_ACCOUNT_UNAVAILABLE | All applicable accounts have stored errors; inspect cards / У аккаунтов сохранены ошибки, проверьте карточки |
 | POOL_ACCOUNT_POLICY | Other account eligibility rules / Аккаунты недоступны по настройкам пула |
 | POOL_NO_ACCOUNTS | No enabled account / Нет включённого аккаунта |

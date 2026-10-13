@@ -1294,7 +1294,7 @@ export class AccountPoolHub {
     }
     accounts = accounts.filter(account => account.enabled && (account.drainOnce || scheduleAllows(account.policy, now)));
     if (accounts.every(account => this.options.quotas.get(account.id).error !== null)) {
-      return this.errorResponse(adapter, request, 503,
+      return this.errorResponse(adapter, request, 403,
         `${adapter.upstreamName}: аккаунты недоступны из-за сохранённых ошибок авторизации или подключения; проверьте карточки / Accounts have stored credential or connection errors.`,
         {"x-bb-pool-error":"POOL_ACCOUNT_UNAVAILABLE"});
     }
