@@ -206,7 +206,7 @@ export function createAccountPoolPlugin(
       authorizeUrl: options.oauthAuthorizeUrl,
       tokenUrl: options.oauthTokenUrl,
       profileUrl: options.oauthProfileUrl,
-      addAccount: (authenticated) => operations.addOAuth(authenticated),
+      addAccount: (authenticated, targetAccountId) => operations.addOAuth(authenticated, targetAccountId),
     });
     const codexLogin = new CodexDeviceLogin({
       fetch: hub.outboundFetch("codex"),

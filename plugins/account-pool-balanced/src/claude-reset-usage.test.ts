@@ -76,9 +76,33 @@ it.each([400, 404, 422])("falls back once on unsupported usage query (HTTP %s)",
   expect(f.quotas.resetCredits(f.account.id)).toBeNull();
 });
 
-it.each([401, 403, 429, 503])("does not retry HTTP %s as a query compatibility failure", async (status) => {
+it.each([403, 429, 503])("does not retry HTTP %s as a query compatibility failure", async (status) => {
   const f = await fixture();
   let requests = 0;
   await f.refresh(async () => { requests++; return new Response(null, { status }); });
   expect(requests).toBe(1);
+});
+
+it("retries HTTP 401 for authorization without dropping the usage query", async () => {
+  const f = await fixture();
+  const urls: string[] = [];
+  await expect(f.refresh(async input => {
+    urls.push(String(input));
+    return new Response(null, { status: 401 });
+  })).rejects.toThrow("after refreshing access");
+  expect(urls).toHaveLength(2);
+  expect(urls[0]).toBe(urls[1]);
+  expect(urls[0]).toContain("cedar_ember=1");
+});
+
+it("reports HTTP 401 after compatibility fallback instead of hiding authorization refusal", async () => {
+  const f = await fixture();
+  const urls: string[] = [];
+  await expect(f.refresh(async input => {
+    const url=String(input);urls.push(url);
+    return new Response(null, { status: url.includes('?') ? 400 : 401 });
+  })).rejects.toThrow("after refreshing access");
+  expect(urls).toHaveLength(4);
+  expect(urls[0]).toBe(urls[2]);
+  expect(urls[1]).toBe(urls[3]);
 });

@@ -1,4 +1,5 @@
 import { NetworkFlights } from "./network-flights.js";
+import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
 import { createVpnPolicy, VpnRequiredError, type VpnState } from "./vpn-policy.js";
 import { isRecoverableAccessError } from "./recoverable-access.js";
 import { projectTier, projectRole } from "./project-policy.js";
@@ -169,6 +170,9 @@ export class AccountPoolHub {
   private readonly inFlightByAccount = new Map<string, number>();
   private readonly activeControllers = new Set<AbortController>();
   private readonly refreshes = new Map<string, SecretFlight>();
+  // Internal binding only: rejected tokens must never become error properties
+  // that RPC serializers or diagnostics could expose.
+  private readonly authorizationFailures = new WeakMap<AccountAuthorizationRequiredError, AccountSecret>();
   private readonly refreshBackoffs = new Map<string, RefreshBackoff>();
   private readonly pacingByAccount = new Map<string, PacingFlight>();
   private affinityBindings = new Map<string, AccountBinding>();
@@ -278,6 +282,45 @@ export class AccountPoolHub {
     );
   }
 
+  async replaceAccountAuthorization<T>(
+    accountId: string,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    // Finish quota checks using the old authorization before replacing it, so
+    // their late refusal cannot mark the newly authorized account as broken.
+    await this.usageRefreshes.get(accountId)?.catch(() => undefined);
+    const previous = this.refreshes.get(accountId);
+    let result: T;
+    let failure: unknown;
+    let failed = false;
+    const flight: Extract<SecretFlight, { kind: "refresh" }> = {
+      kind: "refresh",
+      use: { kind: "normal" },
+      result: Promise.resolve().then(async () => {
+        if (previous) await previous.result.catch(() => undefined);
+        try {
+          result = await write();
+        } catch (error) {
+          failed = true;
+          failure = error;
+        }
+        return this.options.accounts.readSecret(accountId).catch(error => {
+          if (failed) throw failure;
+          throw error;
+        });
+      }),
+    };
+    this.refreshes.set(accountId, flight);
+    try {
+      await flight.result;
+      if (failed) throw failure;
+      return result!;
+    } finally {
+      if (this.refreshes.get(accountId) === flight)
+        this.refreshes.delete(accountId);
+    }
+  }
+
   private async refreshAccountUsage(
     account: Account,
     force: boolean,
@@ -299,19 +342,33 @@ export class AccountPoolHub {
     const running = this.usageRefreshes.get(account.id);
     if (running !== undefined) return running;
     this.lastUsageRefreshAt.set(account.id, now);
+    let usageSecret: AccountSecret | undefined;
     const refresh = adapter
       .refreshUsage({
         account,
-        freshSecret: (rejectedAccessToken) =>
-          this.freshSecret(account, adapter, rejectedAccessToken === undefined
+        freshSecret: async (rejectedAccessToken) => {
+          const secret = await this.freshSecret(account, adapter, rejectedAccessToken === undefined
             ? { kind: "normal" }
-            : { kind: "rejected", accessToken: rejectedAccessToken }),
+            : { kind: "rejected", accessToken: rejectedAccessToken });
+          usageSecret = secret;
+          return secret;
+        },
         accounts: this.options.accounts,
         quotas: this.options.quotas,
         fetch: (input, init) => this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
         now: this.options.now,
       })
       .then(async () => { await this.settleDrain(account); })
+      .catch(async error => {
+        if (error instanceof AccountAuthorizationRequiredError) {
+          const rejected = this.authorizationFailures.get(error) ?? usageSecret;
+          const marked = rejected === undefined ? false : await this.markAuthError(account, rejected, error.accountMessage, this.stopped.signal);
+          if (!marked) throw new TransientOAuthRefreshError("Авторизация изменилась во время проверки квот. Повторите проверку / Authorization changed while checking quotas; retry.", 0);
+          this.options.onAccountsChanged();
+          throw new Error(error.accountMessage);
+        }
+        throw error;
+      })
       .finally(() => this.usageRefreshes.delete(account.id));
     this.usageRefreshes.set(account.id, refresh);
     return refresh;
@@ -547,6 +604,10 @@ export class AccountPoolHub {
           signal.throwIfAborted();
           if (error instanceof TransientOAuthRefreshError) {
             failure = { status: 503, message: error.message, headers: {} };
+          } else if (error instanceof AccountAuthorizationRequiredError) {
+            const rejected = this.authorizationFailures.get(error);
+            if (rejected !== undefined)
+              await this.markAuthError(selected.account, rejected, error.accountMessage, signal);
           } else {
             this.markError(selected.account.id, errorMessage(error));
           }
@@ -779,10 +840,10 @@ export class AccountPoolHub {
     rejected: AccountSecret,
     message: string,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (rejected.kind !== "oauth") {
       this.markError(account.id, message);
-      return;
+      return true;
     }
     while (true) {
       signal.throwIfAborted();
@@ -797,6 +858,7 @@ export class AccountPoolHub {
         );
         continue;
       }
+      let marked = false;
       const flight: SecretFlight = {
         kind: "rejection-check",
         result: this.options.accounts
@@ -813,6 +875,7 @@ export class AccountPoolHub {
               )
             ) {
               this.markError(account.id, message);
+              marked = true;
             }
           })
           .finally(() => {
@@ -822,7 +885,7 @@ export class AccountPoolHub {
       };
       this.refreshes.set(account.id, flight);
       await abortable(flight.result, signal);
-      return;
+      return marked;
     }
   }
 
@@ -1108,6 +1171,8 @@ export class AccountPoolHub {
               }
               return result.secret;
             } catch (error) {
+              if (error instanceof AccountAuthorizationRequiredError)
+                this.authorizationFailures.set(error, secret);
               if (
                 !(error instanceof TransientOAuthRefreshError) ||
                 secret.kind !== "oauth"
@@ -1500,6 +1565,7 @@ function readBearer(value: string | null): string | null {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof AccountAuthorizationRequiredError) return error.accountMessage;
   return error instanceof Error ? error.message : String(error);
 }
 

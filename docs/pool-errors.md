@@ -24,4 +24,6 @@ A configured threshold refusal is not proof that the provider has spent the whol
 
 У каждой причины свой код. Настроенный запас квоты отличается от полного исчерпания. Проценты и известное время сброса отображаются без email, ключей и идентификаторов аккаунтов. Ошибки сохранённой авторизации не выдаются за исчерпанный лимит.
 
+For Claude OAuth refusal, use [reauthorization in the existing card / повторный вход в ту же карточку](claude-reauthorization.md). Removing the subscription is unnecessary.
+
 Scope: local Pooler refusals and adapter error responses. External BB/CLI wrappers may prepend their own text. Upstream passthrough bodies and a transport disconnect after a stream has started retain their existing behavior. No routing, quota thresholds, account credentials or retry policy is changed by this formatting update.
