@@ -960,6 +960,110 @@ describe("Account Pool plugin", () => {
     expect(modelCalls).toEqual([]);
   });
 
+  it.each([200,401])('checks Claude authorization on enable and reports repeated usage HTTP %s',async finalStatus=>{
+    let rejectUsage=false;
+    let refreshCalls=0;
+    const fixture=await createFixture({upstreamUrl:'https://fixture.example',source:'import',options:{
+      importCredentials:async()=>importedCredentials({expiresAt:null}),
+      refreshUrl:'https://refresh.example',
+      fetch:async(input,init)=>{
+        if(String(input)==='https://refresh.example'){
+          refreshCalls++;
+          return Response.json({access_token:'replacement-fixture-access',refresh_token:'replacement-fixture-refresh',expires_in:3600});
+        }
+        if(rejectUsage&& (new Headers(init?.headers).get('authorization')!=='Bearer replacement-fixture-access'||finalStatus===401)) return new Response(null,{status:401});
+        return Response.json({seven_day:{utilization:10}});
+      },
+    }});
+    await fixture.host.harness.behavior.callRpc('account.disable',{id:fixture.account.id});
+    rejectUsage=true;
+    await fixture.host.harness.behavior.callRpc('account.enable',{id:fixture.account.id});
+    const current=(await fixture.host.harness.behavior.callRpc('account.list',null) as AccountSummary[])[0]!;
+    expect(refreshCalls).toBe(1);
+    expect(current.enabled).toBe(true);
+    if(finalStatus===401){expect(current.status).toBe('error');expect(current.error).toContain('OAUTH_REAUTH_REQUIRED');}
+    else {expect(current.error).toBeNull();}
+  });
+
+  it.each([true,false])('persists terminal Claude OAuth refusal from quota refresh for enabled=%s',async enabled=>{
+    const fixture=await createFixture({upstreamUrl:'https://fixture.example',source:'import',options:{importCredentials:async()=>importedCredentials({expiresAt:Date.now()+1000}),refreshUrl:'https://refresh.example',fetch:async()=>Response.json({error:'invalid_grant',error_description:'never-display-this-value'},{status:400})}});
+    if(!enabled)await fixture.host.harness.behavior.callRpc('account.disable',{id:fixture.account.id});
+    await expect(fixture.host.harness.behavior.callRpc('account.refreshUsage',{accountId:fixture.account.id})).rejects.toThrow('OAUTH_REAUTH_REQUIRED');
+    const account=(await fixture.host.harness.behavior.callRpc('account.list',null) as AccountSummary[])[0];
+    expect(account).toMatchObject({enabled,status:enabled?'error':'disabled',eligible:false});
+    expect(account?.error).toContain('invalid_grant');
+    expect(account?.error).not.toContain('never-display-this-value');
+  });
+
+  it.each([true,false])('reauthorizes an existing Claude account without resetting enabled=%s or settings',async enabled=>{
+    const uuid='00000000-0000-4000-8000-000000000001';let profileUuid=uuid;
+    const fixture=await createFixture({upstreamUrl:'https://fixture.example',source:'import',options:{
+      importCredentials:async()=>importedCredentials({accountUuid:uuid,email:'fixture@example.com'}),
+      oauthTokenUrl:'https://login.example/token',oauthProfileUrl:'https://login.example/profile',
+      fetch:async input=>String(input).includes('/token')?Response.json({access_token:'new-fixture-access',refresh_token:'new-fixture-refresh',expires_in:3600}):String(input).includes('/profile')?Response.json({account:{uuid:profileUuid,email:'fixture@example.com'}}):Response.json({seven_day:{utilization:10}}),
+    }});
+    await fixture.host.harness.behavior.callRpc('account.setRole',{accountId:fixture.account.id,role:'reserve'});
+    await fixture.host.harness.behavior.callRpc('account.setPriority',{accountId:fixture.account.id,priority:7});
+    const projects={onlySelected:true,rules:[{projectId:'project-fixture',role:'primary'}]};
+    const policy={enabled:true,weeklyKeep:50};
+    await fixture.host.harness.behavior.callRpc('account.setProjects',{accountId:fixture.account.id,projects});
+    await fixture.host.harness.behavior.callRpc('account.setPolicy',{accountId:fixture.account.id,policy});
+    if(!enabled)await fixture.host.harness.behavior.callRpc('account.disable',{id:fixture.account.id});
+    const before=(await fixture.host.harness.behavior.callRpc('account.list',null) as AccountSummary[])[0]!;
+    const started=await fixture.host.harness.behavior.callRpc('login.reauthorize',{accountId:fixture.account.id}) as {sessionId:string;authorizeUrl:string};
+    const state=new URL(started.authorizeUrl).searchParams.get('state');
+    await fixture.host.harness.behavior.callRpc('login.complete',{sessionId:started.sessionId,pasted:`fixture-code#${state}`});
+    const after=(await fixture.host.harness.behavior.callRpc('account.list',null) as AccountSummary[]);
+    expect(after).toHaveLength(1);expect(after[0]).toMatchObject({id:before.id,enabled,priority:7,role:'reserve',label:before.label,createdAt:before.createdAt});
+    const store=new AccountStore(fixture.host.bb.storage.kv,path.join(fixture.dataDir,'plugins',fixture.host.bb.pluginId,'secrets','accounts'));
+    expect((await store.get(before.id))?.projects).toEqual(projects);
+    expect((await store.get(before.id))?.policy).toMatchObject(policy);
+    const authorization=await store.readSecret(before.id);
+    // The identity mismatch must leave the currently stored authorization intact.
+    profileUuid='00000000-0000-4000-8000-000000000002';
+    const next=await fixture.host.harness.behavior.callRpc('login.reauthorize',{accountId:before.id}) as {sessionId:string;authorizeUrl:string};
+    await expect(fixture.host.harness.behavior.callRpc('login.complete',{sessionId:next.sessionId,pasted:`other-code#${new URL(next.authorizeUrl).searchParams.get('state')}`})).rejects.toThrow('different account');
+    expect((await store.get(before.id))?.id).toBe(before.id);
+    expect(await store.readSecret(before.id)).toEqual(authorization);
+    const removed=await fixture.host.harness.behavior.callRpc('login.reauthorize',{accountId:before.id}) as {sessionId:string;authorizeUrl:string};
+    await fixture.host.harness.behavior.callRpc('account.remove',{id:before.id});
+    await expect(fixture.host.harness.behavior.callRpc('login.complete',{sessionId:removed.sessionId,pasted:`removed-code#${new URL(removed.authorizeUrl).searchParams.get('state')}`})).rejects.toThrow('no longer exists');
+    expect(await fixture.host.harness.behavior.callRpc('account.list',null)).toEqual([]);
+  });
+
+  it('finishes an old failing quota check before replacing Claude authorization',async()=>{
+    const uuid='00000000-0000-4000-8000-000000000001';
+    const started=deferred(),release=deferred(),profileSeen=deferred();
+    let rejectOld=false;
+    const fixture=await createFixture({upstreamUrl:'https://fixture.example',source:'import',options:{
+      importCredentials:async()=>importedCredentials({accountUuid:uuid,email:'fixture@example.com',expiresAt:null}),
+      refreshUrl:'https://refresh.example',oauthTokenUrl:'https://login.example/token',oauthProfileUrl:'https://login.example/profile',
+      fetch:async(input,init)=>{
+        const url=String(input);
+        if(url==='https://refresh.example')return Response.json({error:'invalid_grant'},{status:400});
+        if(url.includes('/token'))return Response.json({access_token:'new-fixture-access',refresh_token:'new-fixture-refresh',expires_in:3600});
+        if(url.includes('/profile')){profileSeen.resolve();return Response.json({account:{uuid,email:'fixture@example.com'}});}
+        if(rejectOld&&new Headers(init?.headers).get('authorization')!=='Bearer new-fixture-access'){
+          started.resolve();await release.promise;return new Response(null,{status:401});
+        }
+        return Response.json({seven_day:{utilization:10}});
+      },
+    }});
+    rejectOld=true;
+    const oldCheck=fixture.host.harness.behavior.callRpc('account.refreshUsage',{accountId:fixture.account.id}).catch(()=>undefined);
+    await started.promise;
+    const login=await fixture.host.harness.behavior.callRpc('login.reauthorize',{accountId:fixture.account.id}) as {sessionId:string;authorizeUrl:string};
+    let completed=false;
+    const replacement=fixture.host.harness.behavior.callRpc('login.complete',{sessionId:login.sessionId,pasted:`race-code#${new URL(login.authorizeUrl).searchParams.get('state')}`}).then(()=>{completed=true;});
+    await profileSeen.promise;
+    await new Promise(resolve=>setImmediate(resolve));
+    expect(completed).toBe(false);
+    release.resolve();await oldCheck;await replacement;
+    const current=(await fixture.host.harness.behavior.callRpc('account.list',null) as AccountSummary[])[0]!;
+    expect(current.error).toBeNull();
+    expect(current.id).toBe(fixture.account.id);
+  });
+
   it.each([true, false])("refreshes Cursor billing quotas for enabled=%s accounts on manual request", async (enabled) => {
     let usageCalls = 0;
     const fixture = await createFixture({

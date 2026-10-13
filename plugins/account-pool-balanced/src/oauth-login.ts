@@ -45,6 +45,7 @@ const profileResponseSchema = z
   .passthrough();
 
 interface LoginSession {
+  targetAccountId?: string;
   sessionId: string;
   codeVerifier: string;
   state: string;
@@ -69,7 +70,7 @@ export interface ClaudeOAuthLoginOptions {
   authorizeUrl?: string;
   tokenUrl?: string;
   profileUrl?: string;
-  addAccount: (authenticated: ClaudeOAuthAccount) => Promise<Account>;
+  addAccount: (authenticated: ClaudeOAuthAccount, targetAccountId?: string) => Promise<Account>;
 }
 
 export interface OAuthLoginStart {
@@ -135,7 +136,7 @@ export class ClaudeOAuthLogin {
     this.profileUrl = options.profileUrl ?? OAUTH_PROFILE_URL;
   }
 
-  async start(): Promise<OAuthLoginStart> {
+  async start(targetAccountId?: string): Promise<OAuthLoginStart> {
     await this.options.beforeStart?.();
     const codeVerifier = randomBytes(32).toString("base64url");
     const codeChallenge = createHash("sha256")
@@ -144,6 +145,7 @@ export class ClaudeOAuthLogin {
     const state = randomBytes(32).toString("base64url");
     const sessionId = randomUUID();
     this.session = {
+      ...(targetAccountId===undefined?{}:{targetAccountId}),
       sessionId,
       codeVerifier,
       state,
@@ -241,6 +243,6 @@ export class ClaudeOAuthLogin {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiresAt: this.now() + tokens.expires_in * 1_000,
-    });
+    }, session.targetAccountId);
   }
 }

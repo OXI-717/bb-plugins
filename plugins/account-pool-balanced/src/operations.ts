@@ -103,7 +103,25 @@ export class PoolOperations {
     return account;
   }
 
-  async addOAuth(authenticated: ClaudeOAuthAccount): Promise<Account> {
+  async addOAuth(
+    authenticated: ClaudeOAuthAccount,
+    targetAccountId?: string,
+  ): Promise<Account> {
+    if (targetAccountId !== undefined) {
+      const account = await this.hub.replaceAccountAuthorization(targetAccountId,
+        () => this.accounts.replaceClaudeAuthorization(targetAccountId, authenticated, {
+          kind: "oauth",
+          accessToken: authenticated.accessToken,
+          refreshToken: authenticated.refreshToken,
+          expiresAt: authenticated.expiresAt,
+        }),
+      );
+      const quota = this.quotas.get(account.id);
+      this.quotas.put({ ...quota, error: null, heldUntil: null });
+      this.onAccountsChanged();
+      if (account.enabled) await this.onAccountEnabled(account.id);
+      return account;
+    }
     const account = await this.accounts.add(
       {
         provider: "claude",
@@ -163,6 +181,14 @@ export class PoolOperations {
 
   async list(): Promise<AccountSummary[]> {
     return (await this.status()).accounts;
+  }
+
+  async validateClaudeReauthorization(id: string): Promise<void> {
+    const account = await this.accounts.get(id);
+    if (!account || account.provider !== "claude" || account.kind !== "oauth")
+      throw new Error("Аккаунт Claude OAuth не найден / Claude OAuth account not found.");
+    if (!account.accountUuid && !account.email)
+      throw new Error("Личность аккаунта неизвестна; обновите профиль перед входом / Account identity is unknown; refresh profile before reauthorization.");
   }
 
   async remove(id: string): Promise<boolean> {

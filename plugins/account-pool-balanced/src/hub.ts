@@ -1,4 +1,5 @@
 import { NetworkFlights } from "./network-flights.js";
+import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
 import { createVpnPolicy, VpnRequiredError, type VpnState } from "./vpn-policy.js";
 import { isRecoverableAccessError } from "./recoverable-access.js";
 import { projectTier, projectRole } from "./project-policy.js";
@@ -278,6 +279,45 @@ export class AccountPoolHub {
     );
   }
 
+  async replaceAccountAuthorization<T>(
+    accountId: string,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    // Finish quota checks using the old authorization before replacing it, so
+    // their late refusal cannot mark the newly authorized account as broken.
+    await this.usageRefreshes.get(accountId)?.catch(() => undefined);
+    const previous = this.refreshes.get(accountId);
+    let result: T;
+    let failure: unknown;
+    let failed = false;
+    const flight: Extract<SecretFlight, { kind: "refresh" }> = {
+      kind: "refresh",
+      use: { kind: "normal" },
+      result: Promise.resolve().then(async () => {
+        if (previous) await previous.result.catch(() => undefined);
+        try {
+          result = await write();
+        } catch (error) {
+          failed = true;
+          failure = error;
+        }
+        return this.options.accounts.readSecret(accountId).catch(error => {
+          if (failed) throw failure;
+          throw error;
+        });
+      }),
+    };
+    this.refreshes.set(accountId, flight);
+    try {
+      await flight.result;
+      if (failed) throw failure;
+      return result!;
+    } finally {
+      if (this.refreshes.get(accountId) === flight)
+        this.refreshes.delete(accountId);
+    }
+  }
+
   private async refreshAccountUsage(
     account: Account,
     force: boolean,
@@ -312,6 +352,14 @@ export class AccountPoolHub {
         now: this.options.now,
       })
       .then(async () => { await this.settleDrain(account); })
+      .catch(error => {
+        if (error instanceof AccountAuthorizationRequiredError) {
+          this.markError(account.id, error.accountMessage);
+          this.options.onAccountsChanged();
+          throw new Error(error.accountMessage);
+        }
+        throw error;
+      })
       .finally(() => this.usageRefreshes.delete(account.id));
     this.usageRefreshes.set(account.id, refresh);
     return refresh;
@@ -1500,6 +1548,7 @@ function readBearer(value: string | null): string | null {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof AccountAuthorizationRequiredError) return error.accountMessage;
   return error instanceof Error ? error.message : String(error);
 }
 

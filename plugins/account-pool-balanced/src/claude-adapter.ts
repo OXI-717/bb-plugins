@@ -8,6 +8,7 @@ import {
 import type { ProviderAdapter } from "./provider-adapter.js";
 import {
   fetchOAuthRefresh,
+  AccountAuthorizationRequiredError,
   filterRequestHeaders,
   mountedUpstreamUrl,
   oauthSecretDueForRefresh,
@@ -137,8 +138,9 @@ export function createClaudeAdapter(options: {
     },
     async refreshUsage(context) {
       if (context.account.kind !== "oauth") return;
-      const secret = await context.freshSecret();
+      let secret = await context.freshSecret();
       if (secret.kind !== "oauth") return;
+      let accessToken = secret.accessToken;
       const usageUrl = new URL(options.usageUrl);
       if (usageUrl.protocol === "https:" || usageUrl.protocol === "http:") {
         usageUrl.searchParams.set("cedar_ember", "1");
@@ -146,7 +148,7 @@ export function createClaudeAdapter(options: {
       }
       const requestUsage = (url: string | URL) => context.fetch(url, {
         headers: {
-          authorization: `Bearer ${secret.accessToken}`,
+          authorization: `Bearer ${accessToken}`,
           "anthropic-beta": OAUTH_BETA,
           accept: "application/json",
           "user-agent": USAGE_USER_AGENT,
@@ -155,6 +157,19 @@ export function createClaudeAdapter(options: {
         signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
       });
       let response = await requestUsage(usageUrl);
+      if (response.status === 401) {
+        await response.body?.cancel();
+        secret = await context.freshSecret(secret.accessToken);
+        if (secret.kind !== "oauth") return;
+        accessToken = secret.accessToken;
+        response = await requestUsage(usageUrl);
+        if (response.status === 401) {
+          await response.body?.cancel();
+          throw new AccountAuthorizationRequiredError(
+            "Claude usage authorization failed with HTTP 401 after refreshing access.",
+          );
+        }
+      }
       // Older compatible endpoints may reject the optional query. Do not retry
       // auth failures or throttling as if they were unsupported parameters.
       if (usageUrl.href !== options.usageUrl && [400, 404, 422].includes(response.status)) {

@@ -247,6 +247,36 @@ export class AccountStore {
     return accountSecretSchema.parse(parsed);
   }
 
+  async replaceClaudeAuthorization(
+    id: string,
+    identity: { email: string | null; accountUuid: string | null; subscriptionType: string | null; rateLimitTier: string | null },
+    secret: AccountSecret,
+  ): Promise<Account> {
+    return this.serialized(async () => {
+      const accounts = await this.list();
+      const index = accounts.findIndex(account => account.id === id);
+      const account = accounts[index];
+      if (!account || account.provider !== "claude" || account.kind !== "oauth")
+        throw new Error("Аккаунт Claude OAuth уже удалён / Claude OAuth account no longer exists.");
+      const matches = account.accountUuid !== null
+        ? account.accountUuid === identity.accountUuid
+        : account.email !== null && identity.email !== null && account.email.toLowerCase() === identity.email.toLowerCase();
+      if (!matches)
+        throw new Error("Вы вошли в другой аккаунт. Авторизуйтесь под выбранной подпиской / Signed in to a different account.");
+      const updated = accountSchema.parse({
+        ...account,
+        email: identity.email,
+        accountUuid: identity.accountUuid,
+        subscriptionType: identity.subscriptionType,
+        rateLimitTier: identity.rateLimitTier,
+      });
+      await this.writeSecret(id, secret);
+      accounts[index] = updated;
+      await this.kv.set(ACCOUNTS_KEY, accounts);
+      return updated;
+    });
+  }
+
   async writeSecret(id: string, secret: AccountSecret): Promise<void> {
     await this.initialize();
     const value = `${JSON.stringify(accountSecretSchema.parse(secret))}\n`;

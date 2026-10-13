@@ -357,7 +357,7 @@ function statusPresentation(
     };
   }
   if (account.status === "error")
-    return { label: "Ошибка", dot: "bg-destructive" };
+    return { label: account.error?.includes("[OAUTH_REAUTH_REQUIRED]") ? "Нужна авторизация" : "Ошибка", dot: "bg-destructive" };
   if (account.status === "disabled")
     return { label: "Выключен", dot: "bg-muted-foreground" };
   return { label: "В работе", dot: "bg-success" };
@@ -1075,6 +1075,7 @@ function AccountPoolSettings() {
     null,
   );
   const [loginDone, setLoginDone] = useState<string | null>(null);
+  const [reauthorizeAccountId, setReauthorizeAccountId] = useState<string | null>(null);
   const [pastedCode, setPastedCode] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [priority, setPriority] = useState("100");
@@ -1185,6 +1186,7 @@ function AccountPoolSettings() {
       await refresh();
     } catch (actionError) {
       setError(errorText(actionError));
+      await refresh().catch(()=>undefined);
     } finally {
       setPending(null);
     }
@@ -1242,11 +1244,13 @@ function AccountPoolSettings() {
       setPending(null);
     }
   }
-  async function startClaude(): Promise<void> {
+  async function startClaude(targetAccountId?: string): Promise<void> {
+    setReauthorizeAccountId(targetAccountId??null);
+    setLoginStep(null);
     setDialog({ kind: "claude-login" });
     setLoginDone(null);
     await run("claude-login", async () => {
-      const started = await rpc.call("login.start", null);
+      const started = targetAccountId ? await rpc.call("login.reauthorize",{accountId:targetAccountId}) : await rpc.call("login.start", null);
       setLoginStep(started);
       setPastedCode("");
     });
@@ -1853,6 +1857,7 @@ function AccountPoolSettings() {
             }
             close={closeDialog}
             pending={pending !== null}
+            reauthorize={() => void startClaude(selectedAccount.id)}
             act={(action) => void accountAction(selectedAccount, action)}
           />
         ) : null}
@@ -2111,6 +2116,7 @@ function AccountPoolSettings() {
         {dialog?.kind === "claude-login" ? (
           <LoginDialog
             provider="claude"
+            reauthorizing={reauthorizeAccountId === null ? null : status?.accounts.find(account => account.id === reauthorizeAccountId)?.email ?? "этого аккаунта"}
             loginStep={loginStep}
             codexStep={null}
             loginDone={loginDone}
@@ -2132,7 +2138,7 @@ function AccountPoolSettings() {
                 setLoginStep(null);
               })
             }
-            restart={() => void startClaude()}
+            restart={() => void startClaude(reauthorizeAccountId??undefined)}
           />
         ) : null}
         {dialog?.kind === "codex-login" ? (
@@ -2180,6 +2186,7 @@ function AccountDialog({
   close,
   act,
   pending,
+  reauthorize,
 }: {
   account: AccountSummary;
   saveProjects: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
@@ -2193,6 +2200,7 @@ function AccountDialog({
   close: () => void;
   act: (action: "toggle" | "refresh" | "remove" | "drain") => void;
   pending: boolean;
+  reauthorize: () => void;
 }) {
   const [projectsUnsaved, setProjectsUnsaved] = useState(false);
   const [quotaUnsaved, setQuotaUnsaved] = useState(false);
@@ -2234,6 +2242,7 @@ function AccountDialog({
           <Button size="sm" variant="outline" onClick={() => act("refresh")}>
             Обновить квоты
           </Button>
+          {account.provider==='claude'&&account.kind==='oauth'&&<Button size="sm" variant="outline" disabled={pending || projectsUnsaved || quotaUnsaved} onClick={reauthorize}>Авторизоваться заново</Button>}
           <Button
             size="sm"
             variant="ghost"
@@ -2246,6 +2255,7 @@ function AccountDialog({
       }
     >
       <AccountSettingsStyle />
+      {account.error&&<p role="alert" className="text-sm text-destructive-text">{account.error}</p>}
       {refreshError === null ? null : <p role="alert" className="text-sm text-destructive-text">{refreshError}</p>}
       <div className="flex flex-wrap items-center gap-2">
         <SettingsBadge>{tier(account)}</SettingsBadge>
@@ -2403,6 +2413,7 @@ function AccountDialog({
 
 function LoginDialog({
   provider,
+  reauthorizing = null,
   loginStep,
   codexStep,
   loginDone,
@@ -2417,6 +2428,7 @@ function LoginDialog({
   restart,
 }: {
   provider: PoolProvider;
+  reauthorizing?: string | null;
   loginStep: OAuthLoginStart | null;
   codexStep: CodexDeviceLoginStart | null;
   loginDone: string | null;
@@ -2437,15 +2449,13 @@ function LoginDialog({
       : codexStep?.verificationUri;
   return (
     <DialogFrame
-      title={`Вход в ${name}`}
+      title={reauthorizing === null ? `Вход в ${name}` : "Повторная авторизация Claude"}
       className="sm:max-w-xl"
       footer={
         loginDone !== null ? (
           <>
             <span className="flex-1" />
-            <Button variant="outline" onClick={restart}>
-              Добавить ещё
-            </Button>
+            {reauthorizing === null ? <Button variant="outline" onClick={restart}>Добавить ещё</Button> : null}
             <Button onClick={close}>Готово</Button>
           </>
         ) : provider === "claude" ? (
@@ -2466,10 +2476,9 @@ function LoginDialog({
       <StepIndicator step={loginDone === null ? 2 : 3} />
       {loginDone !== null ? (
         <div>
-          <h3 className="text-base font-semibold">Подключён {loginDone}</h3>
+          <h3 className="text-base font-semibold">{reauthorizing === null ? "Подключён" : "Авторизация обновлена:"} {loginDone}</h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            Треды {name} на всех машинах теперь идут через этот аккаунт. Квоты
-            обновляются в фоне.
+            {reauthorizing === null ? `Аккаунт добавлен в пул ${name}. Квоты обновляются в фоне.` : "Настройки сохранены. Выключенный аккаунт остаётся выключенным; роль и проекты не меняются."}
           </p>
         </div>
       ) : url === undefined ? (
@@ -2490,6 +2499,7 @@ function LoginDialog({
               ? "Войдите на claude.ai и вставьте код с последней страницы."
               : "Откройте страницу проверки, войдите в ChatGPT и введите этот код."}
           </p>
+          {reauthorizing === null ? null : <p className="text-sm text-muted-foreground">Войдите именно в {reauthorizing}. Вход в другой аккаунт не заменит эту подписку.</p>}
           {codexStep === null ? null : (
             <UserCodeBlock userCode={codexStep.userCode} />
           )}

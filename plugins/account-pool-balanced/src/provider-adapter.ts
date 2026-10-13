@@ -13,6 +13,44 @@ import type { AccountStore, QuotaStore } from "./store.js";
 const OAUTH_REFRESH_TIMEOUT_MS = 15_000;
 const OAUTH_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 
+export class AccountAuthorizationRequiredError extends Error {
+  constructor(message: string, readonly oauthCode: string | null = null) {
+    super(message);
+  }
+  get accountMessage(): string {
+    return `[OAUTH_REAUTH_REQUIRED] ${this.message}${this.oauthCode ? ` OAuth: ${this.oauthCode}.` : ""} Требуется повторная авторизация / Sign in again. HTTP status alone does not establish why the token was rejected.`;
+  }
+}
+
+export class OAuthRefreshRejectedError extends AccountAuthorizationRequiredError {
+  constructor(readonly status: number, oauthCode: string | null) {
+    super(`OAuth refresh failed with HTTP ${status}.`, oauthCode);
+  }
+}
+
+async function safeOAuthCode(response: Response, timeout: Promise<never>): Promise<string | null> {
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  try {
+    const chunks: Uint8Array[] = []; let size = 0;
+    while (true) {
+      const part = await Promise.race([reader.read(), timeout]);
+      if (part.done) break;
+      size += part.value.length;
+      if (size > 8192) return null;
+      chunks.push(part.value);
+    }
+    const bytes = new Uint8Array(size); let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    if (!parsed || typeof parsed !== 'object') return null;
+    const error = (parsed as {error?:unknown}).error;
+    const code = typeof error === 'string' ? error : error && typeof error === 'object' ? (error as {type?:unknown}).type : null;
+    return typeof code === 'string' && ['invalid_grant','invalid_request','invalid_client','unauthorized_client','unsupported_grant_type','invalid_scope'].includes(code) ? code : null;
+  } catch { return null; }
+  finally { void reader.cancel().catch(() => undefined); }
+}
+
 export class TransientOAuthRefreshError extends Error {
   constructor(
     message: string,
@@ -154,16 +192,16 @@ export async function fetchOAuthRefresh(
         response.headers.get("retry-after"),
         context.now(),
       );
-      void response.body?.cancel().catch(() => undefined);
       if (
         response.status === 403 ||
         response.status === 408 ||
         response.status === 429 ||
         response.status >= 500
       ) {
+        void response.body?.cancel().catch(() => undefined);
         throw new TransientOAuthRefreshError(message, retryAfterMs);
       }
-      throw new Error(message);
+      throw new OAuthRefreshRejectedError(response.status, await safeOAuthCode(response, timedOut));
     }
     try {
       return await Promise.race([response.text(), timedOut]);

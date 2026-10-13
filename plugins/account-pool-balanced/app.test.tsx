@@ -168,6 +168,16 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it("reauthorizes the selected disabled account rather than adding another account", async () => {
+    const selected=account({enabled:false,status:'disabled',error:'[OAUTH_REAUTH_REQUIRED] OAuth refresh failed with HTTP 400.'});
+    const slot=render([selected],{'login.reauthorize':()=>({sessionId:'fixture-session',authorizeUrl:'https://login.example/authorize',expiresAt:Date.now()+600000})});
+    fireEvent.click(await slot.findByRole('button',{name:'Открыть person@example.com'}));
+    fireEvent.click(slot.getByRole('button',{name:'Авторизоваться заново'}));
+    await slot.findByText('Повторная авторизация Claude');
+    expect(slot.rpcCalls).toContainEqual({method:'login.reauthorize',input:{accountId:selected.id}});
+    expect(slot.rpcCalls.some(call=>call.method==='login.start')).toBe(false);
+    expect(slot.getByText(/Войдите именно в person@example.com/)).toBeTruthy();
+  });
   it("keeps the account card open through debounce and in-flight policy save", async () => {
     const selected = account();
     const response = deferred<object>();

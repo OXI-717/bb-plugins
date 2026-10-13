@@ -113,6 +113,10 @@ export const accountPoolRpcContract = defineRpcContract({
     input: z.null(),
     output: loginStartSchema,
   },
+  "login.reauthorize": {
+    input: z.object({accountId:z.string().uuid()}).strict(),
+    output: loginStartSchema,
+  },
   "login.complete": {
     input: loginCompleteInputSchema,
     output: accountSchema,
@@ -199,6 +203,10 @@ export function createRpcHandlers(
     "config.get": () => config.get(),
     "config.set": (input) => config.set(input),
     "login.start": () => login.start(),
+    "login.reauthorize": async ({accountId}) => {
+      await operations.validateClaudeReauthorization(accountId);
+      return login.start(accountId);
+    },
     "login.complete": (input) => login.complete(input),
     "codexLogin.start": () => codexLogin.start(),
     "codexLogin.poll": (input) => codexLogin.poll(input),
