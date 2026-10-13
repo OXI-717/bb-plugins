@@ -969,9 +969,9 @@ describe("Account Pool plugin", () => {
       fetch:async(input,init)=>{
         if(String(input)==='https://refresh.example'){
           refreshCalls++;
-          return Response.json({access_token:'replacement-fixture-access',refresh_token:'replacement-fixture-refresh',expires_in:3600});
+          return Response.json({access_token:'test-access',refresh_token:'test-refresh',expires_in:3600});
         }
-        if(rejectUsage&& (new Headers(init?.headers).get('authorization')!=='Bearer replacement-fixture-access'||finalStatus===401)) return new Response(null,{status:401});
+        if(rejectUsage&& (new Headers(init?.headers).get('authorization')!=='Bearer test-access'||finalStatus===401)) return new Response(null,{status:401});
         return Response.json({seven_day:{utilization:10}});
       },
     }});
