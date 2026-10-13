@@ -31,6 +31,24 @@ function delayedAccountReads(kv: PluginKvStorage): PluginKvStorage {
 }
 
 describe("AccountStore", () => {
+  it("restores previous authorization when reauthorization metadata cannot be persisted", async () => {
+    const dataDir=await mkdtemp(path.join(tmpdir(),'bb-account-store-'));
+    const host=createFakePluginHost({pluginId:'account-pool',dataDir});
+    cleanups.push(async()=>{await host.harness.lifecycle.dispose();await fs.rm(dataDir,{recursive:true,force:true});});
+    const kv=host.bb.storage.kv;let rejectWrite=false;
+    const store=new AccountStore({
+      get:key=>kv.get(key),delete:key=>kv.delete(key),list:prefix=>kv.list(prefix),
+      set:async(key,value)=>{if(rejectWrite&&key==='accounts:v1')throw new Error('metadata storage failed');await kv.set(key,value);},
+    },path.join(dataDir,'secrets'));
+    const identity={email:'fixture@example.com',accountUuid:'00000000-0000-4000-8000-000000000001',subscriptionType:null,rateLimitTier:null};
+    const previous={kind:'oauth' as const,accessToken:'old-access',refreshToken:'old-refresh',expiresAt:null};
+    const account=await store.add({...identity,provider:'claude',kind:'oauth',label:'existing',enabled:false,priority:7},previous);
+    rejectWrite=true;
+    await expect(store.replaceClaudeAuthorization(account.id,{...identity,subscriptionType:'new-plan'},
+      {...previous,accessToken:'new-access',refreshToken:'new-refresh'})).rejects.toThrow('metadata storage failed');
+    expect(await store.readSecret(account.id)).toEqual(previous);
+    expect(await store.get(account.id)).toEqual(account);
+  });
   it("loads account metadata written before account UUIDs were stored", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "bb-account-store-"));
     const host = createFakePluginHost({ pluginId: "account-pool", dataDir });

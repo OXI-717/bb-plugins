@@ -270,9 +270,19 @@ export class AccountStore {
         subscriptionType: identity.subscriptionType,
         rateLimitTier: identity.rateLimitTier,
       });
-      await this.writeSecret(id, secret);
-      accounts[index] = updated;
-      await this.kv.set(ACCOUNTS_KEY, accounts);
+      const previousSecret = await this.readSecret(id);
+      try {
+        await this.writeSecret(id, secret);
+        accounts[index] = updated;
+        await this.kv.set(ACCOUNTS_KEY, accounts);
+      } catch (error) {
+        try {
+          await this.writeSecret(id, previousSecret);
+        } catch {
+          throw new Error("Не удалось сохранить или восстановить авторизацию. Проверьте хранилище и повторите вход / Authorization persistence and rollback failed; repair storage and sign in again.");
+        }
+        throw error;
+      }
       return updated;
     });
   }
