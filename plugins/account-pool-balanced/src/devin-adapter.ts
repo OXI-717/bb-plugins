@@ -1,3 +1,4 @@
+import { poolErrorResponse } from "./pool-errors.js";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import type { AccountSecret } from "./contracts.js";
@@ -178,6 +179,8 @@ export function createDevinAdapter(): ProviderAdapter {
     isQuotaRejection,
     async refreshSecret(context) { return { secret: context.secret, refreshed: false }; },
     async refreshUsage() {},
-    errorResponse(status, message, headers) { return Response.json({ error: { message, code: status } }, { status, headers }); },
+    errorResponse(status, message, headers, request) {
+      return poolErrorResponse("devin", status, message, headers, request);
+    },
   };
 }

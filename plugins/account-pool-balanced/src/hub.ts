@@ -242,16 +242,17 @@ export class AccountPoolHub {
       ? await this.options.hubTokens.authenticateContext(token)
       : { hostId: await this.authenticate(request, adapter), projectId: await this.options.hubTokens.projectForToken?.(token) ?? null };
     if (context === null || context.hostId === null) {
-      return adapter.errorResponse(401, "Invalid Account Pooler bearer token.");
+      return this.errorResponse(adapter, request, 401, "Invalid Account Pooler bearer token.");
     }
     if (!this.accepting)
-      return adapter.errorResponse(
+      return this.errorResponse(adapter, request,
         503,
         "Account Pooler is not accepting requests.",
+        {"x-bb-pool-error":"POOL_SHUTTING_DOWN"},
       );
     try { await this.assertNetworkAllowed(provider); }
     catch (error) {
-      if (error instanceof VpnRequiredError) return adapter.errorResponse(403, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
+      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 403, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
       throw error;
     }
     const body = new Uint8Array(await request.arrayBuffer());
@@ -508,7 +509,7 @@ export class AccountPoolHub {
               headers: { "retry-after": String(Math.ceil(heldMs / 1_000)) },
             };
             if (selected.keepAffinity)
-              return adapter.errorResponse(
+              return this.errorResponse(adapter, request,
                 failure.status,
                 failure.message,
                 failure.headers,
@@ -711,20 +712,21 @@ export class AccountPoolHub {
       }
       signal.throwIfAborted();
       return failure === null
-        ? this.noEligibleResponse(accounts, family, adapter, projectId)
-        : adapter.errorResponse(
+        ? this.noEligibleResponse(accounts, family, adapter, projectId, request)
+        : this.errorResponse(adapter, request,
             failure.status,
             failure.message,
             failure.headers,
           );
     } catch (error) {
-      if (error instanceof VpnRequiredError) return adapter.errorResponse(403, error.message, { "x-bb-pool-error": error.code, "retry-after": "10" });
+      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 403, error.message, { "x-bb-pool-error": error.code, "retry-after": "10" });
       if (!signal.aborted) throw error;
-      return adapter.errorResponse(
+      return this.errorResponse(adapter, request,
         request.signal.aborted ? 499 : 503,
         request.signal.aborted
           ? "Account Pooler request was canceled."
           : "Account Pooler stopped accepting requests.",
+        {"x-bb-pool-error":request.signal.aborted?"POOL_REQUEST_CANCELED":"POOL_SHUTTING_DOWN"},
       );
     }
   }
@@ -1263,26 +1265,38 @@ export class AccountPoolHub {
     });
   }
 
+  private errorResponse(adapter: ProviderAdapter, request: Request, status: number, message: string, headers?: HeadersInit): Response {
+    return adapter.errorResponse(status, message, headers, request);
+  }
+
   private noEligibleResponse(
     accounts: readonly Account[],
     family: ModelFamily,
     adapter: ProviderAdapter,
     projectId: string | null,
+    request: Request,
   ): Response {
     const enabled = accounts.filter(account => account.enabled);
     accounts = accounts.filter(account => projectTier(account, projectId) !== null);
     if (enabled.length > 0 && !accounts.some(account => account.enabled)) {
-      return adapter.errorResponse(403, "No enabled Account Pooler account is allowed for this project context.");
+      return this.errorResponse(adapter, request, 403, "Для проекта нет разрешённого аккаунта / No enabled account is allowed for this project context.", {"x-bb-pool-error":"POOL_PROJECT_RESTRICTED"});
     }
     if (!accounts.some((account) => account.enabled)) {
-      return adapter.errorResponse(
+      return this.errorResponse(adapter, request,
         503,
         "Account Pooler has no enabled account",
+        {"x-bb-pool-error":"POOL_NO_ACCOUNTS"},
       );
     }
     const now = this.options.now();
     if (!accounts.some(account => account.enabled && (account.drainOnce || scheduleAllows(account.policy, now)))) {
-      return adapter.errorResponse(403, "Every enabled Account Pooler account for this provider is outside its allowed schedule.");
+      return this.errorResponse(adapter, request, 403, "Аккаунты недоступны по расписанию / Every enabled account is outside its allowed schedule.", {"x-bb-pool-error":"POOL_SCHEDULE_RESTRICTED"});
+    }
+    accounts = accounts.filter(account => account.enabled && (account.drainOnce || scheduleAllows(account.policy, now)));
+    if (accounts.every(account => this.options.quotas.get(account.id).error !== null)) {
+      return this.errorResponse(adapter, request, 503,
+        `${adapter.upstreamName}: аккаунты недоступны из-за сохранённых ошибок авторизации или подключения; проверьте карточки / Accounts have stored credential or connection errors.`,
+        {"x-bb-pool-error":"POOL_ACCOUNT_UNAVAILABLE"});
     }
     const threshold = this.options.getSettings().switchThreshold;
     const next = accounts
@@ -1306,12 +1320,31 @@ export class AccountPoolHub {
     // 429 carrying `retry-after` was worse than useless — coding agents honour it in
     // silence, and an exhausted weekly quota looked like a hang with no error at all.
     const resetAt = next === undefined ? null : new Date(next).toISOString();
-    return adapter.errorResponse(
-      403,
-      resetAt === null
-        ? "Every Account Pooler account for this provider is exhausted."
-        : `Every Account Pooler account for this provider is exhausted until ${resetAt}.`,
-    );
+    const usable = accounts.filter(account => this.options.quotas.get(account.id).error === null);
+    const quotaBlocked = usable.every(account => isQuotaExhausted(this.options.quotas.get(account.id), family, policyThresholds(account, threshold), now));
+    const providerSpent = quotaBlocked && usable.every(account => isQuotaExhausted(this.options.quotas.get(account.id), family, 1, now));
+    const reason = providerSpent ? "POOL_QUOTA_EXHAUSTED" : quotaBlocked ? "POOL_QUOTA_THRESHOLD" : "POOL_ACCOUNT_POLICY";
+    let message = providerSpent
+      ? `${adapter.upstreamName}: лимит провайдера исчерпан / Provider quota exhausted.`
+      : quotaBlocked ? `${adapter.upstreamName}: достигнут порог квоты в настройках пула / Pool quota threshold reached.`
+      : `${adapter.upstreamName}: нет доступных аккаунтов по настройкам пула / No eligible account under pool policy.`;
+    if (quotaBlocked && !providerSpent) {
+      const account = usable.find(account => !isQuotaExhausted(this.options.quotas.get(account.id), family, 1, now));
+      if (account) {
+        const q = this.options.quotas.get(account.id);
+        const limits = policyThresholds(account, threshold);
+        const windows = [
+          {used:q.fiveHourUtilization,reset:q.fiveHourResetAt,limit:limits.fiveHour},
+          {used:q.sevenDayUtilization,reset:q.sevenDayResetAt,limit:limits.weekly},
+          {used:q.familyWeekly[family]?.utilization??null,reset:q.familyWeekly[family]?.resetAt??null,limit:limits.weekly},
+          ...q.limitWindows.map(w=>({used:w.utilization,reset:w.resetAt,limit:w.windowMinutes===300?limits.fiveHour:w.windowMinutes===10080?limits.weekly:limits.other})),
+        ];
+        const window = windows.find(w=>w.used!==null&&w.used>=w.limit&&(w.reset===null||w.reset>now));
+        if (window) message += ` Использовано / used ${Number((window.used!*100).toFixed(2))}%, порог / threshold ${Number((window.limit*100).toFixed(2))}%.`;
+      }
+    }
+    if (resetAt!==null) message += ` Сброс / reset: ${resetAt}.`;
+    return this.errorResponse(adapter, request, 403, message, {"x-bb-pool-error":reason});
   }
 
   private markError(accountId: string, message: string): void {

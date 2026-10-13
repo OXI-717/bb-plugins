@@ -1,3 +1,4 @@
+import { poolErrorResponse } from "./pool-errors.js";
 import { z } from "zod";
 import type { AccountSecret } from "./contracts.js";
 import {
@@ -200,17 +201,8 @@ export function createClaudeAdapter(options: {
         await context.accounts.setAccountUuid(context.account.id, accountUuid);
       }
     },
-    errorResponse(status, message, headers) {
-      const type =
-        status === 401
-          ? "authentication_error"
-          : status === 429
-            ? "rate_limit_error"
-            : "api_error";
-      return Response.json(
-        { type: "error", error: { type, message } },
-        { status, headers },
-      );
+    errorResponse(status, message, headers, request) {
+      return poolErrorResponse("claude", status, message, headers, request);
     },
   };
 }

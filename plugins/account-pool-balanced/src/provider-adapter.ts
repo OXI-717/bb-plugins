@@ -89,6 +89,7 @@ export interface ProviderAdapter {
     status: number,
     message: string,
     headers?: HeadersInit,
+    request?: Request,
   ): Response;
 }
 

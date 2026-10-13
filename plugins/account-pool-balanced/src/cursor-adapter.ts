@@ -1,3 +1,4 @@
+import { poolErrorResponse } from "./pool-errors.js";
 import { z } from "zod";
 import type { AccountSecret } from "./contracts.js";
 import type { ProviderAdapter } from "./provider-adapter.js";
@@ -257,11 +258,8 @@ export function createCursorAdapter(options: {
         error: null,
       });
     },
-    errorResponse(status, message, headers) {
-      return Response.json({ error: { message, code: status } }, {
-        status,
-        headers,
-      });
+    errorResponse(status, message, headers, request) {
+      return poolErrorResponse("cursor", status, message, headers, request);
     },
   };
 }
