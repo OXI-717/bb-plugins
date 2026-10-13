@@ -1064,6 +1064,37 @@ describe("Account Pool plugin", () => {
     expect(current.id).toBe(fixture.account.id);
   });
 
+  it('does not let a delayed usage refusal poison access restored by a model request',async()=>{
+    const seen=deferred(),release=deferred();let rejectUsage=false;let rotations=0;
+    const fixture=await createFixture({upstreamUrl:'https://model.example',source:'import',options:{
+      importCredentials:async()=>importedCredentials({expiresAt:null}),
+      usageUrl:'https://usage.example',refreshUrl:'https://refresh.example',
+      fetch:async(input,init)=>{
+        const request=new Request(input,init);const authorization=request.headers.get('authorization');
+        if(request.url.startsWith('https://refresh.example')){
+          rotations++;return Response.json({access_token:rotations===1?'test-B':'test-C',refresh_token:'refresh',expires_in:3600});
+        }
+        if(request.url.startsWith('https://usage.example')){
+          if(!rejectUsage)return Response.json({seven_day:{utilization:10}});
+          if(authorization==='Bearer test-B'){seen.resolve();await release.promise;}
+          return new Response(null,{status:401});
+        }
+        if(request.url.startsWith('https://model.example'))return authorization==='Bearer test-C'?Response.json({ok:true}):new Response(null,{status:401});
+        return Response.json({});
+      },
+    }});
+    rejectUsage=true;
+    const check=fixture.host.harness.behavior.callRpc('account.refreshUsage',{accountId:fixture.account.id}).catch(error=>String(error));
+    await seen.promise;
+    const model=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
+    expect(model.status).toBe(200);await model.text();
+    release.resolve();
+    expect(await check).toContain('Authorization changed');
+    const current=(await fixture.host.harness.behavior.callRpc('account.list',null) as AccountSummary[])[0]!;
+    expect(rotations).toBe(2);
+    expect(current.error).toBeNull();
+  });
+
   it.each([true, false])("refreshes Cursor billing quotas for enabled=%s accounts on manual request", async (enabled) => {
     let usageCalls = 0;
     const fixture = await createFixture({

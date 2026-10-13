@@ -29,6 +29,11 @@ export class OAuthRefreshRejectedError extends AccountAuthorizationRequiredError
 }
 
 async function safeOAuthCode(response: Response, timeout: Promise<never>): Promise<string | null> {
+  const mediaType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+  if (mediaType !== "application/json" && !mediaType?.endsWith("+json")) {
+    void response.body?.cancel().catch(() => undefined);
+    return null;
+  }
   const reader = response.body?.getReader();
   if (!reader) return null;
   try {

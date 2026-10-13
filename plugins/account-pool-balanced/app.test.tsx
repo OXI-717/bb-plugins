@@ -168,6 +168,22 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it.each(['start','complete'])('shows a Claude reauthorization %s error and offers retry',async stage=>{
+    const selected=account();
+    const failure='Вы вошли в другой аккаунт';
+    const slot=render([selected],{
+      'login.reauthorize':()=>{if(stage==='start')throw new Error(failure);return {sessionId:'fixture-session',authorizeUrl:'https://login.example/authorize',expiresAt:Date.now()+600000};},
+      'login.complete':()=>{throw new Error(failure);},
+    });
+    fireEvent.click(await slot.findByRole('button',{name:'Открыть person@example.com'}));
+    fireEvent.click(slot.getByRole('button',{name:'Авторизоваться заново'}));
+    if(stage==='complete'){
+      fireEvent.change(await slot.findByRole('textbox',{name:'Код авторизации Claude'}),{target:{value:'code#state'}});
+      fireEvent.click(slot.getByRole('button',{name:'Завершить'}));
+    }
+    await within(slot.getByRole('dialog')).findByText(failure);
+    expect(slot.getByRole('button',{name:'Попробовать снова'})).toBeTruthy();
+  });
   it("reauthorizes the selected disabled account rather than adding another account", async () => {
     const selected=account({enabled:false,status:'disabled',error:'[OAUTH_REAUTH_REQUIRED] OAuth refresh failed with HTTP 400.'});
     const slot=render([selected],{'login.reauthorize':()=>({sessionId:'fixture-session',authorizeUrl:'https://login.example/authorize',expiresAt:Date.now()+600000})});

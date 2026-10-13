@@ -5,6 +5,26 @@ import {
 } from "./provider-adapter.js";
 
 describe("OAuth refresh transport", () => {
+  it("bounds JSON error-body parsing even when the transport ignores abort", async () => {
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const cancel = vi.fn();
+    try {
+      const refresh = fetchOAuthRefresh({
+        fetch: async () => new Response(new ReadableStream({ cancel }), {
+          status: 400, headers: { "content-type": "application/json" },
+        }),
+        now: () => 0,
+      }, "https://auth.example/token", { refresh_token: "refresh" });
+      const result = expect(refresh).rejects.toMatchObject({status:400,oauthCode:null});
+      await new Promise<void>(resolve => setImmediate(resolve));
+      controller.abort(new DOMException("Timed out", "TimeoutError"));
+      await result;
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
   it("classifies rejected responses even when cancellation never settles", async () => {
     const cancel = vi.fn(() => new Promise<void>(() => {}));
     await expect(

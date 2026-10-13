@@ -156,25 +156,28 @@ export function createClaudeAdapter(options: {
         },
         signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
       });
-      let response = await requestUsage(usageUrl);
+      const requestCompatibleUsage = async () => {
+        let response = await requestUsage(usageUrl);
+        // Compatibility fallback is separate from access-token recovery.
+        if (usageUrl.href !== options.usageUrl && [400, 404, 422].includes(response.status)) {
+          await response.body?.cancel();
+          response = await requestUsage(options.usageUrl);
+        }
+        return response;
+      };
+      let response = await requestCompatibleUsage();
       if (response.status === 401) {
         await response.body?.cancel();
         secret = await context.freshSecret(secret.accessToken);
         if (secret.kind !== "oauth") return;
         accessToken = secret.accessToken;
-        response = await requestUsage(usageUrl);
+        response = await requestCompatibleUsage();
         if (response.status === 401) {
           await response.body?.cancel();
           throw new AccountAuthorizationRequiredError(
             "Claude usage authorization failed with HTTP 401 after refreshing access.",
           );
         }
-      }
-      // Older compatible endpoints may reject the optional query. Do not retry
-      // auth failures or throttling as if they were unsupported parameters.
-      if (usageUrl.href !== options.usageUrl && [400, 404, 422].includes(response.status)) {
-        await response.body?.cancel();
-        response = await requestUsage(options.usageUrl);
       }
       if (response.ok) {
         const payload = await response.json().catch(() => null);

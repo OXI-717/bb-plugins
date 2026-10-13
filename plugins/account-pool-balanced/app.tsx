@@ -2482,7 +2482,7 @@ function LoginDialog({
           </p>
         </div>
       ) : url === undefined ? (
-        provider === "codex" && error !== null ? (
+        error !== null ? (
           <div className="space-y-3">
             <p className="text-sm text-destructive-text">{error}</p>
             <Button variant="outline" onClick={restart}>
@@ -2494,6 +2494,10 @@ function LoginDialog({
         )
       ) : (
         <>
+          {error === null ? null : <div className="space-y-2">
+            <p role="alert" className="text-sm text-destructive-text">{error}</p>
+            <Button variant="outline" disabled={pending} onClick={restart}>Попробовать снова</Button>
+          </div>}
           <p className="text-sm text-muted-foreground">
             {provider === "claude"
               ? "Войдите на claude.ai и вставьте код с последней страницы."
