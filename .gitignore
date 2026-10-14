@@ -21,3 +21,5 @@ auth.json
 .netrc
 .DS_Store
 __pycache__/
+plugins/vpn-guard/preview/main.js
+plugins/vpn-guard/preview/main.css
