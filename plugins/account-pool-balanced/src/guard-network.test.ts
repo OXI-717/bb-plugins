@@ -3,6 +3,44 @@ import {createGuardNetworkCheck} from './guard-network.js';
 import {createVpnPolicy} from './vpn-policy.js';
 import {accountPoolConfigSchema} from './contracts.js';
 
+it('waits for a fresh permission within the Guard host-check budget',async()=>{
+  vi.useFakeTimers();
+  try {
+    const read=vi.fn(()=>new Promise(resolve=>setTimeout(()=>resolve({schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'connected'}),1200)));
+    const result=createGuardNetworkCheck(read)('codex').then(()=>({allowed:true}),error=>({allowed:false,error}));
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(await result).toEqual({allowed:true});
+  } finally {vi.useRealTimers();}
+});
+
+it('cancels a stalled RPC at the shared deadline and ignores a late allow',async()=>{
+  vi.useFakeTimers();
+  try {
+    let signal:AbortSignal|undefined;
+    let finish:(value:unknown)=>void=()=>{};
+    const read=vi.fn((_provider,abortSignal:AbortSignal)=>{
+      signal=abortSignal;
+      return new Promise(resolve=>{finish=resolve;});
+    });
+    const result=createGuardNetworkCheck(read)('codex').catch(error=>error);
+    await vi.advanceTimersByTimeAsync(3999);
+    expect(signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signal?.aborted).toBe(true);
+    expect(await result).toMatchObject({code:'VPN_GUARD_UNAVAILABLE',failureReason:'timeout'});
+    finish({schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'connected'});
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {vi.useRealTimers();}
+});
+
+it('reports only safe failure categories instead of leaking RPC errors',async()=>{
+  const error=await createGuardNetworkCheck(async()=>{throw Error('private RPC payload');})('codex').catch(error=>error);
+  expect(error).toMatchObject({code:'VPN_GUARD_UNAVAILABLE',failureReason:'rpc_failed'});
+  expect(error.message).not.toContain('private RPC payload');
+  await expect(createGuardNetworkCheck(async()=>({allowed:true}))('codex')).rejects.toMatchObject({failureReason:'invalid_decision'});
+});
+
 it('denies protected calls on manual block and ignores Chinese calls',async()=>{
   const read=vi.fn(async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}));
   const check=createGuardNetworkCheck(read);

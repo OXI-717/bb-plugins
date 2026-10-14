@@ -138,8 +138,7 @@ export function createAccountPoolPlugin(
       getSettings: () => currentSettings,
       fetch: upstreamFetch,fetchIpv4:options.fetchIpv4??transport?.fetchIpv4,
       vpnState: options.vpnState,
-      guardCheck:createGuardNetworkCheck(async provider=>{
-        const signal=AbortSignal.timeout(1000);
+      guardCheck:createGuardNetworkCheck(async (provider,signal)=>{
         const hostId=(await bb.sdk.system.config({signal})).primaryHostId;
         if(!hostId) throw new Error("Pool server machine unknown");
         return bb.sdk.plugins.callRpc({pluginId:"vpn-guard",method:"networkDecision",input:{hostId,provider},outputSchema:z.unknown(),signal});
