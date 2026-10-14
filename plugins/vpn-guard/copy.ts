@@ -1,6 +1,7 @@
 export type Language = 'ru' | 'en';
 export const copy = {
   ru: {
+    statusUnavailable:'Статус недоступен',
     noNativeRecovery:'Нет пауз от Guard',threadUnit:'тредов',
     nativeScope:'Действует на всех машинах: только встроенные Codex и Claude.',nativeDetails:'Область и ограничения отключения',
     verifiedPolicy:'Требует VPN /2',
@@ -24,6 +25,7 @@ export const copy = {
     errorDetails:'Технические подробности',error:'Не удалось выполнить действие',loading:'Загрузка',mode:'Режим',
   },
   en: {
+    statusUnavailable:'Status unavailable',
     noNativeRecovery:'None paused by Guard',threadUnit:'threads',
     nativeScope:'Applies to all machines: native Codex and Claude only.',nativeDetails:'Suspension scope and limits',
     verifiedPolicy:'Requires VPN /2',

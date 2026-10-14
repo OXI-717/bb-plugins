@@ -52,7 +52,7 @@ export function GuardPage() {
     {status&&!statusFresh&&<p role="status" className="vg-error">{t.cachedStatus}</p>}
     {error&&<div role="alert" className="vg-error"><p>{readableError(error,language)}</p><details><summary>{t.errorDetails}</summary><pre className="vg-error-detail">{error}</pre></details></div>}
     <section><div className="vg-section-heading"><h2>{t.control}</h2>
-      <p role="status" className={status?.manualBlock?'vg-blocked':'vg-help'}>{status ? !statusFresh?t.unknown:status.manualBlock?t.blocked:t.notBlocked :t.loading}</p></div>
+      <p role="status" className={status?.manualBlock?'vg-blocked':'vg-help'}>{status ? !statusFresh?t.unknown:status.manualBlock?t.blocked:t.notBlocked :error?t.statusUnavailable:t.loading}</p></div>
       <div className="vg-actions"><button type="button" className={status?.manualBlock?'':'vg-danger'} disabled={!ready||!status.hostIds.length} onClick={()=>void change(()=>rpc.call('setManualBlock',{blocked:!status?.manualBlock}))}>{status?.manualBlock?t.unblock:t.block}</button>
         <button type="button" disabled={busy} onClick={()=>void refresh()}>{t.refresh}</button></div>
       <label className="vg-check"><input type="checkbox" checked={status?.mode==='enforce'} disabled={!ready||(!status.hostIds.length&&status.mode!=='enforce')} onChange={event=>void change(()=>rpc.call('setMode',{mode:event.target.checked?'enforce':'observe'}))}/><span>{t.enforce}</span></label>

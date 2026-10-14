@@ -7,6 +7,13 @@ import {guardFixture} from './ui-fixture.js';
 const app=await loadPluginApp(()=>import('./app.js'));
 afterEach(()=>{cleanup();localStorage.clear();});
 
+it('shows unavailable state instead of indefinite loading after the first status failure',async()=>{
+  const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>{throw new Error('synthetic status unavailable');}}});
+  await slot.findByText('Статус недоступен');
+  expect(slot.queryByText('Загрузка')).toBeNull();
+  expect((slot.getByRole('checkbox',{name:'Защита по VPN'}) as HTMLInputElement).disabled).toBe(true);
+});
+
 it('does not expose pause or resume for an unconnected automation controller',async()=>{
   const slot=renderSlot(app.navPanels[0]!,{subPath: ""},{rpc:{status:()=>guardFixture()}});
   await slot.findAllByText('Demo machine');
