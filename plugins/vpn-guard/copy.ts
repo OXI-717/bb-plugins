@@ -1,6 +1,12 @@
 export type Language = 'ru' | 'en';
 export const copy = {
   ru: {
+    statusUnavailable:'Статус недоступен',
+    noNativeRecovery:'Нет пауз от Guard',threadUnit:'тредов',
+    nativeScope:'Действует на всех машинах: только встроенные Codex и Claude.',nativeDetails:'Область и ограничения отключения',
+    verifiedPolicy:'Требует VPN /2',
+    cachedStatus:'Последние данные не подтверждены. Обновите состояние перед изменениями.',stateUnavailable:'Состояние защиты ещё не подтверждено.',
+    nativeState:'Плагины BB',machineSettings:'Настройки машин',noMachines:'Машины для защиты не выбраны.',controlHelp:'Как работает блокировка',enforceHelp:'Потеря или неизвестный VPN → блок агентов.',observeHelp:'Наблюдение: блокировка по VPN выключена.',controllerOptional:'Контроллер не подключён. Это необязательная интеграция; управление автоматизациями здесь недоступно.',policyOnly:'Это настройка автоматического отключения. Её выключение не включает плагины обратно.',restorePlugins:'Восстановить плагины',restoreBlocked:'Сначала снимите ручной блок и дождитесь подтверждённого VPN на выбранных машинах.',
     ordinaryTransport:'Подтверждение /2 пула выключено',restoreInventory:'Сохранённые расписания',reviewedSchedules:'Проверил изменённые или неоднозначные паузы',guardHold:'Пауза от VPN Guard',manualHold:'Ручная пауза',emergencyHold:'Аварийная остановка',overview:'Общее состояние',pool:'Пул',automations:'Автоматизации',recovery:'Восстановление',linked:'Подключено',notLinked:'Не подключено',partial:'Блокировка или действие выполнены не полностью',paused:'На паузе',available:'Доступны',pendingRecovery:'Ожидает ручного возобновления',pausedSchedules:'Расписаний на паузе',activeRun:'Активный или непроверенный запуск',pauseAutomations:'Приостановить',resumeAutomations:'Возобновить',restoreAutomationsHelp:'Возобновляются только расписания, приостановленные контроллером. Ручные и защитные блоки независимы. Уже выполняющиеся скрипты могут продолжаться.',legacyPause:'Есть отдельный замок автоматизаций или аварийный STOP.',controllerSetup:'Подключение контроллера',controllerPath:'Исполняемый файл контроллера на сервере BB',connectController:'Подключить',disconnectController:'Отключить',verifiedVpn:'Требовать подтверждённый VPN /2',verifiedHelp:'Включать после обновления гарда VPN. Старый /1 будет отклонён. Подтверждается только IPv4; IPv6 native/ACP не защищён этим признаком.',verifiedIpv4:'IPv4 подтверждён',legacyVpn:'Старый /1, без подтверждения',unverifiedVpn:'Трафик не подтверждён',
 
     serverScopeWarning:'Машина сервера не выбрана или не определена: ручной блок Guard не защищает сетевые вызовы пула на ней.',poolHelp:'В Pooler включите «Подчиняться VPN Guard»: тогда ручной блок закроет также сетевые вызовы пула. Без этой связи Guard управляет только тредами BB.',title:'VPN Guard', description:'Управляет запуском Codex, Claude, Cursor и Devin на выбранных машинах. Kimi и Z.ai продолжают работать.',
@@ -10,15 +16,21 @@ export const copy = {
     modeHelp:'Наблюдение не блокирует работу. Защита по VPN удерживает новые сообщения и останавливает защищённые треды при потере VPN.',
     block:'Заблокировать',unblock:'Снять блок',blocked:'Ручной блок включён',notBlocked:'Ручной блок выключен',
     blockHelp:'Ручной блок действует даже при подключённом VPN и в режиме наблюдения. Он сохраняется после перезапуска. Снятие блока возвращает выбранный режим; остановленные задачи не запускаются повторно.',
-    stopped:'Остановленных тредов',native:'Дополнительная глобальная блокировка',
+    stopped:'Остановлено',native:'Блокировка встроенных плагинов',
     nativeHelp:'Отключает встроенные плагины Codex и Claude на ВСЕХ машинах при ручном блоке или потере VPN в режиме защиты. Cursor и Devin не отключаются этим способом. Уже открытые соединения могут продолжать работать.',
-    suspend:'Отключать встроенные плагины глобально',owned:'Отключены Guard',ambiguous:'Нужна ручная проверка',none:'Нет',
+    suspend:'Автоматически отключать встроенные плагины',owned:'Отключены Guard',ambiguous:'Нужна ручная проверка',none:'Нет',
     restoreHelp:'Восстановление только вручную. BB не отличает повторное ручное отключение от отключения Guard: перед восстановлением проверьте настройки плагинов.',
     restore:'Восстановить',ack:'Подтвердить',limits:'Границы защиты',
     limitText:'«Отправить сейчас» обходит очередь. Уже выполняющиеся скрипты, сетевые запросы и bridge-процессы не гарантированно останавливаются. Другие ACP ID, кроме перечисленных Cursor/Devin и их Pool-алиасов, не защищены. Это управление BB, а не сетевой firewall. Обнаружение потери VPN занимает до 5 секунд плюс время проверки машины и остановки.',
     errorDetails:'Технические подробности',error:'Не удалось выполнить действие',loading:'Загрузка',mode:'Режим',
   },
   en: {
+    statusUnavailable:'Status unavailable',
+    noNativeRecovery:'None paused by Guard',threadUnit:'threads',
+    nativeScope:'Applies to all machines: native Codex and Claude only.',nativeDetails:'Suspension scope and limits',
+    verifiedPolicy:'Requires VPN /2',
+    cachedStatus:'Cached state is unverified. Refresh status before making changes.',stateUnavailable:'Protection state is not confirmed yet.',
+    nativeState:'Native plugins',machineSettings:'Machine settings',noMachines:'No protected machines selected.',controlHelp:'How blocking works',enforceHelp:'Lost or unknown VPN evidence blocks protected agents.',observeHelp:'Observe only. Automatic VPN blocking is off.',controllerOptional:'Controller not connected. This integration is optional; automation controls are unavailable here.',policyOnly:'This setting controls automatic suspension. Turning it off does not restore plugins.',restorePlugins:'Restore plugins',restoreBlocked:'Release the manual block and wait for confirmed VPN on selected machines.',
     ordinaryTransport:'Pool /2 verification off',restoreInventory:'Saved schedules',reviewedSchedules:'Reviewed changed or ambiguous pauses',guardHold:'VPN Guard hold',manualHold:'Manual pause',emergencyHold:'Emergency stop',overview:'Overall status',pool:'Pool',automations:'Automations',recovery:'Recovery',linked:'Linked',notLinked:'Not linked',partial:'Protection or action incomplete',paused:'Paused',available:'Available',pendingRecovery:'Manual resume required',pausedSchedules:'Paused schedules',activeRun:'Active or unverified run',pauseAutomations:'Pause',resumeAutomations:'Resume',restoreAutomationsHelp:'Only controller-owned schedules resume. Manual and protection holds are independent. Running scripts may continue.',legacyPause:'A separate automation lock or emergency STOP remains.',controllerSetup:'Controller setup',controllerPath:'Controller executable on BB server host',connectController:'Connect',disconnectController:'Disconnect',verifiedVpn:'Require verified VPN /2',verifiedHelp:'Enable after VPN writer upgrade. Legacy /1 will be refused. Evidence covers IPv4 only; native/ACP IPv6 is outside this policy.',verifiedIpv4:'IPv4 verified',legacyVpn:'Legacy /1, unverified',unverifiedVpn:'Traffic unverified',
 
     serverScopeWarning:'The server machine is not selected or unknown: Guard manual block does not cover pool network calls there.',poolHelp:'Enable Follow VPN Guard in Pooler to also gate its provider-network calls. Without linkage, Guard controls BB threads only.',title:'VPN Guard',description:'Controls Codex, Claude, Cursor and Devin on selected machines. Kimi and Z.ai remain available.',
@@ -30,7 +42,7 @@ export const copy = {
     blockHelp:'Manual block applies even with connected VPN and in Observe mode. It survives restart. Unblock returns to the selected mode; stopped tasks are not replayed.',
     stopped:'Stopped threads',native:'Additional global suspension',
     nativeHelp:'Disables native Codex and Claude plugins on ALL machines during manual block or VPN loss in Enforce mode. Cursor and Devin are not disabled this way. Existing connections may continue.',
-    suspend:'Suspend native plugins globally',owned:'Disabled by Guard',ambiguous:'Needs manual review',none:'None',
+    suspend:'Automatically suspend native plugins',owned:'Disabled by Guard',ambiguous:'Needs manual review',none:'None',
     restoreHelp:'Restore is manual. BB cannot distinguish a redundant manual disable from Guard ownership: review plugin settings before restoring.',
     restore:'Restore',ack:'Confirm',limits:'Protection limits',
     limitText:'Send-now bypasses admission. Running scripts, network requests and bridge processes are not guaranteed stopped. Other ACP IDs are outside scope. This controls BB, not a network firewall. VPN-loss detection takes up to 5 seconds plus host-check and stop latency.',
