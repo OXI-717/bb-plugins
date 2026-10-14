@@ -29,6 +29,6 @@
 .vg-journal {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,160px);gap:8px;align-items:center;margin:8px 0}
 .vg-journal code {overflow-wrap:anywhere}
 .vg-error-detail {white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin:8px 0;max-width:100%}
-.vg-overview{margin:0}.vg-overview>div{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:12px;padding:6px 0;border-bottom:1px solid var(--border,#8883)}.vg-overview dd{margin:0;overflow-wrap:anywhere}.vg-field{display:grid;gap:6px;margin:12px 0}.vg-field input{font:inherit;min-height:36px;width:100%;padding:6px 10px;border:1px solid var(--border,#8886);border-radius:6px;background:var(--background,transparent);color:inherit}
+.vg-overview{margin:0}.vg-overview>div{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:12px;padding:6px 0;border-bottom:1px solid var(--border,#8883)}.vg-overview dt,.vg-overview dd{overflow-wrap:anywhere}.vg-overview dd{margin:0}.vg-field{display:grid;gap:6px;margin:12px 0}.vg-field input{font:inherit;min-height:36px;width:100%;padding:6px 10px;border:1px solid var(--border,#8886);border-radius:6px;background:var(--background,transparent);color:inherit}
 @container(max-width:440px) {.vg-actions {grid-template-columns:repeat(2,minmax(0,1fr))}.vg-machines li {grid-template-columns:minmax(0,1fr);gap:2px}.vg-machines li>span:last-child {text-align:left}.vpn-guard button {min-height:40px}}
 @media(max-width:480px) {.vpn-guard {padding:16px}.vpn-guard button {min-height:40px}}
