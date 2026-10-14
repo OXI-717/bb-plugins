@@ -421,10 +421,10 @@ export class AccountPoolHub {
     const now = this.options.now();
     const vpnState = await this.vpn.state();
     const vpnEvidence=await this.vpn.evidence();
-    const blockedProviders:PoolProvider[]=[];
-    for(const provider of ["codex","claude","cursor","devin"] as const) {
-      try {await this.assertNetworkAllowed(provider);} catch {blockedProviders.push(provider);}
-    }
+    const decisions=await Promise.all((["codex","claude","cursor","devin"] as const).map(async provider=>{
+      try {await this.assertNetworkAllowed(provider);return null;} catch {return provider;}
+    }));
+    const blockedProviders=decisions.filter((provider):provider is Exclude<typeof provider,null>=>provider!==null);
     const accounts = (await this.routingAccounts()).sort(
       (left, right) => left.priority - right.priority,
     );
