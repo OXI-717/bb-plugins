@@ -16,7 +16,7 @@ Both plugins consume `oxi-vpnks/vpn-state/2`: trusted root-owned non-writable re
 
 Only `oxi-vpnks/vpn-state/2` is accepted. Verified fresh IPv4 evidence is mandatory, with no switch to weaken it. Older evidence is denied. Guard requires the linked Pooler to advertise immutable `vpnPolicyVersion: 2` and protect the requested provider; older Poolers are denied until upgraded. Protected Pooler traffic always uses IPv4; IPv6 target literals and IPv6 proxy endpoints are refused. Kimi and Z.ai retain their independent transport.
 
-Подтверждение `/2` относится только к IPv4. Старый `/1` отображается как неподтверждённый. Строгий режим по умолчанию выключен для безопасной миграции. Native/ACP-трафик IPv6 не становится защищённым от проверки IPv4.
+Подтверждение текущего формата обязательно и относится только к IPv4. Устаревшие данные отклоняются; переключателя ослабления проверки нет. Native/ACP-трафик IPv6 не становится защищённым от проверки IPv4.
 
 The canonical TypeScript predicate is `shared/vpn-evidence.ts`. Identical generated copies are shipped inside both self-contained plugin packages; `scripts/check-vpn-contract.mjs` checks equality in CI. Changes must update the canonical source and both shipped copies.
 
