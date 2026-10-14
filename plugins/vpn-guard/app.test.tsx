@@ -3,9 +3,23 @@ import {cleanup,fireEvent,waitFor} from '@testing-library/react';
 import {afterEach,expect,it} from 'vitest';
 import {loadPluginApp,renderSlot} from '@get-bb/plugin-sdk/testing/app';
 import {guardFixture} from './ui-fixture.js';
+import {configurationSchema,rpcContract} from './contract.js';
 
 const app=await loadPluginApp(()=>import('./app.js'));
 afterEach(()=>{cleanup();localStorage.clear();});
+
+it('preserves saved enforcement and automation binding while discarding the retired switch',()=>{
+ const config=configurationSchema.parse({mode:'enforce',manualBlock:false,hostIds:['demo-server'],suspendNativePluginsGlobally:false,requireVerifiedVpn:false,coordinateAutomations:true,automationControllerPath:'/controller/oxi-auto'});
+ expect(config).not.toHaveProperty('requireVerifiedVpn');
+ expect(config).toMatchObject({mode:'enforce',hostIds:['demo-server'],coordinateAutomations:true,automationControllerPath:'/controller/oxi-auto'});
+ expect(rpcContract).not.toHaveProperty('setVerifiedVpn');
+});
+
+it('has no optional VPN verification checkbox',async()=>{
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>guardFixture()}});
+ await slot.findAllByText('Demo machine');
+ expect(slot.queryByRole('checkbox',{name:'Требовать подтверждённый VPN /2'})).toBeNull();
+});
 
 it('shows unavailable state instead of indefinite loading after the first status failure',async()=>{
   const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>{throw new Error('synthetic status unavailable');}}});

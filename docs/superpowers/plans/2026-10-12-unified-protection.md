@@ -10,7 +10,7 @@
 
 ## 1. VPN evidence
 
-- [ ] Add dependency-free `shared/vpn-evidence.ts`, imported by both plugin readers, with `evaluateVpnEvidence(payload, nowMs, requireVerified)`.
+- [ ] Add dependency-free `shared/vpn-evidence.ts`, imported by both plugin readers, with `evaluateVpnEvidence(payload, nowMs)`.
 - [ ] Validate v2 required fields, known reason, coverage ipv4, fixed 90/390 upper bounds, nonfuture timestamps, utun244, positive core PID and matching nonempty epoch hashes for connected. v1 remains labelled legacy, rejected in strict mode.
 - [ ] Add strict-mode configuration defaulting false and evidence status in both plugins. Protected owned Pooler traffic in strict mode uses an IPv4-only dispatcher; Chinese traffic keeps its ordinary transport. Native/ACP IPv6 coverage is explicitly outside guarantee.
 - [ ] Run state/read/transport/CLI/UI regressions and builds. Use producer output from an isolated writer snapshot in integration fixtures.

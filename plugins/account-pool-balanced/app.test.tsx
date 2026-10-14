@@ -143,7 +143,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     restDays: [0, 6],
     vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
     vpnGuardEnabled: false,
-    requireVerifiedVpn:false,
+    vpnPolicyVersion:2,
     vpnStatusFile: null,
     ...overrides,
   };

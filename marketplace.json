@@ -24,7 +24,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/account-pool-balanced",
-          "range": "^0.4.19",
+          "range": "^0.4.20",
           "tagPrefix": "account-pool-balanced/"
         }
       }
@@ -72,7 +72,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/vpn-guard",
-          "range": "^0.1.4",
+          "range": "^0.1.5",
           "tagPrefix": "vpn-guard/"
         }
       }

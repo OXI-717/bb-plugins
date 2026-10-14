@@ -1,6 +1,6 @@
 import { NetworkFlights } from "./network-flights.js";
 import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
-import { createVpnPolicy, VpnRequiredError, type VpnState } from "./vpn-policy.js";
+import { createVpnPolicy, VpnRequiredError } from "./vpn-policy.js";
 import { isRecoverableAccessError } from "./recoverable-access.js";
 import { projectTier, projectRole } from "./project-policy.js";
 import { policyThresholds, reserveHours, scheduleAllows } from "./account-policy.js";
@@ -104,7 +104,7 @@ interface HubOptions {
   maxAffinityBindings: number;
   hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
   getSettings: () => AccountPoolConfig;
-  vpnState?: () => Promise<VpnState>;
+  vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void>;
   adapters: ReadonlyMap<PoolProvider, ProviderAdapter>;
   fetch: typeof fetch;
@@ -185,11 +185,11 @@ export class AccountPoolHub {
   private readonly vpn;
   private readonly networkFlights:NetworkFlights;
   constructor(private readonly options: HubOptions) {
-    this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnState,options.guardCheck);
-    this.networkFlights=new NetworkFlights(options.fetch,()=>this.stopped.signal,provider=>this.assertNetworkAllowed(provider),provider=>options.getSettings().requireVerifiedVpn&&options.getSettings().vpnOnlyProviders.some(value=>value===provider)?options.fetchIpv4!:options.fetch);
+    this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnPayload,options.guardCheck);
+    this.networkFlights=new NetworkFlights(options.fetch,()=>this.stopped.signal,provider=>this.assertNetworkAllowed(provider),provider=>options.getSettings().vpnOnlyProviders.some(value=>value===provider)?options.fetchIpv4!:options.fetch);
   }
 
-  async assertNetworkAllowed(provider: PoolProvider): Promise<void> { await this.vpn.assert(provider);if(this.options.getSettings().requireVerifiedVpn&&this.options.getSettings().vpnOnlyProviders.some(value=>value===provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
+  async assertNetworkAllowed(provider: PoolProvider): Promise<void> { await this.vpn.assert(provider);if(this.options.getSettings().vpnOnlyProviders.some(value=>value===provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
 
   outboundFetch(provider: PoolProvider): typeof fetch {
     return (input,init)=>this.networkFlights.fetch(provider,input,init);
@@ -419,8 +419,8 @@ export class AccountPoolHub {
   async status(): Promise<Omit<PoolStatus, "routing">> {
     const settings = this.options.getSettings();
     const now = this.options.now();
-    const vpnState = await this.vpn.state();
     const vpnEvidence=await this.vpn.evidence();
+    const vpnState=vpnEvidence.state;
     const decisions=await Promise.all((["codex","claude","cursor","devin"] as const).map(async provider=>{
       try {await this.assertNetworkAllowed(provider);return null;} catch {return provider;}
     }));
@@ -455,7 +455,7 @@ export class AccountPoolHub {
       [...this.activeAccounts].filter(([key]) => key.startsWith(`${provider}:`)).at(-1)?.[1].accountId ?? null;
     return {
       route: this.options.route,
-      vpn: { state: vpnState, blockedProviders,guardEnabled:settings.vpnGuardEnabled,requireVerified:settings.requireVerifiedVpn,assurance:vpnEvidence.assurance,reason:vpnEvidence.reason },
+      vpn: { state: vpnState, blockedProviders,guardEnabled:settings.vpnGuardEnabled,assurance:vpnEvidence.assurance,reason:vpnEvidence.reason },
       enabledAccountCount: accounts.filter((account) => account.enabled).length,
       inFlight: this.inFlightCount(),
       accepting: this.accepting,
@@ -1459,7 +1459,7 @@ export function createHub(options: {
   affinity: PoolAffinityStore;
   hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
   getSettings: () => AccountPoolConfig;
-  vpnState?: () => Promise<VpnState>;
+  vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void>;
   fetch?: typeof fetch;
   fetchIpv4?:typeof fetch;
@@ -1548,7 +1548,7 @@ export function createHub(options: {
     maxAffinityBindings: options.maxAffinityBindings ?? MAX_AFFINITY_BINDINGS,
     hubTokens: options.hubTokens,
     getSettings: options.getSettings,
-    vpnState: options.vpnState,
+    vpnPayload: options.vpnPayload,
     guardCheck: options.guardCheck,
     adapters,
     fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,

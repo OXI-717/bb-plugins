@@ -56,16 +56,17 @@ export async function readVpnState(file:string,now:number|(()=>number)):Promise<
 export function createVpnPolicy(
   settings: () => AccountPoolConfig,
   now: () => number,
-  injectedState?: () => Promise<VpnState>,
+  injectedPayload?: (nowMs:number) => Promise<unknown>,
   guardCheck?: (provider:PoolProvider)=>Promise<void>,
 ) {
-  const readState = injectedState ?? (() => readVpnState(
-    settings().vpnStatusFile ?? path.join(homedir(), '.local', 'state', 'vpnks', 'vpn-state.json'), now,
-  ));
-  const state = async (): Promise<VpnState> => {
-    try { return await readState(); } catch { return 'unknown'; }
+  const evidence=async():Promise<VpnEvidence>=>{
+    try {
+      return injectedPayload
+        ? evaluateVpnEvidence(await injectedPayload(now()),now())
+        : await readVpnEvidence(settings().vpnStatusFile??path.join(homedir(),'.local','state','vpnks','vpn-state.json'),now);
+    } catch {return evaluateVpnEvidence(null,now());}
   };
-  const evidence=async()=>readVpnEvidence(settings().vpnStatusFile??path.join(homedir(),'.local','state','vpnks','vpn-state.json'),now);
+  const state=async():Promise<VpnState>=>(await evidence()).state;
   return {
     state, evidence,
     async assert(provider: PoolProvider) {
@@ -74,8 +75,8 @@ export function createVpnPolicy(
         await guardCheck(provider);
       }
       if (!settings().vpnOnlyProviders.some(value => value === provider)) return;
-      if(settings().requireVerifiedVpn&&(await evidence()).assurance!=='verified_ipv4') throw new VpnRequiredError(provider);
-      if (await state() !== 'connected') throw new VpnRequiredError(provider);
+      const current=await evidence();
+      if(current.state!=='connected'||current.assurance!=='verified_ipv4') throw new VpnRequiredError(provider);
     },
   };
 }

@@ -14,7 +14,7 @@ The panel's automation status **Not linked** is normal when no controller is con
 
 Both plugins consume `oxi-vpnks/vpn-state/2`: trusted root-owned non-writable regular file, no symlink, bounded read, file freshness 90 seconds, probe freshness 390 seconds, no future timestamps. Connected requires known `ok` reason, IPv4 coverage, utun244, a positive core PID, successful probe and matching epochs. A malformed or inconsistent sample is unknown and denied. Fixed limits are not replaced by values supplied in JSON.
 
-Legacy `/1` remains compatible and visibly unverified until `requireVerifiedVpn` is enabled. Set this option independently in Guard and Pooler after upgrading the writer. With Enforce and verified VPN enabled, Guard refuses linked Pooler requests unless Pooler also enables verification for that provider. A weaker Pooler setting cannot bypass that decision. Pooler strict traffic uses IPv4; IPv6 target literals and IPv6 proxy endpoints are refused. Other providers retain the ordinary transport.
+Only `oxi-vpnks/vpn-state/2` is accepted. Verified fresh IPv4 evidence is mandatory, with no switch to weaken it. Older evidence is denied. Guard requires the linked Pooler to advertise immutable `vpnPolicyVersion: 2` and protect the requested provider; older Poolers are denied until upgraded. Protected Pooler traffic always uses IPv4; IPv6 target literals and IPv6 proxy endpoints are refused. Kimi and Z.ai retain their independent transport.
 
 Подтверждение `/2` относится только к IPv4. Старый `/1` отображается как неподтверждённый. Строгий режим по умолчанию выключен для безопасной миграции. Native/ACP-трафик IPv6 не становится защищённым от проверки IPv4.
 
@@ -40,11 +40,11 @@ Pause disables future scheduled ticks and cooperatively holds controller-aware b
 
 Controller status and restoration operate on at most the documented bounded inventory; incomplete inspection is reported. Snapshot intent survives process failure. Restoration never replays expired one-shots and skips ambiguous pauses unless explicitly reviewed.
 
-See [existing plugin-only limits](vpn-plugin-protection-limits.md). Test the actual writer-to-consumer chain in an isolated instance before deployment; include the controller only if you opt into automation coordination. Do not activate strict mode against a legacy writer, or automation coordination against an unavailable controller.
+See [existing plugin-only limits](vpn-plugin-protection-limits.md). Test the actual writer-to-consumer chain in an isolated instance before deployment; include the controller only if you opt into automation coordination. Do not deploy these versions without a verified current writer, or automation coordination against an unavailable controller.
 
 ## Deployment / Развёртывание
 
-1. Upgrade Guard and Pooler with activation flags off. Upgrade a compatible automation controller only if you use the optional integration.
+1. Upgrade Guard and Pooler together; a mixed-version pair can refuse protected traffic. The VPN verification requirement cannot be turned off. Upgrade a compatible automation controller only if you use the optional integration.
 2. Deploy the accepted VPN writer in a coordinated idle window.
 3. Confirm a fresh `/2` sample and IPv4 proof on the actual server.
 4. Enable Pooler verification for protected providers, then Guard verification and Enforce; verify explicit denials and recovery.

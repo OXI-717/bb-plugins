@@ -2,7 +2,7 @@
 export type VpnState = 'connected' | 'disconnected' | 'unknown';
 export type VpnEvidence = {
   state: VpnState;
-  assurance: 'legacy' | 'verified_ipv4' | 'unverified' | 'invalid';
+  assurance: 'verified_ipv4' | 'unverified' | 'invalid';
   reason: string;
   updatedAt: number | null;
   probeAt: number | null;
@@ -13,13 +13,9 @@ const integer = (v: unknown): v is number => typeof v === 'number' && Number.isS
 const text = (v: unknown, max = 128): v is string => typeof v === 'string' && v.length > 0 && v.length <= max;
 const fresh = (v: unknown, now: number, ttl: number) => integer(v) && now-v*1000 >= 0 && now-v*1000 <= ttl*1000;
 
-export function evaluateVpnEvidence(payload: unknown, nowMs: number, requireVerified = false): VpnEvidence {
+export function evaluateVpnEvidence(payload: unknown, nowMs: number): VpnEvidence {
   const invalid = (reason = 'invalid_evidence'): VpnEvidence => ({state:'unknown',assurance:'invalid',reason,updatedAt:null,probeAt:null});
   if (!Number.isFinite(nowMs) || !object(payload) || !integer(payload.updated_unix) || typeof payload.state !== 'string' || !['connected','disconnected'].includes(payload.state)) return invalid();
-  if (payload.schema === 'oxi-vpnks/vpn-state/1') {
-    if (!fresh(payload.updated_unix,nowMs,60)) return invalid('file_stale');
-    return {state:requireVerified?'unknown':payload.state as VpnState,assurance:'legacy',reason:requireVerified?'legacy_requires_verified':'legacy_unverified',updatedAt:payload.updated_unix*1000,probeAt:null};
-  }
   if (payload.schema !== 'oxi-vpnks/vpn-state/2' || !fresh(payload.updated_unix,nowMs,90)) return invalid('file_stale_or_schema');
   const tunnel = payload.tunnel, attempt = payload.last_probe_attempt;
   if (!text(payload.reason) || !reasons.has(payload.reason) || payload.coverage !== 'ipv4' ||
