@@ -93,7 +93,7 @@ jobs:
       - name: Rehearse the full upgrade in sandbox
         run: /bin/bash scripts/upgrade-pool.sh --sandbox
       - name: Test upgrade without a live BB server
-        run: python3 -m unittest discover -s scripts -p test_upgrade_pool.py -v
+        run: python3 -m unittest discover -s scripts -p 'test_upgrade_*.py' -v
       - name: Test Cursor gateway with a synthetic local CLI
         run: python3 -m unittest discover -s scripts -p test_cursor_route.py -v
 

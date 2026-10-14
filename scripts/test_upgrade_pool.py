@@ -14,6 +14,23 @@ import upgrade_pool as u
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_wait_only_never_offers_forced_interruption(self):
+        with patch.object(u, 'bb', return_value={'inFlight': 1}), patch.object(u, 'report_pool'), patch.object(u, 'confirm_interrupt') as confirm, patch.object(u.time, 'sleep'), patch.object(u.time, 'monotonic', side_effect=[0, 0, 301, 901]):
+            with self.assertRaises(u.UpgradeError):
+                u.wait_idle(lambda _: None, offer_interrupt=False)
+            confirm.assert_not_called()
+
+    def test_wait_only_main_never_mutates_plugins(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp) / 'plugins' / u.PLUGIN
+            data.mkdir(parents=True)
+            (data / 'data.db').touch()
+            with patch.object(u.sys, 'argv', ['upgrade', '--wait-idle']), patch.object(u, 'bb', return_value={'dataDir': temp}), patch.dict(os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), patch.object(u, 'wait_idle') as idle, patch.object(u, 'perform') as perform, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(u.main(), 0)
+                idle.assert_called_once()
+                self.assertFalse(idle.call_args.kwargs['offer_interrupt'])
+                perform.assert_not_called()
+
     def test_inventory_detects_project_routing_changes(self):
         pool = {'accounts': [{'id': 'account-test', 'projects': {'onlySelected': True, 'rules': [{'projectId': 'project-a', 'role': 'primary'}]}}],
                 'routing': {}, 'enabledAccountCount': 1}

@@ -3,9 +3,10 @@ import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createFakePluginHost, makeHostResponse, makeThreadResponse, makeMessageDispatchHookContext } from '@get-bb/plugin-sdk/testing';
 import { describe, expect, it } from 'vitest';
 import plugin from './server.js';
+import {statusSchema} from './contract.js';
 
 type PluginList = Awaited<ReturnType<BbPluginApi['sdk']['plugins']['list']>>;
-async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean}={}) {
+async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;failHostRpc?:boolean}={}) {
   const states=new Map([['host-a','disconnected'],['host-b','connected']]);
   const available=new Set(['host-a','host-b']);
   const enabled=new Map([['provider-codex',true],['provider-claude-code',false],['provider-acp',true]]);
@@ -31,7 +32,7 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean}={}
         stop:async({threadId})=>{stopped.push(threadId);return {} as never;},
       },
     },
-    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}return verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');},
+    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(options.failHostRpc)throw Error('sensitive-synthetic-payload');if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}return verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');},
   });
   await plugin(fake.bb);
   const hook=fake.harness.registrations.hooks['message.dispatch'];
@@ -67,6 +68,32 @@ describe('guard admission and reconciliation',()=>{
     expect(await dispatch('acp-cursor','host-a')).toMatchObject({action:'wait'});
     expect(await dispatch('kimi','host-a')).toEqual({action:'proceed'});
     expect(await dispatch('codex','host-b')).toEqual({action:'proceed'});
+    await fake.harness.lifecycle.dispose();
+  });
+  it('retains a bounded stop observation across reload without recording upstream payloads',async()=>{
+    const {fake}=await setup();
+    await select(fake,['host-a']);
+    await mode(fake,'enforce');
+    const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));
+    expect(status).toMatchObject({stopHistory:expect.arrayContaining([expect.objectContaining({threadId:'protected',hostId:'host-a',reason:'probe_failed',at:expect.any(Number)})])});
+    const reloaded=await fake.harness.lifecycle.reload(plugin);
+    expect(await reloaded.harness.behavior.callRpc('status',null)).toMatchObject({stopHistory:statusSchema.parse(status).stopHistory});
+    await reloaded.harness.lifecycle.dispose();
+  });
+  it('distinguishes unavailable host RPC from VPN evidence without persisting exception text',async()=>{
+    const {fake}=await setup({failHostRpc:true});
+    await select(fake,['host-a']);
+    await mode(fake,'enforce');
+    const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));
+    expect(status.stopHistory?.at(-1)?.reason).toBe('host_rpc_failed');
+    expect(JSON.stringify(status.stopHistory)).not.toContain('sensitive-synthetic-payload');
+    await fake.harness.lifecycle.dispose();
+  });
+  it('bounds the persisted stop journal to the latest hundred observations',async()=>{
+    const {fake}=await setup();
+    await select(fake,['host-a']);
+    for(let i=0;i<102;i++)await mode(fake,'enforce');
+    expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).stopHistory).toHaveLength(100);
     await fake.harness.lifecycle.dispose();
   });
   it('keeps a missing selected host unknown without treating other hosts as selected',async()=>{

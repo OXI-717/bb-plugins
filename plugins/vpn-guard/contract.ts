@@ -8,6 +8,8 @@ export const hostContract = defineRpcContract({
   readState: { input: z.null(), output: z.object({ state: z.enum(['connected','disconnected','unknown']),evidence:evidenceSchema.optional() }) },
 });
 export const modeSchema = z.enum(['observe','enforce']);
+export const stopReasonSchema=z.enum(['manual_block','host_rpc_failed','host_catalog_unavailable','no_route','no_core','probe_failed','probe_stale','healing','invalid_evidence','file_stale_or_schema','probe_unverified']);
+export const stopObservationSchema=z.object({threadId:z.string().max(160),hostId:z.string().max(160),at:z.number().int().nonnegative(),reason:stopReasonSchema});
 export const configurationSchema = z.object({
   mode: modeSchema,
   manualBlock: z.boolean().default(false),
@@ -32,6 +34,7 @@ export const statusSchema = z.object({
   ownedDisabledPlugins: z.array(z.string()),
   ambiguousPluginChanges: z.array(z.string()),
   stoppedThreadIds: z.array(z.string()),
+  stopHistory:z.array(stopObservationSchema).max(100).optional(),
   limitations: z.array(z.string()),
   automations:z.object({status:automationStatusSchema.nullable(),error:z.string().nullable(),held:z.boolean(),needsReconcile:z.boolean()}),
   pool:z.object({linked:z.boolean().nullable(),vpnPolicyVersion:z.literal(2).nullable(),error:z.string().nullable()}),
