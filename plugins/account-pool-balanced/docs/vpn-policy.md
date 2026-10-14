@@ -12,13 +12,24 @@ The file must be a root-owned regular file, not a symlink, at most 4096 bytes, w
 
 ```json
 {
-  "schema": "oxi-vpnks/vpn-state/1",
+  "schema": "oxi-vpnks/vpn-state/2",
   "updated_unix": 1800000000,
-  "state": "connected"
+  "state": "connected",
+  "reason": "ok",
+  "coverage": "ipv4",
+  "guard_version": "2.0.0",
+  "tunnel": {"iface": "utun244", "core_pid": 123},
+  "epoch_hash": "example-epoch",
+  "traffic_probe_epoch_hash": "example-epoch",
+  "traffic_probe_ok": true,
+  "traffic_probe_unix": 1800000000,
+  "last_probe_attempt": {"ts": 1800000000, "ok": true},
+  "traffic_probe_max_age": 390,
+  "file_ttl": 90
 }
 ```
 
-Only `connected` with a timestamp between now and 60 seconds ago allows protected traffic. Future timestamps also deny traffic. Use `disconnected` otherwise. Extra writer metadata is permitted. Reads, including cleanup, have a one-second deadline; overlapping reads of the same file share one operation, and a stalled operation returns `unknown` without spawning more reads. A server without a configured writer will correctly refuse protected providers, including after suspend.
+Only `connected` with a timestamp between now and 90 seconds ago and a coherent successful probe no older than 390 seconds allows protected traffic. Verification is mandatory and the older evidence format is rejected. Future timestamps also deny traffic. Use `disconnected` otherwise. Extra writer metadata is permitted. Reads, including cleanup, have a one-second deadline; overlapping reads of the same file share one operation, and a stalled operation returns `unknown` without spawning more reads. A server without a configured writer will correctly refuse protected providers, including after suspend.
 
 ## Configuration
 
@@ -36,3 +47,7 @@ This gate protects **the pool's traffic**. BB's built-in Codex/Claude usage sour
 Network failures and OAuth HTTP 403 use bounded retry backoff rather than permanent credential rejection. HTML HTTP 403 edge-block pages pause an account for one minute and permit a later attempt. The periodic five-minute quota refresh can recheck legacy saved OAuth-403/HTML edge errors; a successful provider quota response clears them. Manual refresh can also recover them without toggling the account.
 
 OAuth HTTP 400/401 remains an authentication error. Quota exhaustion remains a provider limit. No automatic reset credits are consumed, and client requests are never resent after an uncertain successful outcome.
+
+## Upgrade and policy compatibility
+
+Upgrade Pooler 0.4.20 and Guard 0.1.5 together when linked. A mixed-version pair can locally refuse protected traffic during the update. Stored settings are sanitized without resetting provider choices, machine scope, accounts or automation bindings. The retired verification switch is not a writable API/CLI setting; `config.get` exposes immutable `vpnPolicyVersion: 2` for the Guard handshake. There is no cached legacy allow or ordinary-transport fallback for VPN-only providers.
