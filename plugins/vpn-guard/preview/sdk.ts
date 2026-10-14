@@ -18,7 +18,6 @@ const rpc={async call(method:string,input?:any){
     case 'status':break;
     case 'setMode':status.mode=input.mode;break;
     case 'setManualBlock':status.manualBlock=input.blocked;break;
-    case 'setVerifiedVpn':status.requireVerifiedVpn=input.enabled;break;
     case 'setGlobalSuspension':status.suspendNativePluginsGlobally=input.enabled;break;
     case 'restoreOwned':if(status.manualBlock||status.hosts.some(host=>host.selected&&host.vpn!=='connected'))throw new Error('Selected machines must be connected before restoring native plugins.');status.ownedDisabledPlugins=[];break;
     case 'setHosts':status.hostIds=input.hostIds;status.hosts.forEach(host=>host.selected=status.hostIds.includes(host.id));break;

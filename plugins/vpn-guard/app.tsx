@@ -62,7 +62,7 @@ export function GuardPage() {
     </section>
     <section><h2>{t.overview}</h2>
       <dl className="vg-overview">
-        <div><dt>{t.pool}</dt><dd>{!statusFresh?t.unknown:status?.pool.linked===true?`${t.linked} · ${status.pool.requireVerified?t.verifiedPolicy:t.ordinaryTransport}`:status?.pool.linked===false?t.notLinked:t.unavailable}</dd></div>
+        <div><dt>{t.pool}</dt><dd>{!statusFresh?t.unknown:status?.pool.linked===true?`${t.linked} · ${t.verifiedPolicy}`:status?.pool.linked===false?t.notLinked:t.unavailable}</dd></div>
         <div><dt>{t.automations}</dt><dd>{!statusFresh?t.unknown:!status?.coordinateAutomations?t.notLinked:status.automations.error||status.automations.status?.activeRuns.length?t.partial:!status.automations.status?t.unknown:status.automations.status.blocked?t.paused:t.available}</dd></div>
         <div><dt>{t.nativeState}</dt><dd>{!statusFresh?t.unknown:needsNativeRecovery?t.pendingRecovery:t.noNativeRecovery}</dd></div>
         <div><dt>{t.stopped}</dt><dd>{statusFresh?`${status?.stoppedThreadIds.length} ${t.threadUnit}`:t.unknown}</dd></div>
@@ -94,9 +94,8 @@ export function GuardPage() {
       </details>
     </details>
     <details className="vg-section"><summary>{t.machineSettings}</summary><p className="vg-help">{t.machinesHelp}</p>
-      <label className="vg-check"><input type="checkbox" checked={status?.requireVerifiedVpn??false} disabled={!ready} onChange={e=>void change(()=>rpc.call('setVerifiedVpn',{enabled:e.target.checked}))}/><span>{t.verifiedVpn}</span></label><p className="vg-help">{t.verifiedHelp}</p>
       <ul className="vg-machines">{status?.hosts.map(h=><li key={h.id}><label className="vg-check"><input type="checkbox" checked={h.selected} disabled={!ready||(!h.available&&!h.selected)} onChange={e=>void selectHost(h.id,e.target.checked)}/><span>{h.name}</span></label>
-        <span className="vg-help">{!statusFresh?t.unknown:h.selected?t[h.vpn??'unknown']:t.outside}{statusFresh&&h.evidence?` · ${h.evidence.assurance==='verified_ipv4'?t.verifiedIpv4:h.evidence.assurance==='legacy'?t.legacyVpn:t.unverifiedVpn}`:''}{statusFresh&&!h.available?` · ${t.unavailable}`:''}</span></li>)}</ul>
+        <span className="vg-help">{!statusFresh?t.unknown:h.selected?t[h.vpn??'unknown']:t.outside}{statusFresh&&h.evidence?` · ${h.evidence.assurance==='verified_ipv4'?t.verifiedIpv4:t.unverifiedVpn}`:''}{statusFresh&&!h.available?` · ${t.unavailable}`:''}</span></li>)}</ul>
     </details>
     <details className="vg-section" open={needsNativeRecovery}><summary>{t.native}</summary><p className="vg-help">{t.nativeScope}</p>
       <label className="vg-check"><input type="checkbox" checked={status?.suspendNativePluginsGlobally??false} disabled={!ready} onChange={e=>void change(()=>rpc.call('setGlobalSuspension',{enabled:e.target.checked,acknowledgeGlobalImpact:e.target.checked}))}/><span>{t.suspend}</span></label>

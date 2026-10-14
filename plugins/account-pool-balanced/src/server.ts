@@ -1,6 +1,5 @@
 import {createGuardNetworkCheck} from "./guard-network.js";
 import {z} from "zod";
-import type { VpnState } from "./vpn-policy.js";
 import {
   createUpstreamTransport,
   transportErrorCode,
@@ -53,7 +52,7 @@ import {
 export interface AccountPoolPluginOptions {
   fetch?: typeof fetch;
   fetchIpv4?:typeof fetch;
-  vpnState?: () => Promise<VpnState>;
+  vpnPayload?: (nowMs:number) => Promise<unknown>;
   now?: () => number;
   refreshUrl?: string;
   codexRefreshUrl?: string;
@@ -92,6 +91,8 @@ export function createAccountPoolPlugin(
     let currentSettings = accountPoolConfigSchema.parse(
       (await bb.storage.kv.get("config")) ?? {},
     );
+    // Persist the sanitized configuration so retired switches are not retained.
+    await bb.storage.kv.set("config",currentSettings);
     const config: AccountPoolConfigController = {
       get: () => currentSettings,
       set: async (input) => {
@@ -137,7 +138,7 @@ export function createAccountPoolPlugin(
       hubTokens: combinedTokens(hubTokens, externalClients.tokens),
       getSettings: () => currentSettings,
       fetch: upstreamFetch,fetchIpv4:options.fetchIpv4??transport?.fetchIpv4,
-      vpnState: options.vpnState,
+      vpnPayload: options.vpnPayload,
       guardCheck:createGuardNetworkCheck(async (provider,signal)=>{
         const hostId=(await bb.sdk.system.config({signal})).primaryHostId;
         if(!hostId) throw new Error("Pool server machine unknown");

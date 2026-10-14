@@ -1,8 +1,9 @@
+import {vpnProof} from './vpn-test-fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { open } from 'node:fs/promises';
 import { trustedRead, readVpnState } from './trusted-read.js';
 const now = 1_800_000_000_000;
-const body = Buffer.from(JSON.stringify({ schema:'oxi-vpnks/vpn-state/1', updated_unix:now/1000, state:'connected' }));
+const body = Buffer.from(JSON.stringify(vpnProof(now)));
 const handle = (options: { uid?: number; mode?: number; size?: number; regular?: boolean; bytes?: Buffer } = {}) => ({
   stat: async () => ({uid:options.uid ?? 0, mode:options.mode ?? 0o100644, size:options.size ?? body.length, isFile:()=>options.regular ?? true}),
   read: async (buffer: Buffer) => { const bytes = options.bytes ?? body; bytes.copy(buffer); return {bytesRead:bytes.length}; },

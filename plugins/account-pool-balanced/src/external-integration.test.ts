@@ -1,3 +1,4 @@
+import {vpnProof} from './vpn-test-fixture.js';
 import { expect, it } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -10,10 +11,11 @@ it("BB CLI provisions an external client that shares the pool and can be revoked
   const host = createFakePluginHost({ pluginId: "account-pool-balanced", dataDir, sdk: { hosts: { list: async () => [] }, system: { providerStates: async () => ({ providers: [] }) } } });
   const seen: string[] = [];
   let connected = false;
-  await createAccountPoolPlugin({ vpnState: async () => connected ? "connected" : "disconnected", fetch: (async (_url, init) => {
+  const upstreamFetch:typeof fetch=async (_url,init)=>{
     seen.push(new Headers(init?.headers).get("x-api-key") ?? "");
     return Response.json({ content: [{ type: "text", text: "ok" }] });
-  }) as typeof fetch })(host.bb);
+  };
+  await createAccountPoolPlugin({vpnPayload:async timestamp=>vpnProof(timestamp,connected?'connected':'disconnected'),fetch:upstreamFetch,fetchIpv4:upstreamFetch})(host.bb);
   const service = host.harness.behavior.runService("hub");
   try {
     await host.harness.behavior.callRpc("account.add", { provider: "claude", source: { kind: "api-key", apiKey: "synthetic-upstream-key" }, label: "fixture", priority: 0 });

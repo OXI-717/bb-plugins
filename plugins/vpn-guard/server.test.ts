@@ -1,3 +1,4 @@
+import {verifiedHostResult} from './vpn-test-fixture.js';
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createFakePluginHost, makeHostResponse, makeThreadResponse, makeMessageDispatchHookContext } from '@get-bb/plugin-sdk/testing';
 import { describe, expect, it } from 'vitest';
@@ -30,7 +31,7 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean}={}
         stop:async({threadId})=>{stopped.push(threadId);return {} as never;},
       },
     },
-    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}return {state:states.get(hostId)??'unknown'};},
+    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}return verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');},
   });
   await plugin(fake.bb);
   const hook=fake.harness.registrations.hooks['message.dispatch'];

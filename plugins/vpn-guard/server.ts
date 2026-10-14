@@ -22,7 +22,7 @@ const LIMITATIONS = [
   'VPN Guard is BB admission control, not a packet firewall.',
 ];
 type Configuration = z.infer<typeof configurationSchema>;
-const initialConfiguration: Configuration = {mode:'observe',manualBlock:false,hostIds:[],suspendNativePluginsGlobally:false,requireVerifiedVpn:false,coordinateAutomations:false,automationControllerPath:null};
+const initialConfiguration: Configuration = {mode:'observe',manualBlock:false,hostIds:[],suspendNativePluginsGlobally:false,coordinateAutomations:false,automationControllerPath:null};
 
 export default async function plugin(bb: BbPluginApi) {
   const storedInstance=await bb.storage.kv.get<string>('protection-instance-v1');
@@ -40,6 +40,7 @@ export default async function plugin(bb: BbPluginApi) {
   const loaded=configurationSchema.safeParse(await bb.storage.kv.get<unknown>(CONFIG));
   let config:Configuration=loaded.success ? loaded.data : initialConfiguration;
   if ((config.mode==='enforce' || config.manualBlock) && config.hostIds.length===0) config={...config,mode:'observe',manualBlock:false};
+  if(loaded.success)await bb.storage.kv.set(CONFIG,config);
   const storedOwned=z.array(z.string()).safeParse(await bb.storage.kv.get<unknown>(JOURNAL));
   const storedPending=z.array(z.string()).safeParse(await bb.storage.kv.get<unknown>(PENDING));
   const storedStopped=z.array(z.string()).safeParse(await bb.storage.kv.get<unknown>(STOPPED));
@@ -61,8 +62,12 @@ export default async function plugin(bb: BbPluginApi) {
     return run;
   }
   async function vpn(hostId:string):Promise<VpnState> {
-    try {const result=await host.call('readState',null,{hostId,timeoutMs:1500});return config.requireVerifiedVpn&&result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state;}
+    try {const result=await host.call('readState',null,{hostId,timeoutMs:1500});return result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state;}
     catch {return 'unknown';}
+  }
+  const poolPolicySchema=z.object({vpnGuardEnabled:z.boolean(),vpnPolicyVersion:z.literal(2),vpnOnlyProviders:z.array(z.string())});
+  async function poolPolicy() {
+    return poolPolicySchema.parse(await bb.sdk.plugins.callRpc({pluginId:'account-pool-balanced',method:'config.get',input:null,outputSchema:poolPolicySchema,signal:AbortSignal.timeout(1000)}));
   }
   async function status() {
     let serverHostId:string|null=null;
@@ -75,12 +80,12 @@ export default async function plugin(bb: BbPluginApi) {
       let result:Awaited<ReturnType<typeof host.call<'readState'>>>|undefined;
       if(selected.has(h.id))try{result=await host.call('readState',null,{hostId:h.id,timeoutMs:1500});}catch{}
       return {id:h.id,name:h.name,selected:selected.has(h.id),available:true,evidence:result?.evidence??null,
-        vpn:selected.has(h.id)?(!result?'unknown':config.requireVerifiedVpn&&result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state):null};
+        vpn:selected.has(h.id)?(!result?'unknown':result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state):null};
     }));
     for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,vpn:'unknown',evidence:null});
-    let pool:{linked:boolean|null,requireVerified:boolean|null,error:string|null}={linked:null,requireVerified:null,error:null};
-    try {const raw=await bb.sdk.plugins.callRpc({pluginId:'account-pool-balanced',method:'config.get',input:null,outputSchema:z.object({vpnGuardEnabled:z.boolean(),requireVerifiedVpn:z.boolean().optional()}),signal:AbortSignal.timeout(1000)});pool={linked:raw.vpnGuardEnabled,requireVerified:raw.requireVerifiedVpn??false,error:null};}catch{pool.error='Pooler linkage unavailable';}
-    return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,requireVerifiedVpn:config.requireVerifiedVpn,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,
+    let pool:{linked:boolean|null,vpnPolicyVersion:2|null,error:string|null}={linked:null,vpnPolicyVersion:null,error:null};
+    try {const raw=await poolPolicy();pool={linked:raw.vpnGuardEnabled,vpnPolicyVersion:raw.vpnPolicyVersion,error:null};}catch{pool.error='Pooler linkage unavailable';}
+    return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,
       hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],limitations:LIMITATIONS,pool,automations:{status:automationStatus,error:automationError,held:automationBinding!==null||bindingCorrupt,needsReconcile:automationDesired===null}};
   }
   async function saveConfig(next:Configuration) {
@@ -256,10 +261,10 @@ export default async function plugin(bb: BbPluginApi) {
       if(!config.hostIds.includes(hostId)) return decision(true,'outside_scope');
       if(config.manualBlock) return decision(false,'manual_block');
       if(config.mode==='observe') return decision(true,'observe');
-      if(config.requireVerifiedVpn) {
+      {
         try {
-          const pool=await bb.sdk.plugins.callRpc({pluginId:'account-pool-balanced',method:'config.get',input:null,outputSchema:z.object({requireVerifiedVpn:z.boolean(),vpnOnlyProviders:z.array(z.string())}),signal:AbortSignal.timeout(1000)});
-          if(!pool.requireVerifiedVpn||!pool.vpnOnlyProviders.includes(provider))return decision(false,'vpn_unavailable');
+          const pool=await poolPolicy();
+          if(!pool.vpnOnlyProviders.includes(provider))return decision(false,'vpn_unavailable');
         }catch{return decision(false,'vpn_unavailable');}
       }
       let available=false;
@@ -288,7 +293,6 @@ export default async function plugin(bb: BbPluginApi) {
     networkDecision:({hostId,provider})=>networkDecision(hostId,provider),
     status:()=>status(),
     setManualBlock:({blocked})=>serial(()=>update({...config,manualBlock:blocked})),
-    setVerifiedVpn:({enabled})=>serial(()=>update({...config,requireVerifiedVpn:enabled})),
     setMode:({mode})=>serial(()=>update({...config,mode})),
     setHosts:({hostIds})=>serial(()=>setHosts(hostIds)),
     setGlobalSuspension:({enabled,acknowledgeGlobalImpact})=>serial(()=>{
@@ -319,7 +323,6 @@ export default async function plugin(bb: BbPluginApi) {
         else if((command==='block'||command==='unblock') && args.length===0) result=await serial(()=>update({...config,manualBlock:command==='block'}));
         else if(command==='enforce' && args.length===0) result=await serial(()=>update({...config,mode:'enforce'}));
         else if(command==='observe' && args.length===0) result=await serial(()=>update({...config,mode:'observe'}));
-        else if(command==='verified-vpn' && args.length===1 && ['on','off'].includes(args[0]!)) result=await serial(()=>update({...config,requireVerifiedVpn:args[0]==='on'}));
         else if(command==='hosts' && args.length>0) {
           const hostIds=args.length===1 && args[0]==='none'?[]:args;
           result=await serial(()=>setHosts(hostIds));
