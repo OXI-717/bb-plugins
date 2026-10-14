@@ -7407,6 +7407,27 @@ describe("network policy boundaries", () => {
 });
 
 describe('VPN Guard linked network policy',()=>{
+  it('shares one deadline across server lookup and a slow successful Guard RPC',async()=>{
+    const outbound=vi.fn(async()=>Response.json({}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    let sharedSignal:AbortSignal|undefined;
+    fixture.host.harness.sdk.stub('system.config',async(args:{signal?:AbortSignal})=>{
+      sharedSignal=args.signal;
+      return {primaryHostId:'pool-host'};
+    });
+    fixture.host.harness.sdk.stub('plugins.callRpc',async(args:{signal?:AbortSignal})=>{
+      expect(args.signal).toBe(sharedSignal);
+      expect(args.signal).toBeInstanceOf(AbortSignal);
+      await new Promise(resolve=>setTimeout(resolve,1200));
+      expect(args.signal?.aborted).toBe(false);
+      return {schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'connected'};
+    });
+    await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
+    const allowed=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
+    expect(allowed.status).toBe(200);
+    await allowed.text();
+    expect(outbound).toHaveBeenCalledTimes(1);
+  });
   it('blocks model, quota, login and status refresh before any upstream when Guard denies',async()=>{
     const outbound=vi.fn(async()=>Response.json({}));
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});

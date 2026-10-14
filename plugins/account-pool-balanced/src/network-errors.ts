@@ -9,8 +9,8 @@ export class VpnRequiredError extends Error {
 
 export class GuardRequiredError extends VpnRequiredError {
   override readonly code:string;
-  constructor(provider:PoolProvider,unavailable=false) {
+  constructor(provider:PoolProvider,unavailable=false,readonly failureReason?:'timeout'|'invalid_decision'|'rpc_failed') {
     super(provider);this.code=unavailable?'VPN_GUARD_UNAVAILABLE':'VPN_GUARD_BLOCKED';
-    this.message=`${this.code}: protected pool traffic requires VPN Guard permission.`;
+    this.message=`${this.code}: protected pool traffic requires VPN Guard permission.${failureReason?` Guard check: ${failureReason}.`:''}`;
   }
 }
