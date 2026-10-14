@@ -15,6 +15,7 @@ export function usageWindowLabel(
   if (minutes === 300) return "Five-hour limit";
   if (minutes === 1_440) return "Daily limit";
   if (minutes === 10_080) return "Weekly limit";
+  if (minutes === 43_200) return "Monthly limit";
   if (minutes === null) return fallback;
   return minutes % 1_440 === 0
     ? `${minutes / 1_440} day limit`
@@ -139,15 +140,16 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
                 null,
               );
             }
-          } else {
-            add(
+          }
+          if(account.limitWindows.length===0 || account.provider==='opencode-go') {
+            if(!account.limitWindows.some(window=>window.windowMinutes===300)) add(
               "five-hour",
               "Five-hour limit",
               account.fiveHourUtilization,
               account.fiveHourResetAt,
               null,
             );
-            add(
+            if(!account.limitWindows.some(window=>window.windowMinutes===10080)) add(
               "weekly",
               "Weekly limit",
               account.sevenDayUtilization,

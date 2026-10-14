@@ -7,6 +7,7 @@ describe("usage presentation labels", () => {
   it("names known windows consistently and retains other durations", () => {
     expect(usageWindowLabel(10_080, "primary")).toBe("Weekly limit");
     expect(usageWindowLabel(300, "secondary")).toBe("Five-hour limit");
+    expect(usageWindowLabel(43_200, "secondary")).toBe("Monthly limit");
     expect(usageWindowLabel(1_440, "primary")).toBe("Daily limit");
     expect(usageWindowLabel(2_880, "primary")).toBe("2 day limit");
     expect(usageWindowLabel(null, "Custom limit")).toBe("Custom limit");

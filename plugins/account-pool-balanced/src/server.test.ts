@@ -899,6 +899,28 @@ describe("Account Pool plugin", () => {
     expect(await requests[0]?.text()).toBe(body);
   });
 
+  it('labels an upstream Retry-After hold as rate limiting rather than account policy',async()=>{
+    let calls=0;
+    const now=Date.parse('2026-09-17T09:00:00Z');
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'opencode-go',source:'api-key',apiKey:'synthetic-go-key',options:{now:()=>now,opencodeGoUsagesUrl:'https://usages.example/zen/go/v1/usage',fetch:async(input,init)=>{
+      if(new Request(input,init).url.startsWith('https://usages.example/'))return Response.json({usage:{rolling:{percent:0},weekly:{percent:0}}});
+      calls++;return Response.json({error:{message:'Rate limited'}},{status:429,headers:{'retry-after':'86400'}});
+    }}});
+    await fixture.host.harness.behavior.callRpc('config.set',{routingStrategy:'balanced'});
+    const send=()=>fixture.host.harness.behavior.fetchHttp('POST','/opencode-go/v1/chat/completions',{headers:authHeaders(fixture.key),body:JSON.stringify({model:'synthetic-model',messages:[]})});
+    await (await send()).text();
+    const held=await send();
+    expect(held.status).toBe(403);
+    expect(held.headers.get('x-bb-pool-error')).toBe('POOL_RATE_LIMITED');
+    expect(await held.text()).toContain('2026-09-18T09:00:00.000Z');
+    expect(calls).toBe(1);
+  });
+  it('shows all three Go quota windows in the BB usage resource',async()=>{
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'opencode-go',source:'api-key',apiKey:'synthetic-go-key',options:{opencodeGoUsagesUrl:'https://usages.example/zen/go/v1/usage',fetch:async()=>Response.json({usage:{rolling:{percent:0},weekly:{percent:0},monthly:{percent:100,status:'rate-limited',resetsAt:'2099-01-01T00:00:00Z'}}})}});
+    const resource=z.object({usage:z.object({windows:z.array(z.object({label:z.string()}))})}).parse(await fixture.host.harness.behavior.callRpc('provider-usage.v1.getResource',{resourceId:fixture.account.id,refresh:true}));
+    expect(resource.usage.windows.map(w=>w.label).sort()).toEqual(['Five-hour limit','Monthly limit','Weekly limit']);
+  });
+
   it("refuses outright when the pooled subscription is spent for days", async () => {
     const requests: Request[] = [];
     const fixture = await createFixture({
