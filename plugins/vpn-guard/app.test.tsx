@@ -47,6 +47,15 @@ it('does not offer native restoration while selected VPN evidence is unknown',as
   expect((slot.getByRole('button',{name:'Восстановить плагины'}) as HTMLButtonElement).disabled).toBe(true);
 });
 
+it('allows explicit restoration after leaving enforcement and clearing machine scope',async()=>{
+  const status=guardFixture();status.mode='observe';status.hostIds=[];status.hosts=[];status.ownedDisabledPlugins=['provider-codex'];
+  const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,restoreOwned:()=>({...status,ownedDisabledPlugins:[]})}});
+  const restore=await slot.findByRole('button',{name:'Восстановить плагины'});
+  expect((restore as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(restore);
+  await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'restoreOwned',input:null}));
+});
+
 it('does not treat cached connected evidence as fresh after a status failure',async()=>{
   const status=guardFixture();status.ownedDisabledPlugins=['provider-codex'];let fail=false;
   const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>{if(fail)throw new Error('synthetic status unavailable');return status;}}});

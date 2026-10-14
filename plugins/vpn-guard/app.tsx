@@ -42,7 +42,7 @@ export function GuardPage() {
   }
   const ready=!!status&&!busy&&statusFresh;
   const selectedHosts=status?.hosts.filter(host=>host.selected)??[];
-  const canRestore=ready&&!status.manualBlock&&selectedHosts.length>0&&selectedHosts.every(host=>host.available&&host.vpn==='connected');
+  const canRestore=ready&&!status.manualBlock&&selectedHosts.every(host=>host.available&&host.vpn==='connected');
   const needsNativeRecovery=!!status&&(status.ownedDisabledPlugins.length>0||status.ambiguousPluginChanges.length>0);
   return <main className="vpn-guard" lang={language}>
     <header className="vg-header"><h1>{t.title}</h1><div className="vg-languages" role="group" aria-label={t.language}>
