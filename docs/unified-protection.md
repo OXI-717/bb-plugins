@@ -45,9 +45,9 @@ See [existing plugin-only limits](vpn-plugin-protection-limits.md). Test the act
 ## Deployment / Развёртывание
 
 1. Prepare the accepted current VPN writer on each protected host and the Pooler server. Confirm a fresh `/2` sample with coherent IPv4 proof before upgrading consumers.
-2. Back up settings and coordinate an idle maintenance window. Use Pooler 0.4.21 and Guard 0.1.7 with the mandatory `/2` policy; incompatible policy versions refuse protected traffic. The combined updater requires Observe before reload; return to the desired Guard mode afterward. Pooler VPN verification itself is always required.
+2. Back up settings and coordinate an idle maintenance window. Use Pooler 0.4.21 and Guard 0.1.8 with the mandatory `/2` policy; incompatible policy versions refuse protected traffic. The combined updater requires Observe before reload; return to the desired Guard mode afterward. Pooler VPN verification itself is always required.
 3. Confirm immutable Pooler `vpnPolicyVersion: 2`, selected host scope and Guard linkage. There is no separate verification setter.
 4. Enable the desired Guard Enforce policy and check explicit denials and recovery without bypassing unknown evidence.
 5. Optional: update the controller to support `--schedules-only` before upgrading Guard, then opt in to coordination. Verify writer readiness on the actual controller host. Test automatic recovery after VPN returns, changed or ambiguous pauses, and preservation of independent manual/emergency holds. Explicit Resume clears those independent holds without an extra review checkbox. Skip this step when no controller is installed.
 
-Building and verifying packages does not install them or change production VPN, Pooler or automation state. Installation of Guard 0.1.7 with coordination already enabled activates automatic recovery of existing pending schedules as soon as VPN evidence and the remaining locks permit it.
+Building and verifying packages does not install them or change production VPN, Pooler or automation state. Installation of Guard 0.1.8 with coordination already enabled activates automatic recovery of existing pending schedules as soon as VPN evidence and the remaining locks permit it.

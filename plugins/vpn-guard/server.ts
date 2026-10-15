@@ -15,7 +15,7 @@ const NATIVE_PLUGINS = ['provider-codex','provider-claude-code'] as const;
 const LIMITATIONS = [
   'Send-now bypasses message.dispatch.',
   'Native plugin suspension is global across hosts and requires separate opt-in.',
-  'Disabled native plugins require explicit restore; BB has no ownership revision for manual changes.',
+  'Guard-owned native plugins resume automatically after VPN recovery; BB cannot distinguish a redundant manual disable while they are already paused.',
   'A crash during plugin disable leaves an ambiguous journal entry for manual review, never automatic restoration.',
   'An ambiguous native plugin change holds its provider until explicitly acknowledged after review.',
   'In-flight connections, running scripts, and existing bridge processes are not a proven network block.',
@@ -99,10 +99,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function saveOwned() {await bb.storage.kv.set(JOURNAL,[...owned]);}
   async function savePending() {await bb.storage.kv.set(PENDING,[...pending]);}
-  async function suspendNativePlugins():Promise<Error[]> {
+  async function suspendNativePlugins(onlyOwned=false):Promise<Error[]> {
     const failures:Error[]=[];
     const {plugins}=await bb.sdk.plugins.list();
     for(const id of NATIVE_PLUGINS) {
+      if(onlyOwned&&!owned.has(id)) continue;
       const entry=plugins.find(p=>p.id===id);
       if(!entry?.enabled) continue;
       try {
@@ -123,19 +124,30 @@ export default async function plugin(bb: BbPluginApi) {
     }
     return failures;
   }
-  async function restoreOwned() {
+  async function assertNativeRecovery(automatic:boolean) {
     if(config.manualBlock) throw new Error("Release the manual block before restoring native plugins.");
-    const snapshot=await status();
-    if(snapshot.hosts.some(h=>h.selected && h.vpn!=='connected')) throw new Error('Selected machines must be connected before restoring native plugins.');
+    if((automatic&&config.hostIds.length===0)||(await Promise.all(config.hostIds.map(vpn))).some(state=>state!=='connected')) throw new Error('Selected machines must be connected before restoring native plugins.');
+  }
+  async function restoreOwned(automatic=false) {
+    await assertNativeRecovery(automatic);
     const {plugins}=await bb.sdk.plugins.list();
     for(const id of [...owned]) {
       const entry=plugins.find(p=>p.id===id);
       if(!entry) continue; // keep the claim visible if the plugin is missing
+      await assertNativeRecovery(automatic);
       if(!entry.enabled) await bb.sdk.plugins.enable({pluginId:id});
-      owned.delete(id);
+      try {await assertNativeRecovery(automatic);}
+      catch(error) {
+        // Enable can take long enough for VPN to disappear. Retain ownership
+        // and restore the paused state; this is not a packet-level guarantee.
+        await bb.sdk.plugins.disable({pluginId:id});
+        throw error;
+      }
+      const next=new Set(owned);next.delete(id);
+      await bb.storage.kv.set(JOURNAL,[...next]);
+      owned=next;
       policyVersion++;
       recheckDirty=true;
-      await saveOwned();
     }
   }
   async function stopProtected(states:Map<string,VpnState>,snapshot:Awaited<ReturnType<typeof status>>):Promise<Error[]> {
@@ -210,12 +222,22 @@ export default async function plugin(bb: BbPluginApi) {
     const snapshot=await status();
     const states=new Map(snapshot.hosts.filter(h=>h.selected).map(h=>[h.id,h.vpn??'unknown'] as const));
     const failures:Error[]=[];
+    const vpnUnavailable=states.size===0||[...states.values()].some(state=>state!=='connected');
+    const blocking=config.manualBlock||(config.mode==='enforce'&&vpnUnavailable);
+    if(config.suspendNativePluginsGlobally&&blocking) {
+      try {failures.push(...await suspendNativePlugins());}
+      catch(error) {failures.push(new Error(`native suspension: ${String(error)}`));}
+    } else if(owned.size>0&&(config.manualBlock||vpnUnavailable)) {
+      // Disabling the option prevents new ownership, but cannot abandon an
+      // interrupted recovery which may have enabled an owned plugin already.
+      try {failures.push(...await suspendNativePlugins(true));}
+      catch(error) {failures.push(new Error(`native suspension: ${String(error)}`));}
+    }
     if(config.manualBlock || (config.mode==='enforce' && [...states.values()].some(state=>state!=='connected'))) {
-      if(config.suspendNativePluginsGlobally) {
-        try {failures.push(...await suspendNativePlugins());}
-        catch(error) {failures.push(new Error(`native suspension: ${String(error)}`));}
-      }
       failures.push(...await stopProtected(states,snapshot));
+    } else if(!config.manualBlock&&states.size>0&&[...states.values()].every(state=>state==='connected')&&owned.size>0) {
+      try {await restoreOwned(true);}
+      catch(error) {failures.push(new Error(`native recovery: ${String(error)}`));}
     }
     try{await coordinate(snapshot);}catch(error){failures.push(new Error(`automation coordination: ${String(error)}`));}
     if(recheckDirty || [...states].some(([id,state])=>previousStates.get(id)!==state) || previousStates.size!==states.size) {

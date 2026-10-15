@@ -5,7 +5,7 @@
 - Guard covers native Codex/Claude/Cursor/Devin IDs and Cursor Pool/Devin Pool aliases for ordinary dispatch and selected-host running-turn cleanup.
 - Pooler persisted `vpnGuardEnabled` opt-in checks Guard for the pool server host before every owned protected outbound call. No allow cache. Invalid/missing/timed-out Guard fails closed; unrelated Chinese traffic is allowed.
 - Models, login/OAuth, token renewal, usage/profile/reset and owned background calls share Pooler gating. Open owned requests/streams are cancelled on policy denial at the next periodic check.
-- Native Codex/Claude plugin suspension remains an explicit global opt-in with ownership journal and manual restore. It removes registrations but does not prove termination of all existing bridges/connections.
+- Native Codex/Claude plugin suspension remains an explicit global opt-in with an ownership journal and automatic recovery of confirmed Guard-owned disables after all selected machines have verified VPN. Ambiguous interrupted changes require review; a redundant manual disable during a Guard-owned pause is not distinguishable. It removes registrations but does not prove termination of all existing bridges/connections.
 
 ## Что плагинами закрыть нельзя
 

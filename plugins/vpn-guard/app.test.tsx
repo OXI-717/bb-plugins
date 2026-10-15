@@ -56,7 +56,7 @@ it('uses one setting control for VPN enforcement and sends the selected mode',as
 it('keeps restoration separate from disabling automatic suspension',async()=>{
   const status=guardFixture();status.suspendNativePluginsGlobally=true;status.ownedDisabledPlugins=['provider-codex'];
   const slot=renderSlot(app.navPanels[0]!,{subPath: ""},{rpc:{status:()=>status,setGlobalSuspension:()=>({...status,suspendNativePluginsGlobally:false})}});
-  const setting=await slot.findByRole('checkbox',{name:'Автоматически отключать встроенные плагины'});
+  const setting=await slot.findByRole('checkbox',{name:'Приостанавливать встроенные Codex и Claude без VPN'});
   fireEvent.click(setting);
   await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'setGlobalSuspension',input:{enabled:false,acknowledgeGlobalImpact:false}}));
   expect(slot.rpcCalls.some(call=>call.method==='restoreOwned')).toBe(false);
