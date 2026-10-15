@@ -1,5 +1,5 @@
 import {verifiedHostResult} from './vpn-test-fixture.js';
-import {expect,it} from 'vitest';
+import {expect,it,vi} from 'vitest';
 import {createFakePluginHost,makeHostResponse} from '@get-bb/plugin-sdk/testing';
 import plugin from './server.js';
 import {statusSchema} from './contract.js';
@@ -17,9 +17,11 @@ it('retains ownership and retries when release leaves its hold active',async()=>
  await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});
  await fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'});
  await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
- await expect(fake.harness.behavior.callRpc('setManualBlock',{blocked:false})).rejects.toThrow();
+ await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
+ await vi.waitFor(async()=>{const s=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));expect(s.automations.busy).toBe(false);expect(s.automations.error).toContain('not released');});
  expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.held).toBe(true);
- await expect(fake.harness.behavior.callRpc('setManualBlock',{blocked:false})).rejects.toThrow();
+ await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
+ await vi.waitFor(async()=>{const s=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));expect(s.automations.busy).toBe(false);expect(s.automations.error).toContain('not released');});
  expect(releases).toBe(2);
 });
 
@@ -53,7 +55,7 @@ it('coordinates a manual block and preserves an external manual pause',async()=>
  await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});
  await fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'});
  await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
- expect(actions).toContain('hold');
+ await vi.waitFor(()=>expect(actions).toContain('hold'));
  await fake.harness.behavior.callRpc('automationAction',{action:'pause'});
  await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
  const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));
@@ -72,7 +74,8 @@ it('strict mode rejects an old host response and controller failures remain visi
  await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});
  await fake.harness.behavior.callRpc('setMode',{mode:'enforce'});
  expect(await fake.harness.behavior.callRpc('networkDecision',{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:false});
- await expect(fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'})).rejects.toThrow();
+ await fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'});
+ await vi.waitFor(async()=>expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.error).toContain('offline'));
  expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.error).toContain('offline');
  expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).coordinateAutomations).toBe(true);
 });
