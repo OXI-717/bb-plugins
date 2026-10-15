@@ -72,7 +72,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/vpn-guard",
-          "range": "^0.1.6",
+          "range": "^0.1.9",
           "tagPrefix": "vpn-guard/"
         }
       }

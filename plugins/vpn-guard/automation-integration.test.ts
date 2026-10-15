@@ -1,5 +1,5 @@
 import {verifiedHostResult} from './vpn-test-fixture.js';
-import {expect,it} from 'vitest';
+import {expect,it,vi} from 'vitest';
 import {createFakePluginHost,makeHostResponse} from '@get-bb/plugin-sdk/testing';
 import plugin from './server.js';
 import {statusSchema} from './contract.js';
@@ -11,15 +11,17 @@ it('retains ownership and retries when release leaves its hold active',async()=>
   const args=input as {action:string;instanceId:string};
   if(args.action==='hold')owner='vpn-guard:'+args.instanceId;
   if(args.action==='release')releases++;
-  return {schema:'oxi-auto/protection-status/1',blocked:true,holds:owner?[{owner,reason:'Protection'}]:[],recoveryPending:true,pausedCount:0,activeRuns:[],errors:args.action==='release'?['Release incomplete']:[],legacyBlocked:false};
+  return {schema:'oxi-auto/protection-status/1',blocked:true,holds:owner?[{owner,reason:'Protection'}]:[],recoveryPending:!!owner,pausedCount:0,activeRuns:[],errors:args.action==='release'?['Release incomplete']:[],legacyBlocked:false};
  }});
  await plugin(fake.bb);
  await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});
  await fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'});
  await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
- await expect(fake.harness.behavior.callRpc('setManualBlock',{blocked:false})).rejects.toThrow();
+ await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
+ await vi.waitFor(async()=>{const s=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));expect(s.automations.busy).toBe(false);expect(s.automations.error).toContain('not released');});
  expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.held).toBe(true);
- await expect(fake.harness.behavior.callRpc('setManualBlock',{blocked:false})).rejects.toThrow();
+ await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
+ await vi.waitFor(async()=>{const s=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));expect(s.automations.busy).toBe(false);expect(s.automations.error).toContain('not released');});
  expect(releases).toBe(2);
 });
 
@@ -38,7 +40,7 @@ it('requires both host proof and strict pool transport under verified enforcemen
  expect(await decision()).toMatchObject({allowed:false});
 });
 
-it('coordinates a manual block, preserves external pause and does not auto-resume',async()=>{
+it('coordinates a manual block and preserves an external manual pause',async()=>{
  const actions:string[]=[];
  const controller={schema:'oxi-auto/protection-status/1' as const,blocked:false,holds:[] as {owner:string;reason:string}[],recoveryPending:false,pausedCount:0,activeRuns:[],errors:[],legacyBlocked:false};
  const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{system:{config:async()=>({primaryHostId:'host-a'}) as never},hosts:{list:async()=>[makeHostResponse({id:'host-a'})]},threads:{listRunning:async()=>[]}},experimental_callHostRpc:async({method,input})=>{
@@ -53,7 +55,8 @@ it('coordinates a manual block, preserves external pause and does not auto-resum
  await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});
  await fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'});
  await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
- expect(actions).toContain('hold');
+ await vi.waitFor(()=>expect(actions).toContain('hold'));
+ await fake.harness.behavior.callRpc('automationAction',{action:'pause'});
  await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
  const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));
  expect(status.automations.status).toMatchObject({recoveryPending:true,pausedCount:1});
@@ -71,7 +74,8 @@ it('strict mode rejects an old host response and controller failures remain visi
  await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});
  await fake.harness.behavior.callRpc('setMode',{mode:'enforce'});
  expect(await fake.harness.behavior.callRpc('networkDecision',{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:false});
- await expect(fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'})).rejects.toThrow();
+ await fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'});
+ await vi.waitFor(async()=>expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.error).toContain('offline'));
  expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.error).toContain('offline');
  expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).coordinateAutomations).toBe(true);
 });

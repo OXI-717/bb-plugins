@@ -21,6 +21,40 @@ it('has no optional VPN verification checkbox',async()=>{
  expect(slot.queryByRole('checkbox',{name:'Требовать подтверждённый VPN /2'})).toBeNull();
 });
 
+it('resumes automations without a review checkbox or client-supplied revision',async()=>{
+ const status=guardFixture();status.coordinateAutomations=true;
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,automationAction:()=>status}});
+ const resume=await slot.findByRole('button',{name:'Возобновить'});
+ expect(slot.queryByRole('checkbox',{name:/Проверил/})).toBeNull();
+ fireEvent.click(resume);
+ await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'automationAction',input:{action:'resume'}}));
+});
+
+it('keeps manual Block available while automation Resume waits and ignores its stale response',async()=>{
+ let status=guardFixture();status.coordinateAutomations=true;
+ let finish!:(value:typeof status)=>void;
+ const resume=new Promise<typeof status>(resolve=>{finish=resolve;});
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,automationAction:()=>resume,setManualBlock:()=>{status={...status,manualBlock:true};return status;}}});
+ fireEvent.click(await slot.findByRole('button',{name:'Возобновить'}));
+ const block=slot.getByRole('button',{name:'Заблокировать'}) as HTMLButtonElement;
+ expect(block.disabled).toBe(false);fireEvent.click(block);
+ await slot.findByText('Ручной блок включён');
+ const reads=slot.rpcCalls.filter(c=>c.method==='status').length;
+ finish({...status,manualBlock:false});
+ await waitFor(()=>expect(slot.rpcCalls.filter(c=>c.method==='status').length).toBeGreaterThan(reads));
+ await waitFor(()=>expect(slot.getByRole('button',{name:'Снять блок'})).toBeTruthy());
+ expect(slot.queryByRole('button',{name:'Заблокировать'})).toBeNull();
+});
+
+it('renders event causes and controller progress in Russian',async()=>{
+ const status=guardFixture();status.coordinateAutomations=true;status.automations.busy=true;status.automations.needsReconcile=true;
+ status.events=[{at:1,kind:'vpn_blocked',hostId:'demo-server',reason:'host_rpc_failed'}];
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
+ await slot.findByText('Применяется');
+ expect(slot.getByText(/машина не ответила на запрос статуса/)).toBeTruthy();
+ expect((slot.getByRole('button',{name:'Заблокировать'}) as HTMLButtonElement).disabled).toBe(false);
+});
+
 it('shows unavailable state instead of indefinite loading after the first status failure',async()=>{
   const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>{throw new Error('synthetic status unavailable');}}});
   await slot.findByText('Статус недоступен');
@@ -47,7 +81,7 @@ it('uses one setting control for VPN enforcement and sends the selected mode',as
 it('keeps restoration separate from disabling automatic suspension',async()=>{
   const status=guardFixture();status.suspendNativePluginsGlobally=true;status.ownedDisabledPlugins=['provider-codex'];
   const slot=renderSlot(app.navPanels[0]!,{subPath: ""},{rpc:{status:()=>status,setGlobalSuspension:()=>({...status,suspendNativePluginsGlobally:false})}});
-  const setting=await slot.findByRole('checkbox',{name:'Автоматически отключать встроенные плагины'});
+  const setting=await slot.findByRole('checkbox',{name:'Приостанавливать встроенные Codex и Claude без VPN'});
   fireEvent.click(setting);
   await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'setGlobalSuspension',input:{enabled:false,acknowledgeGlobalImpact:false}}));
   expect(slot.rpcCalls.some(call=>call.method==='restoreOwned')).toBe(false);
@@ -87,4 +121,16 @@ it('releases a manual block without restoring native plugins or changing VPN pol
   expect(slot.rpcCalls.some(call=>['restoreOwned','setMode'].includes(call.method))).toBe(false);
   expect((slot.getByRole('checkbox',{name:'Защита по VPN'}) as HTMLInputElement).checked).toBe(true);
   expect(slot.getByRole('button',{name:'Восстановить плагины'})).toBeTruthy();
+});
+
+it('distinguishes a routine controller check from applying changes',async()=>{
+ const status=guardFixture();status.coordinateAutomations=true;status.automations.busy=true;status.automations.needsReconcile=false;
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
+ await slot.findByText('Проверяется');expect(slot.queryByText('Применяется')).toBeNull();
+});
+
+it('shows not linked after disconnecting a failed controller with no remaining hold',async()=>{
+ const status=guardFixture();status.coordinateAutomations=false;status.automations.error='Controller unavailable';status.automations.needsReconcile=false;
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
+ await slot.findByText('Не подключено');expect(slot.queryByText('Частично')).toBeNull();
 });

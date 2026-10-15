@@ -10,6 +10,6 @@ export const automationStatusSchema=z.object({
 export const automationInputSchema=z.object({
  action:z.enum(['status','hold','release','pause','resume']),
  instanceId:z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/),
- executable:z.string().min(1).max(1024),restoreRevision:z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),reviewed:z.boolean().default(false),
+ executable:z.string().min(1).max(1024),restoreRevision:z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),reviewed:z.boolean().default(false),schedulesOnly:z.boolean().default(false),
 }).strict();
 export type AutomationStatus=z.infer<typeof automationStatusSchema>;

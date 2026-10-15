@@ -8,8 +8,8 @@ export function guardFixture(): z.infer<typeof statusSchema> {
     coordinateAutomations:false,automationControllerPath:null,
     hosts:[{id:'demo-server',name:'Demo machine',selected:true,available:true,vpn:'connected',evidence:{state:'connected',assurance:'verified_ipv4',reason:'ok',updatedAt:Date.now(),probeAt:Date.now()}}],
     protectedProviders:['codex','claude-code','cursor','devin'],
-    ownedDisabledPlugins:[],ambiguousPluginChanges:[],stoppedThreadIds:[],limitations:[],
+    ownedDisabledPlugins:[],ambiguousPluginChanges:[],stoppedThreadIds:[],events:[],limitations:[],
     pool:{linked:true,vpnPolicyVersion:2,error:null},
-    automations:{status:null,error:null,held:false,needsReconcile:false},
+    automations:{status:null,error:null,held:false,needsReconcile:false,busy:false,lastAttemptAt:null,lastSuccessAt:null,retryAt:null},
   };
 }
