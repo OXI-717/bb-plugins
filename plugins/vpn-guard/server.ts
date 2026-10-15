@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {automationStatusSchema,type AutomationStatus} from './automation-contract.js';
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
-import { configurationSchema, hostContract, rpcContract } from './contract.js';
+import { configurationSchema, hostContract, rpcContract, stopObservationSchema, stopReasonSchema } from './contract.js';
 import { abortableDelay } from './delay.js';
 import { protectedProvider, PROTECTED_PROVIDERS, type VpnState } from './state.js';
 
@@ -10,6 +10,7 @@ const CONFIG = 'configuration-v2';
 const JOURNAL = 'owned-disabled-native-plugins-v2';
 const PENDING = 'pending-native-plugin-changes-v2';
 const STOPPED = 'stopped-thread-ids-v1';
+const STOP_HISTORY = 'stop-observations-v1';
 const NATIVE_PLUGINS = ['provider-codex','provider-claude-code'] as const;
 const LIMITATIONS = [
   'Send-now bypasses message.dispatch.',
@@ -51,6 +52,8 @@ export default async function plugin(bb: BbPluginApi) {
     await bb.storage.kv.set(PENDING,[...pending]);
   }
   let stopped=new Set((storedStopped.success?storedStopped.data:[]).slice(-100));
+  const storedHistory=z.array(stopObservationSchema).max(100).safeParse(await bb.storage.kv.get(STOP_HISTORY));
+  let stopHistory=storedHistory.success?storedHistory.data:[];
   let tail:Promise<void>=Promise.resolve();
   let previousStates=new Map<string,VpnState>();
   let policyVersion=0;
@@ -86,7 +89,7 @@ export default async function plugin(bb: BbPluginApi) {
     let pool:{linked:boolean|null,vpnPolicyVersion:2|null,error:string|null}={linked:null,vpnPolicyVersion:null,error:null};
     try {const raw=await poolPolicy();pool={linked:raw.vpnGuardEnabled,vpnPolicyVersion:raw.vpnPolicyVersion,error:null};}catch{pool.error='Pooler linkage unavailable';}
     return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,
-      hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],limitations:LIMITATIONS,pool,automations:{status:automationStatus,error:automationError,held:automationBinding!==null||bindingCorrupt,needsReconcile:automationDesired===null}};
+      hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],stopHistory:[...stopHistory],limitations:LIMITATIONS,pool,automations:{status:automationStatus,error:automationError,held:automationBinding!==null||bindingCorrupt,needsReconcile:automationDesired===null}};
   }
   async function saveConfig(next:Configuration) {
     await bb.storage.kv.set(CONFIG,next);
@@ -135,7 +138,7 @@ export default async function plugin(bb: BbPluginApi) {
       await saveOwned();
     }
   }
-  async function stopProtected(states:Map<string,VpnState>):Promise<Error[]> {
+  async function stopProtected(states:Map<string,VpnState>,snapshot:Awaited<ReturnType<typeof status>>):Promise<Error[]> {
     const failures:Error[]=[];
     let runningThreads:Awaited<ReturnType<typeof bb.sdk.threads.listRunning>>;
     try {runningThreads=await bb.sdk.threads.listRunning();}
@@ -149,6 +152,11 @@ export default async function plugin(bb: BbPluginApi) {
         stopped.add(running.id);
         if(stopped.size>100) stopped=new Set([...stopped].slice(-100));
         await bb.storage.kv.set(STOPPED,[...stopped]);
+        const observation=snapshot.hosts.find(h=>h.id===running.hostId);
+        const reason=config.manualBlock?'manual_block':!observation?.available?'host_catalog_unavailable':!observation.evidence?'host_rpc_failed':observation.evidence.reason;
+        const parsedReason=stopReasonSchema.safeParse(reason);
+        stopHistory=[...stopHistory,{threadId:running.id,hostId:running.hostId,at:Date.now(),reason:parsedReason.success?parsedReason.data:'invalid_evidence'}].slice(-100);
+        await bb.storage.kv.set(STOP_HISTORY,stopHistory);
       } catch(error) {failures.push(new Error(`thread ${running.id}: ${String(error)}`));}
     }
     return failures;
@@ -194,7 +202,7 @@ export default async function plugin(bb: BbPluginApi) {
         try {failures.push(...await suspendNativePlugins());}
         catch(error) {failures.push(new Error(`native suspension: ${String(error)}`));}
       }
-      failures.push(...await stopProtected(states));
+      failures.push(...await stopProtected(states,snapshot));
     }
     try{await coordinate(snapshot);}catch(error){failures.push(new Error(`automation coordination: ${String(error)}`));}
     if(recheckDirty || [...states].some(([id,state])=>previousStates.get(id)!==state) || previousStates.size!==states.size) {

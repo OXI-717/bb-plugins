@@ -152,7 +152,7 @@ def confirm_interrupt():
     return False
 
 
-def wait_idle(say, prompt_now=False):
+def wait_idle(say, prompt_now=False, *, offer_interrupt=True):
     start = time.monotonic()
     next_report = start
     stable = 0
@@ -171,7 +171,7 @@ def wait_idle(say, prompt_now=False):
             say(f'Idle wait: {int(now - start)} / 900 seconds')
             report_pool(pool, say)
             next_report = now + 60
-        if count and not asked and (prompt_now or now - start >= 300):
+        if offer_interrupt and count and not asked and (prompt_now or now - start >= 300):
             asked = True
             if confirm_interrupt():
                 say('Explicit interruption confirmed; remaining pool requests may be aborted by BB.')
@@ -263,15 +263,18 @@ def perform(args, data, output, say):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', help='Validate release without waiting or updating')
+    parser.add_argument('--wait-idle', action='store_true', help='Wait for three idle checks without updating anything')
     parser.add_argument('--version', help='Require this to be the latest compatible release; not a downgrade selector')
     parser.add_argument('--interrupt-now', action='store_true', help='Offer the interactive interruption prompt immediately')
     parser.add_argument('--sandbox', action='store_true', help='Exercise the full workflow on temporary synthetic state; no live BB or network')
     args = parser.parse_args()
     if args.sandbox:
-        if args.version or args.check or args.interrupt_now:
+        if args.version or args.check or args.interrupt_now or args.wait_idle:
             parser.error('--sandbox cannot be combined with live-operation options')
         from upgrade_pool_sandbox import sandbox
         return sandbox(sys.modules[__name__])
+    if args.wait_idle and (args.version or args.check or args.interrupt_now):
+        parser.error('--wait-idle cannot be combined with update or interruption options')
     os.umask(0o077)
     output = None
     try:
@@ -301,7 +304,11 @@ def main():
                     log.write(message + '\n')
                     log.flush()
                 try:
-                    result = perform(args, data, output, say)
+                    if args.wait_idle:
+                        wait_idle(say, offer_interrupt=False)
+                        result = 'IDLE_PASS'
+                    else:
+                        result = perform(args, data, output, say)
                 except (Exception, KeyboardInterrupt) as error:
                     message = 'Cancelled by user' if isinstance(error, KeyboardInterrupt) else str(error)
                     say('FAILED: ' + type(error).__name__ + ': ' + message)

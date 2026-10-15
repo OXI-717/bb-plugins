@@ -3,7 +3,7 @@ set -euo pipefail
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 for arg in "$@"; do
   case "$arg" in
-    --sandbox|--check|--help|-h) exec bash "$script_dir/upgrade-pool.sh" "$@" ;;
+    --sandbox|--check|--wait-idle|--help|-h) exec bash "$script_dir/upgrade-pool.sh" "$@" ;;
   esac
 done
 bb vpn-guard status --json | python3 -c '
@@ -12,6 +12,9 @@ s=json.load(sys.stdin)
 if s["mode"]!="observe" or s.get("manualBlock") or s["suspendNativePluginsGlobally"] or s["ownedDisabledPlugins"] or s["ambiguousPluginChanges"]:
     raise SystemExit("Return Guard to Observe, release manual block and review owned changes before upgrading.")
 '
+# Do not replace either side of the protocol while requests prevent a paired update.
+# The Pooler updater checks idleness again immediately before its own mutation.
+bash "$script_dir/upgrade-pool.sh" --wait-idle
 bb plugin update vpn-guard --yes
 bb vpn-guard status --json | python3 -c '
 import json,sys

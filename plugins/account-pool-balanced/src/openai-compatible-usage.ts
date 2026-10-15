@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EMPTY_FAMILY_WEEKLY, type AccountQuota } from "./contracts.js";
+import { EMPTY_FAMILY_WEEKLY, type AccountQuota, type LimitWindow } from "./contracts.js";
 import { parseReset } from "./quota.js";
 
 const ZAI_FIVE_HOUR_UNIT = 3;
@@ -27,6 +27,7 @@ const percentWindowSchema = z
   .object({
     percent: z.union([z.number(), z.string()]).nullish(),
     resetsAt: z.union([z.number(), z.string()]).nullish(),
+    status:z.string().nullish(),
   })
   .passthrough();
 
@@ -36,6 +37,7 @@ const opencodeGoPayloadSchema = z
       .object({
         rolling: percentWindowSchema.nullish(),
         weekly: percentWindowSchema.nullish(),
+        monthly: percentWindowSchema.nullish(),
       })
       .passthrough()
       .nullish(),
@@ -54,13 +56,16 @@ function quota(
   previous: AccountQuota,
   now: number,
   windows: {
-    fiveHour: { utilization: number | null; resetAt: number | null };
-    weekly: { utilization: number | null; resetAt: number | null };
+    fiveHour: { utilization: number | null; resetAt: number | null;status?:string|null };
+    weekly: { utilization: number | null; resetAt: number | null;status?:string|null };
   },
+  additionalWindows:LimitWindow[] = [],
 ): AccountQuota | null {
   if (
     windows.fiveHour.utilization === null &&
-    windows.weekly.utilization === null
+    windows.weekly.utilization === null &&
+    windows.fiveHour.status == null && windows.weekly.status == null &&
+    additionalWindows.length === 0
   ) {
     return null;
   }
@@ -68,13 +73,13 @@ function quota(
     accountId,
     fiveHourUtilization: windows.fiveHour.utilization,
     fiveHourResetAt: windows.fiveHour.resetAt,
-    fiveHourStatus: null,
+    fiveHourStatus: windows.fiveHour.status ?? null,
     sevenDayUtilization: windows.weekly.utilization,
     sevenDayResetAt: windows.weekly.resetAt,
-    sevenDayStatus: null,
+    sevenDayStatus: windows.weekly.status ?? null,
     representativeClaim: previous.representativeClaim,
     familyWeekly: EMPTY_FAMILY_WEEKLY,
-    limitWindows: [],
+    limitWindows: additionalWindows,
     observedAt: now,
     heldUntil: previous.heldUntil,
     error: null,
@@ -118,14 +123,26 @@ export function opencodeGoQuotaFromUsages(
   if (!parsed.success) return null;
   const rolling = parsed.data.usage?.rolling ?? null;
   const weekly = parsed.data.usage?.weekly ?? null;
+  const monthly=parsed.data.usage?.monthly ?? null;
+  const status=(value:string|null|undefined)=>value==='rate-limited'?'rejected':value==='ok'?'allowed':null;
+  const monthlyUtilization=fraction(monthly?.percent);
+  const monthlyStatus=status(monthly?.status);
+  const rollingObserved=fraction(rolling?.percent)!==null||status(rolling?.status)!==null;
+  const weeklyObserved=fraction(weekly?.percent)!==null||status(weekly?.status)!==null;
+  if(fraction(rolling?.percent)===null&&fraction(weekly?.percent)===null&&monthlyUtilization===null&&status(rolling?.status)===null&&status(weekly?.status)===null&&monthlyStatus===null)return null;
+  const additionalWindows:LimitWindow[]=monthlyUtilization!==null||monthlyStatus!==null
+    ? [{slot:'secondary',windowMinutes:43200,utilization:monthlyUtilization,status:monthlyStatus,resetAt:parseReset(monthly?.resetsAt??null),observedAt:now,source:'usage'}]
+    : previous.limitWindows.filter(window=>window.windowMinutes===43200&&window.source==='usage');
   return quota(accountId, previous, now, {
     fiveHour: {
-      utilization: fraction(rolling?.percent),
-      resetAt: parseReset(rolling?.resetsAt ?? null),
+      utilization: rollingObserved ? fraction(rolling?.percent) : previous.fiveHourUtilization,
+      resetAt: rollingObserved ? parseReset(rolling?.resetsAt ?? null) : previous.fiveHourResetAt,
+      status:rollingObserved ? status(rolling?.status) : previous.fiveHourStatus,
     },
     weekly: {
-      utilization: fraction(weekly?.percent),
-      resetAt: parseReset(weekly?.resetsAt ?? null),
+      utilization: weeklyObserved ? fraction(weekly?.percent) : previous.sevenDayUtilization,
+      resetAt: weeklyObserved ? parseReset(weekly?.resetsAt ?? null) : previous.sevenDayResetAt,
+      status:weeklyObserved ? status(weekly?.status) : previous.sevenDayStatus,
     },
-  });
+  },additionalWindows);
 }

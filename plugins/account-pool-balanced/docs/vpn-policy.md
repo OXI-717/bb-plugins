@@ -50,4 +50,4 @@ OAuth HTTP 400/401 remains an authentication error. Quota exhaustion remains a p
 
 ## Upgrade and policy compatibility
 
-Upgrade Pooler 0.4.20 and Guard 0.1.5 together when linked. A mixed-version pair can locally refuse protected traffic during the update. Stored settings are sanitized without resetting provider choices, machine scope, accounts or automation bindings. The retired verification switch is not a writable API/CLI setting; `config.get` exposes immutable `vpnPolicyVersion: 2` for the Guard handshake. There is no cached legacy allow or ordinary-transport fallback for VPN-only providers.
+Upgrade Pooler 0.4.21 and Guard 0.1.6 together when linked. A mixed-version pair can locally refuse protected traffic during the update. Stored settings are sanitized without resetting provider choices, machine scope, accounts or automation bindings. The retired verification switch is not a writable API/CLI setting; `config.get` exposes immutable `vpnPolicyVersion: 2` for the Guard handshake. There is no cached legacy allow or ordinary-transport fallback for VPN-only providers.
