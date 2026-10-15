@@ -8,6 +8,7 @@ export async function automationCommand(input:unknown) {
  if(parsed.action==='hold')args.push('--reason','VPN Guard protection block');
  if(parsed.reviewed)args.push('--reviewed');
  if(parsed.restoreRevision)args.push('--expected-revision',parsed.restoreRevision);
+ if(parsed.action==='resume'&&parsed.schedulesOnly)args.push('--schedules-only');
  if(path.basename(parsed.executable)!=='oxi-auto')throw new Error('Expected the oxi-auto controller executable.');
  if(!path.isAbsolute(parsed.executable))throw new Error('Automation controller path must be absolute.');
  return new Promise<ReturnType<typeof automationStatusSchema.parse>>((resolve,reject)=>{

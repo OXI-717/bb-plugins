@@ -18,8 +18,6 @@ export function GuardPage() {
   const [error,setError]=useState<string|null>(null);
   const [busy,setBusy]=useState(false);
   const [controllerPath,setControllerPath]=useState('');
-  const [reviewedSchedules,setReviewedSchedules]=useState(false);
-  useEffect(()=>setReviewedSchedules(false),[status?.automations.status?.restoreRevision]);
   const requests=useRef(createStatusRequests());
   const refresh=useCallback(async()=>{
     const requestRevision=requests.current.start();
@@ -80,12 +78,11 @@ export function GuardPage() {
       {!!status?.automations.status?.errors.length&&<details><summary>{t.errorDetails}</summary><pre className="vg-error-detail">{status.automations.status.errors.join("\n")}</pre></details>}
       {!!status?.automations.status?.activeRuns.length&&<details><summary>{t.activeRun}: {status.automations.status.activeRuns.length}</summary><pre className="vg-error-detail">{status.automations.status.activeRuns.join("\n")}</pre></details>}
       <div className="vg-actions">
-        <button disabled={!ready||!status.coordinateAutomations} onClick={()=>void change(()=>rpc.call('automationAction',{action:'pause',reviewed:false}))}>{t.pauseAutomations}</button>
-        <button disabled={!ready||!status.coordinateAutomations||status.manualBlock||status.automations.held} onClick={()=>void change(()=>rpc.call('automationAction',{action:'resume',reviewed:reviewedSchedules,restoreRevision:status?.automations.status?.restoreRevision??null}))}>{t.resumeAutomations}</button>
+        <button disabled={!ready||!status.coordinateAutomations} onClick={()=>void change(()=>rpc.call('automationAction',{action:'pause'}))}>{t.pauseAutomations}</button>
+        <button disabled={!ready||!status.coordinateAutomations||status.manualBlock||status.automations.held||status.hosts.some(h=>h.selected&&h.vpn!=='connected')} onClick={()=>void change(()=>rpc.call('automationAction',{action:'resume'}))}>{t.resumeAutomations}</button>
       </div>
       <p className="vg-help">{t.restoreAutomationsHelp}</p>
       {!!status?.automations.status?.pendingRestore.length&&<details><summary>{t.restoreInventory}</summary>{status.automations.status.pendingRestore.map(r=><p className="vg-help" key={r.projectId+':'+r.id}>{r.name}</p>)}</details>}
-      <label className="vg-check"><input type="checkbox" checked={reviewedSchedules} onChange={e=>setReviewedSchedules(e.target.checked)}/><span>{t.reviewedSchedules}</span></label>
       </>}
       <details><summary>{t.controllerSetup}</summary>
         <label className="vg-field"><span>{t.controllerPath}</span><input value={controllerPath||status?.automationControllerPath||''} onChange={e=>setControllerPath(e.target.value)} placeholder="/absolute/path/to/oxi-auto"/></label>
