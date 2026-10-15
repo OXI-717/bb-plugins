@@ -899,20 +899,20 @@ describe("Account Pool plugin", () => {
     expect(await requests[0]?.text()).toBe(body);
   });
 
-  it('labels an upstream Retry-After hold as rate limiting rather than account policy',async()=>{
+  it.each([429,403])('labels a hold after HTTP %s without guessing its cause',async status=>{
     let calls=0;
     const now=Date.parse('2026-09-17T09:00:00Z');
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'opencode-go',source:'api-key',apiKey:'synthetic-go-key',options:{now:()=>now,opencodeGoUsagesUrl:'https://usages.example/zen/go/v1/usage',fetch:async(input,init)=>{
       if(new Request(input,init).url.startsWith('https://usages.example/'))return Response.json({usage:{rolling:{percent:0},weekly:{percent:0}}});
-      calls++;return Response.json({error:{message:'Rate limited'}},{status:429,headers:{'retry-after':'86400'}});
+      calls++;return Response.json({error:{message:'Upstream refused'}},{status,headers:{'retry-after':'86400',...(status===403?{'content-type':'text/html'}:{})}});
     }}});
     await fixture.host.harness.behavior.callRpc('config.set',{routingStrategy:'balanced'});
     const send=()=>fixture.host.harness.behavior.fetchHttp('POST','/opencode-go/v1/chat/completions',{headers:authHeaders(fixture.key),body:JSON.stringify({model:'synthetic-model',messages:[]})});
     await (await send()).text();
     const held=await send();
     expect(held.status).toBe(403);
-    expect(held.headers.get('x-bb-pool-error')).toBe('POOL_RATE_LIMITED');
-    expect(await held.text()).toContain('2026-09-18T09:00:00.000Z');
+    expect(held.headers.get('x-bb-pool-error')).toBe('POOL_ACCOUNT_HELD');
+    expect(await held.text()).toContain(status===429?'2026-09-18T09:00:00.000Z':'2026-09-17T09:01:00.000Z');
     expect(calls).toBe(1);
   });
   it('shows all three Go quota windows in the BB usage resource',async()=>{
