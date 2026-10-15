@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useRpc, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useRpc, useBbNavigate, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './contract.js';
 import { copy, readableError, type Language } from './copy.js';
 import { createStatusRequests } from './status-requests.js';
@@ -12,6 +12,7 @@ function initialLanguage():Language {
 }
 export function GuardPage() {
   const rpc=useRpc<typeof rpcContract>();
+  const navigate=useBbNavigate();
   const [language,setLanguage]=useState<Language>(initialLanguage);
   const t=copy[language];
   const [status,setStatus]=useState<Status|null>(null);
@@ -71,11 +72,15 @@ export function GuardPage() {
         <div><dt>{t.pool}</dt><dd>{!statusFresh?t.unknown:status?.pool.linked===true?`${t.linked} · ${t.verifiedPolicy}`:status?.pool.linked===false?t.notLinked:t.unavailable}</dd></div>
         <div><dt>{t.automations}</dt><dd>{!statusFresh?t.unknown:status?.automations.busy?(status.automations.needsReconcile?t.coordinating:t.checking):!status?.coordinateAutomations&&!status?.automations.held&&!status?.automations.needsReconcile?t.notLinked:status?.automations.error||status?.automations.status?.activeRuns.length?t.partial:status?.automations.needsReconcile&&status?.coordinateAutomations?t.coordinating:!status?.coordinateAutomations?t.notLinked:!status.automations.status?t.unknown:status.automations.status.blocked?t.paused:t.available}</dd></div>
         <div><dt>{t.nativeState}</dt><dd>{!statusFresh?t.unknown:needsNativeRecovery?t.pendingRecovery:t.noNativeRecovery}</dd></div>
-        <div><dt>{t.stopped}</dt><dd>{statusFresh?`${status?.stoppedThreadIds.length} ${t.threadUnit}`:t.unknown}</dd></div>
       </dl>
       <ul className="vg-machines vg-current-machines">{selectedHosts.map(host=><li key={host.id}><span>{host.name}</span><span className={statusFresh&&host.vpn==='connected'?'vg-help':'vg-error'}>{t[statusFresh?host.vpn??'unknown':'unknown']}</span></li>)}</ul>
       {statusFresh&&!selectedHosts.length&&<p className="vg-help">{t.noMachines}</p>}
     </section>
+    <details className="vg-section"><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:t.unknown}</summary>
+      <p className="vg-help">{t.stoppedHelp}</p>
+      {statusFresh&&!status?.stoppedThreadIds.length&&<p className="vg-help">{t.noStopHistory}</p>}
+      {statusFresh&&<ol className="vg-events vg-stop-history">{status?.stoppedThreadIds.slice().reverse().map(id=><li key={id}><button type="button" onClick={()=>navigate.toThread(id)}>{t.openStoppedThread} <code>{id}</code></button></li>)}</ol>}
+    </details>
     <details className="vg-section" open={status?.automations.status?.recoveryPending||!!status?.automations.error}>
       <summary>{t.automations}</summary>
       {!status?.coordinateAutomations&&<p className="vg-help">{t.controllerOptional}</p>}

@@ -134,3 +134,19 @@ it('shows not linked after disconnecting a failed controller with no remaining h
  const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
  await slot.findByText('Не подключено');expect(slot.queryByText('Частично')).toBeNull();
 });
+
+it('labels historical stops without claiming they still wait and only navigates on click',async()=>{
+ const status=guardFixture();status.stoppedThreadIds=['demo-thread-a','demo-thread-b'];
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
+ await slot.findByText('Ранее остановлено Guard');
+ expect(slot.getByText(/не число заблокированных сейчас/)).toBeTruthy();
+ fireEvent.click(slot.getByText('Ранее остановлено Guard'));
+ const button=slot.getByRole('button',{name:'Открыть тред demo-thread-a'});fireEvent.click(button);
+ expect(slot.navigateCalls).toContainEqual(expect.objectContaining({method:'toThread',threadId:'demo-thread-a'}));
+ expect(slot.rpcCalls.every(c=>c.method==='status')).toBe(true);
+});
+it('explains historical stops in English',async()=>{
+ localStorage.setItem('vpn-guard-language','en');const status=guardFixture();status.stoppedThreadIds=['demo-thread-a'];
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
+ await slot.findByText('Previously stopped by Guard');expect(slot.getByText(/not a count of threads currently blocked/)).toBeTruthy();
+});

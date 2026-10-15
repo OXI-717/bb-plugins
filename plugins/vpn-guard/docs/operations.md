@@ -82,3 +82,7 @@ The collapsible RU/EN event history retains at most 100 records in plugin KV: ob
 Проверка VPN и остановка тредов больше не ждут медленного контроллера автоматизаций. Панель показывает «Применяется», пока он работает, и время следующей попытки при ошибке. Кнопка ручного блока остаётся доступна во время команды возобновления. Запоздалый ответ старой операции не подтверждает новое состояние защиты. Уже отправленная команда контроллера может завершиться до повторного применения нового блока; это ограничение не скрывается.
 
 «Журнал событий» хранит последние 100 наблюдений и действий с временем и причиной. История доступна после перезапуска; старые события задним числом не создаются. Ошибка записи журнала не отключает защиту. История не является доказательством полного прекращения сетевого трафика или уже выполняющихся скриптов.
+
+### Thread stop history
+
+“Previously stopped by Guard” is a bounded history of up to 100 distinct thread IDs, not a count of threads currently blocked or awaiting continuation. Recorded threads may already be active, finished, archived or deleted. Expand the section to open a recorded thread using BB navigation; opening it does not send a message. Guard does not automatically continue stopped agent threads. Automation schedule recovery and native plugin recovery are separate.

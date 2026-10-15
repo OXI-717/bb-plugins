@@ -11,6 +11,7 @@ if(scenario==='recovery'||scenario==='unknown'){
   status.ownedDisabledPlugins=['provider-codex'];
   status.suspendNativePluginsGlobally=true;
 }
+if(scenario==='stops')status.stoppedThreadIds=['demo-thread-a','demo-thread-b','demo-thread-with-a-long-identifier-for-layout'];
 if(scenario==='events'){
  status.coordinateAutomations=true;status.automationControllerPath='/controller/oxi-auto';
  status.automations.busy=true;status.automations.needsReconcile=true;
@@ -35,3 +36,5 @@ const rpc={async call(method:string,input?:any){
 }};
 export function useRpc<T>(){return rpc;}
 export function definePluginApp(factory:unknown){return factory;}
+
+export function useBbNavigate(){return {toThread:(id:string)=>{console.info('Preview navigation',id);}};}
