@@ -5,10 +5,10 @@ import {copy,type Language} from './copy.js';
 type Entry={id:string;title:string|null;loaded:boolean;unavailable:boolean};
 export function StoppedThreads({threadIds,language}:{threadIds:string[];language:Language}) {
   const sdk=useSdk();const navigate=useBbNavigate();const t=copy[language];
-  const idsKey=JSON.stringify(threadIds.slice(-100).reverse());
+  const serializedIds=JSON.stringify(threadIds.slice(-100).reverse());
   const [entries,setEntries]=useState<Entry[]>([]);
   useEffect(()=>{
-    const ids=JSON.parse(idsKey) as string[];
+    const ids=JSON.parse(serializedIds) as string[];
     setEntries(ids.map(id=>({id,title:null,loaded:false,unavailable:false})));
     let active=true;let next=0;
     async function worker() {
@@ -20,7 +20,7 @@ export function StoppedThreads({threadIds,language}:{threadIds:string[];language
     }
     void Promise.all(Array.from({length:Math.min(4,ids.length)},()=>worker()));
     return()=>{active=false;};
-  },[sdk,idsKey]);
+  },[sdk,serializedIds]);
   return <>
     {entries.some(entry=>!entry.loaded)&&<p className="vg-help" role="status">{t.loadingThreadTitles}</p>}
     <ol className="vg-events vg-stop-history">{entries.map(entry=><li key={entry.id}>
