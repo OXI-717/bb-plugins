@@ -45,7 +45,7 @@ See [existing plugin-only limits](vpn-plugin-protection-limits.md). Test the act
 ## Deployment / Развёртывание
 
 1. Prepare the accepted current VPN writer on each protected host and the Pooler server. Confirm a fresh `/2` sample with coherent IPv4 proof before upgrading consumers.
-2. Back up settings and coordinate an idle maintenance window. Upgrade Pooler 0.4.20 and Guard 0.1.5 together; a mixed pair refuses protected traffic. The combined updater requires Observe before reload; return to the desired Guard mode afterward. Pooler VPN verification itself is always required.
+2. Back up settings and coordinate an idle maintenance window. Upgrade Pooler 0.4.21 and Guard 0.1.6 together; a mixed pair refuses protected traffic. The combined updater requires Observe before reload; return to the desired Guard mode afterward. Pooler VPN verification itself is always required.
 3. Confirm immutable Pooler `vpnPolicyVersion: 2`, selected host scope and Guard linkage. There is no separate verification setter.
 4. Enable the desired Guard Enforce policy and check explicit denials and recovery without bypassing unknown evidence.
 5. Optional: connect a compatible automation controller, opt in to coordination and test independent manual/Guard holds. Verify writer readiness on that controller's actual consumers before upgrading it. Keep recovery manual. Skip this step when no controller is installed.
