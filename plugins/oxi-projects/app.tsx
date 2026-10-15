@@ -3,7 +3,7 @@ import {taskItemSubPath, parseTaskPanelTarget, TASK_DETAIL_PANEL_ID} from './tas
 import {browseCache,visibleProjectItems,recoverBrowseFailure} from './browse-cache';
 import {ProjectRefresh} from './project-refresh';
 import {WorkActions} from "./work-actions";
-import {WorkspaceFrame,CatalogSettings,ProjectHome} from "./workspace-view";
+import {WorkspaceFrame,CatalogSettings} from "./workspace-view";
 import {
   useCallback,
   useEffect,
@@ -7156,7 +7156,6 @@ function TaskboardSettingsInfo() {
 export default definePluginApp(app => {
   app.slots.messageDirective({id:'project-task',component:ProjectTaskLink});
   app.slots.threadPanelAction({id:TASK_DETAIL_PANEL_ID,title:'Задача проекта',icon:'Target',component:ProjectTaskDetailPanel,layout:'flush'});
-  app.slots.homepageSection({id:"project-work",title:"Работа проекта",component:ProjectHome});
   app.composer.customize({
     id: 'create-taskboard-issue',
     scopes: ['thread', 'new-thread'],

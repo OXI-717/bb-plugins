@@ -11,4 +11,5 @@
 - Before the first push of imported content, run the owner's local publication gate and inspect the complete staged diff and commit metadata. Public CI cannot prevent a first-push disclosure.
 - Keep private publication denylists outside this repository; publishing them would disclose the names they protect.
 - Run typecheck, focused tests and `bb plugin build .` for changes. The full suite runs in GitHub Actions. Do not run an expensive full suite locally on macOS without explicit approval.
+- Projects UI changes require a separate visual acceptance step following `plugins/oxi-projects/VISUAL-QA.md`. Record screenshots and actual scenario results privately; do not claim unrun modes passed.
 - Never remove or reload a live pool without considering active requests, a verified state backup and a rollback path.
