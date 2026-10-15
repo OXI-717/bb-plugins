@@ -76,7 +76,7 @@ export function GuardPage() {
       <ul className="vg-machines vg-current-machines">{selectedHosts.map(host=><li key={host.id}><span>{host.name}</span><span className={statusFresh&&host.vpn==='connected'?'vg-help':'vg-error'}>{t[statusFresh?host.vpn??'unknown':'unknown']}</span></li>)}</ul>
       {statusFresh&&!selectedHosts.length&&<p className="vg-help">{t.noMachines}</p>}
     </section>
-    <details className="vg-section"><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:t.unknown}</summary>
+    <details className="vg-section"><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:'—'}</summary>
       <p className="vg-help">{t.stoppedHelp}</p>
       {statusFresh&&!status?.stoppedThreadIds.length&&<p className="vg-help">{t.noStopHistory}</p>}
       {statusFresh&&<ol className="vg-events vg-stop-history">{status?.stoppedThreadIds.slice().reverse().map(id=><li key={id}><button type="button" onClick={()=>navigate.toThread(id)}>{t.openStoppedThread} <code>{id}</code></button></li>)}</ol>}
