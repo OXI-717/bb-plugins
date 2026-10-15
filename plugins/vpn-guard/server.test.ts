@@ -13,6 +13,9 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;fai
   const stopped:string[]=[];
   const hostCalls:string[]=[];
   const mutations:string[]=[];
+  let failEnable=false;
+  let pluginListAction:(()=>void)|null=null;
+  let enableAction:(()=>void)|null=null;
   let failListRunning=false;
   let failHostList=false;
   let pausedRpc:{hostId:string;entered:()=>void;release:Promise<void>}|null=null;
@@ -22,9 +25,9 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;fai
     sdk:{
       hosts:{list:async()=>{if(failHostList) throw Error('host list unavailable');return [...available].map(id=>makeHostResponse({id,name:id}));}},
       plugins:{
-        list:async()=>({plugins:[...enabled].map(([id,value])=>({id,enabled:value}))}) as PluginList,
+        list:async()=>{pluginListAction?.();return {plugins:[...enabled].map(([id,value])=>({id,enabled:value}))} as PluginList;},
         disable:async({pluginId})=>{if(pluginId==='provider-codex'&&pausedDisable){const pause=pausedDisable;pausedDisable=null;pause.entered();await pause.release;}if(options.failDisable||(options.failCodexDisable&&pluginId==='provider-codex')) throw Error('interrupted');enabled.set(pluginId,false);mutations.push(`disable:${pluginId}`);return {} as never;},
-        enable:async({pluginId})=>{enabled.set(pluginId,true);mutations.push(`enable:${pluginId}`);return {} as never;},
+        enable:async({pluginId})=>{if(failEnable)throw Error('enable failed');enabled.set(pluginId,true);mutations.push(`enable:${pluginId}`);enableAction?.();return {} as never;},
       },
       threads:{
         listRunning:async()=>{if(failListRunning) throw Error('thread list unavailable');return [{id:'protected',hostId:'host-a'},{id:'chinese',hostId:'host-a'},{id:'healthy',hostId:'host-b'}];},
@@ -38,7 +41,7 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;fai
   const hook=fake.harness.registrations.hooks['message.dispatch'];
   if(!hook) throw Error('missing hook');
   const dispatch=(providerId:string,hostId:string|null)=>hook(makeMessageDispatchHookContext({requestedExecution:{providerId},host:hostId?{id:hostId,name:hostId}:null}));
-  return {fake,states,available,enabled,stopped,hostCalls,mutations,dispatch,setFailListRunning:(value:boolean)=>{failListRunning=value;},setFailHostList:(value:boolean)=>{failHostList=value;},pauseNextRpc:(pause:{hostId:string;entered:()=>void;release:Promise<void>})=>{pausedRpc=pause;},pauseNextCodexDisable:(pause:{entered:()=>void;release:Promise<void>})=>{pausedDisable=pause;}};
+  return {fake,states,available,enabled,stopped,hostCalls,mutations,dispatch,setFailEnable:(value:boolean)=>{failEnable=value;},setPluginListAction:(action:()=>void)=>{pluginListAction=action;},setEnableAction:(action:()=>void)=>{enableAction=action;},setFailListRunning:(value:boolean)=>{failListRunning=value;},setFailHostList:(value:boolean)=>{failHostList=value;},pauseNextRpc:(pause:{hostId:string;entered:()=>void;release:Promise<void>})=>{pausedRpc=pause;},pauseNextCodexDisable:(pause:{entered:()=>void;release:Promise<void>})=>{pausedDisable=pause;}};
 }
 const select=async(fake:Awaited<ReturnType<typeof setup>>['fake'],hostIds:string[])=>fake.harness.behavior.callRpc('setHosts',{hostIds});
 const mode=async(fake:Awaited<ReturnType<typeof setup>>['fake'],next:'observe'|'enforce')=>fake.harness.behavior.callRpc('setMode',{mode:next});
@@ -118,7 +121,7 @@ describe('guard admission and reconciliation',()=>{
     expect(enabled.get('provider-acp')).toBe(true);
     await fake.harness.lifecycle.dispose();
   });
-  it('persists plugin ownership across restart and restores only after an explicit action',async()=>{
+  it('persists plugin ownership across restart and automatically restores only its own plugins',async()=>{
     const {fake,states,enabled,mutations}=await setup();
     await select(fake,['host-a']);
     await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});
@@ -126,9 +129,7 @@ describe('guard admission and reconciliation',()=>{
     const reloaded=await fake.harness.lifecycle.reload(plugin);
     states.set('host-a','connected');
     await reloaded.harness.behavior.callRpc('setMode',{mode:'enforce'});
-    expect(enabled.get('provider-codex')).toBe(false);
-    expect(await reloaded.harness.behavior.callRpc('status',null)).toMatchObject({ownedDisabledPlugins:['provider-codex']});
-    await reloaded.harness.behavior.callRpc('restoreOwned',null);
+    expect(await reloaded.harness.behavior.callRpc('status',null)).toMatchObject({ownedDisabledPlugins:[]});
     expect(enabled.get('provider-codex')).toBe(true);
     expect(enabled.get('provider-claude-code')).toBe(false);
     expect(mutations).toEqual(['disable:provider-codex','enable:provider-codex']);
@@ -143,6 +144,66 @@ describe('guard admission and reconciliation',()=>{
     await mode(fake,'enforce');
     expect(enabled.get('provider-codex')).toBe(false);
     expect(mutations).toEqual(['disable:provider-codex','disable:provider-codex']);
+    await fake.harness.lifecycle.dispose();
+  });
+  it('waits for every selected machine before automatic native recovery',async()=>{
+    const {fake,states,enabled}=await setup();
+    await select(fake,['host-a','host-b']);
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});
+    await mode(fake,'enforce');
+    states.set('host-a','connected');states.set('host-b','unknown');
+    await mode(fake,'enforce');expect(enabled.get('provider-codex')).toBe(false);
+    states.set('host-b','connected');
+    await mode(fake,'enforce');expect(enabled.get('provider-codex')).toBe(true);
+    expect(enabled.get('provider-claude-code')).toBe(false);
+    await fake.harness.lifecycle.dispose();
+  });
+  it('recovers its outstanding pause after the option is switched off, but requires VPN scope',async()=>{
+    const {fake,states,enabled}=await setup();await select(fake,['host-a']);
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});await mode(fake,'enforce');
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:false,acknowledgeGlobalImpact:false});
+    expect(enabled.get('provider-codex')).toBe(false);
+    await mode(fake,'observe');await select(fake,[]);
+    states.set('host-a','connected');await mode(fake,'observe');
+    expect(enabled.get('provider-codex')).toBe(false);
+    await select(fake,['host-a']);expect(enabled.get('provider-codex')).toBe(true);
+    await fake.harness.lifecycle.dispose();
+  });
+  it('retains ownership and retries a failed native enable',async()=>{
+    const {fake,states,enabled,setFailEnable}=await setup();await select(fake,['host-a']);
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});await mode(fake,'enforce');
+    setFailEnable(true);
+    states.set('host-a','connected');await expect(mode(fake,'enforce')).rejects.toThrow('enable failed');
+    expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({ownedDisabledPlugins:['provider-codex']});
+    setFailEnable(false);await mode(fake,'enforce');expect(enabled.get('provider-codex')).toBe(true);
+    await fake.harness.lifecycle.dispose();
+  });
+  it('does not use an earlier healthy snapshot to enable a plugin after VPN is lost',async()=>{
+    const {fake,states,enabled,mutations,setPluginListAction}=await setup();await select(fake,['host-a']);
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});await mode(fake,'enforce');
+    setPluginListAction(()=>states.set('host-a','unknown'));
+    states.set('host-a','connected');await expect(mode(fake,'enforce')).rejects.toThrow('connected');
+    expect(enabled.get('provider-codex')).toBe(false);expect(mutations).not.toContain('enable:provider-codex');
+    await fake.harness.lifecycle.dispose();
+  });
+  it('keeps recovery ownership until journal clearing is durable',async()=>{
+    const {fake,states,enabled}=await setup();await select(fake,['host-a']);
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});await mode(fake,'enforce');
+    const save=fake.bb.storage.kv.set.bind(fake.bb.storage.kv);let fail=true;
+    fake.bb.storage.kv.set=async(key,value)=>{if(key==='owned-disabled-native-plugins-v2'&&Array.isArray(value)&&value.length===0&&fail){fail=false;throw Error('journal unavailable');}return save(key,value);};
+    states.set('host-a','connected');await expect(mode(fake,'enforce')).rejects.toThrow('journal unavailable');
+    expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({ownedDisabledPlugins:['provider-codex']});
+    await mode(fake,'enforce');expect(enabled.get('provider-codex')).toBe(true);
+    expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({ownedDisabledPlugins:[]});
+    await fake.harness.lifecycle.dispose();
+  });
+  it('re-suspends a plugin if VPN is lost while enable is pending',async()=>{
+    const {fake,states,enabled,setEnableAction}=await setup();await select(fake,['host-a']);
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});await mode(fake,'enforce');
+    setEnableAction(()=>states.set('host-a','disconnected'));
+    states.set('host-a','connected');await expect(mode(fake,'enforce')).rejects.toThrow('connected');
+    expect(enabled.get('provider-codex')).toBe(false);
+    expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({ownedDisabledPlugins:['provider-codex']});
     await fake.harness.lifecycle.dispose();
   });
   it('does not claim ownership if native plugin disable is interrupted',async()=>{
@@ -432,8 +493,6 @@ describe('manual block CLI and native suspension',()=>{
     expect(enabled.get('provider-acp')).toBe(true);
     await expect(fake.harness.behavior.callRpc('restoreOwned',null)).rejects.toThrow('manual');
     expect((await fake.harness.behavior.runCli(['unblock'])).exitCode).toBe(0);
-    expect(enabled.get('provider-codex')).toBe(false);
-    await fake.harness.behavior.callRpc('restoreOwned',null);
     expect(enabled.get('provider-codex')).toBe(true);
     await fake.harness.lifecycle.dispose();
   });

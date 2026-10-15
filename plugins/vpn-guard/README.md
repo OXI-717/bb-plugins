@@ -10,7 +10,7 @@
 
 BB 0.46+ selected-machine admission control for Codex, Claude, Cursor and Devin. Starts in Observe. Enforce holds new protected messages and stops running protected threads on unavailable VPN. **Block** persists a manual override even with connected VPN and in Observe. **Unblock** returns to the selected mode. Kimi and Z.ai remain available. The panel provides RU/EN.
 
-Optional global native Codex/Claude suspension requires separate opt-in and explicit restore. Send-now bypasses admission; active connections and bridges are not proven stopped. See [operations and limits](docs/operations.md). Built from the public BB Plugin SDK; state reading follows Account Pooler policy (MIT).
+Optional global native Codex/Claude suspension requires separate opt-in and automatically restores only confirmed Guard-owned disables after VPN recovery on all selected machines. Send-now bypasses admission; active connections and bridges are not proven stopped. See [operations and limits](docs/operations.md). Built from the public BB Plugin SDK; state reading follows Account Pooler policy (MIT).
 
 
 ## Plugin-only network protection
