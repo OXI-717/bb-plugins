@@ -161,11 +161,21 @@ export default async function plugin(bb: BbPluginApi) {
     }
     return failures;
   }
-  async function controller(action:'status'|'hold'|'release'|'pause'|'resume',binding:{hostId:string;executable:string},reviewed=false,restoreRevision:string|null=null) {
+  async function controller(action:'status'|'hold'|'release'|'pause'|'resume',binding:{hostId:string;executable:string},reviewed=false,restoreRevision:string|null=null,schedulesOnly=false) {
     if(bindingCorrupt)throw Error('Automation ownership journal is malformed; manual review required');
-    const value=await host.call('automation',{action,instanceId,executable:binding.executable,reviewed,restoreRevision},{hostId:binding.hostId,timeoutMs:32_000});
+    const value=await host.call('automation',{action,instanceId,executable:binding.executable,reviewed,restoreRevision,schedulesOnly},{hostId:binding.hostId,timeoutMs:32_000});
     automationStatus=automationStatusSchema.parse(value);automationError=null;
     return automationStatus;
+  }
+  async function resumeAutomations(binding:{hostId:string;executable:string},automatic:boolean) {
+    // Always inspect immediately before resume: release responses do not carry a
+    // live revision. The controller checks this revision again under its lock.
+    const report=await controller('status',binding);
+    if(automatic&&(report.holds.length>0||report.legacyBlocked||!report.recoveryPending))return;
+    if(!report.restoreRevision)throw Error('Automation recovery snapshot unavailable; retry required');
+    if(await vpn(binding.hostId)!=='connected')throw Error('Release protection blocks and verify VPN before resuming');
+    const restored=await controller('resume',binding,true,report.restoreRevision,automatic);
+    if(restored.errors.length||restored.blocked||restored.recoveryPending)throw Error('Automation recovery is incomplete; inspect controller status');
   }
   async function coordinate(snapshot:Awaited<ReturnType<typeof status>>) {
     if(bindingCorrupt)throw Error('Automation ownership journal is malformed; manual review required');
@@ -189,6 +199,9 @@ export default async function plugin(bb: BbPluginApi) {
         if(report.errors.length)automationError='Automation recovery is incomplete; inspect controller status';
       } else if(config.coordinateAutomations&&snapshot.serverHostId&&config.automationControllerPath) {
         await controller('status',{hostId:snapshot.serverHostId,executable:config.automationControllerPath});
+      }
+      if(!wants&&!automationBinding&&config.coordinateAutomations&&!config.manualBlock&&server?.selected&&server.vpn==='connected'&&config.automationControllerPath&&automationStatus?.recoveryPending) {
+        await resumeAutomations({hostId:server.id,executable:config.automationControllerPath},true);
       }
       automationDesired=wants;
     } catch(error){automationError=String(error);automationDesired=null;throw error;}
@@ -290,12 +303,16 @@ export default async function plugin(bb: BbPluginApi) {
       if(automationBinding&&executable!==config.automationControllerPath)throw Error('Release the controller hold before changing the executable');
       return update({...config,coordinateAutomations:enabled,automationControllerPath:executable});
     }),
-    automationAction:({action,reviewed,restoreRevision})=>serial(async()=>{
+    automationAction:({action})=>serial(async()=>{
       const snapshot=await status();
       if(!config.coordinateAutomations||!snapshot.serverHostId||!config.automationControllerPath)throw Error('Automation controller is not configured');
       if(action==='resume'&&(config.manualBlock||automationBinding||snapshot.hosts.some(h=>h.selected&&h.vpn!=='connected')))throw Error('Release protection blocks and verify VPN before resuming');
-      const report=await controller(action,{hostId:snapshot.serverHostId,executable:config.automationControllerPath},reviewed,restoreRevision);
-      if(report.errors.length)throw Error('Automation action incomplete; inspect controller status');
+      const binding={hostId:snapshot.serverHostId,executable:config.automationControllerPath};
+      if(action==='resume')await resumeAutomations(binding,false);
+      else {
+        const report=await controller(action,binding);
+        if(report.errors.length)throw Error('Automation action incomplete; inspect controller status');
+      }
       return status();
     }),
     networkDecision:({hostId,provider})=>networkDecision(hostId,provider),

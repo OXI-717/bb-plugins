@@ -21,6 +21,15 @@ it('has no optional VPN verification checkbox',async()=>{
  expect(slot.queryByRole('checkbox',{name:'Требовать подтверждённый VPN /2'})).toBeNull();
 });
 
+it('resumes automations without a review checkbox or client-supplied revision',async()=>{
+ const status=guardFixture();status.coordinateAutomations=true;
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,automationAction:()=>status}});
+ const resume=await slot.findByRole('button',{name:'Возобновить'});
+ expect(slot.queryByRole('checkbox',{name:/Проверил/})).toBeNull();
+ fireEvent.click(resume);
+ await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'automationAction',input:{action:'resume'}}));
+});
+
 it('shows unavailable state instead of indefinite loading after the first status failure',async()=>{
   const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>{throw new Error('synthetic status unavailable');}}});
   await slot.findByText('Статус недоступен');

@@ -42,7 +42,7 @@ export const statusSchema = z.object({
 export const rpcContract = defineRpcContract({
   automationIdentity:{input:z.null(),output:z.object({instanceId:z.string()})},
   setAutomationCoordination:{input:z.object({enabled:z.boolean(),executable:z.string().nullable()}),output:statusSchema},
-  automationAction:{input:z.object({action:z.enum(["pause","resume"]),reviewed:z.boolean().default(false),restoreRevision:z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null)}),output:statusSchema},
+  automationAction:{input:z.object({action:z.enum(["pause","resume"])}),output:statusSchema},
   networkDecision: {input:z.object({hostId:z.string().min(1),provider:z.enum(['codex','claude','cursor','devin'])}).strict(),output:z.object({schema:z.literal('bb-vpn-guard/network-decision/1'),allowed:z.boolean(),reason:z.enum(['manual_block','vpn_unavailable','outside_scope','observe','connected','restore_required'])}).strict()},
   status: {input:z.null(),output:statusSchema},
   setManualBlock: {input:z.object({blocked:z.boolean()}),output:statusSchema},
