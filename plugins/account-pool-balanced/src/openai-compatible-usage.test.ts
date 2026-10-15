@@ -78,6 +78,18 @@ describe("z.ai quota parsing", () => {
 });
 
 describe("OpenCode Go quota parsing", () => {
+  it.each(['fiveHour','weekly'] as const)('retains a missing %s rejection during a monthly-only refresh',kind=>{
+    const reset=NOW+86400000;
+    const prior={...previous(),fiveHourUtilization:kind==='fiveHour'?1:0,fiveHourResetAt:reset,fiveHourStatus:kind==='fiveHour'?'rejected':null,sevenDayUtilization:kind==='weekly'?1:0,sevenDayResetAt:reset,sevenDayStatus:kind==='weekly'?'rejected':null};
+    const result=opencodeGoQuotaFromUsages(ACCOUNT_ID,{usage:{monthly:{percent:25,status:'ok'}}},prior,NOW)!;
+    expect(isSharedQuotaExhausted(result,1,NOW)).toBe(true);
+    expect(result.fiveHourUtilization).toBe(prior.fiveHourUtilization);
+    expect(result.fiveHourResetAt).toBe(prior.fiveHourResetAt);
+    expect(result.fiveHourStatus).toBe(prior.fiveHourStatus);
+    expect(result.sevenDayUtilization).toBe(prior.sevenDayUtilization);
+    expect(result.sevenDayResetAt).toBe(prior.sevenDayResetAt);
+    expect(result.sevenDayStatus).toBe(prior.sevenDayStatus);
+  });
   it('blocks exhausted monthly usage even when rolling and weekly counters are zero',()=>{
     const resetAt='2026-10-01T09:00:00.000Z';
     const result=opencodeGoQuotaFromUsages(ACCOUNT_ID,{usage:{rolling:{percent:0},weekly:{percent:0},monthly:{status:'rate-limited',percent:100,resetsAt:resetAt}}},previous(),NOW)!;

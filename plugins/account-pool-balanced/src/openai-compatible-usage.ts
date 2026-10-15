@@ -127,20 +127,22 @@ export function opencodeGoQuotaFromUsages(
   const status=(value:string|null|undefined)=>value==='rate-limited'?'rejected':value==='ok'?'allowed':null;
   const monthlyUtilization=fraction(monthly?.percent);
   const monthlyStatus=status(monthly?.status);
+  const rollingObserved=fraction(rolling?.percent)!==null||status(rolling?.status)!==null;
+  const weeklyObserved=fraction(weekly?.percent)!==null||status(weekly?.status)!==null;
   if(fraction(rolling?.percent)===null&&fraction(weekly?.percent)===null&&monthlyUtilization===null&&status(rolling?.status)===null&&status(weekly?.status)===null&&monthlyStatus===null)return null;
   const additionalWindows:LimitWindow[]=monthlyUtilization!==null||monthlyStatus!==null
     ? [{slot:'secondary',windowMinutes:43200,utilization:monthlyUtilization,status:monthlyStatus,resetAt:parseReset(monthly?.resetsAt??null),observedAt:now,source:'usage'}]
     : previous.limitWindows.filter(window=>window.windowMinutes===43200&&window.source==='usage');
   return quota(accountId, previous, now, {
     fiveHour: {
-      utilization: fraction(rolling?.percent),
-      resetAt: parseReset(rolling?.resetsAt ?? null),
-      status:status(rolling?.status),
+      utilization: rollingObserved ? fraction(rolling?.percent) : previous.fiveHourUtilization,
+      resetAt: rollingObserved ? parseReset(rolling?.resetsAt ?? null) : previous.fiveHourResetAt,
+      status:rollingObserved ? status(rolling?.status) : previous.fiveHourStatus,
     },
     weekly: {
-      utilization: fraction(weekly?.percent),
-      resetAt: parseReset(weekly?.resetsAt ?? null),
-      status:status(weekly?.status),
+      utilization: weeklyObserved ? fraction(weekly?.percent) : previous.sevenDayUtilization,
+      resetAt: weeklyObserved ? parseReset(weekly?.resetsAt ?? null) : previous.sevenDayResetAt,
+      status:weeklyObserved ? status(weekly?.status) : previous.sevenDayStatus,
     },
   },additionalWindows);
 }

@@ -3,7 +3,7 @@ set -euo pipefail
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 for arg in "$@"; do
   case "$arg" in
-    --sandbox|--check|--help|-h) exec bash "$script_dir/upgrade-pool.sh" "$@" ;;
+    --sandbox|--check|--wait-idle|--help|-h) exec bash "$script_dir/upgrade-pool.sh" "$@" ;;
   esac
 done
 bb vpn-guard status --json | python3 -c '
