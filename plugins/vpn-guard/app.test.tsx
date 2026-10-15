@@ -128,3 +128,9 @@ it('distinguishes a routine controller check from applying changes',async()=>{
  const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
  await slot.findByText('Проверяется');expect(slot.queryByText('Применяется')).toBeNull();
 });
+
+it('shows not linked after disconnecting a failed controller with no remaining hold',async()=>{
+ const status=guardFixture();status.coordinateAutomations=false;status.automations.error='Controller unavailable';status.automations.needsReconcile=false;
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
+ await slot.findByText('Не подключено');expect(slot.queryByText('Частично')).toBeNull();
+});

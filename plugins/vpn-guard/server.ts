@@ -233,8 +233,8 @@ export default async function plugin(bb: BbPluginApi) {
         const observation=snapshot.hosts.find(h=>h.id===running.hostId);
         const reason=config.manualBlock?'manual_block':!observation?.available?'host_catalog_unavailable':!observation.evidence?'host_rpc_failed':observation.evidence.reason;
         const parsedReason=stopReasonSchema.safeParse(reason);
-        stopHistory=[...stopHistory,{threadId:running.id,hostId:running.hostId,at:Date.now(),reason:parsedReason.success?parsedReason.data:'invalid_evidence'}].slice(-100);
-        await bb.storage.kv.set(STOP_HISTORY,stopHistory);
+        const stopRecord=stopObservationSchema.safeParse({threadId:running.id,hostId:running.hostId,at:Date.now(),reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
+        if(stopRecord.success){stopHistory=[...stopHistory,stopRecord.data].slice(-100);await bb.storage.kv.set(STOP_HISTORY,stopHistory);}else bb.log.warn('VPN Guard stop observation rejected');
         event({kind:'thread_stopped',hostId:running.hostId,threadId:running.id,reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
       } catch(error) {failures.push(new Error(`thread ${running.id}: ${String(error)}`));}
     }

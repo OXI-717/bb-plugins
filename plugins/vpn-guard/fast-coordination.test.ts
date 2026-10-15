@@ -3,11 +3,11 @@ import {createFakePluginHost,makeHostResponse,makeThreadResponse} from '@get-bb/
 import plugin from './server.js';
 import {verifiedHostResult} from './vpn-test-fixture.js';
 function deferred<T>() {let resolve!:(value:T)=>void;const promise=new Promise<T>(r=>resolve=r);return {promise,resolve};}
-async function setup(options:{pending?:boolean;pauseAction?:string}={}) {
- let nativeEnabled=true;let connected=true;let owner='';let pending=options.pending??false;let pausedAction:string|null=options.pauseAction??'status';
+async function setup(options:{pending?:boolean;pauseAction?:string;hostId?:string}={}) {
+ const hostId=options.hostId??'host-a';let nativeEnabled=true;let connected=true;let owner='';let pending=options.pending??false;let pausedAction:string|null=options.pauseAction??'status';
  let entered=deferred<void>();let pause=deferred<void>();const actions:string[]=[];let stops=0;
  const report=()=>({schema:'oxi-auto/protection-status/1',blocked:!!owner||pending,holds:owner?[{owner,reason:'Guard'}]:[],recoveryPending:pending,pausedCount:pending?1:0,activeRuns:[],errors:[],legacyBlocked:false,restoreRevision:'a'.repeat(64)});
- const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{plugins:{list:async()=>({plugins:[{id:'provider-codex',enabled:nativeEnabled},{id:'provider-claude-code',enabled:false}]}),disable:async()=>{nativeEnabled=false;return {} as never;}},system:{config:async()=>({primaryHostId:'host-a'}) as never},hosts:{list:async()=>[makeHostResponse({id:'host-a'})]},threads:{listRunning:async()=>[{id:'thread-a',hostId:'host-a'}],get:async()=>makeThreadResponse({id:'thread-a',providerId:'codex'}),stop:async()=>{stops++;return {} as never;}}},experimental_callHostRpc:async({method,input})=>{
+ const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{plugins:{list:async()=>({plugins:[{id:'provider-codex',enabled:nativeEnabled},{id:'provider-claude-code',enabled:false}]}),disable:async()=>{nativeEnabled=false;return {} as never;}},system:{config:async()=>({primaryHostId:hostId}) as never},hosts:{list:async()=>[makeHostResponse({id:hostId})]},threads:{listRunning:async()=>[{id:'thread-a',hostId}],get:async()=>makeThreadResponse({id:'thread-a',providerId:'codex'}),stop:async()=>{stops++;return {} as never;}}},experimental_callHostRpc:async({method,input})=>{
   if(method==='readState')return verifiedHostResult(connected?'connected':'disconnected');
   const args=input as {action:string;instanceId:string};actions.push(args.action);
   if(args.action===pausedAction){pausedAction=null;entered.resolve();await pause.promise;}
@@ -18,7 +18,7 @@ async function setup(options:{pending?:boolean;pauseAction?:string}={}) {
  }});
  await plugin(fake.bb);
  const rpc=fake.harness.behavior.callRpc;
- await rpc('setHosts',{hostIds:['host-a']});await rpc('setMode',{mode:'enforce'});
+ await rpc('setHosts',{hostIds:[hostId]});await rpc('setMode',{mode:'enforce'});
  return {fake,rpc,actions,nativeEnabled:()=>nativeEnabled,entered:()=>entered.promise,release:()=>pause.resolve(),pauseStatus:()=>{pausedAction='status';entered=deferred<void>();pause=deferred<void>();},pauseRelease:()=>{pausedAction='release';entered=deferred<void>();pause=deferred<void>();},setConnected:(value:boolean)=>{connected=value;},stops:()=>stops,owner:()=>owner};
 }
 async function idle(s:Awaited<ReturnType<typeof setup>>) {
@@ -90,4 +90,11 @@ it('reports a passive status-only poll without pending policy changes',async()=>
   const status=await s.rpc('status',null) as {automations:{busy:boolean;needsReconcile:boolean}};
   expect(status.automations.busy).toBe(true);expect(status.automations.needsReconcile).toBe(false);
  } finally {service.controller.abort();s.release();await service.done;await s.fake.harness.lifecycle.dispose();}
+});
+
+it('contains rejected diagnostic identifiers before native disable and thread stop',async()=>{
+ const s=await setup({hostId:'h'.repeat(161)});
+ await s.rpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});
+ await s.rpc('setManualBlock',{blocked:true});expect(s.stops()).toBeGreaterThan(0);expect(s.nativeEnabled()).toBe(false);
+ await s.fake.harness.lifecycle.dispose();
 });
