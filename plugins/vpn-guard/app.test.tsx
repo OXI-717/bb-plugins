@@ -167,3 +167,12 @@ it('bounds title lookups and stops queued reads when history closes',async()=>{
  await waitFor(()=>expect(slot.queryByText('Загружаем названия тредов…')).toBeNull());release();
  await new Promise(r=>setTimeout(r,10));expect(reads).toBe(4);expect(slot.queryByText('Late title')).toBeNull();
 });
+it('keeps the shared four-read limit after closing and reopening history',async()=>{
+ const status=guardFixture();status.stoppedThreadIds=Array.from({length:8},(_,i)=>`demo-thread-${i}`);
+ let reads=0;let running=0;let peak=0;let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status},sdk:{threads:{get:async({threadId})=>{reads++;running++;peak=Math.max(peak,running);await gate;running--;return {id:threadId,title:'Named '+threadId} as never;}}}});
+ await slot.findByText('Ранее остановлено Guard');fireEvent.click(slot.getByText('Ранее остановлено Guard'));await waitFor(()=>expect(reads).toBe(4));
+ fireEvent.click(slot.getByText('Ранее остановлено Guard'));await waitFor(()=>expect(slot.queryByText('Загружаем названия тредов…')).toBeNull());
+ fireEvent.click(slot.getByText('Ранее остановлено Guard'));await slot.findByText('Загружаем названия тредов…');expect(reads).toBe(4);
+ release();await slot.findByRole('button',{name:'Named demo-thread-0'});expect(peak).toBe(4);
+});
