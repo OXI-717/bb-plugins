@@ -47,7 +47,7 @@ it('keeps manual Block available while automation Resume waits and ignores its s
 });
 
 it('renders event causes and controller progress in Russian',async()=>{
- const status=guardFixture();status.coordinateAutomations=true;status.automations.busy=true;
+ const status=guardFixture();status.coordinateAutomations=true;status.automations.busy=true;status.automations.needsReconcile=true;
  status.events=[{at:1,kind:'vpn_blocked',hostId:'demo-server',reason:'host_rpc_failed'}];
  const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
  await slot.findByText('Применяется');
@@ -121,4 +121,10 @@ it('releases a manual block without restoring native plugins or changing VPN pol
   expect(slot.rpcCalls.some(call=>['restoreOwned','setMode'].includes(call.method))).toBe(false);
   expect((slot.getByRole('checkbox',{name:'Защита по VPN'}) as HTMLInputElement).checked).toBe(true);
   expect(slot.getByRole('button',{name:'Восстановить плагины'})).toBeTruthy();
+});
+
+it('distinguishes a routine controller check from applying changes',async()=>{
+ const status=guardFixture();status.coordinateAutomations=true;status.automations.busy=true;status.automations.needsReconcile=false;
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
+ await slot.findByText('Проверяется');expect(slot.queryByText('Применяется')).toBeNull();
 });

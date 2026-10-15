@@ -1,7 +1,7 @@
 export type Language = 'ru' | 'en';
 export const copy = {
   ru: {
-    statusUnavailable:'Статус недоступен',events:'Журнал событий',noEvents:'Событий пока нет.',coordinating:'Применяется',coordinatingHelp:'Контроллер обрабатывает изменения. Проверка защиты продолжает работать.',retryAfter:'Следующая попытка не раньше',
+    statusUnavailable:'Статус недоступен',events:'Журнал событий',noEvents:'Событий пока нет.',checking:'Проверяется',coordinating:'Применяется',coordinatingHelp:'Контроллер выполняет запрос. Проверка защиты продолжает работать.',retryAfter:'Следующая попытка не раньше',
     noNativeRecovery:'Нет пауз от Guard',threadUnit:'тредов',
     nativeScope:'Действует на всех машинах: только встроенные Codex и Claude.',nativeDetails:'Область и ограничения отключения',
     verifiedPolicy:'Обязательная проверка VPN',
@@ -25,7 +25,7 @@ export const copy = {
     errorDetails:'Технические подробности',error:'Не удалось выполнить действие',loading:'Загрузка',mode:'Режим',
   },
   en: {
-    statusUnavailable:'Status unavailable',events:'Event history',noEvents:'No events yet.',coordinating:'Applying',coordinatingHelp:'Controller changes are in progress. Protection checks continue independently.',retryAfter:'Next retry no earlier than',
+    statusUnavailable:'Status unavailable',events:'Event history',noEvents:'No events yet.',checking:'Checking',coordinating:'Applying',coordinatingHelp:'A controller request is in progress. Protection checks continue independently.',retryAfter:'Next retry no earlier than',
     noNativeRecovery:'None paused by Guard',threadUnit:'threads',
     nativeScope:'Applies to all machines: native Codex and Claude only.',nativeDetails:'Suspension scope and limits',
     verifiedPolicy:'VPN verification required',
