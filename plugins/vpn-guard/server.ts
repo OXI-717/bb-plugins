@@ -99,10 +99,11 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function saveOwned() {await bb.storage.kv.set(JOURNAL,[...owned]);}
   async function savePending() {await bb.storage.kv.set(PENDING,[...pending]);}
-  async function suspendNativePlugins():Promise<Error[]> {
+  async function suspendNativePlugins(onlyOwned=false):Promise<Error[]> {
     const failures:Error[]=[];
     const {plugins}=await bb.sdk.plugins.list();
     for(const id of NATIVE_PLUGINS) {
+      if(onlyOwned&&!owned.has(id)) continue;
       const entry=plugins.find(p=>p.id===id);
       if(!entry?.enabled) continue;
       try {
@@ -221,11 +222,18 @@ export default async function plugin(bb: BbPluginApi) {
     const snapshot=await status();
     const states=new Map(snapshot.hosts.filter(h=>h.selected).map(h=>[h.id,h.vpn??'unknown'] as const));
     const failures:Error[]=[];
+    const vpnUnavailable=states.size===0||[...states.values()].some(state=>state!=='connected');
+    const blocking=config.manualBlock||(config.mode==='enforce'&&vpnUnavailable);
+    if(config.suspendNativePluginsGlobally&&blocking) {
+      try {failures.push(...await suspendNativePlugins());}
+      catch(error) {failures.push(new Error(`native suspension: ${String(error)}`));}
+    } else if(owned.size>0&&(config.manualBlock||vpnUnavailable)) {
+      // Disabling the option prevents new ownership, but cannot abandon an
+      // interrupted recovery which may have enabled an owned plugin already.
+      try {failures.push(...await suspendNativePlugins(true));}
+      catch(error) {failures.push(new Error(`native suspension: ${String(error)}`));}
+    }
     if(config.manualBlock || (config.mode==='enforce' && [...states.values()].some(state=>state!=='connected'))) {
-      if(config.suspendNativePluginsGlobally) {
-        try {failures.push(...await suspendNativePlugins());}
-        catch(error) {failures.push(new Error(`native suspension: ${String(error)}`));}
-      }
       failures.push(...await stopProtected(states,snapshot));
     } else if(!config.manualBlock&&states.size>0&&[...states.values()].every(state=>state==='connected')&&owned.size>0) {
       try {await restoreOwned(true);}

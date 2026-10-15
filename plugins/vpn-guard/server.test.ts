@@ -206,6 +206,34 @@ describe('guard admission and reconciliation',()=>{
     expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({ownedDisabledPlugins:['provider-codex']});
     await fake.harness.lifecycle.dispose();
   });
+  it.each(['enable','compensation','journal'])('retries owned suspension with the option off after %s failure and reload',async failure=>{
+    const options={failDisable:false};
+    const {fake,states,enabled,setEnableAction}=await setup(options);await select(fake,['host-a']);
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});await mode(fake,'enforce');
+    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:false,acknowledgeGlobalImpact:false});
+    if(failure==='journal') {
+      const save=fake.bb.storage.kv.set.bind(fake.bb.storage.kv);let fail=true;
+      fake.bb.storage.kv.set=async(key,value)=>{if(key==='owned-disabled-native-plugins-v2'&&Array.isArray(value)&&value.length===0&&fail){fail=false;throw Error('journal unavailable');}return save(key,value);};
+    } else {
+      setEnableAction(()=>{
+        states.set('host-a','disconnected');
+        if(failure==='enable')throw Error('enable failed after mutation');
+        options.failDisable=true;
+      });
+    }
+    states.set('host-a','connected');await expect(mode(fake,'enforce')).rejects.toThrow();
+    expect(enabled.get('provider-codex')).toBe(true);
+    states.set('host-a','disconnected');options.failDisable=false;
+    await mode(fake,'observe');
+    expect(enabled.get('provider-codex')).toBe(false);
+    enabled.set('provider-codex',true); // another partial/external enable before reload
+    const reloaded=await fake.harness.lifecycle.reload(plugin);
+    await reloaded.harness.behavior.callRpc('setMode',{mode:'observe'});
+    expect(enabled.get('provider-codex')).toBe(false);
+    expect(enabled.get('provider-claude-code')).toBe(false);
+    expect(await reloaded.harness.behavior.callRpc('status',null)).toMatchObject({ownedDisabledPlugins:['provider-codex'],suspendNativePluginsGlobally:false});
+    await reloaded.harness.lifecycle.dispose();
+  });
   it('does not claim ownership if native plugin disable is interrupted',async()=>{
     const {fake,enabled,states}=await setup({failDisable:true});
     await select(fake,['host-a']);

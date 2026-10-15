@@ -4,7 +4,7 @@
 
 Плагин BB 0.46+ управляет запуском Codex, Claude, Cursor и Devin на выбранных машинах. Начинает с наблюдения. В режиме защиты недоступный VPN удерживает новые сообщения в очереди и останавливает защищённые треды. Кнопка **«Заблокировать»** включает постоянный ручной блок даже при подключённом VPN и в режиме наблюдения. **«Снять блок»** возвращает выбранный режим. Kimi и Z.ai остаются доступны.
 
-В панели можно выбрать RU/EN. Дополнительное глобальное отключение встроенных Codex/Claude включается отдельно и требует ручного восстановления. Это управление BB: Send-now обходит очередь, завершение открытых соединений и bridge-процессов не гарантируется. [Управление и ограничения](docs/operations.md). [Общий стандарт интерфейсов](../../docs/plugin-ui-standard.md).
+В панели можно выбрать RU/EN. Настройка «Приостанавливать встроенные Codex и Claude без VPN» включается отдельно и действует на все машины BB. Guard автоматически возвращает свои подтверждённые отключения после снятия ручного блока и восстановления VPN на всех выбранных машинах. Это управление BB: Send-now обходит очередь, завершение открытых соединений и bridge-процессов не гарантируется. [Управление и ограничения](docs/operations.md). [Общий стандарт интерфейсов](../../docs/plugin-ui-standard.md).
 
 Guard работает самостоятельно и вместе с Pooler без контроллера автоматизаций. Подключение собственного совместимого контроллера — необязательное расширение для паузы и восстановления расписаний. Контроллер не входит в комплект; статус автоматизаций «Не подключено» без него нормален.
 
@@ -23,4 +23,4 @@ Guard works independently and with Pooler without an automation controller. Conn
 
 Enable the persisted Pooler linkage after upgrading both plugins. Guard covers Cursor/Devin Pool aliases and supplies an uncached network decision for the pool server. Missing/malformed/timed-out Guard fails closed for protected owned traffic. No BB build or system firewall changes; direct/native Send-now and independent maintenance remain outside the strict guarantee. [Реализованные гарантии и ограничения / guarantees and limits](../../docs/vpn-plugin-protection-limits.md).
 
-[Единая защита / Unified protection](../../docs/unified-protection.md): VPN evidence /2, optional automation controller, independent pause reasons and explicit recovery. Strict mode and controller integration default off.
+[Единая защита / Unified protection](../../docs/unified-protection.md): VPN evidence /2, optional automation controller, independent pause reasons and explicit recovery. VPN `/2` evidence is mandatory; the optional controller integration defaults off.
