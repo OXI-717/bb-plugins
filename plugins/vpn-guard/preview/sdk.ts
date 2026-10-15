@@ -38,3 +38,6 @@ export function useRpc<T>(){return rpc;}
 export function definePluginApp(factory:unknown){return factory;}
 
 export function useBbNavigate(){return {toThread:(id:string)=>{console.info('Preview navigation',id);}};}
+
+const sdk={threads:{get:async({threadId}:{threadId:string})=>{if(threadId==='demo-thread-b')throw Error('Preview unavailable');return {title:threadId==='demo-thread-a'?'Проверка защиты VPN':'Long thread title for checking layout, wrapping and navigation in a narrow panel'};}}};
+export function useSdk(){return sdk;}
