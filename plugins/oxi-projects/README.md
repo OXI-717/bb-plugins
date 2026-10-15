@@ -37,6 +37,8 @@ an explicit executable. A `.gh-account` file does not select the plugin account.
 Tracker credentials stay in server-side BB storage. Do not put them into thread
 messages or ordinary JSON settings. Jira supports site URL plus optional cloud ID
 for scoped API tokens. Project connections do not automatically create BB projects.
+Existing Projects connections are retained. Keys from another Linear plugin's
+private storage are not imported; configure a new connection through this form.
 
 ## Tasks and sessions
 

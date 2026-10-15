@@ -7,7 +7,6 @@ import {readableWorkContext} from './work-context.js';
 import {z} from 'zod';
 import {rpcContract as autopilotWorkContract} from './autopilot/contract.js';
 import {problemContext as autopilotProblemContext} from './autopilot/problems.js';
-import {linearMigrationContract,withLegacyLinearKey} from "./linear-migration.js";
 import {registerWorkBindings} from "./work-bindings.js";
 import {readItem} from "./github/api.js";
 import {setupWorkspace} from "./workspace-server.js";
@@ -1931,15 +1930,6 @@ export default async function plugin(bb: BbPluginApi) {
   },async project=>[...new Map((await workspace.read()).filter(p=>p.autopilotProject===project&&p.bbProjectId).map(p=>[p.bbProjectId!,{id:p.bbProjectId!,name:p.name}])).values()],
     async()=>[...new Map((await workspace.read()).filter(p=>p.bbProjectId).map(p=>[p.bbProjectId!,{id:p.bbProjectId!,name:p.name}])).values()],
     async ref=>{if(ref.source==='tasknotes')await integrations.require('tasknotes');else if(ref.source.startsWith('autopilot')||ref.source==='chat-watch')await integrations.require('autopilot');});
-  bb.rpc.register(linearMigrationContract,{importLinearConnection:async({projectId,teamKey,slot})=>{
-    await assertProjectExists(projectId);
-    if(await credentials.configured(projectId,'linear'))return {imported:false};
-    await withLegacyLinearKey(bb,slot,async value=>{
-      await createLinearAdapter({enabled:true,apiKey:value,teamKey}).list();
-      await saveSource({projectId,source:'linear',teamKey,credential:{operation:'set',value}});
-    });
-    return {imported:true};
-  }});
   bb.rpc.register(taskboardRpcContract, handlers);
 
   bb.ui.registerMentionProvider({
