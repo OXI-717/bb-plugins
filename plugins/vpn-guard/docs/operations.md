@@ -86,3 +86,5 @@ The collapsible RU/EN event history retains at most 100 records in plugin KV: ob
 ### Thread stop history
 
 “Previously stopped by Guard” is a bounded history of up to 100 distinct thread IDs, not a count of threads currently blocked or awaiting continuation. Recorded threads may already be active, finished, archived or deleted. Expand the section to open a recorded thread using BB navigation; opening it does not send a message. Guard does not automatically continue stopped agent threads. Automation schedule recovery and native plugin recovery are separate.
+
+Thread titles are read from BB only while the history is expanded, with at most four concurrent lookups and up to 100 recorded IDs. Ordinary status/protection checks do not resolve titles. Blank titles and unavailable threads have explicit localized labels; IDs are kept in technical details. Closing the list stops queued lookups and ignores late results.

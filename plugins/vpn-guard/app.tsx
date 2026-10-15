@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useRpc, useBbNavigate, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useRpc, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './contract.js';
 import { copy, readableError, type Language } from './copy.js';
 import { createStatusRequests } from './status-requests.js';
 import {eventText,eventTime} from './event-copy.js';
+import {StoppedThreads} from './stopped-threads.js';
 import './app.css';
 
 type Status = StandardSchemaV1InferOutput<(typeof rpcContract)['status']['output']>;
@@ -12,7 +13,6 @@ function initialLanguage():Language {
 }
 export function GuardPage() {
   const rpc=useRpc<typeof rpcContract>();
-  const navigate=useBbNavigate();
   const [language,setLanguage]=useState<Language>(initialLanguage);
   const t=copy[language];
   const [status,setStatus]=useState<Status|null>(null);
@@ -21,6 +21,7 @@ export function GuardPage() {
   const [busy,setBusy]=useState(false);
   const [automationActionBusy,setAutomationActionBusy]=useState(false);
   const [controllerPath,setControllerPath]=useState('');
+  const [historyOpen,setHistoryOpen]=useState(false);
   const requests=useRef(createStatusRequests());
   const refresh=useCallback(async()=>{
     const requestRevision=requests.current.start();
@@ -76,10 +77,10 @@ export function GuardPage() {
       <ul className="vg-machines vg-current-machines">{selectedHosts.map(host=><li key={host.id}><span>{host.name}</span><span className={statusFresh&&host.vpn==='connected'?'vg-help':'vg-error'}>{t[statusFresh?host.vpn??'unknown':'unknown']}</span></li>)}</ul>
       {statusFresh&&!selectedHosts.length&&<p className="vg-help">{t.noMachines}</p>}
     </section>
-    <details className="vg-section"><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:'—'}</summary>
+    <details className="vg-section" onToggle={event=>{if(event.target===event.currentTarget)setHistoryOpen(event.currentTarget.open);}}><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:'—'}</summary>
       <p className="vg-help">{t.stoppedHelp}</p>
       {statusFresh&&!status?.stoppedThreadIds.length&&<p className="vg-help">{t.noStopHistory}</p>}
-      {statusFresh&&<ol className="vg-events vg-stop-history">{status?.stoppedThreadIds.slice().reverse().map(id=><li key={id}><button type="button" onClick={()=>navigate.toThread(id)}>{t.openStoppedThread} <code>{id}</code></button></li>)}</ol>}
+      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language}/> }
     </details>
     <details className="vg-section" open={status?.automations.status?.recoveryPending||!!status?.automations.error}>
       <summary>{t.automations}</summary>
