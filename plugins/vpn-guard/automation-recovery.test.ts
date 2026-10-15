@@ -1,4 +1,4 @@
-import {expect,it} from 'vitest';
+import {expect,it,vi} from 'vitest';
 import {createFakePluginHost,makeHostResponse} from '@get-bb/plugin-sdk/testing';
 import plugin from './server.js';
 import {verifiedHostResult} from './vpn-test-fixture.js';
@@ -18,7 +18,8 @@ async function setup(options:{holds?:{owner:string;reason:string}[];legacy?:bool
  await plugin(fake.bb);
  await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});
  await fake.harness.behavior.callRpc('setMode',{mode:'enforce'});
- return {fake,calls,report,setConnected:(value:boolean)=>{connected=value;},connect:()=>fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'})};
+ async function settled(){let result:any;await vi.waitFor(async()=>{result=await fake.harness.behavior.callRpc('status',null);expect(result.automations.busy).toBe(false);expect(result.automations.error!==null||!result.automations.needsReconcile).toBe(true);});return result;}
+ return {fake,calls,report,settled,setConnected:(value:boolean)=>{connected=value;},connect:async()=>{await fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'});return settled();}};
 }
 
 it('recovers existing pending schedules with fresh revision and no operator checkbox',async()=>{
@@ -30,7 +31,7 @@ it('releases its hold and automatically resumes when VPN returns',async()=>{
  const s=await setup({connected:false});await s.connect();
  expect(s.calls.some(c=>c.action==='resume')).toBe(false);
  s.setConnected(true);
- await s.fake.harness.behavior.callRpc('setMode',{mode:'enforce'});
+ await s.fake.harness.behavior.callRpc('setMode',{mode:'enforce'});await s.settled();
  expect(s.calls).toContainEqual(expect.objectContaining({action:'resume',reviewed:true,restoreRevision:'b'.repeat(64)}));
  expect(s.report.recoveryPending).toBe(false);
 });
@@ -46,7 +47,7 @@ it('preserves legacy lock instead of auto-resuming',async()=>{
 });
 
 it('does not resume without a complete recovery snapshot',async()=>{
- const s=await setup({revision:null});await expect(s.connect()).rejects.toThrow(/snapshot/i);
+ const s=await setup({revision:null});const result=await s.connect();expect(result.automations.error).toMatch(/snapshot/i);
  expect(s.calls.some(c=>c.action==='resume')).toBe(false);
 });
 

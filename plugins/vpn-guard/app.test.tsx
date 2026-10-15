@@ -30,6 +30,31 @@ it('resumes automations without a review checkbox or client-supplied revision',a
  await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'automationAction',input:{action:'resume'}}));
 });
 
+it('keeps manual Block available while automation Resume waits and ignores its stale response',async()=>{
+ let status=guardFixture();status.coordinateAutomations=true;
+ let finish!:(value:typeof status)=>void;
+ const resume=new Promise<typeof status>(resolve=>{finish=resolve;});
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,automationAction:()=>resume,setManualBlock:()=>{status={...status,manualBlock:true};return status;}}});
+ fireEvent.click(await slot.findByRole('button',{name:'Возобновить'}));
+ const block=slot.getByRole('button',{name:'Заблокировать'}) as HTMLButtonElement;
+ expect(block.disabled).toBe(false);fireEvent.click(block);
+ await slot.findByText('Ручной блок включён');
+ const reads=slot.rpcCalls.filter(c=>c.method==='status').length;
+ finish({...status,manualBlock:false});
+ await waitFor(()=>expect(slot.rpcCalls.filter(c=>c.method==='status').length).toBeGreaterThan(reads));
+ await waitFor(()=>expect(slot.getByRole('button',{name:'Снять блок'})).toBeTruthy());
+ expect(slot.queryByRole('button',{name:'Заблокировать'})).toBeNull();
+});
+
+it('renders event causes and controller progress in Russian',async()=>{
+ const status=guardFixture();status.coordinateAutomations=true;status.automations.busy=true;
+ status.events=[{at:1,kind:'vpn_blocked',hostId:'demo-server',reason:'host_rpc_failed'}];
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
+ await slot.findByText('Применяется');
+ expect(slot.getByText(/машина не ответила на запрос статуса/)).toBeTruthy();
+ expect((slot.getByRole('button',{name:'Заблокировать'}) as HTMLButtonElement).disabled).toBe(false);
+});
+
 it('shows unavailable state instead of indefinite loading after the first status failure',async()=>{
   const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>{throw new Error('synthetic status unavailable');}}});
   await slot.findByText('Статус недоступен');

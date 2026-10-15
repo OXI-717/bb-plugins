@@ -11,6 +11,14 @@ if(scenario==='recovery'||scenario==='unknown'){
   status.ownedDisabledPlugins=['provider-codex'];
   status.suspendNativePluginsGlobally=true;
 }
+if(scenario==='events'){
+ status.coordinateAutomations=true;status.automationControllerPath='/controller/oxi-auto';
+ status.automations.busy=true;status.automations.needsReconcile=true;
+ status.automations.retryAt=Date.now()+5000;
+ status.events=[{at:Date.now()-10000,kind:'vpn_blocked',hostId:'demo-server',reason:'host_rpc_failed'},
+  {at:Date.now()-5000,kind:'native_paused',pluginId:'provider-codex'},
+  {at:Date.now(),kind:'automation_failed',reason:'controller_unavailable'}];
+}
 if(params.has('long'))status.hosts[0]!.name='Demo machine with a deliberately long name for layout verification';
 const rpc={async call(method:string,input?:any){
   if(scenario==='error'&&method==='status')throw new Error('Synthetic host unavailable');

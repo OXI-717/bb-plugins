@@ -3,6 +3,7 @@ import { definePluginApp, useRpc, type StandardSchemaV1InferOutput } from '@get-
 import type { rpcContract } from './contract.js';
 import { copy, readableError, type Language } from './copy.js';
 import { createStatusRequests } from './status-requests.js';
+import {eventText,eventTime} from './event-copy.js';
 import './app.css';
 
 type Status = StandardSchemaV1InferOutput<(typeof rpcContract)['status']['output']>;
@@ -17,6 +18,7 @@ export function GuardPage() {
   const [statusFresh,setStatusFresh]=useState(false);
   const [error,setError]=useState<string|null>(null);
   const [busy,setBusy]=useState(false);
+  const [automationActionBusy,setAutomationActionBusy]=useState(false);
   const [controllerPath,setControllerPath]=useState('');
   const requests=useRef(createStatusRequests());
   const refresh=useCallback(async()=>{
@@ -29,6 +31,12 @@ export function GuardPage() {
     setBusy(true);
     try {setStatus(await action());setStatusFresh(true);setError(null);} catch(e){setError(String(e));await refresh();setError(String(e));}
     finally {requests.current.invalidate();setBusy(false);}
+  }
+  async function automationChange(action:'pause'|'resume') {
+    setAutomationActionBusy(true);
+    try {await rpc.call('automationAction',{action});}
+    catch(e){setError(String(e));}
+    finally {setAutomationActionBusy(false);await refresh();}
   }
   async function selectHost(id:string,selected:boolean) {
     const ids=new Set(status?.hostIds??[]);
@@ -61,7 +69,7 @@ export function GuardPage() {
     <section><h2>{t.overview}</h2>
       <dl className="vg-overview">
         <div><dt>{t.pool}</dt><dd>{!statusFresh?t.unknown:status?.pool.linked===true?`${t.linked} · ${t.verifiedPolicy}`:status?.pool.linked===false?t.notLinked:t.unavailable}</dd></div>
-        <div><dt>{t.automations}</dt><dd>{!statusFresh?t.unknown:!status?.coordinateAutomations?t.notLinked:status.automations.error||status.automations.status?.activeRuns.length?t.partial:!status.automations.status?t.unknown:status.automations.status.blocked?t.paused:t.available}</dd></div>
+        <div><dt>{t.automations}</dt><dd>{!statusFresh?t.unknown:status?.automations.busy?t.coordinating:status?.automations.error||status?.automations.status?.activeRuns.length?t.partial:status?.automations.needsReconcile&&status?.coordinateAutomations?t.coordinating:!status?.coordinateAutomations?t.notLinked:!status.automations.status?t.unknown:status.automations.status.blocked?t.paused:t.available}</dd></div>
         <div><dt>{t.nativeState}</dt><dd>{!statusFresh?t.unknown:needsNativeRecovery?t.pendingRecovery:t.noNativeRecovery}</dd></div>
         <div><dt>{t.stopped}</dt><dd>{statusFresh?`${status?.stoppedThreadIds.length} ${t.threadUnit}`:t.unknown}</dd></div>
       </dl>
@@ -72,14 +80,16 @@ export function GuardPage() {
       <summary>{t.automations}</summary>
       {!status?.coordinateAutomations&&<p className="vg-help">{t.controllerOptional}</p>}
       {status?.coordinateAutomations&&<>
+      {status.automations.busy&&<p className="vg-help" role="status">{t.coordinatingHelp}</p>}
+      {!!status.automations.retryAt&&<p className="vg-help">{t.retryAfter}: {eventTime(status.automations.retryAt,language)}</p>}
       {status?.automations.status?.holds.map(hold=><p className="vg-help" key={hold.owner}>{hold.owner.startsWith('vpn-guard:')?t.guardHold:hold.owner==='emergency'?t.emergencyHold:t.manualHold}</p>)}
       {!!status?.automations.status?.legacyBlocked&&<p className="vg-help">{t.legacyPause}</p>}
       {!!status?.automations.error&&<div className="vg-error" role="status">{t.partial}<details><summary>{t.errorDetails}</summary><pre className="vg-error-detail">{status.automations.error}</pre></details></div>}
       {!!status?.automations.status?.errors.length&&<details><summary>{t.errorDetails}</summary><pre className="vg-error-detail">{status.automations.status.errors.join("\n")}</pre></details>}
       {!!status?.automations.status?.activeRuns.length&&<details><summary>{t.activeRun}: {status.automations.status.activeRuns.length}</summary><pre className="vg-error-detail">{status.automations.status.activeRuns.join("\n")}</pre></details>}
       <div className="vg-actions">
-        <button disabled={!ready||!status.coordinateAutomations} onClick={()=>void change(()=>rpc.call('automationAction',{action:'pause'}))}>{t.pauseAutomations}</button>
-        <button disabled={!ready||!status.coordinateAutomations||status.manualBlock||status.automations.held||status.hosts.some(h=>h.selected&&h.vpn!=='connected')} onClick={()=>void change(()=>rpc.call('automationAction',{action:'resume'}))}>{t.resumeAutomations}</button>
+        <button disabled={!ready||automationActionBusy||status.automations.busy||!status.coordinateAutomations} onClick={()=>void automationChange('pause')}>{t.pauseAutomations}</button>
+        <button disabled={!ready||automationActionBusy||status.automations.busy||!status.coordinateAutomations||status.manualBlock||status.automations.held||status.hosts.some(h=>h.selected&&h.vpn!=='connected')} onClick={()=>void automationChange('resume')}>{t.resumeAutomations}</button>
       </div>
       <p className="vg-help">{t.restoreAutomationsHelp}</p>
       {!!status?.automations.status?.pendingRestore.length&&<details><summary>{t.restoreInventory}</summary>{status.automations.status.pendingRestore.map(r=><p className="vg-help" key={r.projectId+':'+r.id}>{r.name}</p>)}</details>}
@@ -103,6 +113,10 @@ export function GuardPage() {
       {!canRestore&&<p className="vg-help">{t.restoreBlocked}</p>}</>}
       {!!status?.ambiguousPluginChanges.length&&<><p className="vg-help">{t.ambiguous}</p>{status.ambiguousPluginChanges.map(id=><div key={id} className="vg-journal"><code>{id}</code><button type="button" disabled={!ready} onClick={()=>void change(()=>rpc.call('acknowledgeAmbiguous',{pluginId:id,acknowledgeReviewed:true}))}>{t.ack}</button></div>)}</>}
       <details className="vg-inline-details"><summary>{t.nativeDetails}</summary><p className="vg-help">{t.nativeHelp}</p></details>
+    </details>
+    <details className="vg-section"><summary>{t.events}</summary>
+      {!status?.events?.length&&<p className="vg-help">{t.noEvents}</p>}
+      <ol className="vg-events">{status?.events?.slice().reverse().map((entry,index)=><li key={`${entry.at}:${index}`}><time className="vg-help" dateTime={new Date(entry.at).toISOString()}>{eventTime(entry.at,language)}</time><p>{eventText(entry,language,status.hosts.find(h=>h.id===entry.hostId)?.name)}</p></li>)}</ol>
     </details>
     <details className="vg-section"><summary>{t.limits}</summary><p className="vg-help">{t.limitText}</p></details>
   </main>;

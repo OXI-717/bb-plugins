@@ -4,6 +4,7 @@ import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { configurationSchema, hostContract, rpcContract, stopObservationSchema, stopReasonSchema } from './contract.js';
 import { abortableDelay } from './delay.js';
+import {eventJournal,type GuardEvent} from './event-journal.js';
 import { protectedProvider, PROTECTED_PROVIDERS, type VpnState } from './state.js';
 
 const CONFIG = 'configuration-v2';
@@ -11,6 +12,8 @@ const JOURNAL = 'owned-disabled-native-plugins-v2';
 const PENDING = 'pending-native-plugin-changes-v2';
 const STOPPED = 'stopped-thread-ids-v1';
 const STOP_HISTORY = 'stop-observations-v1';
+const EVENTS = 'protection-events-v1';
+class AutomationPolicyChanged extends Error {constructor(){super('Automation policy changed; retry required');}}
 const NATIVE_PLUGINS = ['provider-codex','provider-claude-code'] as const;
 const LIMITATIONS = [
   'Send-now bypasses message.dispatch.',
@@ -37,6 +40,60 @@ export default async function plugin(bb: BbPluginApi) {
   if(bindingCorrupt)automationError='Automation ownership journal is malformed; manual review required';
   let automationBinding=storedHold.success?storedHold.data:null;
   let automationDesired:boolean|null=null;
+  let automationPolicyVersion=0;
+  let automationOperationVersion=0;
+  let automationTail:Promise<void>=Promise.resolve();
+  let automationTask:Promise<void>|null=null;
+  let coordinationRequested=false;
+  let automationBusy=false;
+  let lastAutomationAttempt:number|null=null;
+  let lastAutomationSuccess:number|null=null;
+  let automationRetryAt:number|null=null;
+  let automationFailed=false;
+  let disposed=false;
+  const lifetime=new AbortController();
+  bb.onDispose(()=>{disposed=true;lifetime.abort();coordinationRequested=false;});
+  const journal=eventJournal(await bb.storage.kv.get(EVENTS),events=>bb.storage.kv.set(EVENTS,events),()=>{if(!disposed)bb.log.warn('VPN Guard event journal write failed');});
+  automationFailed=journal.snapshot().slice().reverse().find(e=>e.kind==='automation_failed'||e.kind==='automation_recovered')?.kind==='automation_failed';
+  const observedVpn=new Map<string,string>();
+  let nativeProblem:string|null=null;
+  async function event(value:Omit<GuardEvent,'at'>) {if(!disposed)await journal.append(value);}
+  function assertAutomationCurrent() {if(disposed||automationOperationVersion!==automationPolicyVersion)throw new AutomationPolicyChanged();}
+  function automationSerial<T>(operation:()=>Promise<T>):Promise<T> {
+    const run=automationTail.then(async()=>{
+      if(disposed)throw new AutomationPolicyChanged();
+      automationBusy=true;automationOperationVersion=automationPolicyVersion;lastAutomationAttempt=Date.now();
+      try {
+        const value=await operation();assertAutomationCurrent();
+        lastAutomationSuccess=Date.now();automationRetryAt=null;
+        if(automationFailed){automationFailed=false;await event({kind:'automation_recovered'});}
+        return value;
+      } catch(error) {
+        if(!disposed&&automationOperationVersion===automationPolicyVersion&&!(error instanceof AutomationPolicyChanged)) {
+          automationError=String(error);automationDesired=null;automationRetryAt=Date.now()+5000;
+          if(!automationFailed){automationFailed=true;await event({kind:'automation_failed',reason:'controller_unavailable'});}
+        }
+        throw error;
+      } finally {automationBusy=false;}
+    });
+    automationTail=run.then(()=>undefined,()=>undefined);return run;
+  }
+  function requestCoordination(force=false) {
+    if(disposed)return;
+    if(!config.coordinateAutomations&&!automationBinding&&!bindingCorrupt){automationDesired=false;return;}
+    if(!force&&automationRetryAt!==null&&Date.now()<automationRetryAt)return;
+    coordinationRequested=true;automationDesired=null;
+    if(automationTask)return;
+    automationTask=automationSerial(async()=>{
+      coordinationRequested=false;
+      const snapshot=await status();assertAutomationCurrent();await coordinate(snapshot);assertAutomationCurrent();
+    }).catch(error=>{
+      if(disposed)return;
+      if(error instanceof AutomationPolicyChanged||automationOperationVersion!==automationPolicyVersion)coordinationRequested=true;
+      else {coordinationRequested=false;bb.log.warn('VPN Guard automation coordination failed; retry scheduled');}
+    }).finally(()=>{automationTask=null;if(coordinationRequested&&!disposed)requestCoordination(true);});
+  }
+
   const host = bb.hosts.experimental_client({contract:hostContract});
   const loaded=configurationSchema.safeParse(await bb.storage.kv.get<unknown>(CONFIG));
   let config:Configuration=loaded.success ? loaded.data : initialConfiguration;
@@ -89,13 +146,14 @@ export default async function plugin(bb: BbPluginApi) {
     let pool:{linked:boolean|null,vpnPolicyVersion:2|null,error:string|null}={linked:null,vpnPolicyVersion:null,error:null};
     try {const raw=await poolPolicy();pool={linked:raw.vpnGuardEnabled,vpnPolicyVersion:raw.vpnPolicyVersion,error:null};}catch{pool.error='Pooler linkage unavailable';}
     return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,
-      hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],stopHistory:[...stopHistory],limitations:LIMITATIONS,pool,automations:{status:automationStatus,error:automationError,held:automationBinding!==null||bindingCorrupt,needsReconcile:automationDesired===null}};
+      hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],stopHistory:[...stopHistory],events:journal.snapshot(),limitations:LIMITATIONS,pool,automations:{status:automationStatus,error:automationError,held:automationBinding!==null||bindingCorrupt,needsReconcile:automationDesired===null,busy:automationBusy||automationTask!==null,lastAttemptAt:lastAutomationAttempt,lastSuccessAt:lastAutomationSuccess,retryAt:automationRetryAt}};
   }
   async function saveConfig(next:Configuration) {
     await bb.storage.kv.set(CONFIG,next);
-    config=next;
+    const previous=config;config=next;automationPolicyVersion++;automationRetryAt=null;
     policyVersion++;
     recheckDirty=true;
+    if(previous.manualBlock!==next.manualBlock)await event({kind:next.manualBlock?'manual_block_on':'manual_block_off',reason:'manual_block'});
   }
   async function saveOwned() {await bb.storage.kv.set(JOURNAL,[...owned]);}
   async function savePending() {await bb.storage.kv.set(PENDING,[...pending]);}
@@ -120,7 +178,8 @@ export default async function plugin(bb: BbPluginApi) {
         policyVersion++;
         recheckDirty=true;
         await savePending();
-      } catch(error) {failures.push(new Error(`${id}: ${String(error)}`));}
+        nativeProblem=null;await event({kind:'native_paused',pluginId:id});
+      } catch(error) {if(nativeProblem!==`pause:${id}`){nativeProblem=`pause:${id}`;await event({kind:'native_pause_failed',pluginId:id,reason:'operation_failed'});}failures.push(new Error(`${id}: ${String(error)}`));}
     }
     return failures;
   }
@@ -146,6 +205,7 @@ export default async function plugin(bb: BbPluginApi) {
       const next=new Set(owned);next.delete(id);
       await bb.storage.kv.set(JOURNAL,[...next]);
       owned=next;
+      nativeProblem=null;await event({kind:'native_restored',pluginId:id as 'provider-codex'|'provider-claude-code'});
       policyVersion++;
       recheckDirty=true;
     }
@@ -169,13 +229,16 @@ export default async function plugin(bb: BbPluginApi) {
         const parsedReason=stopReasonSchema.safeParse(reason);
         stopHistory=[...stopHistory,{threadId:running.id,hostId:running.hostId,at:Date.now(),reason:parsedReason.success?parsedReason.data:'invalid_evidence'}].slice(-100);
         await bb.storage.kv.set(STOP_HISTORY,stopHistory);
+        await event({kind:'thread_stopped',hostId:running.hostId,threadId:running.id,reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
       } catch(error) {failures.push(new Error(`thread ${running.id}: ${String(error)}`));}
     }
     return failures;
   }
   async function controller(action:'status'|'hold'|'release'|'pause'|'resume',binding:{hostId:string;executable:string},reviewed=false,restoreRevision:string|null=null,schedulesOnly=false) {
+    assertAutomationCurrent();
     if(bindingCorrupt)throw Error('Automation ownership journal is malformed; manual review required');
-    const value=await host.call('automation',{action,instanceId,executable:binding.executable,reviewed,restoreRevision,schedulesOnly},{hostId:binding.hostId,timeoutMs:32_000});
+    const value=await host.call('automation',{action,instanceId,executable:binding.executable,reviewed,restoreRevision,schedulesOnly},{hostId:binding.hostId,timeoutMs:32_000,signal:lifetime.signal});
+    assertAutomationCurrent();
     automationStatus=automationStatusSchema.parse(value);automationError=null;
     return automationStatus;
   }
@@ -188,8 +251,10 @@ export default async function plugin(bb: BbPluginApi) {
     if(await vpn(binding.hostId)!=='connected')throw Error('Release protection blocks and verify VPN before resuming');
     const restored=await controller('resume',binding,true,report.restoreRevision,automatic);
     if(restored.errors.length||restored.blocked||restored.recoveryPending)throw Error('Automation recovery is incomplete; inspect controller status');
+    await event({kind:'automation_restored',hostId:binding.hostId});
   }
   async function coordinate(snapshot:Awaited<ReturnType<typeof status>>) {
+    assertAutomationCurrent();
     if(bindingCorrupt)throw Error('Automation ownership journal is malformed; manual review required');
     const server=snapshot.hosts.find(h=>h.id===snapshot.serverHostId);
     const wants=config.coordinateAutomations&&!!server?.selected&&(config.manualBlock||(config.mode==='enforce'&&server.vpn!=='connected'));
@@ -198,16 +263,20 @@ export default async function plugin(bb: BbPluginApi) {
         if(!snapshot.serverHostId||!config.automationControllerPath)throw Error('Automation controller and server host must be configured');
         const binding={hostId:snapshot.serverHostId,executable:config.automationControllerPath};
         if(automationBinding&&(automationBinding.hostId!==binding.hostId||automationBinding.executable!==binding.executable))throw Error('Release the previous controller hold before changing its binding');
+        const newlyHeld=automationBinding===null;
         if(!automationBinding){await bb.storage.kv.set('automation-hold-binding-v1',binding);automationBinding=binding;}
         // Hold is idempotent and retries failed or newly enabled schedules.
         const report=await controller('hold',binding);
         if(!report.holds.some(h=>h.owner===`vpn-guard:${instanceId}`))throw Error('Automation controller did not confirm the protection hold');
         if(report.errors.length)throw Error('Automation pause is incomplete; inspect controller status');
+        if(newlyHeld)await event({kind:'automation_hold',hostId:binding.hostId});
         if(report.activeRuns.length)automationError='Active automation runs may continue or are unverified';
       } else if(automationBinding) {
         const report=await controller('release',automationBinding);
         if(report.holds.some(h=>h.owner===`vpn-guard:${instanceId}`))throw Error('Automation protection hold was not released; retry required');
+        const releasedHost=automationBinding.hostId;
         await bb.storage.kv.set('automation-hold-binding-v1',null);automationBinding=null;
+        assertAutomationCurrent();await event({kind:'automation_release',hostId:releasedHost});
         if(report.errors.length)automationError='Automation recovery is incomplete; inspect controller status';
       } else if(config.coordinateAutomations&&snapshot.serverHostId&&config.automationControllerPath) {
         await controller('status',{hostId:snapshot.serverHostId,executable:config.automationControllerPath});
@@ -215,13 +284,19 @@ export default async function plugin(bb: BbPluginApi) {
       if(!wants&&!automationBinding&&config.coordinateAutomations&&!config.manualBlock&&server?.selected&&server.vpn==='connected'&&config.automationControllerPath&&automationStatus?.recoveryPending) {
         await resumeAutomations({hostId:server.id,executable:config.automationControllerPath},true);
       }
-      automationDesired=wants;
-    } catch(error){automationError=String(error);automationDesired=null;throw error;}
+      assertAutomationCurrent();automationDesired=wants;
+    } catch(error){automationDesired=null;throw error;}
   }
   async function reconcile() {
     const snapshot=await status();
     const states=new Map(snapshot.hosts.filter(h=>h.selected).map(h=>[h.id,h.vpn??'unknown'] as const));
     const failures:Error[]=[];
+    for(const observation of snapshot.hosts.filter(h=>h.selected)) {
+      const reason=observation.vpn==='connected'?undefined:!observation.available?'host_catalog_unavailable':!observation.evidence?'host_rpc_failed':stopReasonSchema.safeParse(observation.evidence.reason).success?stopReasonSchema.parse(observation.evidence.reason):'invalid_evidence';
+      const key=`${observation.vpn}:${reason??'ok'}`;
+      if(observedVpn.get(observation.id)!==key){automationPolicyVersion++;automationRetryAt=null;observedVpn.set(observation.id,key);await event({kind:observation.vpn==='connected'?'vpn_connected':'vpn_blocked',hostId:observation.id,reason});}
+    }
+    for(const id of observedVpn.keys())if(!config.hostIds.includes(id))observedVpn.delete(id);
     const vpnUnavailable=states.size===0||[...states.values()].some(state=>state!=='connected');
     const blocking=config.manualBlock||(config.mode==='enforce'&&vpnUnavailable);
     if(config.suspendNativePluginsGlobally&&blocking) {
@@ -237,9 +312,9 @@ export default async function plugin(bb: BbPluginApi) {
       failures.push(...await stopProtected(states,snapshot));
     } else if(!config.manualBlock&&states.size>0&&[...states.values()].every(state=>state==='connected')&&owned.size>0) {
       try {await restoreOwned(true);}
-      catch(error) {failures.push(new Error(`native recovery: ${String(error)}`));}
+      catch(error) {if(nativeProblem!=='restore'){nativeProblem='restore';await event({kind:'native_restore_failed',reason:String(error).includes('connected')?'vpn_unavailable':'operation_failed'});}failures.push(new Error(`native recovery: ${String(error)}`));}
     }
-    try{await coordinate(snapshot);}catch(error){failures.push(new Error(`automation coordination: ${String(error)}`));}
+    requestCoordination();
     if(recheckDirty || [...states].some(([id,state])=>previousStates.get(id)!==state) || previousStates.size!==states.size) {
       try {
         await bb.experimental_hooks.recheck('message.dispatch');
@@ -322,11 +397,12 @@ export default async function plugin(bb: BbPluginApi) {
     setAutomationCoordination:({enabled,executable})=>serial(async()=>{
       if(enabled&&(!executable||!executable.startsWith('/')))throw Error('An absolute automation controller path is required');
       if(enabled){const primary=(await bb.sdk.system.config()).primaryHostId;if(!primary||!config.hostIds.includes(primary))throw Error('Select the BB server host before connecting automation protection');}
-      if(automationBinding&&executable!==config.automationControllerPath)throw Error('Release the controller hold before changing the executable');
+      if((automationBinding||automationBusy||automationTask)&&executable!==config.automationControllerPath)throw Error('Release the controller hold before changing the executable');
       return update({...config,coordinateAutomations:enabled,automationControllerPath:executable});
     }),
-    automationAction:({action})=>serial(async()=>{
-      const snapshot=await status();
+    automationAction:({action})=>{const requestedRevision=automationPolicyVersion;return automationSerial(async()=>{
+      if(requestedRevision!==automationPolicyVersion)throw new AutomationPolicyChanged();
+      const snapshot=await status();assertAutomationCurrent();
       if(!config.coordinateAutomations||!snapshot.serverHostId||!config.automationControllerPath)throw Error('Automation controller is not configured');
       if(action==='resume'&&(config.manualBlock||automationBinding||snapshot.hosts.some(h=>h.selected&&h.vpn!=='connected')))throw Error('Release protection blocks and verify VPN before resuming');
       const binding={hostId:snapshot.serverHostId,executable:config.automationControllerPath};
@@ -335,8 +411,8 @@ export default async function plugin(bb: BbPluginApi) {
         const report=await controller(action,binding);
         if(report.errors.length)throw Error('Automation action incomplete; inspect controller status');
       }
-      return status();
-    }),
+      requestCoordination(true);return status();
+    });},
     networkDecision:({hostId,provider})=>networkDecision(hostId,provider),
     status:()=>status(),
     setManualBlock:({blocked})=>serial(()=>update({...config,manualBlock:blocked})),
