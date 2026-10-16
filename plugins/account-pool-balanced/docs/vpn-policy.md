@@ -51,3 +51,7 @@ OAuth HTTP 400/401 remains an authentication error. Quota exhaustion remains a p
 ## Upgrade and policy compatibility
 
 Upgrade Pooler 0.4.21 and Guard 0.1.6 together when linked. A mixed-version pair can locally refuse protected traffic during the update. Stored settings are sanitized without resetting provider choices, machine scope, accounts or automation bindings. The retired verification switch is not a writable API/CLI setting; `config.get` exposes immutable `vpnPolicyVersion: 2` for the Guard handshake. There is no cached legacy allow or ordinary-transport fallback for VPN-only providers.
+
+When Follow VPN Guard is enabled, only Kimi and Z.ai bypass Guard admission. Codex, Claude, Cursor, Devin and OpenCode Go ask Guard before provider calls, including maintenance. Go therefore requires Guard with Go network-decision support; an older Guard refuses locally. The linked protected transport uses IPv4, matching the proof coverage. VPN-only provider settings still govern independent VPN checks; a connected VPN does not itself mean the manual Guard block is off.
+
+A timed-out state-file result is discarded before the next read. At most 16 underlying file operations may remain outstanding; timeouts never free an underlying operation's capacity until that operation settles. This prevents unbounded resource growth while allowing a later healthy read after an isolated stall.

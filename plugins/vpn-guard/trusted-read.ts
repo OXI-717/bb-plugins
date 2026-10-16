@@ -6,6 +6,7 @@ import {evaluateVpnEvidence,type VpnState,type VpnEvidence} from './vpn-evidence
 type Opener = typeof open;
 const pending = new Map<string, Promise<unknown>>();
 const MAX_PENDING = 16;
+const activeReads = new Set<Promise<unknown>>();
 export async function trustedRead(file: string, opener: Opener = open): Promise<unknown> {
   let handle: Awaited<ReturnType<Opener>> | undefined;
   try {
@@ -22,16 +23,18 @@ export async function trustedRead(file: string, opener: Opener = open): Promise<
 export async function readVpnEvidence(file: string, now: () => number = Date.now, opener: Opener = open): Promise<VpnEvidence> {
   let result = pending.get(file);
   if (!result) {
-    if (pending.size >= MAX_PENDING) return evaluateVpnEvidence(null,now());
+    if (activeReads.size >= MAX_PENDING) return evaluateVpnEvidence(null,now());
     const reading = trustedRead(file, opener);
+    activeReads.add(reading);
     let timer: ReturnType<typeof setTimeout>;
     result = Promise.race([reading, new Promise<null>(resolve => { timer = setTimeout(()=>resolve(null), 1000); })]);
     pending.set(file, result);
     const current = result;
-    void reading.finally(() => {
+    void result.finally(() => {
       clearTimeout(timer);
       if (pending.get(file) === current) pending.delete(file);
     }).catch(()=>undefined);
+    void reading.finally(()=>activeReads.delete(reading)).catch(()=>undefined);
   }
   return evaluateVpnEvidence(await result, now());
 }

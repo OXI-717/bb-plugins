@@ -11,7 +11,7 @@ if(scenario==='recovery'||scenario==='unknown'){
   status.ownedDisabledPlugins=['provider-codex'];
   status.suspendNativePluginsGlobally=true;
 }
-if(scenario==='stops')status.stoppedThreadIds=['demo-thread-a','demo-thread-b','demo-thread-with-a-long-identifier-for-layout'];
+if(scenario==='stops'){status.stoppedThreadIds=['demo-thread-a','demo-thread-b','demo-thread-with-a-long-identifier-for-layout'];status.stopHistory=status.stoppedThreadIds.map(threadId=>({threadId,hostId:'demo-server',at:Date.now(),reason:'manual_block'}));}
 if(scenario==='events'){
  status.coordinateAutomations=true;status.automationControllerPath='/controller/oxi-auto';
  status.automations.busy=true;status.automations.needsReconcile=true;
@@ -24,6 +24,7 @@ if(params.has('long'))status.hosts[0]!.name='Demo machine with a deliberately lo
 const rpc={async call(method:string,input?:any){
   if(scenario==='error'&&method==='status')throw new Error('Synthetic host unavailable');
   switch(method){
+    case 'resumeThread':return {accepted:true};
     case 'status':break;
     case 'setMode':status.mode=input.mode;break;
     case 'setManualBlock':status.manualBlock=input.blocked;break;
@@ -39,5 +40,5 @@ export function definePluginApp(factory:unknown){return factory;}
 
 export function useBbNavigate(){return {toThread:(id:string)=>{console.info('Preview navigation',id);}};}
 
-const sdk={threads:{get:async({threadId}:{threadId:string})=>{if(threadId==='demo-thread-b')throw Error('Preview unavailable');return {title:threadId==='demo-thread-a'?'Проверка защиты VPN':'Long thread title for checking layout, wrapping and navigation in a narrow panel'};}}};
+const sdk={threads:{get:async({threadId}:{threadId:string})=>{if(threadId==='demo-thread-b')throw Error('Preview unavailable');return {status:'idle',updatedAt:0,queuedMessageCount:0,title:threadId==='demo-thread-a'?'Проверка защиты VPN':'Long thread title for checking layout, wrapping and navigation in a narrow panel'};}}};
 export function useSdk(){return sdk;}

@@ -22,7 +22,7 @@ const LIMITATIONS = [
   'A crash during plugin disable leaves an ambiguous journal entry for manual review, never automatic restoration.',
   'An ambiguous native plugin change holds its provider until explicitly acknowledged after review.',
   'In-flight connections, running scripts, and existing bridge processes are not a proven network block.',
-  'Generic ACP IDs other than acp-cursor/acp-devin are outside this policy.',
+  'All provider IDs are protected except exact Kimi and Z.ai routes; generic ACP engines are protected.',
   'VPN Guard is BB admission control, not a packet firewall.',
 ];
 type Configuration = z.infer<typeof configurationSchema>;
@@ -388,7 +388,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         try {
           const pool=await poolPolicy();
-          if(!pool.vpnOnlyProviders.includes(provider))return decision(false,'vpn_unavailable');
+          if(provider!=='opencode-go'&&!pool.vpnOnlyProviders.includes(provider))return decision(false,'vpn_unavailable');
         }catch{return decision(false,'vpn_unavailable');}
       }
       let available=false;
@@ -398,7 +398,23 @@ export default async function plugin(bb: BbPluginApi) {
       return state==='connected'?decision(true,'connected'):decision(false,'vpn_unavailable');
     }
   }
+  const resumeClaimSchema=z.array(z.object({threadId:z.string(),stoppedAt:z.number().int().nonnegative()})).max(100);
+  const savedResumeClaims=resumeClaimSchema.safeParse((await bb.storage.kv.get('thread-resume-claims-v1'))??[]);
+  let resumeClaims=savedResumeClaims.success?savedResumeClaims.data:null;
   bb.rpc.register(rpcContract,{
+    resumeThread:({threadId,stoppedAt})=>serial(async()=>{
+      const record=stopHistory.slice().reverse().find(stop=>stop.threadId===threadId);
+      if(!record||record.at!==stoppedAt)throw Error('This Guard stop is no longer current. Open the thread to continue.');
+      if(!resumeClaims||resumeClaims.some(claim=>claim.threadId===threadId&&claim.stoppedAt===stoppedAt))throw Error('Resume was already requested or is uncertain. Open the thread to check.');
+      const thread=await bb.sdk.threads.get({threadId});
+      if(thread.status!=='idle'||thread.archivedAt!=null||thread.deletedAt!=null||thread.queuedMessageCount||thread.updatedAt>stoppedAt)throw Error('The thread has changed since this stop. Open it to continue.');
+      if(config.manualBlock||!config.hostIds.includes(record.hostId)||await vpn(record.hostId)!=='connected'||owned.has(nativePluginFor(thread.providerId))||pending.has(nativePluginFor(thread.providerId)))throw Error('Verified VPN and restored plugins are required before resuming.');
+      // Persist before send: an ambiguous send failure must never be retried automatically.
+      const next=[...resumeClaims,{threadId,stoppedAt}].slice(-100);
+      await bb.storage.kv.set('thread-resume-claims-v1',next);resumeClaims=next;
+      await bb.sdk.threads.send({threadId,mode:'start',input:[{type:'text',mentions:[],text:'Continue the work interrupted by VPN Guard. Check the current state before repeating any actions.'}]});
+      return {accepted:true as const};
+    }),
     automationIdentity:()=>({instanceId}),
     setAutomationCoordination:({enabled,executable})=>serial(async()=>{
       if(enabled&&(!executable||!executable.startsWith('/')))throw Error('An absolute automation controller path is required');

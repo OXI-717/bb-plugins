@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { definePluginApp, useRpc, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './contract.js';
 import { copy, readableError, type Language } from './copy.js';
-import { createStatusRequests } from './status-requests.js';
+import { createStatusRequests, createStatusReads } from './status-requests.js';
 import {eventText,eventTime} from './event-copy.js';
 import {StoppedThreads} from './stopped-threads.js';
 import './app.css';
@@ -23,11 +23,12 @@ export function GuardPage() {
   const [controllerPath,setControllerPath]=useState('');
   const [historyOpen,setHistoryOpen]=useState(false);
   const requests=useRef(createStatusRequests());
+  const statusReads=useRef(createStatusReads());
   const refresh=useCallback(async()=>{
-    const requestRevision=requests.current.start();
-    try {const next=await rpc.call('status');if(requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setError(null);}} catch(e){if(requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
+    let requestRevision:number|undefined;
+    try {const next=await statusReads.current.read(()=>{requestRevision=requests.current.start();return rpc.call('status');});if(next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setError(null);}} catch(e){if(requestRevision===undefined||requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
   },[rpc]);
-  useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>clearInterval(timer);},[refresh]);
+  useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>{clearInterval(timer);requests.current.invalidate();};},[refresh]);
   async function change(action:()=>Promise<Status>) {
     requests.current.invalidate();
     setBusy(true);
@@ -80,7 +81,7 @@ export function GuardPage() {
     <details className="vg-section" onToggle={event=>{if(event.target===event.currentTarget)setHistoryOpen(event.currentTarget.open);}}><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:'—'}</summary>
       <p className="vg-help">{t.stoppedHelp}</p>
       {statusFresh&&!status?.stoppedThreadIds.length&&<p className="vg-help">{t.noStopHistory}</p>}
-      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language}/> }
+      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language} stopHistory={status.stopHistory} canResume={canRestore&&!needsNativeRecovery}/> }
     </details>
     <details className="vg-section" open={status?.automations.status?.recoveryPending||!!status?.automations.error}>
       <summary>{t.automations}</summary>

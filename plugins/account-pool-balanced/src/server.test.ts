@@ -7460,9 +7460,9 @@ describe('VPN Guard linked network policy',()=>{
     fixture.host.harness.sdk.stub('plugins.callRpc',call);
     await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
     const status=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));
-    expect(maxActive).toBe(4);
-    expect(call).toHaveBeenCalledTimes(4);
-    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin']);
+    expect(maxActive).toBe(5);
+    expect(call).toHaveBeenCalledTimes(5);
+    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin','opencode-go']);
     expect(outbound).not.toHaveBeenCalled();
   });
   it('shares one deadline across server lookup and a slow successful Guard RPC',async()=>{
@@ -7549,4 +7549,14 @@ it('cancels a retained linked protected stream through the actual policy service
    const ended=await reader.read().then(r=>r.done,()=>true);expect(ended).toBe(true);
    await vi.waitFor(async()=>{const value=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));expect(value.inFlight).toBe(0);});
  }finally{service.controller.abort();await service.done;}
+});
+
+it.each(['devin','opencode-go'] as const)('refuses linked %s before any provider call on manual block',async provider=>{
+ const outbound=vi.fn(async()=>Response.json({}));const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider,options:{fetch:outbound}});
+ fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
+ fixture.host.harness.sdk.stub('plugins.callRpc',async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}));
+ await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});outbound.mockClear();
+ const route=provider==='devin'?'/devin/exa.seat_management_pb.SeatManagementService/GetUserStatus':'/opencode-go/v1/chat/completions';
+ const response=await fixture.host.harness.behavior.fetchHttp('POST',route,{headers:authHeaders(fixture.key),body:'{}'});
+ expect(response.status).toBe(403);expect(response.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_BLOCKED');expect(outbound).not.toHaveBeenCalled();
 });

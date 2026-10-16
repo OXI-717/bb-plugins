@@ -186,10 +186,11 @@ export class AccountPoolHub {
   private readonly networkFlights:NetworkFlights;
   constructor(private readonly options: HubOptions) {
     this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnPayload,options.guardCheck);
-    this.networkFlights=new NetworkFlights(options.fetch,()=>this.stopped.signal,provider=>this.assertNetworkAllowed(provider),provider=>options.getSettings().vpnOnlyProviders.some(value=>value===provider)?options.fetchIpv4!:options.fetch);
+    this.networkFlights=new NetworkFlights(options.fetch,()=>this.stopped.signal,provider=>this.assertNetworkAllowed(provider),provider=>this.requiresIpv4(provider)?options.fetchIpv4!:options.fetch);
   }
 
-  async assertNetworkAllowed(provider: PoolProvider): Promise<void> { await this.vpn.assert(provider);if(this.options.getSettings().vpnOnlyProviders.some(value=>value===provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
+  private requiresIpv4(provider:PoolProvider):boolean {const settings=this.options.getSettings();return settings.vpnOnlyProviders.some(value=>value===provider)||(settings.vpnGuardEnabled&&provider!=="kimi"&&provider!=="zai");}
+  async assertNetworkAllowed(provider: PoolProvider): Promise<void> { await this.vpn.assert(provider);if(this.requiresIpv4(provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
 
   outboundFetch(provider: PoolProvider): typeof fetch {
     return (input,init)=>this.networkFlights.fetch(provider,input,init);
@@ -421,7 +422,7 @@ export class AccountPoolHub {
     const now = this.options.now();
     const vpnEvidence=await this.vpn.evidence();
     const vpnState=vpnEvidence.state;
-    const decisions=await Promise.all((["codex","claude","cursor","devin"] as const).map(async provider=>{
+    const decisions=await Promise.all((["codex","claude","cursor","devin","opencode-go"] as const).map(async provider=>{
       try {await this.assertNetworkAllowed(provider);return null;} catch {return provider;}
     }));
     const blockedProviders=decisions.filter((provider):provider is Exclude<typeof provider,null>=>provider!==null);

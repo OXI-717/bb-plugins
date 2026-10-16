@@ -14,3 +14,26 @@ it('shows a Russian explanation for unknown technical errors',()=>{
   expect(readableError('Error: threads.listRunning: service unavailable','ru')).toBe('Не удалось выполнить действие. Проверьте подробности ошибки.');
   expect(readableError('Error: threads.listRunning: service unavailable','en')).toBe('Action failed. Check the error details.');
 });
+
+it('coalesces polling so a slower-than-cadence successful response is usable',async()=>{
+ const {createStatusReads}=await import('./status-requests.js');
+ let finish!:(value:string)=>void;let calls=0;
+ const reads=createStatusReads();
+ const pending=reads.read(()=>{calls++;return new Promise<string>(resolve=>{finish=resolve;});});
+ expect(await reads.read(async()=>{calls++;return 'new';})).toBeNull();
+ finish('healthy');expect(await pending).toBe('healthy');expect(calls).toBe(1);
+});
+
+it('retries after a status timeout and bounds underlying stalled requests',async()=>{
+ const {vi}=await import('vitest');const {createStatusReads}=await import('./status-requests.js');
+ vi.useFakeTimers();const reads=createStatusReads();const finishes:((value:string)=>void)[]=[];
+ try{
+  for(let i=0;i<4;i++){
+   const pending=reads.read(()=>new Promise<string>(resolve=>finishes.push(resolve)),10).catch(error=>error);
+   await vi.advanceTimersByTimeAsync(11);expect(await pending).toBeInstanceOf(Error);
+  }
+  await expect(reads.read(async()=> 'healthy',10)).rejects.toThrow('unavailable');
+  finishes.shift()!('late');await vi.advanceTimersByTimeAsync(0);
+  expect(await reads.read(async()=> 'healthy',10)).toBe('healthy');
+ }finally{for(const finish of finishes)finish('late');await vi.advanceTimersByTimeAsync(0);vi.useRealTimers();}
+});

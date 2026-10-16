@@ -562,3 +562,41 @@ it('stops running pool aliases and preserves Chinese sessions',async()=>{
   await select(fake,['host-a']);await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
   expect(stopped).toEqual(['cursor-pool','devin-pool']);await fake.harness.lifecycle.dispose();
 });
+
+it('blocks all provider IDs except exact Kimi and GLM routes on manual block',async()=>{
+  const {fake,dispatch,states}=await setup();states.set('host-a','connected');
+  await select(fake,['host-a']);await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+  for(const id of ['acp-devin','acp-oxi-devin-pool','acp-opencode','acp-opencode-go','acp-agy','acp-grok','new-provider'])expect(await dispatch(id,'host-a')).toMatchObject({action:'wait'});
+  for(const id of ['acp-opencode-kimi','acp-opencode-zai'])expect(await dispatch(id,'host-a')).toEqual({action:'proceed'});
+  await fake.harness.lifecycle.dispose();
+});
+
+it('accepts a linked Go network check and denies it on manual block',async()=>{
+ const {fake,states}=await setup();states.set('host-a','connected');await select(fake,['host-a']);
+ await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+ expect(await fake.harness.behavior.callRpc('networkDecision',{hostId:'host-a',provider:'opencode-go'})).toMatchObject({allowed:false,reason:'manual_block'});
+ await fake.harness.lifecycle.dispose();
+});
+
+it('resumes only an unchanged idle thread actually stopped by Guard, once',async()=>{
+ const {fake,states}=await setup();await select(fake,['host-a']);await mode(fake,'enforce');
+ const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));const stop=status.stopHistory!.at(-1)!;
+ states.set('host-a','connected');
+ fake.harness.sdk.stub('threads.get',async()=>makeThreadResponse({id:'protected',providerId:'codex',status:'idle',updatedAt:stop.at-1,queuedMessageCount:0}));
+ const sent:unknown[]=[];fake.harness.sdk.stub('threads.send',async input=>{sent.push(input);return {ok:true,delivery:'sent'} as never;});
+ await fake.harness.behavior.callRpc('resumeThread',{threadId:'protected',stoppedAt:stop.at});
+ expect(sent).toMatchObject([{threadId:'protected',mode:'start',input:[{type:'text',text:expect.any(String)}]}]);
+ await expect(fake.harness.behavior.callRpc('resumeThread',{threadId:'protected',stoppedAt:stop.at})).rejects.toThrow();
+ expect(sent).toHaveLength(1);await fake.harness.lifecycle.dispose();
+});
+
+it('refuses resume while blocked, after later thread activity, or without an owned stop',async()=>{
+ const {fake,states}=await setup();await select(fake,['host-a']);await mode(fake,'enforce');
+ const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));const stop=status.stopHistory!.at(-1)!;
+ await expect(fake.harness.behavior.callRpc('resumeThread',{threadId:'protected',stoppedAt:stop.at})).rejects.toThrow();
+ states.set('host-a','connected');
+ fake.harness.sdk.stub('threads.get',async()=>makeThreadResponse({id:'protected',status:'idle',updatedAt:stop.at+1}));
+ await expect(fake.harness.behavior.callRpc('resumeThread',{threadId:'protected',stoppedAt:stop.at})).rejects.toThrow();
+ await expect(fake.harness.behavior.callRpc('resumeThread',{threadId:'not-owned',stoppedAt:stop.at})).rejects.toThrow();
+ await fake.harness.lifecycle.dispose();
+});

@@ -176,3 +176,13 @@ it('keeps the shared four-read limit after closing and reopening history',async(
  fireEvent.click(slot.getByText('Ранее остановлено Guard'));await slot.findByText('Загружаем названия тредов…');expect(reads).toBe(4);
  release();await slot.findByRole('button',{name:'Named demo-thread-0'});expect(peak).toBe(4);
 });
+
+it('shows Continue for an unchanged owned stop and hides technical identifiers',async()=>{
+ const status=guardFixture();status.stoppedThreadIds=['demo-stopped'];status.stopHistory=[{threadId:'demo-stopped',hostId:'demo-server',at:1000,reason:'manual_block'}];
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,resumeThread:()=>({accepted:true})},sdk:{threads:{get:async()=>({title:'Interrupted work',status:'idle',updatedAt:999,queuedMessageCount:0}) as never}}});
+ const history=await slot.findByText('Ранее остановлено Guard');fireEvent.click(history.closest('summary')!);fireEvent(history.closest('details')!,new Event('toggle'));
+ fireEvent.click(await slot.findByRole('button',{name:'Продолжить'}));
+ await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'resumeThread',input:{threadId:'demo-stopped',stoppedAt:1000}}));
+ expect(slot.queryByText('demo-stopped')).toBeNull();
+ await slot.findByRole('button',{name:'Запуск запрошен'});
+});
