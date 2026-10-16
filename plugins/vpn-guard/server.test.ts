@@ -600,3 +600,28 @@ it('refuses resume while blocked, after later thread activity, or without an own
  await expect(fake.harness.behavior.callRpc('resumeThread',{threadId:'not-owned',stoppedAt:stop.at})).rejects.toThrow();
  await fake.harness.lifecycle.dispose();
 });
+
+it('rechecks thread activity after a delayed VPN read before Continue sends',async()=>{
+ const {fake,states,pauseNextRpc}=await setup();await select(fake,['host-a']);await mode(fake,'enforce');
+ const stop=statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).stopHistory!.at(-1)!;
+ states.set('host-a','connected');let updatedAt=stop.at-1;let sent=0;
+ fake.harness.sdk.stub('threads.get',async()=>makeThreadResponse({id:'protected',status:'idle',providerId:'codex',updatedAt}));
+ fake.harness.sdk.stub('threads.send',async()=>{sent++;return {ok:true,delivery:'sent'} as never;});
+ let entered!:()=>void;let release!:()=>void;const ready=new Promise<void>(r=>{entered=r;});const gate=new Promise<void>(r=>{release=r;});
+ pauseNextRpc({hostId:'host-a',entered,release:gate});
+ const result=fake.harness.behavior.callRpc('resumeThread',{threadId:'protected',stoppedAt:stop.at}).catch(error=>error);
+ await ready;updatedAt=stop.at+1;release();expect(await result).toBeInstanceOf(Error);expect(sent).toBe(0);
+ await fake.harness.lifecycle.dispose();
+});
+
+it('keeps manual Block available while a Continue send is stalled',async()=>{
+ const {fake,states}=await setup();await select(fake,['host-a']);await mode(fake,'enforce');
+ const stop=statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).stopHistory!.at(-1)!;
+ states.set('host-a','connected');fake.harness.sdk.stub('threads.get',async()=>makeThreadResponse({id:'protected',status:'idle',providerId:'codex',updatedAt:stop.at-1}));
+ let entered!:()=>void;let release!:()=>void;const ready=new Promise<void>(r=>{entered=r;});const gate=new Promise<void>(r=>{release=r;});
+ fake.harness.sdk.stub('threads.send',async()=>{entered();await gate;return {ok:true,delivery:'sent'} as never;});
+ const resume=fake.harness.behavior.callRpc('resumeThread',{threadId:'protected',stoppedAt:stop.at});await ready;
+ let blocked=false;const block=fake.harness.behavior.callRpc('setManualBlock',{blocked:true}).then(()=>{blocked=true;});
+ try{await new Promise(resolve=>setTimeout(resolve,30));expect(blocked).toBe(true);}
+ finally{release();await Promise.all([resume,block]);await fake.harness.lifecycle.dispose();}
+});
