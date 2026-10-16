@@ -4,7 +4,7 @@ import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { accountPoolConfigSchema,accountPoolConfigSetInputSchema } from "./contracts.js";
-import { createVpnPolicy, readVpnState, VpnRequiredError, vpnStateFromPayload } from "./vpn-policy.js";
+import { createVpnPolicy, readVpnEvidence, readVpnState, VpnRequiredError, vpnStateFromPayload } from "./vpn-policy.js";
 
 const now = 1_800_000_000_000;
 const payload = vpnProof(now)!;
@@ -67,4 +67,17 @@ describe("VPN permission", () => {
       expect(await readVpnState(link, now)).toBe("unknown");
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
+});
+
+it('forgets a timed-out result while bounding still-pending file operations',async()=>{
+ vi.useFakeTimers();let finish!:(handle:unknown)=>void;
+ const bytes=Buffer.from(JSON.stringify(payload));
+ const handle={stat:async()=>({uid:0,mode:0o100644,size:bytes.length,isFile:()=>true}),read:async(buffer:Buffer)=>{bytes.copy(buffer);return {bytesRead:bytes.length};},close:async()=>{}};
+ const opener=vi.fn().mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;})).mockImplementation(async()=>handle);
+ try{
+  const first=readVpnEvidence('/synthetic/recovery',()=>now,opener as never);
+  await vi.advanceTimersByTimeAsync(1001);expect((await first).state).toBe('unknown');
+  expect((await readVpnEvidence('/synthetic/recovery',()=>now,opener as never)).state).toBe('connected');
+  expect(opener).toHaveBeenCalledTimes(2);
+ }finally{finish(handle);await vi.advanceTimersByTimeAsync(0);vi.useRealTimers();}
 });

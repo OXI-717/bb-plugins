@@ -2,7 +2,7 @@ import {z} from 'zod';
 import type {PoolProvider} from './contracts.js';
 import {GuardRequiredError} from './network-errors.js';
 
-export const GUARD_PROVIDERS = ['codex','claude','cursor','devin'] as const;
+export function requiresGuardCheck(provider:PoolProvider):boolean {return provider!=='kimi'&&provider!=='zai';}
 export const guardDecisionSchema=z.object({
   schema:z.literal('bb-vpn-guard/network-decision/1'),allowed:z.boolean(),
   reason:z.enum(['manual_block','vpn_unavailable','outside_scope','observe','connected','restore_required']),
@@ -13,7 +13,7 @@ export const guardDecisionSchema=z.object({
 export const GUARD_CHECK_TIMEOUT_MS = 4000;
 export function createGuardNetworkCheck(read:(provider:PoolProvider,signal:AbortSignal)=>Promise<unknown>,timeoutMs=GUARD_CHECK_TIMEOUT_MS) {
   return async(provider:PoolProvider)=>{
-    if(!GUARD_PROVIDERS.some(p=>p===provider)) return;
+    if(!requiresGuardCheck(provider)) return;
     let timer:ReturnType<typeof setTimeout>|undefined;
     const controller=new AbortController();
     let timedOut=false;

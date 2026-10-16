@@ -22,7 +22,7 @@ const LIMITATIONS = [
   'A crash during plugin disable leaves an ambiguous journal entry for manual review, never automatic restoration.',
   'An ambiguous native plugin change holds its provider until explicitly acknowledged after review.',
   'In-flight connections, running scripts, and existing bridge processes are not a proven network block.',
-  'Generic ACP IDs other than acp-cursor/acp-devin are outside this policy.',
+  'All provider IDs are protected except exact Kimi and Z.ai routes; generic ACP engines are protected.',
   'VPN Guard is BB admission control, not a packet firewall.',
 ];
 type Configuration = z.infer<typeof configurationSchema>;
@@ -388,7 +388,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         try {
           const pool=await poolPolicy();
-          if(!pool.vpnOnlyProviders.includes(provider))return decision(false,'vpn_unavailable');
+          if(provider!=='opencode-go'&&!pool.vpnOnlyProviders.includes(provider))return decision(false,'vpn_unavailable');
         }catch{return decision(false,'vpn_unavailable');}
       }
       let available=false;
@@ -398,7 +398,49 @@ export default async function plugin(bb: BbPluginApi) {
       return state==='connected'?decision(true,'connected'):decision(false,'vpn_unavailable');
     }
   }
+  const resumeClaimSchema=z.array(z.object({threadId:z.string(),stoppedAt:z.number().int().nonnegative()})).max(100);
+  const savedResumeClaims=resumeClaimSchema.safeParse((await bb.storage.kv.get('thread-resume-claims-v1'))??[]);
+  let resumeClaims=savedResumeClaims.success?savedResumeClaims.data:null;
+  const resumeFlights=new Set<string>();
+  let resumeClaimTail:Promise<void>=Promise.resolve();
+  async function resumeThread(threadId:string,stoppedAt:number) {
+    if(resumeFlights.has(threadId))throw Error('Resume is already pending. Open the thread to check.');
+    resumeFlights.add(threadId);
+    const version=policyVersion;
+    const assertCurrent=()=>{
+      if(disposed||version!==policyVersion||config.manualBlock)throw Error('Protection policy changed; open the thread to continue.');
+      const record=stopHistory.slice().reverse().find(stop=>stop.threadId===threadId);
+      if(!record||record.at!==stoppedAt||!config.hostIds.includes(record.hostId))throw Error('This Guard stop is no longer current. Open the thread to continue.');
+      return record;
+    };
+    const assertThread=(thread:Awaited<ReturnType<typeof bb.sdk.threads.get>>)=>{
+      if(thread.status!=='idle'||thread.archivedAt!=null||thread.deletedAt!=null||thread.queuedMessageCount||thread.updatedAt>stoppedAt)throw Error('The thread has changed since this stop. Open it to continue.');
+      if(owned.has(nativePluginFor(thread.providerId))||pending.has(nativePluginFor(thread.providerId)))throw Error('Restore native plugins before resuming.');
+    };
+    try {
+      const record=assertCurrent();
+      const initial=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(initial);
+      if(await vpn(record.hostId)!=='connected')throw Error('Verified VPN is required before resuming.');
+      assertCurrent();
+      // Only claim writes serialize with each other; slow reads/sends never own the protection lane.
+      const claim=resumeClaimTail.then(async()=>{
+        assertCurrent();
+        if(!resumeClaims||resumeClaims.some(value=>value.threadId===threadId&&value.stoppedAt===stoppedAt))throw Error('Resume was already requested or is uncertain. Open the thread to check.');
+        const next=[...resumeClaims,{threadId,stoppedAt}].slice(-100);
+        await bb.storage.kv.set('thread-resume-claims-v1',next);resumeClaims=next;
+      });
+      resumeClaimTail=claim.then(()=>undefined,()=>undefined);await claim;assertCurrent();
+      if(await vpn(record.hostId)!=='connected')throw Error('Verified VPN is required before resuming.');
+      assertCurrent();
+      const current=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(current);
+      if(current.providerId!==initial.providerId)throw Error('The thread provider changed. Open it to continue.');
+      // BB has no atomic compare-and-send. Normal admission still checks current protection.
+      await bb.sdk.threads.send({threadId,mode:'start',input:[{type:'text',mentions:[],text:'Continue the work interrupted by VPN Guard. Check the current state before repeating any actions.'}]});
+      return {accepted:true as const};
+    } finally {resumeFlights.delete(threadId);}
+  }
   bb.rpc.register(rpcContract,{
+    resumeThread:({threadId,stoppedAt})=>resumeThread(threadId,stoppedAt),
     automationIdentity:()=>({instanceId}),
     setAutomationCoordination:({enabled,executable})=>serial(async()=>{
       if(enabled&&(!executable||!executable.startsWith('/')))throw Error('An absolute automation controller path is required');

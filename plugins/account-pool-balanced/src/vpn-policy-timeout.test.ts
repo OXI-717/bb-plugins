@@ -10,14 +10,16 @@ vi.mock("node:fs/promises", async original => {
 });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.mocked(open).mockClear(); });
 
-it("bounds stalled opens and reuses the denied result until the I/O settles", async () => {
+it("coalesces stalled opens but retries after the denied result expires", async () => {
   vi.useFakeTimers();
   vi.mocked(open).mockImplementation(() => new Promise(() => {}));
   const requests = Array.from({ length: 5 }, () => readVpnState("/synthetic/stalled-vpn-open.json", 1_800_000_000_000));
   await vi.advanceTimersByTimeAsync(1_000);
   expect(await Promise.all(requests)).toEqual(Array(5).fill("unknown"));
-  expect(await readVpnState("/synthetic/stalled-vpn-open.json", 1_800_000_001_000)).toBe("unknown");
-  expect(open).toHaveBeenCalledOnce();
+  const retry=readVpnState("/synthetic/stalled-vpn-open.json", 1_800_000_001_000);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(await retry).toBe("unknown");
+  expect(open).toHaveBeenCalledTimes(2);
 });
 
 it("includes delayed handle cleanup in the deadline", async () => {
@@ -37,8 +39,10 @@ it("includes delayed handle cleanup in the deadline", async () => {
     await vi.waitFor(() => expect(delayedClose).toHaveBeenCalledOnce());
     await vi.advanceTimersByTimeAsync(1_000);
     expect(await result).toBe("unknown");
-    expect(await readVpnState(file, 1_800_000_001_000)).toBe("unknown");
-    expect(open).toHaveBeenCalledOnce();
+    const retry=readVpnState(file, 1_800_000_001_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await retry).toBe("unknown");
+    expect(open).toHaveBeenCalledTimes(2);
   } finally {
     vi.useRealTimers();
     release();

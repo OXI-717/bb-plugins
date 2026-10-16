@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useRpc, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useRpc, useSdk, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './contract.js';
 import { copy, readableError, type Language } from './copy.js';
-import { createStatusRequests } from './status-requests.js';
+import { createStatusRequests, createStatusReads } from './status-requests.js';
 import {eventText,eventTime} from './event-copy.js';
 import {StoppedThreads} from './stopped-threads.js';
 import './app.css';
+
+const sharedStatusReads=new WeakMap<object,ReturnType<typeof createStatusReads>>();
 
 type Status = StandardSchemaV1InferOutput<(typeof rpcContract)['status']['output']>;
 function initialLanguage():Language {
@@ -23,11 +25,15 @@ export function GuardPage() {
   const [controllerPath,setControllerPath]=useState('');
   const [historyOpen,setHistoryOpen]=useState(false);
   const requests=useRef(createStatusRequests());
+  const sdk=useSdk();
+  let statusReads=sharedStatusReads.get(sdk);
+  if(!statusReads){statusReads=createStatusReads();sharedStatusReads.set(sdk,statusReads);}
+  const reads=statusReads;
   const refresh=useCallback(async()=>{
-    const requestRevision=requests.current.start();
-    try {const next=await rpc.call('status');if(requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setError(null);}} catch(e){if(requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
-  },[rpc]);
-  useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>clearInterval(timer);},[refresh]);
+    let requestRevision:number|undefined;
+    try {const next=await reads.read(()=>{requestRevision=requests.current.start();return rpc.call('status');});if(next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setError(null);}} catch(e){if(requestRevision===undefined||requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
+  },[rpc,reads]);
+  useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>{clearInterval(timer);requests.current.invalidate();};},[refresh]);
   async function change(action:()=>Promise<Status>) {
     requests.current.invalidate();
     setBusy(true);
@@ -80,7 +86,7 @@ export function GuardPage() {
     <details className="vg-section" onToggle={event=>{if(event.target===event.currentTarget)setHistoryOpen(event.currentTarget.open);}}><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:'—'}</summary>
       <p className="vg-help">{t.stoppedHelp}</p>
       {statusFresh&&!status?.stoppedThreadIds.length&&<p className="vg-help">{t.noStopHistory}</p>}
-      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language}/> }
+      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language} stopHistory={status.stopHistory} canResume={(hostId,providerId)=>{const native=providerId==='codex'?'provider-codex':providerId==='claude'||providerId==='claude-code'?'provider-claude-code':'';return ready&&!status.manualBlock&&status.hosts.some(host=>host.id===hostId&&host.selected&&host.available&&host.vpn==='connected')&&!status.ownedDisabledPlugins.includes(native)&&!status.ambiguousPluginChanges.includes(native);}}/> }
     </details>
     <details className="vg-section" open={status?.automations.status?.recoveryPending||!!status?.automations.error}>
       <summary>{t.automations}</summary>

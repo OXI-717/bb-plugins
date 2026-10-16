@@ -12,13 +12,15 @@ describe('VPN state contract', () => {
   it.each([null, {}, payload('connected', now / 1000 - 91), payload('connected', now / 1000 + 1), {...payload('connected'),schema:'wrong'},payload('unknown')])('fails closed for missing, stale, future, or tampered content', value => {
     expect(vpnStateFromPayload(value, now)).toBe('unknown');
   });
-  it('protects only named provider families', () => {
+  it('protects every provider except explicit Kimi and GLM routes', () => {
     expect(['codex','claude-code','cursor','acp-cursor','devin','acp-devin'].every(protectedProvider)).toBe(true);
-    expect(['kimi','zai','z-ai','opencode-go'].some(protectedProvider)).toBe(false);
+    expect(['kimi','zai','z-ai'].some(protectedProvider)).toBe(false);
   });
 });
 
 it('protects pool aliases without changing Chinese providers',()=>{
   for(const id of ['acp-oxi-cursor','acp-oxi-devin-pool']) expect(protectedProvider(id)).toBe(true);
-  for(const id of ['acp-opencode-zai','acp-opencode-kimi','acp-opencode']) expect(protectedProvider(id)).toBe(false);
+  for(const id of ['acp-opencode-zai','acp-opencode-kimi']) expect(protectedProvider(id)).toBe(false);
 });
+
+it.each(['acp-opencode','opencode-go','acp-opencode-go','acp-grok','acp-agy','acp-opencode-neuraldeep','new-provider','acp-opencode-kimi-custom',''])('protects non-exempt provider %s',id=>expect(protectedProvider(id)).toBe(true));
