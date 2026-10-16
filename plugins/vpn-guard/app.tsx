@@ -86,7 +86,7 @@ export function GuardPage() {
     <details className="vg-section" onToggle={event=>{if(event.target===event.currentTarget)setHistoryOpen(event.currentTarget.open);}}><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:'—'}</summary>
       <p className="vg-help">{t.stoppedHelp}</p>
       {statusFresh&&!status?.stoppedThreadIds.length&&<p className="vg-help">{t.noStopHistory}</p>}
-      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language} stopHistory={status.stopHistory} canResume={canRestore&&!needsNativeRecovery}/> }
+      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language} stopHistory={status.stopHistory} canResume={(hostId,providerId)=>{const native=providerId==='codex'?'provider-codex':providerId==='claude'||providerId==='claude-code'?'provider-claude-code':'';return ready&&!status.manualBlock&&status.hosts.some(host=>host.id===hostId&&host.selected&&host.available&&host.vpn==='connected')&&!status.ownedDisabledPlugins.includes(native)&&!status.ambiguousPluginChanges.includes(native);}}/> }
     </details>
     <details className="vg-section" open={status?.automations.status?.recoveryPending||!!status?.automations.error}>
       <summary>{t.automations}</summary>

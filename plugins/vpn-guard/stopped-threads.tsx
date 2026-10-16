@@ -4,15 +4,15 @@ import type {rpcContract} from './contract.js';
 import {copy,type Language} from './copy.js';
 import {createThreadTitleReader} from './thread-title-reader.js';
 
-type ThreadSummary={title:string|null;idle:boolean;updatedAt:number;queued:boolean;archived:boolean};
+type ThreadSummary={providerId:string;title:string|null;idle:boolean;updatedAt:number;queued:boolean;archived:boolean};
 const readers=new WeakMap<object,ReturnType<typeof createThreadTitleReader<ThreadSummary>>>();
 
 type Entry={id:string;title:string|null;loaded:boolean;unavailable:boolean;thread?:ThreadSummary};
-export function StoppedThreads({threadIds,language,stopHistory=[],canResume=false}:{threadIds:string[];language:Language;stopHistory?:{threadId:string;at:number}[];canResume?:boolean}) {
+export function StoppedThreads({threadIds,language,stopHistory=[],canResume=()=>false}:{threadIds:string[];language:Language;stopHistory?:{threadId:string;hostId:string;at:number}[];canResume?:(hostId:string,providerId:string)=>boolean}) {
   const rpc=useRpc<typeof rpcContract>();const [resuming,setResuming]=useState<string|null>(null);const [requested,setRequested]=useState<string[]>([]);const [resumeError,setResumeError]=useState(false);
   const sdk=useSdk();const navigate=useBbNavigate();const t=copy[language];
   let reader=readers.get(sdk);
-  if(!reader){reader=createThreadTitleReader(async id=>{const thread=await sdk.threads.get({threadId:id});return {title:thread.title?.trim()||null,idle:thread.status==='idle',updatedAt:thread.updatedAt,queued:thread.queuedMessageCount>0,archived:thread.archivedAt!=null||thread.deletedAt!=null};});readers.set(sdk,reader);}
+  if(!reader){reader=createThreadTitleReader(async id=>{const thread=await sdk.threads.get({threadId:id});return {providerId:thread.providerId,title:thread.title?.trim()||null,idle:thread.status==='idle',updatedAt:thread.updatedAt,queued:thread.queuedMessageCount>0,archived:thread.archivedAt!=null||thread.deletedAt!=null};});readers.set(sdk,reader);}
   const titleReader=reader;
   const serializedIds=JSON.stringify(threadIds.slice(-100).reverse());
   const [entries,setEntries]=useState<Entry[]>([]);
@@ -40,7 +40,7 @@ export function StoppedThreads({threadIds,language,stopHistory=[],canResume=fals
     {entries.some(entry=>!entry.loaded)&&<p className="vg-help" role="status">{t.loadingThreadTitles}</p>}
     <ol className="vg-events vg-stop-history">{entries.map(entry=><li key={entry.id}>
       {!entry.loaded?<span className="vg-help">{t.loading}</span>:entry.unavailable?<p className="vg-help">{t.threadUnavailable}</p>:<button type="button" onClick={()=>navigate.toThread(entry.id)}>{entry.title||t.untitledThread}</button>}
-      {entry.loaded&&!entry.unavailable&&entry.thread?.idle&&!entry.thread.queued&&!entry.thread.archived&&stopHistory.some(stop=>stop.threadId===entry.id&&entry.thread!.updatedAt<=stop.at)&&<div className="vg-actions"><button type="button" disabled={!canResume||resuming!==null||requested.includes(entry.id)} onClick={()=>void resume(entry.id,stopHistory.filter(stop=>stop.threadId===entry.id).at(-1)!.at)}>{requested.includes(entry.id)?t.resumeRequested:t.resumeThread}</button></div>}
+      {entry.loaded&&!entry.unavailable&&entry.thread?.idle&&!entry.thread.queued&&!entry.thread.archived&&stopHistory.some(stop=>stop.threadId===entry.id&&entry.thread!.updatedAt<=stop.at)&&<div className="vg-actions"><button type="button" disabled={!canResume(stopHistory.filter(stop=>stop.threadId===entry.id).at(-1)!.hostId,entry.thread.providerId)||resuming!==null||requested.includes(entry.id)} onClick={()=>void resume(entry.id,stopHistory.filter(stop=>stop.threadId===entry.id).at(-1)!.at)}>{requested.includes(entry.id)?t.resumeRequested:t.resumeThread}</button></div>}
     </li>)}</ol>
   </>;
 }

@@ -186,3 +186,20 @@ it('shows Continue for an unchanged owned stop and hides technical identifiers',
  expect(slot.queryByText('demo-stopped')).toBeNull();
  await slot.findByRole('button',{name:'Запуск запрошен'});
 });
+
+it('allows Continue on its healthy host despite another host and unrelated native pause',async()=>{
+ const status=guardFixture();status.hostIds.push('offline-host');status.hosts.push({id:'offline-host',name:'Offline',selected:true,available:false,vpn:'unknown',evidence:null});
+ status.ownedDisabledPlugins=['provider-codex'];status.stoppedThreadIds=['demo-devin'];status.stopHistory=[{threadId:'demo-devin',hostId:'demo-server',at:1000,reason:'manual_block'}];
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,resumeThread:()=>({accepted:true})},sdk:{threads:{get:async()=>({title:'Devin work',providerId:'acp-oxi-devin-pool',status:'idle',updatedAt:999,queuedMessageCount:0}) as never}}});
+ fireEvent.click(await slot.findByText('Ранее остановлено Guard'));
+ const resume=await slot.findByRole('button',{name:'Продолжить'}) as HTMLButtonElement;expect(resume.disabled).toBe(false);
+ fireEvent.click(resume);await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'resumeThread',input:{threadId:'demo-devin',stoppedAt:1000}}));
+});
+
+it.each(['host','owned','ambiguous','manual'])('keeps Continue disabled for its own %s fence',async fence=>{
+ const status=guardFixture();status.stoppedThreadIds=['demo-codex'];status.stopHistory=[{threadId:'demo-codex',hostId:'demo-server',at:1000,reason:'manual_block'}];
+ if(fence==='host')status.hosts[0]!.vpn='unknown';if(fence==='owned')status.ownedDisabledPlugins=['provider-codex'];if(fence==='ambiguous')status.ambiguousPluginChanges=['provider-codex'];if(fence==='manual')status.manualBlock=true;
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status},sdk:{threads:{get:async()=>({title:'Codex work',providerId:'codex',status:'idle',updatedAt:999,queuedMessageCount:0}) as never}}});
+ fireEvent.click(await slot.findByText('Ранее остановлено Guard'));
+ expect((await slot.findByRole('button',{name:'Продолжить'}) as HTMLButtonElement).disabled).toBe(true);
+});
