@@ -15,6 +15,7 @@ export function StoppedThreads({threadIds,language,stopHistory=[],canResume=()=>
   if(!reader){reader=createThreadTitleReader(async id=>{const thread=await sdk.threads.get({threadId:id});return {providerId:thread.providerId,title:thread.title?.trim()||null,idle:thread.status==='idle',updatedAt:thread.updatedAt,queued:thread.queuedMessageCount>0,archived:thread.archivedAt!=null||thread.deletedAt!=null};});readers.set(sdk,reader);}
   const titleReader=reader;
   const serializedIds=JSON.stringify(threadIds.slice(-100).reverse());
+  const stopRevision=JSON.stringify(stopHistory.map(stop=>[stop.threadId,stop.at]));
   const [entries,setEntries]=useState<Entry[]>([]);
   useEffect(()=>{
     const ids=JSON.parse(serializedIds) as string[];
@@ -29,7 +30,7 @@ export function StoppedThreads({threadIds,language,stopHistory=[],canResume=()=>
     }
     void Promise.all(Array.from({length:Math.min(4,ids.length)},()=>worker()));
     return()=>{active=false;cancellation.abort();};
-  },[titleReader,serializedIds]);
+  },[titleReader,serializedIds,stopRevision]);
   async function resume(id:string,at:number) {
     setResuming(id);setResumeError(false);
     try{await rpc.call('resumeThread',{threadId:id,stoppedAt:at});setRequested(previous=>[...previous,JSON.stringify([id,at])]);}

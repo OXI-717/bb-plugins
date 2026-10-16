@@ -205,12 +205,14 @@ it.each(['host','owned','ambiguous','manual'])('keeps Continue disabled for its 
 });
 
 it('offers Continue again for a new stop of the same thread',async()=>{
- let status=guardFixture();status.stoppedThreadIds=['demo-repeat'];status.stopHistory=[{threadId:'demo-repeat',hostId:'demo-server',at:1000,reason:'manual_block'}];
- const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,resumeThread:()=>({accepted:true})},sdk:{threads:{get:async()=>({title:'Repeated work',providerId:'codex',status:'idle',updatedAt:999,queuedMessageCount:0}) as never}}});
+ let updatedAt=999;let title='Repeated work';let status=guardFixture();status.stoppedThreadIds=['demo-repeat'];status.stopHistory=[{threadId:'demo-repeat',hostId:'demo-server',at:1000,reason:'manual_block'}];
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,resumeThread:()=>({accepted:true})},sdk:{threads:{get:async()=>({title,providerId:'codex',status:'idle',updatedAt,queuedMessageCount:0}) as never}}});
  fireEvent.click(await slot.findByText('Ранее остановлено Guard'));fireEvent.click(await slot.findByRole('button',{name:'Продолжить'}));
  await slot.findByRole('button',{name:'Запуск запрошен'});
+ updatedAt=1999;title='Repeated work after second stop';
  status={...status,stopHistory:[...status.stopHistory!,{threadId:'demo-repeat',hostId:'demo-server',at:2000,reason:'manual_block'}]};
  fireEvent.click(slot.getByRole('button',{name:'Обновить'}));
+ await slot.findByRole('button',{name:'Repeated work after second stop'});
  const resume=await slot.findByRole('button',{name:'Продолжить'}) as HTMLButtonElement;expect(resume.disabled).toBe(false);fireEvent.click(resume);
  await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'resumeThread',input:{threadId:'demo-repeat',stoppedAt:2000}}));
 });
