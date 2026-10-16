@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { definePluginApp, useRpc, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
+import { definePluginApp, useRpc, useSdk, type StandardSchemaV1InferOutput } from '@get-bb/plugin-sdk/app';
 import type { rpcContract } from './contract.js';
 import { copy, readableError, type Language } from './copy.js';
 import { createStatusRequests, createStatusReads } from './status-requests.js';
 import {eventText,eventTime} from './event-copy.js';
 import {StoppedThreads} from './stopped-threads.js';
 import './app.css';
+
+const sharedStatusReads=new WeakMap<object,ReturnType<typeof createStatusReads>>();
 
 type Status = StandardSchemaV1InferOutput<(typeof rpcContract)['status']['output']>;
 function initialLanguage():Language {
@@ -23,11 +25,14 @@ export function GuardPage() {
   const [controllerPath,setControllerPath]=useState('');
   const [historyOpen,setHistoryOpen]=useState(false);
   const requests=useRef(createStatusRequests());
-  const statusReads=useRef(createStatusReads());
+  const sdk=useSdk();
+  let statusReads=sharedStatusReads.get(sdk);
+  if(!statusReads){statusReads=createStatusReads();sharedStatusReads.set(sdk,statusReads);}
+  const reads=statusReads;
   const refresh=useCallback(async()=>{
     let requestRevision:number|undefined;
-    try {const next=await statusReads.current.read(()=>{requestRevision=requests.current.start();return rpc.call('status');});if(next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setError(null);}} catch(e){if(requestRevision===undefined||requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
-  },[rpc]);
+    try {const next=await reads.read(()=>{requestRevision=requests.current.start();return rpc.call('status');});if(next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setError(null);}} catch(e){if(requestRevision===undefined||requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
+  },[rpc,reads]);
   useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>{clearInterval(timer);requests.current.invalidate();};},[refresh]);
   async function change(action:()=>Promise<Status>) {
     requests.current.invalidate();

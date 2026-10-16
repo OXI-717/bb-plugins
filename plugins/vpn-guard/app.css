@@ -35,5 +35,5 @@
 @container(max-width:440px) {.vg-machines li {grid-template-columns:minmax(0,1fr);gap:2px}.vg-machines li>span:last-child {text-align:left}.vpn-guard button {min-height:40px}}
 @media(max-width:480px) {.vpn-guard {padding:16px}.vpn-guard button {min-height:40px}}
 
-.vg-stop-history button {text-align:left}.vg-stop-history code {font-size:12px;overflow-wrap:anywhere}
+.vg-stop-history>li>button {text-align:left}.vg-stop-history code {font-size:12px;overflow-wrap:anywhere}
 .vg-stop-history>li>button {white-space:normal;overflow-wrap:anywhere}
