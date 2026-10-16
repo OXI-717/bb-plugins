@@ -32,7 +32,7 @@ export function StoppedThreads({threadIds,language,stopHistory=[],canResume=()=>
   },[titleReader,serializedIds]);
   async function resume(id:string,at:number) {
     setResuming(id);setResumeError(false);
-    try{await rpc.call('resumeThread',{threadId:id,stoppedAt:at});setRequested(previous=>[...previous,id]);}
+    try{await rpc.call('resumeThread',{threadId:id,stoppedAt:at});setRequested(previous=>[...previous,JSON.stringify([id,at])]);}
     catch{setResumeError(true);}finally{setResuming(null);}
   }
   return <>
@@ -40,7 +40,7 @@ export function StoppedThreads({threadIds,language,stopHistory=[],canResume=()=>
     {entries.some(entry=>!entry.loaded)&&<p className="vg-help" role="status">{t.loadingThreadTitles}</p>}
     <ol className="vg-events vg-stop-history">{entries.map(entry=><li key={entry.id}>
       {!entry.loaded?<span className="vg-help">{t.loading}</span>:entry.unavailable?<p className="vg-help">{t.threadUnavailable}</p>:<button type="button" onClick={()=>navigate.toThread(entry.id)}>{entry.title||t.untitledThread}</button>}
-      {entry.loaded&&!entry.unavailable&&entry.thread?.idle&&!entry.thread.queued&&!entry.thread.archived&&stopHistory.some(stop=>stop.threadId===entry.id&&entry.thread!.updatedAt<=stop.at)&&<div className="vg-actions"><button type="button" disabled={!canResume(stopHistory.filter(stop=>stop.threadId===entry.id).at(-1)!.hostId,entry.thread.providerId)||resuming!==null||requested.includes(entry.id)} onClick={()=>void resume(entry.id,stopHistory.filter(stop=>stop.threadId===entry.id).at(-1)!.at)}>{requested.includes(entry.id)?t.resumeRequested:t.resumeThread}</button></div>}
+      {entry.loaded&&!entry.unavailable&&entry.thread?.idle&&!entry.thread.queued&&!entry.thread.archived&&stopHistory.some(stop=>stop.threadId===entry.id&&entry.thread!.updatedAt<=stop.at)&&<div className="vg-actions"><button type="button" disabled={!canResume(stopHistory.filter(stop=>stop.threadId===entry.id).at(-1)!.hostId,entry.thread.providerId)||resuming!==null||requested.includes(JSON.stringify([entry.id,stopHistory.filter(stop=>stop.threadId===entry.id).at(-1)!.at]))} onClick={()=>void resume(entry.id,stopHistory.filter(stop=>stop.threadId===entry.id).at(-1)!.at)}>{requested.includes(JSON.stringify([entry.id,stopHistory.filter(stop=>stop.threadId===entry.id).at(-1)!.at]))?t.resumeRequested:t.resumeThread}</button></div>}
     </li>)}</ol>
   </>;
 }
