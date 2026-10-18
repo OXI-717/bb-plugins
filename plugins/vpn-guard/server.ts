@@ -435,7 +435,7 @@ export default async function plugin(bb: BbPluginApi) {
       const current=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(current);
       if(current.providerId!==initial.providerId)throw Error('The thread provider changed. Open it to continue.');
       // BB has no atomic compare-and-send. Normal admission still checks current protection.
-      await bb.sdk.threads.send({threadId,mode:'start',input:[{type:'text',mentions:[],text:'Continue the work interrupted by VPN Guard. Check the current state before repeating any actions.'}]});
+      await bb.sdk.threads.send({threadId,mode:'start',input:[{type:'text',mentions:[],text:'Continue the interrupted work. Check the current state before repeating any actions.'}]});
       return {accepted:true as const};
     } finally {resumeFlights.delete(threadId);}
   }
