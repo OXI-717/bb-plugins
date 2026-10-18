@@ -21,6 +21,9 @@ export function GuardPage() {
   const [statusFresh,setStatusFresh]=useState(false);
   const [error,setError]=useState<string|null>(null);
   const [busy,setBusy]=useState(false);
+  const [refreshing,setRefreshing]=useState(false);
+  const [receivedAt,setReceivedAt]=useState<number|null>(null);
+  const panelLifetime=useRef(new AbortController());
   const [automationActionBusy,setAutomationActionBusy]=useState(false);
   const [controllerPath,setControllerPath]=useState('');
   const [historyOpen,setHistoryOpen]=useState(false);
@@ -29,11 +32,15 @@ export function GuardPage() {
   let statusReads=sharedStatusReads.get(sdk);
   if(!statusReads){statusReads=createStatusReads();sharedStatusReads.set(sdk,statusReads);}
   const reads=statusReads;
-  const refresh=useCallback(async()=>{
+  const refresh=useCallback(async(fresh=false)=>{
+    const signal=panelLifetime.current.signal;
+    if(signal.aborted)return;
     let requestRevision:number|undefined;
-    try {const next=await reads.read(()=>{requestRevision=requests.current.start();return rpc.call('status');});if(next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setError(null);}} catch(e){if(requestRevision===undefined||requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
+    const load=()=>{requestRevision=requests.current.start();return rpc.call('status');};
+    try {const next=await (fresh?reads.readFresh(load,10000,signal):reads.read(load));if(!signal.aborted&&next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setReceivedAt(Date.now());setError(null);}} catch(e){if(!signal.aborted&&(requestRevision===undefined||requests.current.isCurrent(requestRevision))){setStatusFresh(false);setError(String(e));}}
   },[rpc,reads]);
-  useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>{clearInterval(timer);requests.current.invalidate();};},[refresh]);
+  async function manualRefresh(){setRefreshing(true);try{await refresh(true);}finally{setRefreshing(false);}}
+  useEffect(()=>{const lifetime=new AbortController();panelLifetime.current=lifetime;void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>{lifetime.abort();clearInterval(timer);requests.current.invalidate();};},[refresh]);
   async function change(action:()=>Promise<Status>) {
     requests.current.invalidate();
     setBusy(true);
@@ -68,7 +75,8 @@ export function GuardPage() {
     <section><div className="vg-section-heading"><h2>{t.control}</h2>
       <p role="status" className={status?.manualBlock?'vg-blocked':'vg-help'}>{status ? !statusFresh?t.unknown:status.manualBlock?t.blocked:t.notBlocked :error?t.statusUnavailable:t.loading}</p></div>
       <div className="vg-actions"><button type="button" className={status?.manualBlock?'':'vg-danger'} disabled={!ready||!status.hostIds.length} onClick={()=>void change(()=>rpc.call('setManualBlock',{blocked:!status?.manualBlock}))}>{status?.manualBlock?t.unblock:t.block}</button>
-        <button type="button" disabled={busy} onClick={()=>void refresh()}>{t.refresh}</button></div>
+        <button type="button" disabled={busy||refreshing} aria-busy={refreshing} onClick={()=>void manualRefresh()}>{refreshing?t.refreshing:t.refresh}</button></div>
+      {receivedAt!==null&&<p className="vg-help">{t.statusReceived}: {new Date(receivedAt).toLocaleTimeString(language==='ru'?'ru-RU':'en-GB')}</p>}
       <label className="vg-check"><input type="checkbox" checked={status?.mode==='enforce'} disabled={!ready||(!status.hostIds.length&&status.mode!=='enforce')} onChange={event=>void change(()=>rpc.call('setMode',{mode:event.target.checked?'enforce':'observe'}))}/><span>{t.enforce}</span></label>
       {status&&(!status.serverHostId||!status.hostIds.includes(status.serverHostId))&&<p className="vg-error" role="status">{t.serverScopeWarning}</p>}
       <p className="vg-help">{!statusFresh?t.stateUnavailable:status?.mode==='enforce'?t.enforceHelp:t.observeHelp}</p>

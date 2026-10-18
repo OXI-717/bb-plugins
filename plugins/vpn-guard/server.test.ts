@@ -585,7 +585,7 @@ it('resumes only an unchanged idle thread actually stopped by Guard, once',async
  fake.harness.sdk.stub('threads.get',async()=>makeThreadResponse({id:'protected',providerId:'codex',status:'idle',updatedAt:stop.at-1,queuedMessageCount:0}));
  const sent:unknown[]=[];fake.harness.sdk.stub('threads.send',async input=>{sent.push(input);return {ok:true,delivery:'sent'} as never;});
  await fake.harness.behavior.callRpc('resumeThread',{threadId:'protected',stoppedAt:stop.at});
- expect(sent).toMatchObject([{threadId:'protected',mode:'start',input:[{type:'text',text:expect.any(String)}]}]);
+ expect(sent).toMatchObject([{threadId:'protected',mode:'start',input:[{type:'text',text:'Continue the interrupted work. Check the current state before repeating any actions.'}]}]);
  await expect(fake.harness.behavior.callRpc('resumeThread',{threadId:'protected',stoppedAt:stop.at})).rejects.toThrow();
  expect(sent).toHaveLength(1);await fake.harness.lifecycle.dispose();
 });

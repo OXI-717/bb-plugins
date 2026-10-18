@@ -8,6 +8,30 @@ import {configurationSchema,rpcContract} from './contract.js';
 const app=await loadPluginApp(()=>import('./app.js'));
 afterEach(()=>{cleanup();localStorage.clear();});
 
+it('shows manual refresh progress and gets fresh data after an existing read',async()=>{
+ let finish!:(value:ReturnType<typeof guardFixture>)=>void;
+ const pending=new Promise<ReturnType<typeof guardFixture>>(resolve=>{finish=resolve;});
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>pending}});
+ fireEvent.click(slot.getByRole('button',{name:'Обновить статус'}));
+ expect((slot.getByRole('button',{name:'Обновляем…'}) as HTMLButtonElement).disabled).toBe(true);
+ expect(slot.rpcCalls.filter(call=>call.method==='status')).toHaveLength(1);
+ finish(guardFixture());
+ await slot.findByRole('button',{name:'Обновить статус'});
+ await slot.findByText(/Данные получены/);
+ expect(slot.rpcCalls.filter(call=>call.method==='status')).toHaveLength(2);
+});
+
+it('reports a failed manual refresh instead of confirming old data',async()=>{
+ let fail!:(reason:Error)=>void;let calls=0;
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>++calls===1?guardFixture():new Promise((_,reject)=>{fail=reject;})}});
+ await slot.findAllByText('Demo machine');
+ fireEvent.click(slot.getByRole('button',{name:'Обновить статус'}));
+ await waitFor(()=>expect(fail).toBeTypeOf('function'));
+ fail(Error('Synthetic status failure'));
+ await slot.findByText('Последние данные не подтверждены. Обновите состояние перед изменениями.');
+ expect((slot.getByRole('button',{name:'Обновить статус'}) as HTMLButtonElement).disabled).toBe(false);
+});
+
 it('preserves saved enforcement and automation binding while discarding the retired switch',()=>{
  const config=configurationSchema.parse({mode:'enforce',manualBlock:false,hostIds:['demo-server'],suspendNativePluginsGlobally:false,requireVerifiedVpn:false,coordinateAutomations:true,automationControllerPath:'/controller/oxi-auto'});
  expect(config).not.toHaveProperty('requireVerifiedVpn');
@@ -108,7 +132,7 @@ it('does not treat cached connected evidence as fresh after a status failure',as
   const status=guardFixture();status.ownedDisabledPlugins=['provider-codex'];let fail=false;
   const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>{if(fail)throw new Error('synthetic status unavailable');return status;}}});
   await slot.findByRole('button',{name:'Восстановить плагины'});
-  fail=true;fireEvent.click(slot.getByRole('button',{name:'Обновить'}));
+  fail=true;fireEvent.click(slot.getByRole('button',{name:'Обновить статус'}));
   await slot.findByText('Последние данные не подтверждены. Обновите состояние перед изменениями.');
   expect((slot.getByRole('button',{name:'Восстановить плагины'}) as HTMLButtonElement).disabled).toBe(true);
 });
@@ -211,7 +235,7 @@ it('offers Continue again for a new stop of the same thread',async()=>{
  await slot.findByRole('button',{name:'Запуск запрошен'});
  updatedAt=1999;title='Repeated work after second stop';
  status={...status,stopHistory:[...status.stopHistory!,{threadId:'demo-repeat',hostId:'demo-server',at:2000,reason:'manual_block'}]};
- fireEvent.click(slot.getByRole('button',{name:'Обновить'}));
+ fireEvent.click(slot.getByRole('button',{name:'Обновить статус'}));
  await slot.findByRole('button',{name:'Repeated work after second stop'});
  const resume=await slot.findByRole('button',{name:'Продолжить'}) as HTMLButtonElement;expect(resume.disabled).toBe(false);fireEvent.click(resume);
  await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'resumeThread',input:{threadId:'demo-repeat',stoppedAt:2000}}));
