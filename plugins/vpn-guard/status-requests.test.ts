@@ -24,6 +24,28 @@ it('coalesces polling so a slower-than-cadence successful response is usable',as
  finish('healthy');expect(await pending).toBe('healthy');expect(calls).toBe(1);
 });
 
+it('manual refresh waits for a shared read then performs its own fresh read',async()=>{
+ const {createStatusReads}=await import('./status-requests.js');
+ const reads=createStatusReads();let finish!:(value:string)=>void;let freshCalls=0;
+ const older=reads.read(()=>new Promise<string>(resolve=>{finish=resolve;}));
+ const manual=reads.readFresh(async()=>{freshCalls++;return 'new snapshot';});
+ expect(freshCalls).toBe(0);
+ finish('old snapshot');expect(await older).toBe('old snapshot');
+ expect(await manual).toBe('new snapshot');expect(freshCalls).toBe(1);
+});
+
+it('manual refresh can recover after the preceding shared request times out',async()=>{
+ const {vi}=await import('vitest');const {createStatusReads}=await import('./status-requests.js');
+ vi.useFakeTimers();const reads=createStatusReads();let finish!:(value:string)=>void;
+ try{
+  const older=reads.read(()=>new Promise<string>(resolve=>{finish=resolve;}),10).catch(error=>error);
+  const manual=reads.readFresh(async()=> 'fresh',10);
+  await vi.advanceTimersByTimeAsync(11);
+  expect(await older).toBeInstanceOf(Error);expect(await manual).toBe('fresh');
+  finish('late old data');await vi.advanceTimersByTimeAsync(0);
+ }finally{vi.useRealTimers();}
+});
+
 it('retries after a status timeout and bounds underlying stalled requests',async()=>{
  const {vi}=await import('vitest');const {createStatusReads}=await import('./status-requests.js');
  vi.useFakeTimers();const reads=createStatusReads();const finishes:((value:string)=>void)[]=[];

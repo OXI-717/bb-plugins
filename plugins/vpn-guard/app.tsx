@@ -23,7 +23,6 @@ export function GuardPage() {
   const [busy,setBusy]=useState(false);
   const [refreshing,setRefreshing]=useState(false);
   const [receivedAt,setReceivedAt]=useState<number|null>(null);
-  const refreshFlight=useRef<Promise<void>|null>(null);
   const [automationActionBusy,setAutomationActionBusy]=useState(false);
   const [controllerPath,setControllerPath]=useState('');
   const [historyOpen,setHistoryOpen]=useState(false);
@@ -32,17 +31,11 @@ export function GuardPage() {
   let statusReads=sharedStatusReads.get(sdk);
   if(!statusReads){statusReads=createStatusReads();sharedStatusReads.set(sdk,statusReads);}
   const reads=statusReads;
-  const refresh=useCallback(()=>{
-    if(refreshFlight.current)return refreshFlight.current;
-    const operation=(async()=>{
+  const refresh=useCallback(async(fresh=false)=>{
     let requestRevision:number|undefined;
-    try {const next=await reads.read(()=>{requestRevision=requests.current.start();return rpc.call('status');});if(next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setReceivedAt(Date.now());setError(null);}} catch(e){if(requestRevision===undefined||requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
-    })();
-    refreshFlight.current=operation;
-    void operation.finally(()=>{if(refreshFlight.current===operation)refreshFlight.current=null;});
-    return operation;
+    try {const next=await (fresh?reads.readFresh:reads.read)(()=>{requestRevision=requests.current.start();return rpc.call('status');});if(next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setReceivedAt(Date.now());setError(null);}} catch(e){if(requestRevision===undefined||requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
   },[rpc,reads]);
-  async function manualRefresh(){setRefreshing(true);try{await refresh();}finally{setRefreshing(false);}}
+  async function manualRefresh(){setRefreshing(true);try{await refresh(true);}finally{setRefreshing(false);}}
   useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>{clearInterval(timer);requests.current.invalidate();};},[refresh]);
   async function change(action:()=>Promise<Status>) {
     requests.current.invalidate();

@@ -8,7 +8,7 @@ import {configurationSchema,rpcContract} from './contract.js';
 const app=await loadPluginApp(()=>import('./app.js'));
 afterEach(()=>{cleanup();localStorage.clear();});
 
-it('shows manual refresh progress while joining an existing status read',async()=>{
+it('shows manual refresh progress and gets fresh data after an existing read',async()=>{
  let finish!:(value:ReturnType<typeof guardFixture>)=>void;
  const pending=new Promise<ReturnType<typeof guardFixture>>(resolve=>{finish=resolve;});
  const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>pending}});
@@ -18,6 +18,7 @@ it('shows manual refresh progress while joining an existing status read',async()
  finish(guardFixture());
  await slot.findByRole('button',{name:'Обновить статус'});
  await slot.findByText(/Данные получены/);
+ expect(slot.rpcCalls.filter(call=>call.method==='status')).toHaveLength(2);
 });
 
 it('reports a failed manual refresh instead of confirming old data',async()=>{
