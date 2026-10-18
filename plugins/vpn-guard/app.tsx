@@ -23,6 +23,7 @@ export function GuardPage() {
   const [busy,setBusy]=useState(false);
   const [refreshing,setRefreshing]=useState(false);
   const [receivedAt,setReceivedAt]=useState<number|null>(null);
+  const panelLifetime=useRef(new AbortController());
   const [automationActionBusy,setAutomationActionBusy]=useState(false);
   const [controllerPath,setControllerPath]=useState('');
   const [historyOpen,setHistoryOpen]=useState(false);
@@ -32,11 +33,14 @@ export function GuardPage() {
   if(!statusReads){statusReads=createStatusReads();sharedStatusReads.set(sdk,statusReads);}
   const reads=statusReads;
   const refresh=useCallback(async(fresh=false)=>{
+    const signal=panelLifetime.current.signal;
+    if(signal.aborted)return;
     let requestRevision:number|undefined;
-    try {const next=await (fresh?reads.readFresh:reads.read)(()=>{requestRevision=requests.current.start();return rpc.call('status');});if(next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setReceivedAt(Date.now());setError(null);}} catch(e){if(requestRevision===undefined||requests.current.isCurrent(requestRevision)){setStatusFresh(false);setError(String(e));}}
+    const load=()=>{requestRevision=requests.current.start();return rpc.call('status');};
+    try {const next=await (fresh?reads.readFresh(load,10000,signal):reads.read(load));if(!signal.aborted&&next&&requestRevision!==undefined&&requests.current.isCurrent(requestRevision)){setStatus(next);setStatusFresh(true);setReceivedAt(Date.now());setError(null);}} catch(e){if(!signal.aborted&&(requestRevision===undefined||requests.current.isCurrent(requestRevision))){setStatusFresh(false);setError(String(e));}}
   },[rpc,reads]);
   async function manualRefresh(){setRefreshing(true);try{await refresh(true);}finally{setRefreshing(false);}}
-  useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>{clearInterval(timer);requests.current.invalidate();};},[refresh]);
+  useEffect(()=>{const lifetime=new AbortController();panelLifetime.current=lifetime;void refresh();const timer=setInterval(()=>void refresh(),5000);return()=>{lifetime.abort();clearInterval(timer);requests.current.invalidate();};},[refresh]);
   async function change(action:()=>Promise<Status>) {
     requests.current.invalidate();
     setBusy(true);

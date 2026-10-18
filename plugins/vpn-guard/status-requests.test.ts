@@ -46,6 +46,36 @@ it('manual refresh can recover after the preceding shared request times out',asy
  }finally{vi.useRealTimers();}
 });
 
+it('disposes queued consumers without starting their reads or taking active slots',async()=>{
+ const {createStatusReads}=await import('./status-requests.js');const reads=createStatusReads();
+ let finish!:(value:string)=>void;let staleCalls=0;
+ const active=reads.read(()=>new Promise<string>(resolve=>{finish=resolve;}));
+ const cancelled=[];
+ for(let i=0;i<3;i++){
+  const controller=new AbortController();
+  const pending=reads.readFresh(async()=>{staleCalls++;return 'stale';},10000,controller.signal).catch(error=>error);
+  controller.abort();cancelled.push(pending);
+ }
+ const current=reads.readFresh(async()=> 'current');
+ expect((await Promise.all(cancelled)).every(error=>error instanceof Error)).toBe(true);
+ finish('old');expect(await active).toBe('old');expect(await current).toBe('current');expect(staleCalls).toBe(0);
+});
+
+it('retains the slot for an already started call even after its consumer aborts',async()=>{
+ const {vi}=await import('vitest');const {createStatusReads}=await import('./status-requests.js');
+ vi.useFakeTimers();const reads=createStatusReads();const finishes:((value:string)=>void)[]=[];
+ try{
+  for(let i=0;i<4;i++){
+   const controller=new AbortController();
+   const pending=reads.readFresh(()=>new Promise<string>(resolve=>finishes.push(resolve)),10,controller.signal).catch(error=>error);
+   controller.abort();await vi.advanceTimersByTimeAsync(11);expect(await pending).toBeInstanceOf(Error);
+  }
+  await expect(reads.readFresh(async()=> 'extra',10)).rejects.toThrow('unavailable');
+  finishes.shift()!('late');await vi.advanceTimersByTimeAsync(0);
+  expect(await reads.readFresh(async()=> 'current',10)).toBe('current');
+ }finally{for(const finish of finishes)finish('late');await vi.advanceTimersByTimeAsync(0);vi.useRealTimers();}
+});
+
 it('retries after a status timeout and bounds underlying stalled requests',async()=>{
  const {vi}=await import('vitest');const {createStatusReads}=await import('./status-requests.js');
  vi.useFakeTimers();const reads=createStatusReads();const finishes:((value:string)=>void)[]=[];
