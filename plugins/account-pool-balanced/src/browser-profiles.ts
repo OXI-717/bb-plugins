@@ -49,7 +49,8 @@ const GEO_MAX_BYTES = 65536;
 /** Optional override for the Helium executable. */
 const BROWSER_PATH_ENV = "POOL_BROWSER_EXECUTABLE";
 const HELIUM_APP_BINARY = "Helium.app/Contents/MacOS/Helium";
-const HELIUM_DATA_DIR = path.join("Application Support", "Helium");
+// Chromium на macOS хранит профили по bundle id, не по имени приложения.
+const HELIUM_MAC_DATA_DIR = path.join("Application Support", "net.imput.helium");
 
 export interface ExitGeo {
   timezone: string;
@@ -155,7 +156,7 @@ export function heliumDataRoot(
   platformName: NodeJS.Platform = currentPlatform(),
   home: string = homedir(),
 ): string {
-  if (platformName === "darwin") return path.join(home, "Library", HELIUM_DATA_DIR);
+  if (platformName === "darwin") return path.join(home, "Library", HELIUM_MAC_DATA_DIR);
   if (platformName === "win32") {
     return path.join(process.env["LOCALAPPDATA"] ?? path.join(home, "AppData", "Local"), "Helium");
   }

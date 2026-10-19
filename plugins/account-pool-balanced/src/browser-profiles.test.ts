@@ -8,6 +8,7 @@ import {
   browserExecutableCandidates,
   ensureProfile,
   fetchExitGeo,
+  heliumDataRoot,
   listBrowserProfiles,
   nextProfileDirectory,
   openAccountBrowser,
@@ -169,6 +170,11 @@ describe("browserExecutableCandidates", () => {
       POOL_BROWSER_EXECUTABLE: "/opt/helium/Helium",
     });
     expect(candidates[0]).toBe("/opt/helium/Helium");
+  });
+  it("uses the bundle-id data dir on macOS", () => {
+    expect(heliumDataRoot("darwin", "/Users/test")).toBe(
+      "/Users/test/Library/Application Support/net.imput.helium",
+    );
   });
 });
 
