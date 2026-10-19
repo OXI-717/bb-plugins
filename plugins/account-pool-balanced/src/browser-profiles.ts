@@ -250,7 +250,50 @@ async function readLaunchMarker(file: string): Promise<LaunchMarker | null> {
 export interface EnsureProfileOptions {
   heliumRoot: string;
   registryFile: string;
-  running?: boolean;
+}
+
+/** Sync every registry entry into Helium's Local State info_cache.
+ *  Helium rewrites Local State live, so call this only while it is closed;
+ *  this also self-heals profiles that were created while it was running. */
+export async function syncLocalStateProfiles(
+  heliumRoot: string,
+  entries: readonly RegistryEntry[],
+): Promise<void> {
+  const localStateFile = path.join(heliumRoot, "Local State");
+  let localState: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(await readFile(localStateFile, "utf8"));
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      localState = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // first launch — file absent, created here
+  }
+  const profile =
+    localState["profile"] !== null &&
+    typeof localState["profile"] === "object" &&
+    !Array.isArray(localState["profile"])
+      ? { ...(localState["profile"] as Record<string, unknown>) }
+      : {};
+  const cache =
+    profile["info_cache"] !== null &&
+    typeof profile["info_cache"] === "object" &&
+    !Array.isArray(profile["info_cache"])
+      ? { ...(profile["info_cache"] as Record<string, unknown>) }
+      : {};
+  for (const entry of entries) {
+    const existing = cache[entry.profileDirectory];
+    cache[entry.profileDirectory] = {
+      ...(existing !== null && typeof existing === "object" && !Array.isArray(existing)
+        ? (existing as Record<string, unknown>)
+        : {}),
+      name: entry.profileName,
+      is_using_default_name: false,
+    };
+  }
+  profile["info_cache"] = cache;
+  localState["profile"] = profile;
+  await writeJsonAtomic(localStateFile, localState);
 }
 
 /** Create the account's native Helium profile on first use; idempotent. */
@@ -261,7 +304,6 @@ export async function ensureProfile(
   const registry = await readRegistry(options.registryFile);
   const existing = registry[account.id];
   if (existing !== undefined) return existing;
-  const running = options.running ?? (await listRunningHelium()).length > 0;
   const name = profileNameFor(account);
   const profileDirectory = nextProfileDirectory(await listHeliumProfileDirs(options.heliumRoot));
   const profileDir = path.join(options.heliumRoot, profileDirectory);
@@ -269,40 +311,6 @@ export async function ensureProfile(
   await writeJsonAtomic(path.join(profileDir, "Preferences"), {
     profile: { name },
   });
-  if (!running) {
-    // Register the profile in the picker up front; Helium rewrites Local State
-    // live, so only touch it while the browser is closed.
-    const localStateFile = path.join(options.heliumRoot, "Local State");
-    let localState: Record<string, unknown> = {};
-    try {
-      const parsed: unknown = JSON.parse(await readFile(localStateFile, "utf8"));
-      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-        localState = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // first launch — file absent, created here
-    }
-    const infoCache =
-      localState["profile"] !== null &&
-      typeof localState["profile"] === "object" &&
-      !Array.isArray(localState["profile"])
-        ? { ...(localState["profile"] as Record<string, unknown>) }
-        : {};
-    const cache =
-      infoCache["info_cache"] !== null &&
-      typeof infoCache["info_cache"] === "object" &&
-      !Array.isArray(infoCache["info_cache"])
-        ? { ...(infoCache["info_cache"] as Record<string, unknown>) }
-        : {};
-    cache[profileDirectory] = {
-      name,
-      is_using_default_name: false,
-      is_using_default_avatar: true,
-    };
-    infoCache["info_cache"] = cache;
-    localState["profile"] = infoCache;
-    await writeJsonAtomic(localStateFile, localState);
-  }
   const entry: RegistryEntry = { profileDirectory, profileName: name, createdAt: Date.now() };
   registry[account.id] = entry;
   await writeJsonAtomic(options.registryFile, registry);
@@ -392,11 +400,12 @@ export async function openAccountBrowser(
       );
     }
   }
-  const entry = await ensureProfile(account, {
-    heliumRoot,
-    registryFile,
-    running: running.length > 0,
-  });
+  const entry = await ensureProfile(account, { heliumRoot, registryFile });
+  // Helium rewrites Local State live: sync the picker only while it is closed.
+  if (running.length === 0) {
+    const registry = await readRegistry(registryFile);
+    await syncLocalStateProfiles(heliumRoot, Object.values(registry));
+  }
   const url = options.url ?? PROVIDER_HOME[account.provider] ?? "about:blank";
   const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
   if (timezone !== null) env.TZ = timezone;

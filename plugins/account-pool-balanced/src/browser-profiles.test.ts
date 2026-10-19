@@ -13,6 +13,7 @@ import {
   openAccountBrowser,
   profileNameFor,
   resolveAccount,
+  syncLocalStateProfiles,
 } from "./browser-profiles.js";
 import type { VpnEvidence } from "./vpn-evidence.js";
 
@@ -132,41 +133,33 @@ describe("profile naming and allocation", () => {
     expect(nextProfileDirectory(["Default"])).toBe("Profile 1");
     expect(nextProfileDirectory(["Default", "Profile 1", "Profile 3"])).toBe("Profile 4");
   });
-  it("creates Preferences and Local State entries on first use", async () => {
+  it("creates Preferences on first use; picker sync is a separate step", async () => {
     const box = sandbox();
     const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
     const entry = await ensureProfile(ACCOUNTS[0]!, {
       heliumRoot: box.heliumRoot,
       registryFile,
-      running: false,
     });
     expect(entry.profileDirectory).toBe("Profile 1");
     expect(entry.profileName).toBe("Claude · a@example.test");
     const prefs = JSON.parse(readFileSync(path.join(box.heliumRoot, "Profile 1", "Preferences"), "utf8"));
     expect(prefs.profile.name).toBe("Claude · a@example.test");
-    const localState = JSON.parse(readFileSync(path.join(box.heliumRoot, "Local State"), "utf8"));
-    expect(localState.profile.info_cache["Profile 1"].name).toBe("Claude · a@example.test");
-    // второй аккаунт получает следующий номер
+    // picker-регистрация — только через sync (Helium должен быть закрыт)
+    expect(existsSync(path.join(box.heliumRoot, "Local State"))).toBe(false);
     const second = await ensureProfile(ACCOUNTS[1]!, {
       heliumRoot: box.heliumRoot,
       registryFile,
-      running: false,
     });
-    expect(second.profileDirectory).toBe("Profile 2");
+    await syncLocalStateProfiles(box.heliumRoot, [entry, second]);
+    const localState = JSON.parse(readFileSync(path.join(box.heliumRoot, "Local State"), "utf8"));
+    expect(localState.profile.info_cache["Profile 1"].name).toBe("Claude · a@example.test");
+    expect(localState.profile.info_cache["Profile 2"].name).toBe("Claude · b@example.test");
     // повторный вызов идемпотентен
     const again = await ensureProfile(ACCOUNTS[0]!, {
       heliumRoot: box.heliumRoot,
       registryFile,
-      running: true,
     });
     expect(again.profileDirectory).toBe("Profile 1");
-  });
-  it("does not touch Local State while Helium is running", async () => {
-    const box = sandbox();
-    const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
-    await ensureProfile(ACCOUNTS[0]!, { heliumRoot: box.heliumRoot, registryFile, running: true });
-    expect(existsSync(path.join(box.heliumRoot, "Local State"))).toBe(false);
-    expect(existsSync(path.join(box.heliumRoot, "Profile 1", "Preferences"))).toBe(true);
   });
 });
 
@@ -244,6 +237,22 @@ describe("openAccountBrowser", () => {
     });
     expect(result.profileDirectory).toBe("Profile 2");
     expect(second.captured).toHaveLength(1);
+    // picker-синк пропущен при живом Helium: Profile 2 пока не в Local State
+    const lsPath = path.join(box.heliumRoot, "Local State");
+    let cache = JSON.parse(readFileSync(lsPath, "utf8")).profile.info_cache;
+    expect(Object.keys(cache)).toEqual(["Profile 1"]);
+    // self-heal: следующий open при закрытом Helium догоняет picker
+    const third = fakeSpawn(4343);
+    await openAccountBrowser({
+      ...baseOptions(box),
+      query: "b@example.test",
+      readVpn: verifiedVpn,
+      fetcher: geoFetcher,
+      listRunning: () => Promise.resolve([]),
+      spawnImpl: third.spawnImpl,
+    });
+    cache = JSON.parse(readFileSync(lsPath, "utf8")).profile.info_cache;
+    expect(cache["Profile 2"].name).toBe("Claude · b@example.test");
   });
   it("launches Helium with the native profile and the exit timezone", async () => {
     const box = sandbox();
