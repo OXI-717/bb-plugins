@@ -45,6 +45,27 @@ it("does not report a cancellation from the owner", async () => {
   expect(onError).not.toHaveBeenCalled();
 });
 
+it("reports a real request deadline through the composed network signal", async () => {
+  const onError = vi.fn();
+  const stop = new AbortController();
+  const flights = new NetworkFlights(fetch, () => stop.signal, async () => {}, () =>
+    observeUpstreamFetch(async (_input, init) => {
+      await new Promise((_resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("test watchdog")), 200);
+        init!.signal!.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(init!.signal!.reason);
+        }, { once: true });
+      });
+      return new Response("unreachable");
+    }, onError));
+  await expect(flights.fetch("codex", "https://synthetic.example", {
+    signal: AbortSignal.timeout(5),
+  })).rejects.toMatchObject({ name: "TimeoutError" });
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(describeTransportError(onError.mock.calls[0]![0])).toEqual({ code: "REQUEST_DEADLINE", category: "timeout" });
+});
+
 it("diagnostics cannot replace an upstream result or error", async () => {
   const onError = () => { throw new Error("logger failed"); };
   const error = new Error("upstream failed");

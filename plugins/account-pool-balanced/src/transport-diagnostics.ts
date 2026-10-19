@@ -25,6 +25,8 @@ export function describeTransportError(error: unknown): { code: string; category
       if (typeof code === "string" && CATEGORIES.has(code))
         return { code, category: CATEGORIES.get(code)! };
       if (current.name === "AbortError") return { code: "ABORT_ERR", category: "abort" };
+      if (current instanceof DOMException && current.name === "TimeoutError")
+        return { code: "REQUEST_DEADLINE", category: "timeout" };
       pending.push(current.cause);
       if (current instanceof AggregateError && Array.isArray(current.errors))
         pending.push(...current.errors.slice(0, 12));
@@ -39,8 +41,11 @@ export function observeUpstreamFetch(upstream: typeof fetch, onError: (error: un
     const started = clock();
     try { return await upstream(input, init); }
     catch (error) {
-      const aborted = init?.signal?.aborted || (input instanceof Request && input.signal.aborted);
-      if (!aborted) {
+      const signals = [init?.signal, input instanceof Request ? input.signal : undefined];
+      const ownerCancelled = signals.some(signal => signal?.aborted && !(
+        signal.reason instanceof DOMException && signal.reason.name === "TimeoutError"
+      ));
+      if (!ownerCancelled) {
         try { onError(error, Math.max(0, Math.floor(clock() - started))); }
         catch { /* Logging must not alter upstream behavior. */ }
       }
