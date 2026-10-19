@@ -1,14 +1,17 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AccountSummary } from "./contracts.js";
 import {
   browserExecutableCandidates,
+  ensureProfile,
   fetchExitGeo,
   listBrowserProfiles,
+  nextProfileDirectory,
   openAccountBrowser,
+  profileNameFor,
   resolveAccount,
 } from "./browser-profiles.js";
 import type { VpnEvidence } from "./vpn-evidence.js";
@@ -42,6 +45,11 @@ const UNVERIFIED: VpnEvidence = {
 };
 
 class FakeChild extends EventEmitter {
+  pid: number | undefined;
+  constructor(pid?: number) {
+    super();
+    this.pid = pid;
+  }
   unref(): void {}
 }
 
@@ -51,28 +59,36 @@ interface CapturedSpawn {
   env: NodeJS.ProcessEnv | undefined;
 }
 
-function fakeSpawn(): { spawnImpl: never; captured: CapturedSpawn[] } {
+function fakeSpawn(pid?: number): { spawnImpl: never; captured: CapturedSpawn[] } {
   const captured: CapturedSpawn[] = [];
   const impl = (command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
     captured.push({ command, args, env: options.env });
-    return new FakeChild();
+    return new FakeChild(pid);
   };
   return { spawnImpl: impl as never, captured };
 }
 
 const geoFetcher = () => Promise.resolve({ timezone: "Europe/Amsterdam", city: "Amsterdam", country: "NL" });
 const verifiedVpn = () => Promise.resolve(VERIFIED);
-const DATA_DIR = mkdtempSync(path.join(tmpdir(), "pool-browser-test-"));
-const PROFILE_ROOT = path.join(DATA_DIR, "plugins", "account-pool-balanced", "browser-profiles");
-const baseOptions = {
-  accounts: ACCOUNTS,
-  dataDir: DATA_DIR,
-  pluginId: "account-pool-balanced",
-  settleMs: 1,
-  exists: () => true,
-  platformName: "darwin" as const,
-  env: { PATH: "/usr/bin" } as NodeJS.ProcessEnv,
-};
+const noRunning = () => Promise.resolve([]);
+
+function sandbox(): { dataDir: string; heliumRoot: string } {
+  const root = mkdtempSync(path.join(tmpdir(), "pool-browser-test-"));
+  return { dataDir: path.join(root, "data"), heliumRoot: path.join(root, "helium") };
+}
+
+function baseOptions(box: { dataDir: string; heliumRoot: string }) {
+  return {
+    accounts: ACCOUNTS,
+    dataDir: box.dataDir,
+    pluginId: "account-pool-balanced",
+    heliumRoot: box.heliumRoot,
+    settleMs: 1,
+    exists: () => true,
+    listRunning: noRunning,
+    env: { PATH: "/usr/bin" } as NodeJS.ProcessEnv,
+  };
+}
 
 describe("resolveAccount", () => {
   it("matches by exact id", () => {
@@ -92,32 +108,6 @@ describe("resolveAccount", () => {
   });
 });
 
-describe("browserExecutableCandidates", () => {
-  it("puts the POOL_BROWSER_CHROMIUM override first", () => {
-    const candidates = browserExecutableCandidates("darwin", "/home/x", {
-      POOL_BROWSER_CHROMIUM: "/opt/chromium/Chromium",
-    });
-    expect(candidates[0]).toBe("/opt/chromium/Chromium");
-  });
-});
-
-describe("listBrowserProfiles", () => {
-  it("reports existing and missing profiles per account", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "pool-browser-list-"));
-    const existing = path.join(root, "plugins", "account-pool-balanced", "browser-profiles", ACCOUNTS[0]!.id);
-    mkdirSync(existing, { recursive: true });
-    const rows = await listBrowserProfiles({
-      accounts: ACCOUNTS,
-      dataDir: root,
-      pluginId: "account-pool-balanced",
-    });
-    expect(rows).toHaveLength(ACCOUNTS.length);
-    expect(rows[0]).toMatchObject({ accountId: ACCOUNTS[0]!.id, exists: true });
-    expect(rows[0]!.updatedAt).not.toBeNull();
-    expect(rows[1]).toMatchObject({ accountId: ACCOUNTS[1]!.id, exists: false, updatedAt: null });
-  });
-});
-
 describe("fetchExitGeo", () => {
   it("parses a valid payload", async () => {
     const geo = await fetchExitGeo(geoFetcher, "https://example.test/geo");
@@ -132,11 +122,69 @@ describe("fetchExitGeo", () => {
   });
 });
 
+describe("profile naming and allocation", () => {
+  it("names profiles '<Provider> · <email>'", () => {
+    expect(profileNameFor(ACCOUNTS[0]!)).toBe("Claude · a@example.test");
+    expect(profileNameFor(ACCOUNTS[2]!)).toBe("Kimi · Kimi");
+  });
+  it("allocates the next free Profile N", () => {
+    expect(nextProfileDirectory([])).toBe("Profile 1");
+    expect(nextProfileDirectory(["Default"])).toBe("Profile 1");
+    expect(nextProfileDirectory(["Default", "Profile 1", "Profile 3"])).toBe("Profile 4");
+  });
+  it("creates Preferences and Local State entries on first use", async () => {
+    const box = sandbox();
+    const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
+    const entry = await ensureProfile(ACCOUNTS[0]!, {
+      heliumRoot: box.heliumRoot,
+      registryFile,
+      running: false,
+    });
+    expect(entry.profileDirectory).toBe("Profile 1");
+    expect(entry.profileName).toBe("Claude · a@example.test");
+    const prefs = JSON.parse(readFileSync(path.join(box.heliumRoot, "Profile 1", "Preferences"), "utf8"));
+    expect(prefs.profile.name).toBe("Claude · a@example.test");
+    const localState = JSON.parse(readFileSync(path.join(box.heliumRoot, "Local State"), "utf8"));
+    expect(localState.profile.info_cache["Profile 1"].name).toBe("Claude · a@example.test");
+    // второй аккаунт получает следующий номер
+    const second = await ensureProfile(ACCOUNTS[1]!, {
+      heliumRoot: box.heliumRoot,
+      registryFile,
+      running: false,
+    });
+    expect(second.profileDirectory).toBe("Profile 2");
+    // повторный вызов идемпотентен
+    const again = await ensureProfile(ACCOUNTS[0]!, {
+      heliumRoot: box.heliumRoot,
+      registryFile,
+      running: true,
+    });
+    expect(again.profileDirectory).toBe("Profile 1");
+  });
+  it("does not touch Local State while Helium is running", async () => {
+    const box = sandbox();
+    const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
+    await ensureProfile(ACCOUNTS[0]!, { heliumRoot: box.heliumRoot, registryFile, running: true });
+    expect(existsSync(path.join(box.heliumRoot, "Local State"))).toBe(false);
+    expect(existsSync(path.join(box.heliumRoot, "Profile 1", "Preferences"))).toBe(true);
+  });
+});
+
+describe("browserExecutableCandidates", () => {
+  it("puts the POOL_BROWSER_EXECUTABLE override first", () => {
+    const candidates = browserExecutableCandidates("darwin", "/home/x", {
+      POOL_BROWSER_EXECUTABLE: "/opt/helium/Helium",
+    });
+    expect(candidates[0]).toBe("/opt/helium/Helium");
+  });
+});
+
 describe("openAccountBrowser", () => {
   it("refuses guarded providers without verified VPN evidence", async () => {
+    const box = sandbox();
     await expect(
       openAccountBrowser({
-        ...baseOptions,
+        ...baseOptions(box),
         query: "a@example.test",
         readVpn: () => Promise.resolve(UNVERIFIED),
         fetcher: geoFetcher,
@@ -145,9 +193,10 @@ describe("openAccountBrowser", () => {
     ).rejects.toThrow(/verified_ipv4/);
   });
   it("fails closed when the exit timezone is unknown for a guarded account", async () => {
+    const box = sandbox();
     await expect(
       openAccountBrowser({
-        ...baseOptions,
+        ...baseOptions(box),
         query: "a@example.test",
         readVpn: verifiedVpn,
         fetcher: () => Promise.resolve(null),
@@ -155,10 +204,46 @@ describe("openAccountBrowser", () => {
       }),
     ).rejects.toThrow(/timezone/);
   });
-  it("launches Chrome with a per-account profile and the exit timezone", async () => {
+  it("refuses to join a Helium instance running with an unverified timezone", async () => {
+    const box = sandbox();
+    await expect(
+      openAccountBrowser({
+        ...baseOptions(box),
+        query: "a@example.test",
+        readVpn: verifiedVpn,
+        fetcher: geoFetcher,
+        listRunning: () => Promise.resolve([42]),
+        spawnImpl: fakeSpawn().spawnImpl,
+      }),
+    ).rejects.toThrow(/unverified timezone/);
+  });
+  it("joins a running instance we launched ourselves with the same timezone", async () => {
+    const box = sandbox();
+    const { spawnImpl } = fakeSpawn(4242);
+    await openAccountBrowser({
+      ...baseOptions(box),
+      query: "a@example.test",
+      readVpn: verifiedVpn,
+      fetcher: geoFetcher,
+      spawnImpl,
+    });
+    const second = fakeSpawn(4242);
+    const result = await openAccountBrowser({
+      ...baseOptions(box),
+      query: "b@example.test",
+      readVpn: verifiedVpn,
+      fetcher: geoFetcher,
+      listRunning: () => Promise.resolve([4242]),
+      spawnImpl: second.spawnImpl,
+    });
+    expect(result.profileDirectory).toBe("Profile 2");
+    expect(second.captured).toHaveLength(1);
+  });
+  it("launches Helium with the native profile and the exit timezone", async () => {
+    const box = sandbox();
     const { spawnImpl, captured } = fakeSpawn();
     const result = await openAccountBrowser({
-      ...baseOptions,
+      ...baseOptions(box),
       query: "a@example.test",
       readVpn: verifiedVpn,
       fetcher: geoFetcher,
@@ -166,18 +251,18 @@ describe("openAccountBrowser", () => {
     });
     expect(result.timezone).toBe("Europe/Amsterdam");
     expect(result.url).toBe("https://claude.ai/");
-    expect(result.profileDir).toBe(
-      path.join(PROFILE_ROOT, "11111111-1111-4111-8111-111111111111"),
-    );
+    expect(result.profileName).toBe("Claude · a@example.test");
+    expect(result.profileDirectory).toBe("Profile 1");
     expect(captured).toHaveLength(1);
     const launch = captured[0]!;
     expect(launch.env?.TZ).toBe("Europe/Amsterdam");
-    expect(launch.args.join(" ")).toContain(`--user-data-dir=${path.join(PROFILE_ROOT, "11111111-1111-4111-8111-111111111111")}`);
+    expect(launch.args.join(" ")).toContain("--profile-directory=Profile 1");
   });
   it("does not read VPN state for unguarded providers", async () => {
+    const box = sandbox();
     const { spawnImpl, captured } = fakeSpawn();
     const result = await openAccountBrowser({
-      ...baseOptions,
+      ...baseOptions(box),
       query: "kimi",
       readVpn: () => Promise.reject(new Error("must not be called")),
       fetcher: geoFetcher,
@@ -188,9 +273,10 @@ describe("openAccountBrowser", () => {
     expect(result.url).toBe("about:blank");
   });
   it("honours an explicit --url", async () => {
+    const box = sandbox();
     const { spawnImpl, captured } = fakeSpawn();
     await openAccountBrowser({
-      ...baseOptions,
+      ...baseOptions(box),
       query: "kimi",
       url: "https://example.test/settings",
       fetcher: geoFetcher,
@@ -198,18 +284,20 @@ describe("openAccountBrowser", () => {
     });
     expect(captured[0]?.args.at(-1)).toBe("https://example.test/settings");
   });
-  it("throws when no Chrome executable exists", async () => {
+  it("throws when no Helium executable exists", async () => {
+    const box = sandbox();
     await expect(
       openAccountBrowser({
-        ...baseOptions,
+        ...baseOptions(box),
         query: "kimi",
         exists: () => false,
         fetcher: geoFetcher,
         spawnImpl: fakeSpawn().spawnImpl,
       }),
-    ).rejects.toThrow(/executable not found/);
+    ).rejects.toThrow(/Helium executable not found/);
   });
   it("throws when the browser exits during launch", async () => {
+    const box = sandbox();
     const impl = () => {
       const child = new FakeChild();
       queueMicrotask(() => child.emit("exit", 1));
@@ -217,11 +305,37 @@ describe("openAccountBrowser", () => {
     };
     await expect(
       openAccountBrowser({
-        ...baseOptions,
+        ...baseOptions(box),
         query: "kimi",
         fetcher: geoFetcher,
         spawnImpl: impl as never,
       }),
     ).rejects.toThrow(/exited during launch/);
+  });
+});
+
+describe("listBrowserProfiles", () => {
+  it("joins accounts with the registry", async () => {
+    const box = sandbox();
+    const { spawnImpl } = fakeSpawn();
+    await openAccountBrowser({
+      ...baseOptions(box),
+      query: "kimi",
+      fetcher: geoFetcher,
+      spawnImpl,
+    });
+    const rows = await listBrowserProfiles({
+      accounts: ACCOUNTS,
+      dataDir: box.dataDir,
+      pluginId: "account-pool-balanced",
+      heliumRoot: box.heliumRoot,
+    });
+    const kimi = rows.find((row) => row.provider === "kimi")!;
+    expect(kimi.profileName).toBe("Kimi · Kimi");
+    expect(kimi.exists).toBe(true);
+    expect(kimi.updatedAt).not.toBeNull();
+    const primary = rows.find((row) => row.label === "Primary")!;
+    expect(primary.exists).toBe(false);
+    expect(primary.profileDirectory).toBe("");
   });
 });

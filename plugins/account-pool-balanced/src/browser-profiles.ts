@@ -1,14 +1,18 @@
-/** Per-account persistent browser profiles for the Account Pooler.
+/** Per-account browser profiles for the Account Pooler, on a dedicated Helium.
  *
- * Opens the provider's own web UI for one pool account in an isolated Chrome
- * profile whose process timezone matches the current exit IP timezone. All IO
- * is dependency-injected so tests stay hermetic: no network, no spawning.
+ * One Helium installation carries one native profile per pool account (the
+ * standard profile picker works for manual use). Profiles are named
+ * "<Provider> · <email>" so the window always shows which account it serves.
+ * `open` launches Helium with the profile and a process timezone aligned to
+ * the current exit IP. All IO is dependency-injected so tests stay hermetic.
  */
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir, platform as currentPlatform } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { request as httpRequest } from "undici";
 import type { AccountSummary } from "./contracts.js";
 import { readVpnEvidence } from "./vpn-policy.js";
@@ -28,9 +32,24 @@ const PROVIDER_HOME: Readonly<Record<string, string>> = {
   codex: "https://chatgpt.com/",
 };
 
+const PROVIDER_TITLE: Readonly<Record<string, string>> = {
+  claude: "Claude",
+  codex: "Codex",
+  kimi: "Kimi",
+  zai: "Z.ai",
+  "opencode-go": "OpenCode Go",
+  cursor: "Cursor",
+  devin: "Devin",
+};
+
 const DEFAULT_GEO_URL = "https://ipinfo.io/json";
 const GEO_URL_ENV = "POOL_BROWSER_GEO_URL";
 const GEO_MAX_BYTES = 65536;
+
+/** Optional override for the Helium executable. */
+const BROWSER_PATH_ENV = "POOL_BROWSER_EXECUTABLE";
+const HELIUM_APP_BINARY = "Helium.app/Contents/MacOS/Helium";
+const HELIUM_DATA_DIR = path.join("Application Support", "Helium");
 
 export interface ExitGeo {
   timezone: string;
@@ -104,11 +123,7 @@ export async function fetchExitGeo(
   }
 }
 
-/** Dedicated browser for pool profiles: the Playwright-cached Chromium build,
- * never the user's daily Chrome. Override with POOL_BROWSER_CHROMIUM. */
-const BROWSER_PATH_ENV = "POOL_BROWSER_CHROMIUM";
-
-/** Candidate executables: env override first, then newest cached Chromium. */
+/** Helium executable candidates: env override, then platform defaults. */
 export function browserExecutableCandidates(
   platformName: NodeJS.Platform = currentPlatform(),
   home: string = homedir(),
@@ -116,38 +131,178 @@ export function browserExecutableCandidates(
 ): string[] {
   const override = env[BROWSER_PATH_ENV];
   const out: string[] = override ? [override] : [];
-  const cacheRoots = platformName === "darwin"
-    ? [path.join(home, "Library", "Caches", "ms-playwright")]
-    : platformName === "win32"
-      ? [path.join(home, "AppData", "Local", "ms-playwright")]
-      : [path.join(home, ".cache", "ms-playwright")];
-  const subPaths = platformName === "darwin"
-    ? [
-        "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
-        "chrome-mac-x64/Chromium.app/Contents/MacOS/Chromium",
-        "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-      ]
-    : platformName === "win32"
-      ? ["chrome-win/chrome.exe"]
-      : ["chrome-linux/chrome", "chrome-linux64/chrome"];
-  for (const root of cacheRoots) {
-    let entries: string[] = [];
-    try {
-      entries = readdirSync(root)
-        .filter((name) => name.startsWith("chromium-"))
-        .sort()
-        .reverse();
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      for (const sub of subPaths) out.push(path.join(root, entry, sub));
-    }
+  if (platformName === "darwin") {
+    out.push(
+      path.join("/Applications", HELIUM_APP_BINARY),
+      path.join(home, "Applications", HELIUM_APP_BINARY),
+    );
+  } else if (platformName === "win32") {
+    const bases = [process.env["LOCALAPPDATA"], process.env["ProgramFiles"]]
+      .filter((value): value is string => typeof value === "string" && value !== "");
+    for (const base of bases) out.push(path.join(base, "Helium", "Application", "Helium.exe"));
+  } else {
+    out.push("/usr/bin/helium", "/usr/local/bin/helium");
   }
   return out;
+}
+
+/** Helium user-data root (native profile store). */
+export function heliumDataRoot(
+  platformName: NodeJS.Platform = currentPlatform(),
+  home: string = homedir(),
+): string {
+  if (platformName === "darwin") return path.join(home, "Library", HELIUM_DATA_DIR);
+  if (platformName === "win32") {
+    return path.join(process.env["LOCALAPPDATA"] ?? path.join(home, "AppData", "Local"), "Helium");
+  }
+  return path.join(home, ".config", "helium");
+}
+
+/** Human-readable native profile name: "<Provider> · <email-or-label>". */
+export function profileNameFor(account: AccountSummary): string {
+  const title = PROVIDER_TITLE[account.provider] ?? account.provider;
+  return `${title} · ${account.email ?? account.label}`;
+}
+
+interface RegistryEntry {
+  profileDirectory: string;
+  profileName: string;
+  createdAt: number;
+}
+
+type Registry = Record<string, RegistryEntry>;
+
+async function readRegistry(file: string): Promise<Registry> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as Registry;
+  } catch {
+    return {};
+  }
+}
+
+async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  await writeFile(tmp, JSON.stringify(value, null, 2));
+  await rename(tmp, file);
+}
+
+/** Next free "Profile N" directory name (Default counts as taken). */
+export function nextProfileDirectory(existingDirs: readonly string[]): string {
+  let max = 0;
+  for (const dir of existingDirs) {
+    const match = /^Profile (\d+)$/.exec(dir);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return `Profile ${max + 1}`;
+}
+
+async function listHeliumProfileDirs(root: string): Promise<string[]> {
+  try {
+    const entries = await readdir(root, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory() && (entry.name === "Default" || /^Profile \d+$/.test(entry.name)))
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+const execFileAsync = promisify(execFile);
+
+/** Pids of running Helium main+helper processes (env unreadable under SIP). */
+export async function listRunningHelium(): Promise<number[]> {
+  try {
+    const { stdout } = await execFileAsync("pgrep", ["-f", "Helium.app/Contents/MacOS/Helium"]);
+    return stdout
+      .split("\n")
+      .map((line) => Number(line.trim()))
+      .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+  } catch {
+    return [];
+  }
+}
+
+interface LaunchMarker {
+  tz: string;
+  pid: number;
+  at: number;
+}
+
+async function readLaunchMarker(file: string): Promise<LaunchMarker | null> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.tz !== "string" || typeof record.pid !== "number") return null;
+    return { tz: record.tz, pid: record.pid, at: typeof record.at === "number" ? record.at : 0 };
+  } catch {
+    return null;
+  }
+}
+
+export interface EnsureProfileOptions {
+  heliumRoot: string;
+  registryFile: string;
+  running?: boolean;
+}
+
+/** Create the account's native Helium profile on first use; idempotent. */
+export async function ensureProfile(
+  account: AccountSummary,
+  options: EnsureProfileOptions,
+): Promise<RegistryEntry> {
+  const registry = await readRegistry(options.registryFile);
+  const existing = registry[account.id];
+  if (existing !== undefined) return existing;
+  const running = options.running ?? (await listRunningHelium()).length > 0;
+  const name = profileNameFor(account);
+  const profileDirectory = nextProfileDirectory(await listHeliumProfileDirs(options.heliumRoot));
+  const profileDir = path.join(options.heliumRoot, profileDirectory);
+  await mkdir(profileDir, { recursive: true });
+  await writeJsonAtomic(path.join(profileDir, "Preferences"), {
+    profile: { name },
+  });
+  if (!running) {
+    // Register the profile in the picker up front; Helium rewrites Local State
+    // live, so only touch it while the browser is closed.
+    const localStateFile = path.join(options.heliumRoot, "Local State");
+    let localState: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = JSON.parse(await readFile(localStateFile, "utf8"));
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        localState = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // first launch — file absent, created here
+    }
+    const infoCache =
+      localState["profile"] !== null &&
+      typeof localState["profile"] === "object" &&
+      !Array.isArray(localState["profile"])
+        ? { ...(localState["profile"] as Record<string, unknown>) }
+        : {};
+    const cache =
+      infoCache["info_cache"] !== null &&
+      typeof infoCache["info_cache"] === "object" &&
+      !Array.isArray(infoCache["info_cache"])
+        ? { ...(infoCache["info_cache"] as Record<string, unknown>) }
+        : {};
+    cache[profileDirectory] = {
+      name,
+      is_using_default_name: false,
+      is_using_default_avatar: true,
+    };
+    infoCache["info_cache"] = cache;
+    localState["profile"] = infoCache;
+    await writeJsonAtomic(localStateFile, localState);
+  }
+  const entry: RegistryEntry = { profileDirectory, profileName: name, createdAt: Date.now() };
+  registry[account.id] = entry;
+  await writeJsonAtomic(options.registryFile, registry);
+  return entry;
 }
 
 export interface OpenAccountBrowserOptions {
@@ -157,12 +312,14 @@ export interface OpenAccountBrowserOptions {
   dataDir: string;
   pluginId: string;
   vpnStatusFile?: string | null;
+  heliumRoot?: string | undefined;
   fetcher?: GeoFetcher | undefined;
   readVpn?: VpnReader | undefined;
+  listRunning?: (() => Promise<number[]>) | undefined;
   spawnImpl?: typeof spawn | undefined;
-  platformName?: NodeJS.Platform | undefined;
   exists?: ((file: string) => boolean) | undefined;
   env?: NodeJS.ProcessEnv | undefined;
+  platformName?: NodeJS.Platform | undefined;
   settleMs?: number | undefined;
 }
 
@@ -170,6 +327,8 @@ export interface OpenAccountBrowserResult {
   accountId: string;
   provider: string;
   label: string;
+  profileName: string;
+  profileDirectory: string;
   profileDir: string;
   timezone: string | null;
   url: string;
@@ -206,34 +365,55 @@ export async function openAccountBrowser(
   ).find((candidate) => exists(candidate));
   if (executable === undefined) {
     throw new Error(
-      "Chromium executable not found. Install the shared build once with " +
-        "`npx playwright install chromium` or set POOL_BROWSER_CHROMIUM to a Chromium-family binary.",
+      "Helium executable not found. Install it once (`brew install --cask helium-browser`) " +
+        `or set ${BROWSER_PATH_ENV} to a Chromium-family binary.`,
     );
   }
-  const profileDir = path.join(
-    options.dataDir,
-    "plugins",
-    options.pluginId,
-    "browser-profiles",
-    account.id,
-  );
-  await mkdir(profileDir, { recursive: true });
+  const heliumRoot = options.heliumRoot ?? heliumDataRoot(options.platformName ?? currentPlatform());
+  const profileStore = path.join(options.dataDir, "plugins", options.pluginId, "browser-profiles");
+  const registryFile = path.join(profileStore, "registry.json");
+  const markerFile = path.join(profileStore, "last-launch.json");
+  const running = await (options.listRunning ?? listRunningHelium)();
+  const timezone = geo?.timezone ?? null;
+  if (timezone !== null && running.length > 0) {
+    // SIP hides process env on macOS, so trust is established by our own marker:
+    // the running instance is accepted only when WE started it with this timezone
+    // and the recorded pid is still a live Helium process.
+    const marker = await readLaunchMarker(markerFile);
+    const trusted = marker !== null && marker.tz === timezone && running.includes(marker.pid);
+    if (!trusted) {
+      throw new Error(
+        "Helium is already running with an unverified timezone. " +
+          "Quit Helium (Cmd+Q) and open the profile again so the exit timezone applies.",
+      );
+    }
+  }
+  const entry = await ensureProfile(account, {
+    heliumRoot,
+    registryFile,
+    running: running.length > 0,
+  });
   const url = options.url ?? PROVIDER_HOME[account.provider] ?? "about:blank";
   const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
-  if (geo !== null) env.TZ = geo.timezone;
+  if (timezone !== null) env.TZ = timezone;
   const child = (options.spawnImpl ?? spawn)(executable, [
-    `--user-data-dir=${profileDir}`,
+    `--profile-directory=${entry.profileDirectory}`,
     "--no-first-run",
     "--no-default-browser-check",
     url,
   ], { detached: true, stdio: "ignore", env });
   await waitForLaunch(child, options.settleMs ?? 800);
+  if (timezone !== null && child.pid !== undefined) {
+    await writeJsonAtomic(markerFile, { tz: timezone, pid: child.pid, at: Date.now() });
+  }
   return {
     accountId: account.id,
     provider: account.provider,
     label: account.label,
-    profileDir,
-    timezone: geo?.timezone ?? null,
+    profileName: entry.profileName,
+    profileDirectory: entry.profileDirectory,
+    profileDir: path.join(heliumRoot, entry.profileDirectory),
+    timezone,
     url,
     guarded,
   };
@@ -244,37 +424,44 @@ export interface BrowserProfileInfo {
   provider: string;
   label: string;
   email: string | null;
+  profileName: string;
+  profileDirectory: string;
   profileDir: string;
   exists: boolean;
   updatedAt: number | null;
 }
 
-/** Registry view: every pool account and the state of its browser profile. */
+/** Registry view: every pool account and the state of its Helium profile. */
 export async function listBrowserProfiles(options: {
   accounts: readonly AccountSummary[];
   dataDir: string;
   pluginId: string;
+  heliumRoot?: string | undefined;
 }): Promise<BrowserProfileInfo[]> {
-  const root = path.join(
-    options.dataDir,
-    "plugins",
-    options.pluginId,
-    "browser-profiles",
+  const heliumRoot = options.heliumRoot ?? heliumDataRoot();
+  const registry = await readRegistry(
+    path.join(options.dataDir, "plugins", options.pluginId, "browser-profiles", "registry.json"),
   );
   const rows: BrowserProfileInfo[] = [];
   for (const account of options.accounts) {
-    const profileDir = path.join(root, account.id);
+    const entry = registry[account.id];
+    const profileDirectory = entry?.profileDirectory ?? "";
+    const profileDir = entry === undefined ? "" : path.join(heliumRoot, profileDirectory);
     let updatedAt: number | null = null;
-    try {
-      updatedAt = Math.round((await stat(profileDir)).mtimeMs);
-    } catch {
-      // profile not created yet — expected state, not an error
+    if (entry !== undefined) {
+      try {
+        updatedAt = Math.round((await stat(profileDir)).mtimeMs);
+      } catch {
+        updatedAt = null;
+      }
     }
     rows.push({
       accountId: account.id,
       provider: account.provider,
       label: account.label,
       email: account.email,
+      profileName: entry?.profileName ?? "",
+      profileDirectory,
       profileDir,
       exists: updatedAt !== null,
       updatedAt,

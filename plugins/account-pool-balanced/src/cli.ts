@@ -677,8 +677,10 @@ export function registerPoolCli(
           }
           const lines = profiles.map(
             (row) =>
-              `${row.provider}\t${row.label}\t${row.email ?? "-"}\t` +
-              (row.exists ? `profile (updated ${new Date(row.updatedAt ?? 0).toISOString()})` : "no profile"),
+              `${row.provider}\t${row.profileName === "" ? row.label : row.profileName}\t` +
+              (row.exists
+                ? `${row.profileDirectory} (updated ${new Date(row.updatedAt ?? 0).toISOString()})`
+                : "no profile yet"),
           );
           return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
         }
@@ -697,8 +699,8 @@ export function registerPoolCli(
           return {
             exitCode: 0,
             stdout:
-              `Opened ${result.provider} account "${result.label}" in its persistent browser profile.\n` +
-              `  profile: ${result.profileDir}\n` +
+              `Opened "${result.profileName}" in Helium.\n` +
+              `  profile: ${result.profileDirectory}\n` +
               `  timezone: ${result.timezone ?? "system"}\n` +
               `  url: ${result.url}\n`,
           };
