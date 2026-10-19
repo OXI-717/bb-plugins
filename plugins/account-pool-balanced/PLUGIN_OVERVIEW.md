@@ -14,6 +14,8 @@ BB 0.43.1 или новее, Node/npm для установки из Git и ак
 
 Настройки доступны через интерфейс и `bb pool --help`. Инструкция для Devin CLI и других внешних клиентов — [External clients](docs/external-clients.md). Проверка состояния — `bb pool status`, обновление — `bb plugin update account-pool-balanced`. Не включайте одновременно встроенный Account Pooler: оба используют команду `bb pool`.
 
+`bb pool browser open <id|email|label> [--url <url>]` открывает веб-интерфейс провайдера для одного аккаунта пула в выделенном персистентном Chrome-профиле (на аккаунт) с таймзоной процесса, выровненной под гео текущего exit IP. Для claude/codex/cursor/devin команда fail-closed: без верифицированного VPN (`verified_ipv4`) браузер не откроется. Профили живут в data dir BB (`plugins/account-pool-balanced/browser-profiles/<account-id>`) и переживают перезапуски. Назначение: ручные операции с аккаунтом — логин, биллинг, применение сохранённого сброса лимитов ([Saved resets](docs/saved-resets.md)).
+
 
 ## Защита без изменения BB / Plugin-only network protection
 
