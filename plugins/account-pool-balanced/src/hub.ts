@@ -1,4 +1,5 @@
 import { NetworkFlights } from "./network-flights.js";
+import { observeUpstreamFetch } from "./transport-diagnostics.js";
 import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
 import { createVpnPolicy, VpnRequiredError } from "./vpn-policy.js";
 import { isRecoverableAccessError } from "./recoverable-access.js";
@@ -112,7 +113,7 @@ interface HubOptions {
   now: () => number;
   drainTimeoutMs: number;
   onAccountsChanged: () => void;
-  onUpstreamError: (provider: PoolProvider, error: unknown) => void;
+  onUpstreamError: (provider: PoolProvider, error: unknown, context: { elapsedMs: number; transport: "ipv4" | "default"; stage: "fetch_headers"; operation: "model" | "auxiliary" }) => void;
 }
 
 interface SelectedAccount {
@@ -186,7 +187,15 @@ export class AccountPoolHub {
   private readonly networkFlights:NetworkFlights;
   constructor(private readonly options: HubOptions) {
     this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnPayload,options.guardCheck);
-    this.networkFlights=new NetworkFlights(options.fetch,()=>this.stopped.signal,provider=>this.assertNetworkAllowed(provider),provider=>this.requiresIpv4(provider)?options.fetchIpv4!:options.fetch);
+    this.networkFlights = new NetworkFlights(options.fetch, () => this.stopped.signal,
+      provider => this.assertNetworkAllowed(provider), (provider, drainable) => {
+        const ipv4 = this.requiresIpv4(provider);
+        return observeUpstreamFetch(ipv4 ? options.fetchIpv4! : options.fetch,
+          (error, elapsedMs) => options.onUpstreamError(provider, error, {
+            elapsedMs, transport: ipv4 ? "ipv4" : "default", stage: "fetch_headers",
+            operation: drainable ? "model" : "auxiliary",
+          }));
+      });
   }
 
   private requiresIpv4(provider:PoolProvider):boolean {const settings=this.options.getSettings();return settings.vpnOnlyProviders.some(value=>value===provider)||(settings.vpnGuardEnabled&&provider!=="kimi"&&provider!=="zai");}
@@ -1260,8 +1269,6 @@ export class AccountPoolHub {
         },true)
         .catch((cause: unknown) => {
           if (cause instanceof VpnRequiredError) throw cause;
-          if (!controller.signal.aborted)
-            this.options.onUpstreamError(adapter.provider, cause);
           throw new UpstreamConnectionError("Upstream connection failed.", {
             cause,
           });
@@ -1483,7 +1490,7 @@ export function createHub(options: {
   drainTimeoutMs?: number;
   maxAffinityBindings?: number;
   onAccountsChanged?: () => void;
-  onUpstreamError?: (provider: PoolProvider, error: unknown) => void;
+  onUpstreamError?: HubOptions["onUpstreamError"];
 }): AccountPoolHub {
   const adapters: ReadonlyMap<PoolProvider, ProviderAdapter> = new Map([
     [

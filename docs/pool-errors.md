@@ -31,3 +31,19 @@ For Claude OAuth refusal, use [reauthorization in the existing card / повто
 `VPN_GUARD_UNAVAILABLE` означает, что разрешение не удалось получить; сама ошибка не доказывает отключение VPN. В версии 0.4.19 сообщение различает таймаут (`timeout`), сбой вызова (`rpc_failed`) и некорректный ответ (`invalid_decision`). Общий срок ожидания — четыре секунды. При отказе запрос к провайдеру не начинается, аккаунт не считается испорченным; повторный запрос заново проверяет разрешение. Это не гарантирует прекращения уже открытых сетевых соединений или возобновления остановленных BB-тредов.
 
 Scope: local Pooler refusals and adapter error responses. External BB/CLI wrappers may prepend their own text. Upstream passthrough bodies and a transport disconnect after a stream has started retain their existing behavior. No routing, quota thresholds, account credentials or retry policy is changed by this formatting update.
+
+## Transport diagnostics / Диагностика соединений
+
+Transport warnings retain the `Account Pooler <provider> transport failed: <code>.` prefix and append a bounded JSON object:
+
+```json
+{"code":"UND_ERR_CONNECT_TIMEOUT","category":"connect","elapsedMs":10021,"transport":"ipv4","stage":"fetch_headers","operation":"model"}
+```
+
+`elapsedMs` measures one actual fetch attempt until response headers or failure, using a monotonic clock. It excludes admission checks, account selection and response-body reads. `transport` describes the selected Pooler fetch (`ipv4` or `default`), not the actual VPN node or proxy route. `operation` separates model calls from auxiliary calls such as quota and OAuth requests. Auxiliary failures now use the same diagnostic boundary; compare counters by operation when analyzing old and new logs.
+
+`category` comes only from recognized error codes: `dns`, `connect`, `socket`, `tls`, `headers`, `body`, `session`, `abort`, `timeout`, or `unknown`. A generic timeout does not establish a connection stage. Only a bounded error/aggregate cause traversal is inspected; unknown codes, error messages, URLs, headers, account identifiers and tokens are never included. The existing prefix may remain `unclassified transport error` while the JSON supplies a recognized TLS or abort category.
+
+Policy refusals before fetch and owner cancellations do not generate transport warnings. Stream failures after headers are outside this diagnostic scope. These records provide evidence about a failed attempt, not proof that VPN, DNS, the provider or Pooler caused it. No automatic retry or change to admission policy is added.
+
+В журнал добавляются безопасная категория, длительность отдельной попытки, выбранный транспорт и тип вызова. Отказы Guard и отмена владельцем не считаются сетевыми сбоями. Запись не раскрывает адреса и секреты и сама по себе не устанавливает причину отказа.

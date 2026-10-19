@@ -2,7 +2,7 @@ import type {PoolProvider} from './contracts.js';
 
 export class NetworkFlights {
   private readonly active=new Map<AbortController,PoolProvider>();
-  constructor(private readonly upstream:typeof fetch,private readonly stop:()=>AbortSignal,private readonly check:(provider:PoolProvider)=>Promise<void>,private readonly selectFetch:(provider:PoolProvider)=>typeof fetch=()=>upstream) {}
+  constructor(private readonly upstream:typeof fetch,private readonly stop:()=>AbortSignal,private readonly check:(provider:PoolProvider)=>Promise<void>,private readonly selectFetch:(provider:PoolProvider,drainable:boolean)=>typeof fetch=()=>upstream) {}
   get size(){return this.active.size;}
   async enforce() {
     for(const provider of new Set(this.active.values())) {
@@ -30,7 +30,7 @@ export class NetworkFlights {
     signal.addEventListener('abort',abort,{once:true});
     let response:Response|undefined;
     try {
-      response=await this.selectFetch(provider)(input,{...init,signal});
+      response=await this.selectFetch(provider,drainable)(input,{...init,signal});
       signal.throwIfAborted();
       await this.check(provider);
       signal.throwIfAborted();
