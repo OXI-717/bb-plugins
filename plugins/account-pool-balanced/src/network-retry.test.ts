@@ -1,4 +1,4 @@
-import { createFakePluginHost, makeThreadResponse, makeTurnFailedEvent } from '@get-bb/plugin-sdk/testing';
+import { createFakePluginHost, makeMessageDispatchHookContext, makeThreadResponse, makeTurnFailedEvent } from '@get-bb/plugin-sdk/testing';
 import { expect, it, vi } from 'vitest';
 import { registerNetworkRetry } from './network-retry.js';
 async function setup() {
@@ -100,4 +100,38 @@ it('removes a late scheduling result after a newer user failure',async()=>{
  const remove=vi.fn(async()=>({ok:true}) as never);fake.harness.sdk.stub('threads.queuedMessages.delete',remove);
  release({ok:true,delivery:'queued',queuedMessageId:'late-owned'} as never);await failed;
  expect(remove).toHaveBeenCalledExactlyOnceWith({threadId:'thread-one',queuedMessageId:'late-owned'});await fake.harness.lifecycle.dispose();
+});
+
+it('rejects a late owned queued retry at dispatch after a lost scheduling reply and newer user failure',async()=>{
+ const {fake,retry,fail}=await setup();retry.mockRejectedValue(Error('lost reply'));await fail();
+ fake.harness.sdk.stub('threads.events.list',async()=>[{threadId:'thread-one',type:'client/turn/requested',data:{requestId:'new-user-request'}}] as never);
+ const hook=fake.harness.registrations.hooks['message.dispatch'];expect(hook).toBeTypeOf('function');
+ const result=await hook!(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},queuedMessage:{id:'late-owned',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}));
+ expect(result.action).toBe('reject');await fake.harness.lifecycle.dispose();
+});
+it('permits the current owned queued retry and never fences manual retries or ordinary messages',async()=>{
+ const {fake,fail}=await setup();await fail();const hook=fake.harness.registrations.hooks['message.dispatch'];expect(hook).toBeTypeOf('function');
+ const context=makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
+ expect(await hook!(context)).toEqual({action:'proceed'});
+ fake.harness.sdk.stub('threads.events.list',async()=>{throw Error('unavailable');});
+ expect(await hook!({...context,queuedMessage:{...context.queuedMessage!,payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Manual retry'}}})).toEqual({action:'proceed'});
+ expect(await hook!({...context,queuedMessage:null})).toEqual({action:'proceed'});await fake.harness.lifecycle.dispose();
+});
+it('holds an owned queued retry when current request history is unavailable',async()=>{
+ const {fake,fail}=await setup();await fail();fake.harness.sdk.stub('threads.events.list',async()=>{throw Error('private');});
+ const hook=fake.harness.registrations.hooks['message.dispatch'];expect(hook).toBeTypeOf('function');
+ expect(await hook!(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}))).toMatchObject({action:'wait',sendAt:110_000});
+ await fake.harness.lifecycle.dispose();
+});
+
+it('bounds a stalled dispatch history read and shares its slot until the underlying I/O settles',async()=>{
+ vi.useFakeTimers();const {fake,fail}=await setup();await fail();let release!:(rows:never)=>void;
+ const read=vi.fn(()=>new Promise<never>(resolve=>{release=resolve;}));fake.harness.sdk.stub('threads.events.list',read);
+ const hook=fake.harness.registrations.hooks['message.dispatch']!;
+ const context=makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
+ try{
+  const first=hook(context);await vi.advanceTimersByTimeAsync(1_500);expect(await first).toMatchObject({action:'wait'});
+  const second=hook(context);await vi.advanceTimersByTimeAsync(1_500);expect(await second).toMatchObject({action:'wait'});expect(read).toHaveBeenCalledTimes(1);
+  release([{threadId:'thread-one',type:'client/turn/requested',data:{requestId:'request-one'}}] as never);await Promise.resolve();await Promise.resolve();
+ }finally{await fake.harness.lifecycle.dispose();vi.useRealTimers();}
 });

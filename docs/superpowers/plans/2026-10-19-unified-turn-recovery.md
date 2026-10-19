@@ -14,3 +14,5 @@ Tasks:
 - [ ] Regression tests and durable automatic continuation of new Guard-owned stops; preserve manual recovery and enforcement isolation.
 - [ ] Focused suites, both typechecks/builds, public checks and independent fault/concurrency review.
 - [ ] Full CI on final SHA; controlled live synthetic recovery check; immutable paired release and idle/backup upgrade.
+
+Queue-drain ownership check: a late native retry whose scheduling reply was lost is rechecked against the latest client request through `message.dispatch`. Only recorded Pooler retries are checked; manual retries and messages are untouched. Unavailable history waits ten seconds without consuming an attempt. History I/O has a 1.5-second decision budget and at most four underlying reads; stalled reads retain their slots until settlement.

@@ -57,6 +57,35 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
       if(entry?.payload.kind==='retry')await bb.sdk.threads.queuedMessages.delete({threadId,queuedMessageId:entry.id});
     }
   }
+  // Native retries are checked again at queue drain: an RPC can lose its reply
+  // before a late row appears, after event/startup cancellation already ran.
+  const dispatchReads=new Map<string,Promise<string|null>>();
+  bb.experimental_hooks.on('message.dispatch',async context=>{
+    const entry=context.queuedMessage;
+    if(!entry||entry.payload.kind!=='retry'||!claims)return {action:'proceed'};
+    const payload=entry.payload;
+    const claim=claims.find(value=>value.threadId===context.thread.id&&(value.queuedMessageId===entry.id||
+      (value.originalRequestId===payload.retryOfTurnRequestId&&payload.reason===`Temporary connection failure. Retry ${value.attempt}/3.`)));
+    if(!claim)return {action:'proceed'};
+    if(disposed)return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};
+    let read=dispatchReads.get(context.thread.id);
+    if(!read&&dispatchReads.size<4){
+      const controller=new AbortController();
+      const deadline=setTimeout(()=>controller.abort(),1_500);
+      read=bb.sdk.threads.events.list({threadId:context.thread.id,order:'desc',limit:'1',types:['client/turn/requested'],signal:controller.signal})
+        .then(rows=>{const row=rows.find(value=>value.type==='client/turn/requested');return row?.type==='client/turn/requested'&&row.threadId===context.thread.id?row.data.requestId:null;});
+      dispatchReads.set(context.thread.id,read);
+      const active=read;
+      void read.finally(()=>{clearTimeout(deadline);if(dispatchReads.get(context.thread.id)===active)dispatchReads.delete(context.thread.id);}).catch(()=>undefined);
+    }
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      const requestId=read?await Promise.race([read,new Promise<null>(resolve=>{timer=setTimeout(()=>resolve(null),1_500);})]):null;
+      if(!requestId||disposed)return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};
+      return requestId===claim.requestId?{action:'proceed'}:{action:'reject',message:'Automatic retry cancelled because the thread has newer work.'};
+    }catch{return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};}
+    finally{if(timer)clearTimeout(timer);}
+  });
   // An own retry is removed from the queue before it activates its thread.
   // A still-queued owned row when something else starts (or stops) is stale.
   for(const name of ['thread.active','thread.idle','thread.failed'] as const)bb.events.on(name,async({thread})=>{
