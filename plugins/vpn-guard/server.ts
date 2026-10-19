@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { configurationSchema, hostContract, rpcContract, stopObservationSchema, stopReasonSchema } from './contract.js';
 import { abortableDelay } from './delay.js';
 import {eventJournal,type GuardEvent} from './event-journal.js';
+import {automaticStopRecovery} from './auto-recovery.js';
 import { protectedProvider, PROTECTED_PROVIDERS, type VpnState } from './state.js';
 
 const CONFIG = 'configuration-v2';
@@ -227,14 +228,15 @@ export default async function plugin(bb: BbPluginApi) {
         const thread=await bb.sdk.threads.get({threadId:running.id});
         if(!protectedProvider(thread.providerId)) continue;
         await bb.sdk.threads.stop({threadId:running.id});
+        const stoppedAt=Date.now();
         stopped.add(running.id);
         if(stopped.size>100) stopped=new Set([...stopped].slice(-100));
         await bb.storage.kv.set(STOPPED,[...stopped]);
         const observation=snapshot.hosts.find(h=>h.id===running.hostId);
         const reason=config.manualBlock?'manual_block':!observation?.available?'host_catalog_unavailable':!observation.evidence?'host_rpc_failed':observation.evidence.reason;
         const parsedReason=stopReasonSchema.safeParse(reason);
-        const stopRecord=stopObservationSchema.safeParse({threadId:running.id,hostId:running.hostId,at:Date.now(),reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
-        if(stopRecord.success){stopHistory=[...stopHistory,stopRecord.data].slice(-100);await bb.storage.kv.set(STOP_HISTORY,stopHistory);}else bb.log.warn('VPN Guard stop observation rejected');
+        const stopRecord=stopObservationSchema.safeParse({threadId:running.id,hostId:running.hostId,at:stoppedAt,reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
+        if(stopRecord.success){stopHistory=[...stopHistory,stopRecord.data].slice(-100);await bb.storage.kv.set(STOP_HISTORY,stopHistory);await autoRecovery.remember(running.id,stopRecord.data.at,running.hostId);}else bb.log.warn('VPN Guard stop observation rejected');
         event({kind:'thread_stopped',hostId:running.hostId,threadId:running.id,reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
       } catch(error) {failures.push(new Error(`thread ${running.id}: ${String(error)}`));}
     }
@@ -403,6 +405,16 @@ export default async function plugin(bb: BbPluginApi) {
   let resumeClaims=savedResumeClaims.success?savedResumeClaims.data:null;
   const resumeFlights=new Set<string>();
   let resumeClaimTail:Promise<void>=Promise.resolve();
+  const autoRecovery=await automaticStopRecovery({
+    load:()=>bb.storage.kv.get('automatic-stop-recovery-v1'),
+    save:value=>bb.storage.kv.set('automatic-stop-recovery-v1',value),
+    now:Date.now,
+    claimed:(threadId,at)=>resumeClaims===null||resumeClaims.some(value=>value.threadId===threadId&&value.stoppedAt===at),
+    allowed:async hostId=>!disposed&&!config.manualBlock&&config.mode==='enforce'&&config.hostIds.includes(hostId)&&await vpn(hostId)==='connected',
+    resume:async(threadId,at)=>{await resumeThread(threadId,at);},
+    warn:()=>bb.log.warn('Automatic continuation could not be confirmed. Open the stopped thread to check.'),
+  });
+  bb.onDispose(()=>autoRecovery.close());
   async function resumeThread(threadId:string,stoppedAt:number) {
     if(resumeFlights.has(threadId))throw Error('Resume is already pending. Open the thread to check.');
     resumeFlights.add(threadId);
@@ -417,6 +429,8 @@ export default async function plugin(bb: BbPluginApi) {
       if(thread.status!=='idle'||thread.archivedAt!=null||thread.deletedAt!=null||thread.queuedMessageCount||thread.updatedAt>stoppedAt)throw Error('The thread has changed since this stop. Open it to continue.');
       if(owned.has(nativePluginFor(thread.providerId))||pending.has(nativePluginFor(thread.providerId)))throw Error('Restore native plugins before resuming.');
     };
+    let claimAcquired=false;
+    let dispatchStarted=false;
     try {
       const record=assertCurrent();
       const initial=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(initial);
@@ -429,14 +443,28 @@ export default async function plugin(bb: BbPluginApi) {
         const next=[...resumeClaims,{threadId,stoppedAt}].slice(-100);
         await bb.storage.kv.set('thread-resume-claims-v1',next);resumeClaims=next;
       });
-      resumeClaimTail=claim.then(()=>undefined,()=>undefined);await claim;assertCurrent();
+      resumeClaimTail=claim.then(()=>undefined,()=>undefined);await claim;claimAcquired=true;assertCurrent();
       if(await vpn(record.hostId)!=='connected')throw Error('Verified VPN is required before resuming.');
       assertCurrent();
       const current=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(current);
       if(current.providerId!==initial.providerId)throw Error('The thread provider changed. Open it to continue.');
       // BB has no atomic compare-and-send. Normal admission still checks current protection.
+      dispatchStarted=true;
       await bb.sdk.threads.send({threadId,mode:'start',input:[{type:'text',mentions:[],text:'Continue the interrupted work. Check the current state before repeating any actions.'}]});
       return {accepted:true as const};
+    } catch(error) {
+      // If no dispatch was even attempted, releasing this claim is safe. A
+      // failed/unknown send keeps ownership and must never be blindly replayed.
+      if(claimAcquired&&!dispatchStarted&&!disposed) {
+        const release=resumeClaimTail.then(async()=>{
+          if(!resumeClaims)return;
+          const next=resumeClaims.filter(value=>value.threadId!==threadId||value.stoppedAt!==stoppedAt);
+          await bb.storage.kv.set('thread-resume-claims-v1',next);resumeClaims=next;
+        });
+        resumeClaimTail=release.then(()=>undefined,()=>undefined);
+        await release.catch(()=>undefined);
+      }
+      throw error;
     } finally {resumeFlights.delete(threadId);}
   }
   bb.rpc.register(rpcContract,{
@@ -510,6 +538,8 @@ export default async function plugin(bb: BbPluginApi) {
     async start(signal) {
       while(!signal.aborted) {
         try {await serial(reconcile);} catch(error) {bb.log.warn(`VPN Guard reconcile failed: ${String(error)}`);}
+        // Slow continuation RPCs must never own the enforcement lane.
+        void autoRecovery.run();
         await abortableDelay(signal,5000);
       }
     },

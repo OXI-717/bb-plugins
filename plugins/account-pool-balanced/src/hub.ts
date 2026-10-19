@@ -266,7 +266,7 @@ export class AccountPoolHub {
       );
     try { await this.assertNetworkAllowed(provider); }
     catch (error) {
-      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 403, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
+      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 503, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
       throw error;
     }
     const body = new Uint8Array(await request.arrayBuffer());
@@ -790,7 +790,7 @@ export class AccountPoolHub {
             failure.headers,
           );
     } catch (error) {
-      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 403, error.message, { "x-bb-pool-error": error.code, "retry-after": "10" });
+      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 503, error.message, { "x-bb-pool-error": error.code, "retry-after": "10" });
       if (!signal.aborted) throw error;
       return this.errorResponse(adapter, request,
         request.signal.aborted ? 499 : 503,

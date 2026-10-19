@@ -1,6 +1,7 @@
 import {createGuardNetworkCheck} from "./guard-network.js";
 import {z} from "zod";
 import { describeTransportError } from "./transport-diagnostics.js";
+import { registerNetworkRetry } from "./network-retry.js";
 import {
   createUpstreamTransport,
   transportErrorCode,
@@ -203,6 +204,17 @@ export function createAccountPoolPlugin(
       () => bb.realtime.publish(ACCOUNT_POOL_ACCOUNTS_CHANGED, {}),
       (accountId) => hub.refreshUsage(accountId, true),
     );
+    const retryProviders:Readonly<Record<string,PoolProvider>>={
+      codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor',
+      'acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai',
+      'acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi',
+      'acp-opencode-kimi-highspeed':'kimi',
+    };
+    await registerNetworkRetry(bb,async(threadId,providerId)=>{
+      const provider=retryProviders[providerId];
+      return !!provider && !await routing.isBypassed(threadId) &&
+        await operations.isRoutingEnabled(provider) && await operations.hasUsableEnabledAccount(provider);
+    },now);
     const login = new ClaudeOAuthLogin({
       beforeStart: () => hub.assertNetworkAllowed("claude"),
       fetch: hub.outboundFetch("claude"),

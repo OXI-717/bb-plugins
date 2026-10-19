@@ -7350,7 +7350,7 @@ describe("VPN-only outbound protection", () => {
     const protobuf = Buffer.from(Uint8Array.of(0x0a, metadata.length, ...metadata));
     const request = () => fixture.host.harness.behavior.fetchHttp("POST", routes[provider], { headers: { authorization: `${provider === "devin" ? "Basic" : "Bearer"} ${fixture.key}`, "x-api-key": fixture.key, "content-type": provider === "devin" ? "application/proto" : "application/json" }, body: provider === "devin" ? protobuf : "{}" });
     const denied = await request();
-    expect(denied.status).toBe(403);
+    expect(denied.status).toBe(503);
     expect(denied.headers.get("x-bb-pool-error")).toBe("VPN_REQUIRED");
     expect(outbound).not.toHaveBeenCalled();
     const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
@@ -7419,7 +7419,7 @@ describe("network policy boundaries", () => {
     const fixture = await createFixture({ upstreamUrl: "https://upstream.example", options: { fetch: outbound, vpnPayload: async (timestamp) => vpnProof(timestamp, ++checks === 1 ? "connected" : "disconnected")} });
     checks = 0;
     const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/messages", { headers: authHeaders(fixture.key), body: "{}" });
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(503);
     expect(response.headers.get("x-bb-pool-error")).toBe("VPN_REQUIRED");
     expect(outbound).not.toHaveBeenCalled();
     const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
@@ -7447,7 +7447,7 @@ describe('VPN Guard linked network policy',()=>{
     const outbound=vi.fn(async()=>Response.json({}));
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound,fetchIpv4:undefined}});
     const denied=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
-    expect(denied.status).toBe(403);
+    expect(denied.status).toBe(503);
     expect(denied.headers.get('x-bb-pool-error')).toBe('VPN_REQUIRED');
     expect(outbound).not.toHaveBeenCalled();
   });
@@ -7504,7 +7504,7 @@ describe('VPN Guard linked network policy',()=>{
     fixture.host.harness.sdk.stub('plugins.callRpc',call);
     await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true,vpnOnlyProviders:[]});
     const request=()=>fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
-    const denied=await request();expect(denied.status).toBe(403);expect(denied.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_BLOCKED');
+    const denied=await request();expect(denied.status).toBe(503);expect(denied.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_BLOCKED');
     await fixture.host.harness.behavior.callRpc('account.refreshUsage',{accountId:fixture.account.id});
     await expect(fixture.host.harness.behavior.callRpc('login.start',null)).rejects.toThrow('VPN_GUARD_BLOCKED');
     expect(outbound).not.toHaveBeenCalled();
@@ -7515,7 +7515,7 @@ describe('VPN Guard linked network policy',()=>{
     fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));fixture.host.harness.sdk.stub('plugins.callRpc',async()=>{throw Error('Guard offline');});
     await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
     const denied=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
-    expect(denied.status).toBe(403);expect(denied.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_UNAVAILABLE');expect(outbound).not.toHaveBeenCalled();
+    expect(denied.status).toBe(503);expect(denied.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_UNAVAILABLE');expect(outbound).not.toHaveBeenCalled();
     const accounts=z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc('account.list',null));expect(accounts[0]?.error).toBeNull();
   });
 });
@@ -7564,5 +7564,5 @@ it.each(['devin','opencode-go'] as const)('refuses linked %s before any provider
  await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});outbound.mockClear();
  const route=provider==='devin'?'/devin/exa.seat_management_pb.SeatManagementService/GetUserStatus':'/opencode-go/v1/chat/completions';
  const response=await fixture.host.harness.behavior.fetchHttp('POST',route,{headers:authHeaders(fixture.key),body:'{}'});
- expect(response.status).toBe(403);expect(response.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_BLOCKED');expect(outbound).not.toHaveBeenCalled();
+ expect(response.status).toBe(503);expect(response.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_BLOCKED');expect(outbound).not.toHaveBeenCalled();
 });
