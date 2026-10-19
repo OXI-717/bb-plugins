@@ -68,3 +68,13 @@ it('does not spend continuation attempts while owned native restoration is faili
   failEnable=false;await tick();expect(continued).toBe(1);
  }finally{await reloaded.harness.lifecycle.dispose();vi.useRealTimers();}
 });
+
+it('loads the original stop proof when more than one hundred other proofs exist',async()=>{
+ const t=await setup();t.connect();
+ const original=await t.fake.bb.storage.kv.get('thread-stop-proofs-v1') as {threadId:string}[];
+ await t.fake.bb.storage.kv.set('thread-stop-proofs-v1',[...original,...Array.from({length:100},(_,n)=>({...original[0],threadId:`other-${n}`}))]);
+ const reloaded=await t.fake.harness.lifecycle.reload(plugin);let sent=0;
+ reloaded.harness.sdk.stub('threads.send',async()=>{sent++;return {ok:true,delivery:'sent'} as never;});
+ const service=reloaded.harness.behavior.runService('reconcile');
+ try{await vi.waitFor(()=>expect(sent).toBe(1));}finally{service.controller.abort();await service.done;await reloaded.harness.lifecycle.dispose();}
+});

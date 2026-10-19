@@ -243,7 +243,11 @@ export default async function plugin(bb: BbPluginApi) {
         // Only durable intent is recorded in the enforcement lane. Optional
         // event/ownership inspection happens later in the recovery workers.
         const write=resumeClaimTail.then(async()=>{
-          const next=[...stopProofs.filter(value=>value.threadId!==running.id),{threadId:running.id,at:stoppedAt,calledAt,providerId:thread.providerId,environmentId:thread.environmentId}].slice(-100);
+          const unresolved=new Set(autoRecovery.snapshot().filter(value=>value.state==='pending'||value.state==='uncertain').map(value=>JSON.stringify([value.threadId,value.at])));
+          const previous=stopProofs.filter(value=>value.threadId!==running.id);
+          const retained=previous.filter(value=>unresolved.has(JSON.stringify([value.threadId,value.at])));
+          const recent=previous.filter(value=>!unresolved.has(JSON.stringify([value.threadId,value.at]))).slice(-99);
+          const next=[...recent,...retained,{threadId:running.id,at:stoppedAt,calledAt,providerId:thread.providerId,environmentId:thread.environmentId}];
           await bb.storage.kv.set('thread-stop-proofs-v1',next);stopProofs=next;
         });
         resumeClaimTail=write.then(()=>undefined,()=>undefined);await write;
@@ -423,7 +427,7 @@ export default async function plugin(bb: BbPluginApi) {
   let resumeClaims=savedResumeClaims.success?savedResumeClaims.data:null;
   const resumeFlights=new Set<string>();
   let resumeClaimTail:Promise<void>=Promise.resolve();
-  const savedProofs=z.array(z.object({threadId:z.string().min(1).max(160),at:z.number().int().nonnegative().max(8640000000000000),calledAt:z.number().int().nonnegative().max(8640000000000000),providerId:z.string().min(1).max(160),environmentId:z.string().min(1).max(160).nullable(),requestId:z.string().min(1).max(160).optional(),turnId:z.string().min(1).max(160).optional(),updatedAt:z.number().int().nonnegative().max(8640000000000000).optional()}).strict()).max(100).safeParse((await bb.storage.kv.get('thread-stop-proofs-v1'))??[]);
+  const savedProofs=z.array(z.object({threadId:z.string().min(1).max(160),at:z.number().int().nonnegative().max(8640000000000000),calledAt:z.number().int().nonnegative().max(8640000000000000),providerId:z.string().min(1).max(160),environmentId:z.string().min(1).max(160).nullable(),requestId:z.string().min(1).max(160).optional(),turnId:z.string().min(1).max(160).optional(),updatedAt:z.number().int().nonnegative().max(8640000000000000).optional()}).strict()).safeParse((await bb.storage.kv.get('thread-stop-proofs-v1'))??[]);
   let stopProofs=savedProofs.success?savedProofs.data:[];
   async function confirmStopProof(threadId:string,at:number){
     const attempt=stopProofs.find(value=>value.threadId===threadId&&value.at===at);

@@ -38,3 +38,9 @@ it('does not starve a recovered thread behind ineligible hosts',async()=>{
  for(let n=0;n<6;n++)await recovery.remember(`thread-${n}`,1000,n===5?'healthy-host':'offline-host');
  await recovery.run();expect(t.resume).toHaveBeenCalledExactlyOnceWith('thread-5',1000);
 });
+
+it('retains every unresolved stop beyond the recent-history limit, also after reload',async()=>{
+ const t=await setup();for(let n=0;n<105;n++)await t.recovery.remember(`thread-${n}`,1000+n,'host-one');
+ t.setAllowed(true);const restored=await automaticStopRecovery(t.options());await restored.run();
+ expect(t.resume).toHaveBeenCalledTimes(105);expect(t.resume).toHaveBeenCalledWith('thread-0',1000);
+});
