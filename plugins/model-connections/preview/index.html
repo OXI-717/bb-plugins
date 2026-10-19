@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  /><title>Model connections — synthetic preview</title
+  ><style>
+    :root {
+      --background: #fafafa;
+      --foreground: #24252a;
+      --muted: #f0f0f2;
+      --muted-foreground: #686970;
+      --border: #dedfe3;
+      --primary: #5257cc;
+      --primary-foreground: white;
+      --destructive: #b52c39;
+      --ring: #666ad8;
+    }
+    html.dark {
+      --background: #1e1f23;
+      --foreground: #ececf0;
+      --muted: #292a30;
+      --muted-foreground: #a1a2ac;
+      --border: #3b3c44;
+      --primary: #9599f5;
+      --primary-foreground: #171824;
+      --destructive: #ff96a2;
+      --ring: #9599f5;
+    }
+    html,
+    body {
+      height: 100%;
+    }
+    #root {
+      height: calc(100% - 44px);
+    }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--foreground);
+      font:
+        14px system-ui,
+        sans-serif;
+    }
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+    select {
+      max-width: 100%;
+      padding: 0.3rem;
+      background: var(--background);
+      color: var(--foreground);
+      border: 1px solid var(--border);
+      border-radius: 0.3rem;
+    }
+    #preview-note {
+      font-size: 11px;
+      color: var(--muted-foreground);
+      padding: 0.5rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }</style
+  ><link rel="stylesheet" href="main.css" />
+  <div id="preview-note">
+    Preview · синтетические подключения · без сетевых запросов к провайдерам
+  </div>
+  <div id="root"></div>
+  <script type="module" src="main.js"></script>
+</html>

@@ -71,6 +71,10 @@ export const accountPoolRpcContract = defineRpcContract({
     input: z.object({ accountId: z.string().uuid(), policy: accountPolicySchema }).strict(),
     output: z.object({ account: accountSchema.nullable() }).strict(),
   },
+  "account.setEmail": {
+    input:z.object({accountId:z.string().uuid(),email:z.string().trim().email().max(254).nullable(),expectedEmail:z.string().email().nullable().optional()}).strict(),
+    output:z.object({account:accountSchema.nullable()}).strict(),
+  },
   "account.setPriority": {
     input: accountPriorityInputSchema,
     output: z.object({ account: accountSchema.nullable() }).strict(),
@@ -177,6 +181,7 @@ export function createRpcHandlers(
     "account.setPolicy": async ({ accountId, policy }) => ({
       account: await operations.setPolicy(accountId, policy),
     }),
+    "account.setEmail":async({accountId,email,expectedEmail})=>({account:await operations.setEmail(accountId,email,expectedEmail)}),
     "account.setPriority": async ({ accountId, priority }) => ({
       account: await operations.setPriority(accountId, priority),
     }),

@@ -266,13 +266,17 @@ export class AccountPoolHub {
       );
     try { await this.assertNetworkAllowed(provider); }
     catch (error) {
-      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 403, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
+      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 503, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
       throw error;
     }
     const body = new Uint8Array(await request.arrayBuffer());
     const refusal = adapter.guardRequest?.(request, body);
     if (refusal !== null && refusal !== undefined) return refusal;
-    return this.forward(request, body, adapter, context.hostId, context.projectId);
+    return this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null);
+  }
+
+  threadObservation(provider:PoolProvider,hostId:string,threadId:string,projectId:string|null):AccountBinding|null {
+    return this.options.affinity.observation(JSON.stringify(['thread',provider,hostId,projectId,threadId]));
   }
 
   sessionObservation(provider: PoolProvider, hostId: string, sessionId: string, projectId: string | null = null): AccountBinding | null {
@@ -508,6 +512,7 @@ export class AccountPoolHub {
     adapter: ProviderAdapter,
     hostId: string,
     projectId: string | null,
+    threadId: string | null = null,
   ): Promise<Response> {
     const signal = AbortSignal.any([request.signal, this.stopped.signal]);
     const attempted = new Set<string>();
@@ -775,6 +780,7 @@ export class AccountPoolHub {
             break;
           }
           if (response.ok) {
+            if(threadId!==null)this.options.affinity.recordObservation(JSON.stringify(['thread',adapter.provider,hostId,projectId,threadId]),selected.account.id,this.options.now());
             selected.accept();
             this.options.quotas.recordSuccessfulRequest(selected.account.id);
           }
@@ -790,7 +796,7 @@ export class AccountPoolHub {
             failure.headers,
           );
     } catch (error) {
-      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 403, error.message, { "x-bb-pool-error": error.code, "retry-after": "10" });
+      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 503, error.message, { "x-bb-pool-error": error.code, "retry-after": "10" });
       if (!signal.aborted) throw error;
       return this.errorResponse(adapter, request,
         request.signal.aborted ? 499 : 503,

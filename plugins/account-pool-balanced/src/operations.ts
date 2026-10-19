@@ -228,6 +228,10 @@ export class PoolOperations {
     return account;
   }
 
+  async setEmail(id:string,email:string|null,expectedEmail?:string|null):Promise<Account|null>{
+    const account=await this.accounts.setEmail(id,email,expectedEmail);this.onAccountsChanged();return account;
+  }
+
   async setPriority(id: string, priority: number): Promise<Account | null> {
     const account = await this.accounts.setPriority(id, priority);
     if (account !== null) this.onAccountsChanged();

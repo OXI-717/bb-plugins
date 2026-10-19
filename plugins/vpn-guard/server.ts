@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { configurationSchema, hostContract, rpcContract, stopObservationSchema, stopReasonSchema } from './contract.js';
 import { abortableDelay } from './delay.js';
 import {eventJournal,type GuardEvent} from './event-journal.js';
+import {automaticStopRecovery} from './auto-recovery.js';
 import { protectedProvider, PROTECTED_PROVIDERS, type VpnState } from './state.js';
 
 const CONFIG = 'configuration-v2';
@@ -216,6 +217,16 @@ export default async function plugin(bb: BbPluginApi) {
       recheckDirty=true;
     }
   }
+  async function turnIdentity(threadId:string){
+    try{
+      const rows=await bb.sdk.threads.events.list({threadId,order:'desc',limit:'8',types:['client/turn/requested','turn/started','turn/completed']});
+      const request=rows.find(row=>row.type==='client/turn/requested');
+      const turn=rows.find(row=>row.type==='turn/started');
+      const completed=rows.find(row=>row.type==='turn/completed');
+      return request?.type==='client/turn/requested'&&turn?.scope.kind==='turn'?
+        {requestId:request.data.requestId,turnId:turn.scope.turnId,startedSeq:turn.seq,requestSeq:request.seq,completed}:null;
+    }catch{return null;}
+  }
   async function stopProtected(states:Map<string,VpnState>,snapshot:Awaited<ReturnType<typeof status>>):Promise<Error[]> {
     const failures:Error[]=[];
     let runningThreads:Awaited<ReturnType<typeof bb.sdk.threads.listRunning>>;
@@ -226,15 +237,28 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         const thread=await bb.sdk.threads.get({threadId:running.id});
         if(!protectedProvider(thread.providerId)) continue;
+        const calledAt=Date.now();
         await bb.sdk.threads.stop({threadId:running.id});
+        const stoppedAt=Date.now();
+        // Only durable intent is recorded in the enforcement lane. Optional
+        // event/ownership inspection happens later in the recovery workers.
+        const write=resumeClaimTail.then(async()=>{
+          const unresolved=new Set(autoRecovery.snapshot().filter(value=>value.state==='pending'||value.state==='uncertain').map(value=>JSON.stringify([value.threadId,value.at])));
+          const previous=stopProofs.filter(value=>value.threadId!==running.id);
+          const retained=previous.filter(value=>unresolved.has(JSON.stringify([value.threadId,value.at])));
+          const recent=previous.filter(value=>!unresolved.has(JSON.stringify([value.threadId,value.at]))).slice(-99);
+          const next=[...recent,...retained,{threadId:running.id,at:stoppedAt,calledAt,providerId:thread.providerId,environmentId:thread.environmentId}];
+          await bb.storage.kv.set('thread-stop-proofs-v1',next);stopProofs=next;
+        });
+        resumeClaimTail=write.then(()=>undefined,()=>undefined);await write;
         stopped.add(running.id);
         if(stopped.size>100) stopped=new Set([...stopped].slice(-100));
         await bb.storage.kv.set(STOPPED,[...stopped]);
         const observation=snapshot.hosts.find(h=>h.id===running.hostId);
         const reason=config.manualBlock?'manual_block':!observation?.available?'host_catalog_unavailable':!observation.evidence?'host_rpc_failed':observation.evidence.reason;
         const parsedReason=stopReasonSchema.safeParse(reason);
-        const stopRecord=stopObservationSchema.safeParse({threadId:running.id,hostId:running.hostId,at:Date.now(),reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
-        if(stopRecord.success){stopHistory=[...stopHistory,stopRecord.data].slice(-100);await bb.storage.kv.set(STOP_HISTORY,stopHistory);}else bb.log.warn('VPN Guard stop observation rejected');
+        const stopRecord=stopObservationSchema.safeParse({threadId:running.id,hostId:running.hostId,at:stoppedAt,reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
+        if(stopRecord.success){stopHistory=[...stopHistory,stopRecord.data].slice(-100);await bb.storage.kv.set(STOP_HISTORY,stopHistory);await autoRecovery.remember(running.id,stopRecord.data.at,running.hostId);}else bb.log.warn('VPN Guard stop observation rejected');
         event({kind:'thread_stopped',hostId:running.hostId,threadId:running.id,reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
       } catch(error) {failures.push(new Error(`thread ${running.id}: ${String(error)}`));}
     }
@@ -398,45 +422,110 @@ export default async function plugin(bb: BbPluginApi) {
       return state==='connected'?decision(true,'connected'):decision(false,'vpn_unavailable');
     }
   }
-  const resumeClaimSchema=z.array(z.object({threadId:z.string(),stoppedAt:z.number().int().nonnegative()})).max(100);
+  const resumeClaimSchema=z.array(z.object({threadId:z.string().min(1).max(160),stoppedAt:z.number().int().nonnegative()}));
   const savedResumeClaims=resumeClaimSchema.safeParse((await bb.storage.kv.get('thread-resume-claims-v1'))??[]);
   let resumeClaims=savedResumeClaims.success?savedResumeClaims.data:null;
   const resumeFlights=new Set<string>();
   let resumeClaimTail:Promise<void>=Promise.resolve();
-  async function resumeThread(threadId:string,stoppedAt:number) {
+  const savedProofs=z.array(z.object({threadId:z.string().min(1).max(160),at:z.number().int().nonnegative().max(8640000000000000),calledAt:z.number().int().nonnegative().max(8640000000000000),providerId:z.string().min(1).max(160),environmentId:z.string().min(1).max(160).nullable(),requestId:z.string().min(1).max(160).optional(),turnId:z.string().min(1).max(160).optional(),updatedAt:z.number().int().nonnegative().max(8640000000000000).optional()}).strict()).safeParse((await bb.storage.kv.get('thread-stop-proofs-v1'))??[]);
+  let stopProofs=savedProofs.success?savedProofs.data:[];
+  async function confirmStopProof(threadId:string,at:number){
+    const attempt=stopProofs.find(value=>value.threadId===threadId&&value.at===at);
+    if(!attempt)throw Error('The stopped turn cannot be verified. Open the thread to continue.');
+    if(attempt.requestId&&attempt.turnId&&attempt.updatedAt!==undefined)return attempt;
+    const identity=await turnIdentity(threadId);
+    const settled=await bb.sdk.threads.get({threadId});
+    const ended=identity?.completed;
+    if(!identity||identity.requestSeq>=identity.startedSeq||ended?.type!=='turn/completed'||ended.data.status!=='interrupted'||
+       ended.scope.kind!=='turn'||ended.scope.turnId!==identity.turnId||ended.seq<=identity.startedSeq||ended.createdAt<attempt.calledAt||ended.createdAt>attempt.at||
+       settled.status!=='idle'||settled.updatedAt>attempt.at||settled.providerId!==attempt.providerId||settled.environmentId!==attempt.environmentId)throw Error('The stopped turn changed or its interruption cannot be verified.');
+    const confirmed={...attempt,requestId:identity.requestId,turnId:identity.turnId,updatedAt:settled.updatedAt};
+    const write=resumeClaimTail.then(async()=>{
+      const current=stopProofs.find(value=>value.threadId===threadId);
+      if(disposed||current?.at!==at)throw Error('The stopped turn changed.');
+      const next=stopProofs.map(value=>value.threadId===threadId&&value.at===at?confirmed:value);
+      await bb.storage.kv.set('thread-stop-proofs-v1',next);stopProofs=next;
+    });
+    resumeClaimTail=write.then(()=>undefined,()=>undefined);await write;return confirmed;
+  }
+  const autoRecovery=await automaticStopRecovery({
+    load:()=>bb.storage.kv.get('automatic-stop-recovery-v1'),
+    save:value=>bb.storage.kv.set('automatic-stop-recovery-v1',value),
+    now:Date.now,
+    claimed:(threadId,at)=>resumeClaims===null||resumeClaims.some(value=>value.threadId===threadId&&value.stoppedAt===at),
+    allowed:async(hostId,threadId,at)=>{
+      const proof=stopProofs.find(value=>value.threadId===threadId&&value.at===at);
+      return !!proof&&!disposed&&!config.manualBlock&&config.hostIds.includes(hostId)&&
+        !owned.has(nativePluginFor(proof.providerId))&&!pending.has(nativePluginFor(proof.providerId))&&await vpn(hostId)==='connected';
+    },
+    resume:async(threadId,at)=>{await resumeThread(threadId,at,true);},
+    warn:()=>bb.log.warn('Automatic continuation could not be confirmed. Open the stopped thread to check.'),
+  });
+  bb.onDispose(()=>autoRecovery.close());
+  async function resumeThread(threadId:string,stoppedAt:number,automatic=false) {
     if(resumeFlights.has(threadId))throw Error('Resume is already pending. Open the thread to check.');
     resumeFlights.add(threadId);
+    let proof=stopProofs.find(value=>value.threadId===threadId&&value.at===stoppedAt);
+    const assertRequest=async()=>{
+      if(!proof)return;
+      const identity=await turnIdentity(threadId);
+      if(!identity||identity.requestId!==proof.requestId||identity.turnId!==proof.turnId)throw Error('The thread request changed after this stop.');
+    };
     const version=policyVersion;
     const assertCurrent=()=>{
       if(disposed||version!==policyVersion||config.manualBlock)throw Error('Protection policy changed; open the thread to continue.');
-      const record=stopHistory.slice().reverse().find(stop=>stop.threadId===threadId);
+      // UI history can expire independently of unresolved ownership. A new
+      // proof supersedes an older stop even before its display row is written.
+      const retained=autoRecovery.snapshot().slice().reverse().find(stop=>stop.threadId===threadId);
+      if(proof&&stopProofs.find(value=>value.threadId===threadId)?.at!==stoppedAt)throw Error('This Guard stop was superseded.');
+      const record=proof?retained:stopHistory.slice().reverse().find(stop=>stop.threadId===threadId);
       if(!record||record.at!==stoppedAt||!config.hostIds.includes(record.hostId))throw Error('This Guard stop is no longer current. Open the thread to continue.');
       return record;
     };
     const assertThread=(thread:Awaited<ReturnType<typeof bb.sdk.threads.get>>)=>{
-      if(thread.status!=='idle'||thread.archivedAt!=null||thread.deletedAt!=null||thread.queuedMessageCount||thread.updatedAt>stoppedAt)throw Error('The thread has changed since this stop. Open it to continue.');
+      if(thread.status!=='idle'||thread.archivedAt!=null||thread.deletedAt!=null||thread.queuedMessageCount||thread.updatedAt>(proof?.updatedAt??stoppedAt))throw Error('The thread has changed since this stop. Open it to continue.');
+      if(proof&&(thread.providerId!==proof.providerId||thread.environmentId!==proof.environmentId))throw Error('The stopped provider or environment changed.');
       if(owned.has(nativePluginFor(thread.providerId))||pending.has(nativePluginFor(thread.providerId)))throw Error('Restore native plugins before resuming.');
     };
+    let claimAcquired=false;
+    let dispatchStarted=false;
     try {
+      if(proof)proof=await confirmStopProof(threadId,stoppedAt);
+      if(automatic&&!proof)throw Error('The stopped turn cannot be verified. Open the thread to continue.');
       const record=assertCurrent();
-      const initial=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(initial);
+      const initial=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(initial);await assertRequest();assertCurrent();
       if(await vpn(record.hostId)!=='connected')throw Error('Verified VPN is required before resuming.');
       assertCurrent();
       // Only claim writes serialize with each other; slow reads/sends never own the protection lane.
       const claim=resumeClaimTail.then(async()=>{
         assertCurrent();
         if(!resumeClaims||resumeClaims.some(value=>value.threadId===threadId&&value.stoppedAt===stoppedAt))throw Error('Resume was already requested or is uncertain. Open the thread to check.');
-        const next=[...resumeClaims,{threadId,stoppedAt}].slice(-100);
+        const next=[...resumeClaims.filter(value=>value.threadId!==threadId),{threadId,stoppedAt}];
         await bb.storage.kv.set('thread-resume-claims-v1',next);resumeClaims=next;
       });
-      resumeClaimTail=claim.then(()=>undefined,()=>undefined);await claim;assertCurrent();
+      resumeClaimTail=claim.then(()=>undefined,()=>undefined);await claim;claimAcquired=true;assertCurrent();
       if(await vpn(record.hostId)!=='connected')throw Error('Verified VPN is required before resuming.');
       assertCurrent();
+      await assertRequest();assertCurrent();
       const current=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(current);
       if(current.providerId!==initial.providerId)throw Error('The thread provider changed. Open it to continue.');
       // BB has no atomic compare-and-send. Normal admission still checks current protection.
+      dispatchStarted=true;
       await bb.sdk.threads.send({threadId,mode:'start',input:[{type:'text',mentions:[],text:'Continue the interrupted work. Check the current state before repeating any actions.'}]});
       return {accepted:true as const};
+    } catch(error) {
+      // If no dispatch was even attempted, releasing this claim is safe. A
+      // failed/unknown send keeps ownership and must never be blindly replayed.
+      if(claimAcquired&&!dispatchStarted&&!disposed) {
+        const release=resumeClaimTail.then(async()=>{
+          if(!resumeClaims)return;
+          const next=resumeClaims.filter(value=>value.threadId!==threadId||value.stoppedAt!==stoppedAt);
+          await bb.storage.kv.set('thread-resume-claims-v1',next);resumeClaims=next;
+        });
+        resumeClaimTail=release.then(()=>undefined,()=>undefined);
+        await release.catch(()=>undefined);
+      }
+      throw error;
     } finally {resumeFlights.delete(threadId);}
   }
   bb.rpc.register(rpcContract,{
@@ -510,6 +599,8 @@ export default async function plugin(bb: BbPluginApi) {
     async start(signal) {
       while(!signal.aborted) {
         try {await serial(reconcile);} catch(error) {bb.log.warn(`VPN Guard reconcile failed: ${String(error)}`);}
+        // Slow continuation RPCs must never own the enforcement lane.
+        void autoRecovery.run();
         await abortableDelay(signal,5000);
       }
     },

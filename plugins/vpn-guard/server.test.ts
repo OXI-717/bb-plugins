@@ -11,6 +11,7 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;fai
   const available=new Set(['host-a','host-b']);
   const enabled=new Map([['provider-codex',true],['provider-claude-code',false],['provider-acp',true]]);
   const stopped:string[]=[];
+  const stoppedTimes=new Map<string,number>();
   const hostCalls:string[]=[];
   const mutations:string[]=[];
   let failEnable=false;
@@ -30,9 +31,14 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;fai
         enable:async({pluginId})=>{if(failEnable)throw Error('enable failed');enabled.set(pluginId,true);mutations.push(`enable:${pluginId}`);enableAction?.();return {} as never;},
       },
       threads:{
+        events:{list:async({threadId})=>[
+          ...(stoppedTimes.has(threadId)?[{threadId,seq:3,createdAt:stoppedTimes.get(threadId),type:'turn/completed',scope:{kind:'turn',turnId:`turn-${threadId}`},data:{status:'interrupted'}}]:[]),
+          {threadId,seq:2,createdAt:0,type:'turn/started',scope:{kind:'turn',turnId:`turn-${threadId}`},data:{}},
+          {threadId,seq:1,createdAt:0,type:'client/turn/requested',scope:{kind:'thread'},data:{requestId:`request-${threadId}`}},
+        ] as never},
         listRunning:async()=>{if(failListRunning) throw Error('thread list unavailable');return [{id:'protected',hostId:'host-a'},{id:'chinese',hostId:'host-a'},{id:'healthy',hostId:'host-b'}];},
         get:async({threadId})=>makeThreadResponse({id:threadId,providerId:threadId==='chinese'?'kimi':'codex'}),
-        stop:async({threadId})=>{stopped.push(threadId);return {} as never;},
+        stop:async({threadId})=>{stopped.push(threadId);stoppedTimes.set(threadId,Date.now());return {} as never;},
       },
     },
     experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(options.failHostRpc)throw Error('sensitive-synthetic-payload');if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}return verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');},
@@ -624,4 +630,10 @@ it('keeps manual Block available while a Continue send is stalled',async()=>{
  let blocked=false;const block=fake.harness.behavior.callRpc('setManualBlock',{blocked:true}).then(()=>{blocked=true;});
  try{await new Promise(resolve=>setTimeout(resolve,30));expect(blocked).toBe(true);}
  finally{release();await Promise.all([resume,block]);await fake.harness.lifecycle.dispose();}
+});
+it('does not delay an enforcement stop behind optional recovery history reads',async()=>{
+ const {fake,stopped}=await setup();let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});
+ fake.harness.sdk.stub('threads.events.list',async()=>{await gate;return [];});
+ try{await select(fake,['host-a']);await mode(fake,'enforce');expect(stopped).toContain('protected');}
+ finally{release();await fake.harness.lifecycle.dispose();}
 });

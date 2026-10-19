@@ -1,0 +1,174 @@
+import type { BbPluginApi, PluginTurnFailedEvent } from '@get-bb/plugin-sdk';
+import { z } from 'zod';
+
+const KEY='network-retry-claims-v1';
+const claimsSchema=z.array(z.object({threadId:z.string().min(1).max(160),requestId:z.string().min(1).max(160),providerId:z.string().min(1).max(160).optional(),queuedMessageId:z.string().min(1).max(160).optional(),originalRequestId:z.string().min(1).max(160).optional(),attempt:z.number().int().min(1).max(3).optional()})).max(256);
+const DELAYS=[30_000,120_000,300_000] as const;
+export function retryableNetworkFailure(failure:PluginTurnFailedEvent):boolean {
+  if(!Number.isInteger(failure.attemptNumber)||failure.attemptNumber<1||failure.attemptNumber>3)return false;
+  const error=failure.errorInfo;
+  if(!error)return false;
+  if(error.category==='connection-failed'||error.category==='stream-disconnected')return true;
+  // Stable local codes only; never infer retries from arbitrary exception text.
+  return ['POOL_UPSTREAM_UNAVAILABLE','VPN_REQUIRED','VPN_GUARD_BLOCKED','VPN_GUARD_UNAVAILABLE'].includes(error.providerCode??'') && (error.httpStatusCode??0)>=500 &&
+    !['unauthorized','policy','billing','rate-limit','overloaded'].includes(error.category);
+}
+// ACP drops JSON-RPC error.data. Read only the latest provider error in the
+// exact failed request, never assistant output or an older failure.
+async function normalizedCursorFailure(bb:BbPluginApi,failure:PluginTurnFailedEvent):Promise<PluginTurnFailedEvent> {
+  if(failure.errorInfo&&(!['unknown','internal'].includes(failure.errorInfo.category)||failure.errorInfo.providerCode))return failure;
+  const rows=await bb.sdk.threads.events.list({threadId:failure.threadId,order:'desc',limit:'8',types:['provider/error','client/turn/requested']});
+  let message:string|undefined;
+  for(const row of rows){
+    if(row.threadId!==failure.threadId)return failure;
+    if(row.type==='client/turn/requested'){
+      if(row.data.requestId!==failure.requestId||!message)return failure;
+      const match=/^\[(POOL_UPSTREAM_UNAVAILABLE|VPN_REQUIRED|VPN_GUARD_BLOCKED|VPN_GUARD_UNAVAILABLE)\] Pooler connection temporarily unavailable\.$/.exec(message);
+      return match?{...failure,errorInfo:{category:'connection-failed',httpStatusCode:503,providerCode:match[1]!}}:failure;
+    }
+    if(row.type==='provider/error'&&message===undefined)message=row.data.message;
+  }
+  return failure;
+}
+export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:string,providerId:string)=>Promise<boolean>,now=Date.now,random=Math.random) {
+  const loaded=claimsSchema.safeParse((await bb.storage.kv.get(KEY))??[]);
+  let claims=loaded.success?loaded.data:null;
+  let disposed=false;
+  if(!claims)bb.log.warn('Pooler retry journal is malformed; automatic retries are paused.');
+  const flights=new Set<string>();
+  let claimTail:Promise<void>=Promise.resolve();
+  bb.onDispose(()=>{disposed=true;});
+  async function cancelIfSuperseded(threadId:string,status:string){
+    if(disposed||!claims)return;
+    if(status==='active'||status==='idle')return cancelQueued(threadId);
+    const rows=await bb.sdk.threads.events.list({threadId,order:'desc',limit:'1',types:['client/turn/requested']});
+    const current=rows.find(row=>row.type==='client/turn/requested');
+    if(!current)return;
+    return cancelQueued(threadId,current.data.requestId);
+  }
+  async function cancelQueued(threadId:string,currentRequestId?:string){
+    if(disposed||!claims)return;
+    const owned=claims.filter(claim=>claim.threadId===threadId&&claim.requestId!==currentRequestId&&(claim.queuedMessageId||claim.originalRequestId));
+    if(!owned.length)return;
+    const queue=await bb.sdk.threads.queue.list({threadId});
+    for(const claim of owned){
+      if(disposed)return;
+      const entry=queue.find(row=>row.id===claim.queuedMessageId||(claim.originalRequestId&&row.payload.kind==='retry'&&row.payload.retryOfTurnRequestId===claim.originalRequestId&&row.payload.reason===`Temporary connection failure. Retry ${claim.attempt}/3.`));
+      if(entry?.payload.kind==='retry')await bb.sdk.threads.queuedMessages.delete({threadId,queuedMessageId:entry.id});
+      if(entry?.payload.kind==='retry'||(!entry&&claim.queuedMessageId)){
+        // A confirmed queued row is gone/cancelled. An uncertain scheduling
+        // call without a returned row ID must retain ownership of any late row.
+        const settle=claimTail.then(async()=>{
+          if(disposed||!claims)return;
+          const next=claims.filter(value=>value.threadId!==claim.threadId||value.requestId!==claim.requestId);
+          await bb.storage.kv.set(KEY,next);claims=next;
+        });
+        claimTail=settle.then(()=>undefined,()=>undefined);await settle;
+      }
+    }
+  }
+  // Native retries are checked again at queue drain: an RPC can lose its reply
+  // before a late row appears, after event/startup cancellation already ran.
+  const dispatchReads=new Map<string,Promise<{requestId:string|null;eligible:boolean}>>();
+  bb.experimental_hooks.on('message.dispatch',async context=>{
+    const entry=context.queuedMessage;
+    if(!entry||entry.payload.kind!=='retry')return {action:'proceed'};
+    const payload=entry.payload;
+    if(!claims)return /^Temporary connection failure\. Retry [123]\/3\.$/.test(payload.reason)?{action:'wait',reason:'Pooler retry journal unavailable',sendAt:now()+10_000}:{action:'proceed'};
+    const claim=claims.find(value=>value.threadId===context.thread.id&&(value.queuedMessageId===entry.id||
+      (value.originalRequestId===payload.retryOfTurnRequestId&&payload.reason===`Temporary connection failure. Retry ${value.attempt}/3.`)));
+    if(!claim)return {action:'proceed'};
+    if(claim.providerId!==context.requestedExecution.providerId)return {action:'reject',message:'Automatic retry cancelled because its provider changed or cannot be verified.'};
+    if(disposed)return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};
+    const readKey=JSON.stringify([context.thread.id,context.requestedExecution.providerId]);
+    let read=dispatchReads.get(readKey);
+    if(!read&&dispatchReads.size<4){
+      const controller=new AbortController();
+      const deadline=setTimeout(()=>controller.abort(),1_500);
+      read=(async()=>{
+        if(!await eligible(context.thread.id,context.requestedExecution.providerId))return {requestId:null,eligible:false};
+        const rows=await bb.sdk.threads.events.list({threadId:context.thread.id,order:'desc',limit:'1',types:['client/turn/requested'],signal:controller.signal});
+        const row=rows.find(value=>value.type==='client/turn/requested');
+        return {requestId:row?.type==='client/turn/requested'&&row.threadId===context.thread.id?row.data.requestId:null,eligible:true};
+      })();
+      dispatchReads.set(readKey,read);
+      const active=read;
+      void read.finally(()=>{clearTimeout(deadline);if(dispatchReads.get(readKey)===active)dispatchReads.delete(readKey);}).catch(()=>undefined);
+    }
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      const result=read?await Promise.race([read,new Promise<null>(resolve=>{timer=setTimeout(()=>resolve(null),1_500);})]):null;
+      if(disposed)return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};
+      if(result&&!result.eligible)return {action:'reject',message:'Automatic retry cancelled because the thread no longer uses an available pooled route.'};
+      const requestId=result?.requestId;
+      if(!requestId)return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};
+      return requestId===claim.requestId?{action:'proceed'}:{action:'reject',message:'Automatic retry cancelled because the thread has newer work.'};
+    }catch{return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};}
+    finally{if(timer)clearTimeout(timer);}
+  });
+  // An own retry is removed from the queue before it activates its thread.
+  // A still-queued owned row when something else starts (or stops) is stale.
+  for(const name of ['thread.active','thread.idle','thread.failed'] as const)bb.events.on(name,async({thread})=>{
+    try{await cancelIfSuperseded(thread.id,thread.status);}catch{if(!disposed)bb.log.warn('Pooler queued retry cancellation could not be confirmed.');}
+  });
+  bb.background.service('network-retry-recovery',{
+    async start(signal){
+      // A lost RPC reply can still be identified by its original chain and reason.
+      const ids=[...new Set((claims??[]).map(claim=>claim.threadId))];
+      let index=0;
+      await Promise.all(Array.from({length:Math.min(4,ids.length)},async()=>{
+        while(!disposed&&!signal.aborted&&index<ids.length){
+          const threadId=ids[index++]!;
+          try{
+            const thread=await bb.sdk.threads.get({threadId,signal});
+            await cancelIfSuperseded(threadId,thread.status);
+          }catch{if(!disposed&&!signal.aborted)bb.log.warn('Pooler retry recovery could not be confirmed.');}
+        }
+      }));
+    },
+  });
+  bb.events.on('turn.failed',async failure=>{
+    if(disposed||!claims||!Number.isInteger(failure.attemptNumber)||failure.attemptNumber<1||failure.attemptNumber>3||flights.has(failure.threadId))return;
+    flights.add(failure.threadId);
+    try {
+      const thread=await bb.sdk.threads.get({threadId:failure.threadId});
+      if(disposed||thread.status!=='error'||thread.archivedAt!=null||thread.deletedAt!=null||thread.queuedMessageCount)return;
+      if(!await eligible(thread.id,thread.providerId))return;
+      const classified=thread.providerId==='acp-oxi-cursor'?await normalizedCursorFailure(bb,failure):failure;
+      if(!retryableNetworkFailure(classified))return;
+      if((await bb.sdk.threads.queue.list({threadId:thread.id})).length)return;
+      const requests=await bb.sdk.threads.events.list({threadId:thread.id,order:'desc',limit:'1',types:['client/turn/requested']});
+      const currentRequest=requests.find(row=>row.type==='client/turn/requested');
+      if(!currentRequest||currentRequest.data.requestId!==failure.requestId)return;
+      const originalRequestId=currentRequest.data.retryOfRequestId??failure.requestId;
+      const claim=claimTail.then(async()=>{
+        if(disposed||!claims||claims.some(value=>value.threadId===thread.id&&value.requestId===failure.requestId))return false;
+        if(claims.length>=256){bb.log.warn('Pooler retry journal is full; new automatic retries are paused.');return false;}
+        const next=[...claims,{threadId:thread.id,requestId:failure.requestId,providerId:thread.providerId,originalRequestId,attempt:failure.attemptNumber}];
+        await bb.storage.kv.set(KEY,next);claims=next;return true;
+      });
+      claimTail=claim.then(()=>undefined,()=>undefined);
+      if(!await claim||disposed)return;
+      const delay=DELAYS[failure.attemptNumber-1]!;
+      // The core validates the exact failed request again, deduplicates the
+      // original retry chain and preserves inputAccepted/attemptNumber semantics.
+      const result=await bb.sdk.threads.retry({threadId:thread.id,turnRequestId:failure.requestId,
+        sendAt:now()+delay+Math.floor(Math.max(0,Math.min(1,random()))*delay*0.1),
+        reason:`Temporary connection failure. Retry ${failure.attemptNumber}/3.`});
+      if(result.delivery==='queued'&&result.queuedMessageId){
+        const record=claimTail.then(async()=>{
+          if(disposed||!claims)return;
+          const next=claims.map(value=>value.threadId===thread.id&&value.requestId===failure.requestId?{...value,queuedMessageId:result.queuedMessageId}:value);
+          await bb.storage.kv.set(KEY,next);claims=next;
+        });
+        claimTail=record.then(()=>undefined,()=>undefined);await record;
+        const current=await bb.sdk.threads.get({threadId:thread.id});
+        await cancelIfSuperseded(thread.id,current.status);
+      }
+    } catch {
+      // A timed-out RPC may already have queued the retry. Keep the durable
+      // claim instead of blindly sending again; no raw exception in logs.
+      if(!disposed)bb.log.warn('Pooler automatic network retry could not be confirmed; inspect the thread queue.');
+    } finally {flights.delete(failure.threadId);}
+  });
+}

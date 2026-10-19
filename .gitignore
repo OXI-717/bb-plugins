@@ -23,3 +23,6 @@ auth.json
 __pycache__/
 plugins/vpn-guard/preview/main.js
 plugins/vpn-guard/preview/main.css
+
+plugins/model-connections/preview/main.js
+plugins/model-connections/preview/main.css

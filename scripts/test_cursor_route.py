@@ -87,6 +87,82 @@ print("PROBE_OK")
             hub.server_close()
             thread.join()
 
+    def test_jsonl_failure_roundtrip_through_gateway(self):
+        class Hub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                self.send_response(503)
+                self.send_header('x-bb-pool-error', 'POOL_UPSTREAM_UNAVAILABLE')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+        hub = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Hub)
+        thread = threading.Thread(target=hub.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cli = Path(tmp) / 'cursor-agent'
+                cli.write_text('#!' + sys.executable + '\n' + '''import http.client,json,os,sys
+from urllib.parse import urlsplit
+request=json.loads(sys.stdin.readline())
+url=urlsplit(os.environ['CURSOR_API_ENDPOINT'])
+conn=http.client.HTTPConnection(url.hostname,url.port,timeout=5)
+conn.request('POST','/agent.v1.AgentService/Run',body=b'probe')
+response=conn.getresponse();response.read();conn.close()
+for text in ['Error: RetriableError: [unavailable] [POOL_', 'UPSTREAM_UNAVAILABLE] Synthetic failure']:
+ print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':request['params']['sessionId'],'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}}),flush=True)
+print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end_turn'}}),flush=True)
+''')
+                cli.chmod(0o755)
+                env=dict(os.environ, HOME=tmp, PATH=tmp+os.pathsep+os.environ['PATH'], CURSOR_API_ENDPOINT=f'http://127.0.0.1:{hub.server_port}/cursor', CURSOR_POOL_RPC_GATEWAY='1')
+                request={'jsonrpc':'2.0','id':7,'method':'session/prompt','params':{'sessionId':'synthetic'}}
+                try:
+                    result=subprocess.run([sys.executable,'-c',
+                        'import faulthandler,runpy,sys; faulthandler.dump_traceback_later(20); path=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(path,run_name="__main__")',
+                        str(WRAPPER),'acp'],input=json.dumps(request)+'\n',env=env,capture_output=True,text=True,timeout=60)
+                except subprocess.TimeoutExpired as error:
+                    self.fail('Synthetic ACP roundtrip stalled: '+str(error.stderr))
+                self.assertEqual(result.returncode,0,result.stderr)
+                messages=[json.loads(line) for line in result.stdout.splitlines()]
+                self.assertEqual(len(messages),3)
+                self.assertEqual(messages[-1],{'jsonrpc':'2.0','id':7,'error':{'code':-32603,'message':'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.'}})
+        finally:
+            hub.shutdown();hub.server_close();thread.join()
+
+
+
+class AcpFailureNormalizationTest(unittest.TestCase):
+    def test_local_model_failure_becomes_failed_prompt_not_successful_answer(self):
+        state=route.AcpPoolFailures()
+        state.client({"id":1,"method":"session/prompt","params":{"sessionId":"synthetic"}})
+        state.model_response('agent.v1.AgentService/Run','POOL_UPSTREAM_UNAVAILABLE')
+        state.child({'method':'session/update','params':{'sessionId':'synthetic','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'Error: RetriableError: [unavailable] [POOL_UPSTREAM_UNAVAILABLE] Synthetic failure'}}}})
+        result=state.child({"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}})
+        self.assertNotIn('result',result)
+        self.assertEqual(result['error']['code'],-32603)
+        self.assertTrue(result['error']['message'].startswith('[POOL_UPSTREAM_UNAVAILABLE]'))
+
+    def test_successful_retry_clears_old_failure_and_auxiliary_failures_are_ignored(self):
+        state=route.AcpPoolFailures();state.client({"id":1,"method":"session/prompt","params":{}})
+        state.model_response('agent.v1.AgentService/Run','POOL_UPSTREAM_UNAVAILABLE')
+        state.model_response('agent.v1.AgentService/Run',None)
+        original={"id":1,"result":{"stopReason":"end_turn"}}
+        self.assertEqual(state.child(original),original)
+        state.client({"id":2,"method":"session/prompt","params":{}})
+        state.model_response('aiserver.v1.DashboardService/GetCurrentPeriodUsage','POOL_UPSTREAM_UNAVAILABLE')
+        result={"id":2,"result":{"stopReason":"end_turn"}}
+        self.assertEqual(state.child(result),result)
+
+    def test_no_cross_session_guessing_or_arbitrary_error_propagation(self):
+        state=route.AcpPoolFailures()
+        for identifier in [1,2]:state.client({"id":identifier,"method":"session/prompt","params":{}})
+        state.model_response('agent.v1.AgentService/Run','POOL_UPSTREAM_UNAVAILABLE')
+        original={"id":1,"result":{"stopReason":"end_turn"}}
+        self.assertEqual(state.child(original),original)
+        state.model_response('agent.v1.AgentService/Run','private-secret')
+        original={"id":2,"result":{"stopReason":"end_turn"}}
+        self.assertEqual(state.child(original),original)
 
 if __name__ == "__main__":
     unittest.main()
