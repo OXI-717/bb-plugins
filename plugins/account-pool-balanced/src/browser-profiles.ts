@@ -63,10 +63,14 @@ export type VpnReader = (file: string) => Promise<VpnEvidence>;
 const defaultVpnReader: VpnReader = (file) => readVpnEvidence(file, Date.now());
 
 const defaultGeoFetcher: GeoFetcher = async (url) => {
+  // family 4: the verified VPN evidence covers the IPv4 route; do not let the
+  // geo probe itself leak through a non-VPN IPv6 path on dual-stack hosts.
   const res = await httpRequest(url, {
     method: "GET",
     headersTimeout: 4000,
     bodyTimeout: 4000,
+    // @ts-expect-error undici forwards connect options; family is runtime-valid
+    connect: { family: 4 },
   });
   if (res.statusCode !== 200) {
     await res.body.dump();
@@ -396,13 +400,18 @@ export async function openAccountBrowser(
   const url = options.url ?? PROVIDER_HOME[account.provider] ?? "about:blank";
   const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
   if (timezone !== null) env.TZ = timezone;
+  const wasRunning = running.length > 0;
   const child = (options.spawnImpl ?? spawn)(executable, [
     `--profile-directory=${entry.profileDirectory}`,
     "--no-first-run",
     "--no-default-browser-check",
+    // The verified VPN evidence covers IPv4 only; keep the browser off any
+    // non-VPN IPv6 route on dual-stack hosts (system-level IPv6 off is the
+    // full guarantee, this flag is the in-process constraint).
+    "--disable-ipv6",
     url,
   ], { detached: true, stdio: "ignore", env });
-  await waitForLaunch(child, options.settleMs ?? 800);
+  await waitForLaunch(child, options.settleMs ?? 800, wasRunning);
   if (timezone !== null && child.pid !== undefined) {
     await writeJsonAtomic(markerFile, { tz: timezone, pid: child.pid, at: Date.now() });
   }
@@ -470,10 +479,13 @@ export async function listBrowserProfiles(options: {
   return rows;
 }
 
-/** Fail fast when the browser process dies during the settle window. */
+/** Fail fast when a fresh browser dies during the settle window. A quick clean
+ * exit while an instance is already running is the normal process-singleton
+ * handoff (the existing window navigates; the new TZ was verified to match). */
 function waitForLaunch(
   child: ReturnType<typeof spawn>,
   settleMs: number,
+  expectHandoff: boolean,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -487,8 +499,10 @@ function waitForLaunch(
       else resolve();
     };
     const onError = (error: Error) => finish(error);
-    const onExit = (code: number | null) =>
+    const onExit = (code: number | null) => {
+      if (expectHandoff && code === 0) return finish();
       finish(new Error(`Browser exited during launch (code ${String(code)}).`));
+    };
     const timer = setTimeout(() => {
       child.unref();
       finish();

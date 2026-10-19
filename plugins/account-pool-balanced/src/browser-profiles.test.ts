@@ -228,13 +228,19 @@ describe("openAccountBrowser", () => {
       spawnImpl,
     });
     const second = fakeSpawn(4242);
+    const impl2 = (command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+      second.captured.push({ command, args, env: options.env });
+      const child = new FakeChild(4242);
+      queueMicrotask(() => child.emit("exit", 0)); // process-singleton handoff: clean fast exit
+      return child;
+    };
     const result = await openAccountBrowser({
       ...baseOptions(box),
       query: "b@example.test",
       readVpn: verifiedVpn,
       fetcher: geoFetcher,
       listRunning: () => Promise.resolve([4242]),
-      spawnImpl: second.spawnImpl,
+      spawnImpl: impl2 as never,
     });
     expect(result.profileDirectory).toBe("Profile 2");
     expect(second.captured).toHaveLength(1);
@@ -257,6 +263,7 @@ describe("openAccountBrowser", () => {
     const launch = captured[0]!;
     expect(launch.env?.TZ).toBe("Europe/Amsterdam");
     expect(launch.args.join(" ")).toContain("--profile-directory=Profile 1");
+    expect(launch.args).toContain("--disable-ipv6");
   });
   it("does not read VPN state for unguarded providers", async () => {
     const box = sandbox();
