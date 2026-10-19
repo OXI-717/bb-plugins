@@ -9,6 +9,10 @@ selected per repository; Linear and Jira can be connected independently. Task
 buttons open beside the conversation. Memory, autopilot and Obsidian tasks are
 optional and start disabled. See [BB Projects setup](plugins/oxi-projects/README.md).
 
+## Models and connections
+
+A separate chooser groups local authentication and supported Account Pooler routes, with provider icons, search and per-machine visibility preferences. It changes the current provider's model on the next turn or opens an explicit new-thread form for another provider. It does not patch BB's native menu or restart Account Pooler. See [Model Connections](plugins/model-connections/PLUGIN_OVERVIEW.md).
+
 ## VPN Guard
 
 A separate observation-first plugin holds protected BB dispatches and stops protected turns by host-local VPN state. See [VPN Guard operations](plugins/vpn-guard/docs/operations.md). It does not replace a network kill switch.

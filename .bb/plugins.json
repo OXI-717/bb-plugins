@@ -18,6 +18,10 @@
     {
       "name": "oxi-projects",
       "source": "./plugins/oxi-projects"
+    },
+    {
+      "name": "model-connections",
+      "source": "./plugins/model-connections"
     }
   ]
 }

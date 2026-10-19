@@ -1,0 +1,290 @@
+.mc-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1rem;
+  color: var(--foreground);
+  font: inherit;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.mc-root * {
+  box-sizing: border-box;
+}
+.mc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.mc-root h2 {
+  font-size: 1.1rem;
+  font-weight: 650;
+  margin: 0;
+}
+.mc-root p {
+  margin: 0.35rem 0;
+}
+.mc-header p,
+.mc-muted,
+.mc-empty {
+  font-size: 0.8rem;
+  color: var(--muted-foreground);
+}
+.mc-icon {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+}
+.mc-brand {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--muted);
+}
+.mc-group {
+  margin: 1.1rem 0;
+}
+.mc-root h3 {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.75rem 0 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.mc-group h3 span {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+.mc-row {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  margin-top: 0.35rem;
+  overflow: hidden;
+  background: var(--background);
+}
+.mc-row:hover {
+  background: var(--muted);
+}
+.mc-selected {
+  outline: 2px solid var(--primary);
+  outline-offset: 0;
+}
+.mc-connection {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+  flex: 1;
+  padding: 0.7rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mc-row-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.mc-row-copy strong {
+  font-size: 0.85rem;
+  font-weight: 550;
+}
+.mc-row-copy small {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+.mc-check {
+  width: 1rem;
+  height: 1rem;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+.mc-visibility {
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  padding: 0.65rem;
+  cursor: pointer;
+}
+.mc-connection:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.mc-search,
+.mc-host select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--background);
+  color: inherit;
+  padding: 0.6rem 0.7rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+.mc-host {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.8rem;
+}
+.mc-host select {
+  flex: 1;
+  min-width: 0;
+}
+.mc-button,
+.mc-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 2rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.4rem 0.65rem;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  background: var(--background);
+  color: inherit;
+}
+.mc-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: transparent;
+}
+.mc-root button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.mc-root button:focus-visible,
+.mc-root input:focus-visible,
+.mc-root summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.mc-root .mc-refresh {
+  flex-shrink: 0;
+  padding: 0.45rem;
+}
+.mc-empty {
+  padding: 0.65rem 0;
+}
+.mc-unavailable {
+  border-top: 1px solid var(--border);
+  padding-top: 0.8rem;
+  font-size: 0.8rem;
+  color: var(--muted-foreground);
+}
+.mc-unavailable summary {
+  cursor: pointer;
+  padding: 0.3rem 0;
+}
+.mc-choice {
+  margin-top: 1rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+.mc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
+}
+.mc-error {
+  color: var(--destructive);
+  font-size: 0.8rem;
+}
+.mc-notice {
+  color: var(--foreground);
+  font-size: 0.8rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+}
+.mc-create h2 {
+  margin: 1rem 0;
+}
+.mc-header-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 28px;
+  max-width: 100%;
+  padding: 0 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  color: var(--foreground);
+  background: transparent;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+@media (max-width: 380px) {
+  .mc-root {
+    padding: 0.7rem;
+  }
+  .mc-actions {
+    flex-direction: column;
+  }
+  .mc-actions button {
+    width: 100%;
+  }
+  .mc-header-button span {
+    display: none;
+  }
+}
+
+.mc-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.15rem;
+}
+.mc-brand {
+  flex: 0 0 2rem;
+}
+.mc-mark {
+  white-space: nowrap;
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+.mc-choice,
+.mc-header,
+.mc-actions,
+.mc-search,
+.mc-host,
+.mc-notice,
+.mc-error,
+.mc-muted {
+  flex-shrink: 0;
+}
+.mc-create {
+  display: block;
+  overflow-y: auto;
+}
+.mc-choice {
+  padding-bottom: 0.2rem;
+}
+.mc-choice button {
+  max-width: 100%;
+}
