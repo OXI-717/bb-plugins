@@ -16,3 +16,7 @@ it.each(['claude','codex','kimi','zai','opencode-go','devin'] as const)('preserv
  expect(r.headers.get('x-bb-pool-error')).toBe('POOL_UPSTREAM_UNAVAILABLE');
  expect(await r.json()).toMatchObject({error:{code:'POOL_UPSTREAM_UNAVAILABLE',message:expect.stringContaining('POOL_UPSTREAM_UNAVAILABLE')}});
 });
+it.each(['VPN_REQUIRED','VPN_GUARD_BLOCKED','VPN_GUARD_UNAVAILABLE'])('represents %s as temporary unavailability rather than bad credentials',async reason=>{
+ const r=poolErrorResponse('cursor',503,'Waiting for verified VPN',{'x-bb-pool-error':reason,'retry-after':'10'},new Request('http://fixture.test',{headers:{'content-type':'application/connect+proto'}}));
+ expect(r.status).toBe(200);expect(r.headers.get('x-bb-pool-http-status')).toBe('503');expect(r.headers.get('retry-after')).toBe('10');const bytes=Buffer.from(await r.arrayBuffer());expect(JSON.parse(bytes.subarray(5).toString())).toMatchObject({error:{code:'unavailable',message:expect.stringContaining(reason)}});
+});

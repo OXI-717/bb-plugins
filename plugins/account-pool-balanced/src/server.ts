@@ -1,6 +1,7 @@
 import {createGuardNetworkCheck} from "./guard-network.js";
 import {z} from "zod";
 import { describeTransportError } from "./transport-diagnostics.js";
+import { registerNetworkRetry } from "./network-retry.js";
 import {
   createUpstreamTransport,
   transportErrorCode,
@@ -175,7 +176,7 @@ export function createAccountPoolPlugin(
         if (!(await operations.isRoutingEnabled("devin")) || await routing.isBypassed(context.threadId) ||
           !(await operations.hasUsableEnabledAccount("devin"))) return [];
         return [
-          { name: "OXI_DEVIN_POOL_TOKEN", value: await hubTokens.forProject(context.hostId, context.projectId), reason: "Project-bound Account Pooler token" },
+          { name: "OXI_DEVIN_POOL_TOKEN", value: await hubTokens.forThread(context.hostId, context.projectId, context.threadId), reason: "Project-bound Account Pooler token" },
           { name: "OXI_DEVIN_POOL_URL", value: { serverPath: hubBasePath(bb.pluginId) }, reason: "Account Pooler route" },
         ];
       });
@@ -203,6 +204,17 @@ export function createAccountPoolPlugin(
       () => bb.realtime.publish(ACCOUNT_POOL_ACCOUNTS_CHANGED, {}),
       (accountId) => hub.refreshUsage(accountId, true),
     );
+    const retryProviders:Readonly<Record<string,PoolProvider>>={
+      codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor',
+      'acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai',
+      'acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi',
+      'acp-opencode-kimi-highspeed':'kimi',
+    };
+    await registerNetworkRetry(bb,async(threadId,providerId)=>{
+      const provider=retryProviders[providerId];
+      return !!provider && !await routing.isBypassed(threadId) &&
+        await operations.isRoutingEnabled(provider) && await operations.hasUsableEnabledAccount(provider);
+    },now);
     const login = new ClaudeOAuthLogin({
       beforeStart: () => hub.assertNetworkAllowed("claude"),
       fetch: hub.outboundFetch("claude"),
@@ -227,13 +239,16 @@ export function createAccountPoolPlugin(
       accountPoolRpcContract,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
         const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
-        const provider = thread.providerId === "codex" ? "codex" : thread.providerId === "claude-code" ? "claude" : null;
+        const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi'} as Record<string,PoolProvider>)[thread.providerId]??null;
         const empty = { account: null, lastUsedAt: null };
         if (provider === null) return { state: "unsupported", ...empty };
         if (await routing.isBypassed(threadId) || !(await operations.isRoutingEnabled(provider)))
           return { state: "bypassed", ...empty };
         const hostId = "environment" in thread ? thread.environment?.hostId : undefined;
         if (!hostId) return { state: "unobserved", ...empty };
+        const direct=hub.threadObservation(provider,hostId,threadId,thread.projectId);
+        if(direct!==null){const account=(await operations.list()).find(item=>item.id===direct.accountId)??null;return {state:'observed',account,lastUsedAt:direct.lastUsedAt};}
+        if(provider!=='codex'&&provider!=='claude')return {state:'unobserved',...empty};
         const events = await bb.sdk.threads.events.list({ threadId, order: "desc", limit: "5", types: ["thread/started", "thread/identity", "turn/started"] });
         let sessionId: string | null = null;
         for (const event of events) {
@@ -268,7 +283,7 @@ export function createAccountPoolPlugin(
       ) {
         return [];
       }
-      const token = await hubTokens.forProject(context.hostId, context.projectId);
+      const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
       await routing.recordRouted(context.threadId, context.hostId);
       return [
         {
@@ -306,7 +321,7 @@ export function createAccountPoolPlugin(
       ) {
         return [];
       }
-      const token = await hubTokens.forProject(context.hostId, context.projectId);
+      const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
       return [
         {
           name: "CODEX_OPENAI_BASE_URL",
@@ -404,7 +419,7 @@ export function createAccountPoolPlugin(
       ) {
         return [];
       }
-      const token = await hubTokens.forProject(context.hostId, context.projectId);
+      const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
       return [
         {
           name: "CURSOR_API_ENDPOINT",
@@ -460,7 +475,7 @@ export function createAccountPoolPlugin(
           ) {
             return [];
           }
-          const token = await hubTokens.forProject(context.hostId, context.projectId);
+          const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
           return [
             {
               name: entry.baseUrlEnv,
@@ -493,7 +508,7 @@ export function createAccountPoolPlugin(
         ) {
           return [];
         }
-        const token = await hubTokens.forProject(context.hostId, context.projectId);
+        const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
         return [
           {
             name: "OXI_KIMI_BASE_URL",

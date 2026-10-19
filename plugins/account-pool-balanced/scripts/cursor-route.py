@@ -24,6 +24,8 @@ import http.server
 import signal
 import subprocess
 import threading
+import json
+import re
 from urllib.parse import urlsplit
 
 CURSOR_BINARY = "cursor-agent"
@@ -33,6 +35,123 @@ CONFIG_DIR_VAR = "CURSOR_CONFIG_DIR"
 #: does not speak, and the CLI then fails the turn with "[internal] Protocol error".
 POOLED_CONFIG = '{"network":{"useHttp1ForAgent":true}}'
 POOLED_CONFIG_DIR = ".local/state/oxi-cursor-route"
+
+
+class AcpPoolFailures:
+    """Normalize a known local model refusal which Cursor prints as an answer.
+
+    Only one active ACP prompt can be attributed to an outgoing model request.
+    Auxiliary HTTP errors, ambiguous concurrent prompts and arbitrary messages
+    never become failed turns. No request body or credential is retained.
+    """
+    REASONS = frozenset({'POOL_UPSTREAM_UNAVAILABLE', 'VPN_REQUIRED',
+                         'VPN_GUARD_BLOCKED', 'VPN_GUARD_UNAVAILABLE'})
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.pending = {}
+        self.generation = 0
+
+    def client(self, message):
+        if not isinstance(message, dict) or message.get('method') != 'session/prompt':
+            return
+        identifier = message.get('id')
+        if type(identifier) not in (str, int):
+            return
+        with self.lock:
+            if len(self.pending) < 64:
+                self.generation += 1
+                params = message.get('params') or {}
+                self.pending[identifier] = {'generation': self.generation,
+                    'session': params.get('sessionId') if isinstance(params, dict) else None,
+                    'reason': None, 'reported': False, 'prefix': ''}
+
+    def begin_model_request(self, path):
+        if not re.fullmatch(r'agent\.v[0-9]+\.AgentService/Run(?:SSE|Poll)?', path):
+            return None
+        with self.lock:
+            if len(self.pending) != 1:
+                return None
+            identifier = next(iter(self.pending))
+            self.pending[identifier].update(reason=None, reported=False, prefix='')
+            return (identifier, self.pending[identifier]['generation'])
+
+    def model_response(self, path, reason, prompt=None):
+        token = prompt if prompt is not None else self.begin_model_request(path)
+        if token is None:
+            return
+        with self.lock:
+            current = self.pending.get(token[0])
+            if current and current['generation'] == token[1]:
+                current['reason'] = reason if reason in self.REASONS else None
+
+    def child(self, message):
+        if not isinstance(message, dict):
+            return message
+        with self.lock:
+            if message.get('method') == 'session/update':
+                params = message.get('params') or {}
+                update = params.get('update', {}) if isinstance(params, dict) else {}
+                content = update.get('content', {}) if isinstance(update, dict) else {}
+                text = content.get('text') if isinstance(content, dict) else None
+                if isinstance(update, dict) and update.get('sessionUpdate') == 'agent_message_chunk' and isinstance(text, str):
+                    for current in self.pending.values():
+                        if params.get('sessionId') != current['session']:
+                            continue
+                        current['prefix'] = (current['prefix'] + text[:256])[:256]
+                        match = re.match(r'^(?:Error: )?(?:RetriableError: )?\[(?:unavailable|permission_denied)\] \[([A-Z_]+)\]', current['prefix'])
+                        if match and match[1] == current['reason']:
+                            current['reported'] = True
+            identifier = message.get('id')
+            if type(identifier) not in (str, int) or ('result' not in message and 'error' not in message):
+                return message
+            current = self.pending.pop(identifier, None)
+            if current and current['reason'] and current['reported'] and isinstance(message.get('result'), dict) and message['result'].get('stopReason') == 'end_turn':
+                reason = current['reason']
+                return {'jsonrpc': '2.0', 'id': identifier, 'error': {
+                    'code': -32603, 'message': '[' + reason + '] Pooler connection temporarily unavailable.'}}
+        return message
+
+
+def relay_acp(process, failures):
+    """Preserve JSONL traffic except an explicitly correlated failed prompt."""
+    def parse(line):
+        if len(line) > 1024 * 1024:
+            return None
+        try:
+            return json.loads(line)
+        except (ValueError, UnicodeError):
+            return None
+
+    def incoming():
+        try:
+            while True:
+                line = sys.stdin.buffer.readline(1024 * 1024 + 1)
+                if not line:
+                    break
+                message = parse(line)
+                if message is not None:
+                    failures.client(message)
+                process.stdin.write(line)
+                process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+    threading.Thread(target=incoming, daemon=True).start()
+    while True:
+        line = process.stdout.readline(1024 * 1024 + 1)
+        if not line:
+            break
+        message = parse(line)
+        transformed = failures.child(message) if message is not None else message
+        if transformed is not message:
+            line = json.dumps(transformed, separators=(',', ':')).encode() + b'\n'
+        sys.stdout.buffer.write(line)
+        sys.stdout.buffer.flush()
 
 
 def build_argv(executable, argv, env):
@@ -99,6 +218,7 @@ def run_gateway(executable, argv, env):
     target = urlsplit(env[ENDPOINT_VAR].rstrip("/"))
     if target.scheme not in ("http", "https") or not target.hostname or target.query or target.fragment or target.username:
         raise SystemExit("Invalid Cursor pool endpoint")
+    failures = AcpPoolFailures()
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -125,6 +245,7 @@ def run_gateway(executable, argv, env):
                 self.send_error(400, "Invalid RPC path")
                 return
             connection = None
+            prompt = failures.begin_model_request(rpc_path)
             try:
                 limit = 16 * 1024 * 1024
                 if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
@@ -159,6 +280,8 @@ def run_gateway(executable, argv, env):
                 connection = connection_type(target.hostname, target.port, timeout=120)
                 connection.request(self.command, path, body=body, headers=headers)
                 response = connection.getresponse()
+                if prompt is not None:
+                    failures.model_response(rpc_path, response.getheader('x-bb-pool-error'), prompt)
                 self.send_response(response.status)
                 for k, v in response.getheaders():
                     if k.lower() not in {"content-length", "connection", "transfer-encoding"}:
@@ -190,14 +313,25 @@ def run_gateway(executable, argv, env):
     local_env = dict(env)
     local_env[ENDPOINT_VAR] = "http://127.0.0.1:%d" % server.server_port
     command = build_argv(executable, argv, local_env)
-    process = subprocess.Popen(command, env=local_env)
+    acp = not argv[1:] or argv[1] == 'acp'
+    process = subprocess.Popen(command, env=local_env,
+        **({'stdin': subprocess.PIPE, 'stdout': subprocess.PIPE} if acp else {}))
     def stop(signum, _frame):
         process.send_signal(signum)
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
+        if acp:
+            relay_acp(process, failures)
         code = process.wait()
     finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
         server.shutdown()
         server.server_close()
     raise SystemExit(code if code >= 0 else 128 - code)

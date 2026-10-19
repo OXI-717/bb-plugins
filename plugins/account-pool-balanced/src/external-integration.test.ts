@@ -28,7 +28,8 @@ it("BB CLI provisions an external client that shares the pool and can be revoked
     await host.harness.behavior.runCli(["status"]);
     const request = () => host.harness.behavior.fetchHttp("POST", "/v1/messages", { headers: { "x-api-key": token, "content-type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet", max_tokens: 10, messages: [{ role: "user", content: "test" }] }) });
     const blocked = await request();
-    expect(blocked.status).toBe(403);
+    expect(blocked.status).toBe(503);
+    expect(blocked.headers.get("retry-after")).toBe("10");
     expect(blocked.headers.get("x-bb-pool-error")).toBe("VPN_REQUIRED");
     expect(seen).toEqual([]);
     connected = true;

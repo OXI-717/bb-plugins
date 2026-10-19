@@ -45,7 +45,7 @@ Version 0.4.5 adds a per-account **Use until exhausted** switch: bypass pool cap
 
 Version 0.4.4 also displays saved Claude usage-limit resets and shows exact expiry times (including seconds, in Moscow time) for both Claude and Codex. See [saved resets](plugins/account-pool-balanced/docs/saved-resets.md) for availability and refresh behavior.
 
-Install BB 0.43.1+ and Node/npm first. The release is checked with BB 0.43.3 and Node 22.
+Install BB 0.46.1+ and Node/npm first. The release is checked with BB 0.46.1 and Node 22.
 
 ```sh
 bb marketplace add git:https://github.com/OXI-717/bb-plugins@main

@@ -1,3 +1,4 @@
+import {AccountEmailForm} from './account-email-form';
 import { AccountSettingsStyle } from './account-settings-style';
 import type { AccountProjects } from "./src/contracts.js";
 import { AccountProjectsForm } from "./account-projects-form";
@@ -1841,6 +1842,10 @@ function AccountPoolSettings() {
               if (!result.account) throw new Error("Account removed");
               await refresh();
             }}
+            saveEmail={async (email,expectedEmail)=>{
+              const result=await rpc.call('account.setEmail',{accountId:selectedAccount.id,email,expectedEmail});
+              if(!result.account)throw Error('Account removed');await refresh();
+            }}
             savePolicy={async policy => {
               const result = await rpc.call("account.setPolicy", { accountId: selectedAccount.id, policy });
               if (!result.account) throw new Error("Account removed");
@@ -2174,6 +2179,7 @@ function capSummary(account: AccountSummary): string | null {
 
 function AccountDialog({
   account,
+  saveEmail,
   savePolicy,
   saveProjects,
   loadProjects,
@@ -2188,6 +2194,7 @@ function AccountDialog({
   reauthorize,
 }: {
   account: AccountSummary;
+  saveEmail:(email:string|null,expectedEmail:string|null)=>Promise<void>;
   saveProjects: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
   loadProjects: () => Promise<Array<{ id: string; name: string }>>;
   savePolicy: (policy: AccountPolicy) => Promise<void>;
@@ -2201,9 +2208,10 @@ function AccountDialog({
   pending: boolean;
   reauthorize: () => void;
 }) {
+  const [emailUnsaved,setEmailUnsaved]=useState(false);
   const [projectsUnsaved, setProjectsUnsaved] = useState(false);
   const [quotaUnsaved, setQuotaUnsaved] = useState(false);
-  useEffect(() => { onPolicyUnsavedChange(projectsUnsaved || quotaUnsaved); }, [projectsUnsaved, quotaUnsaved, onPolicyUnsavedChange]);
+  useEffect(() => { onPolicyUnsavedChange(projectsUnsaved || quotaUnsaved || emailUnsaved); }, [projectsUnsaved, quotaUnsaved,emailUnsaved, onPolicyUnsavedChange]);
   const limits = policyThresholds(account, threshold);
   const inheritedThreshold = threshold;
   const inheritedDrainHours = drainHours;
@@ -2266,6 +2274,7 @@ function AccountDialog({
         </SettingsBadge>
         {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
       </div>
+      {account.kind==='api-key'&&<AccountEmailForm email={account.email} save={saveEmail} onUnsavedChange={setEmailUnsaved}/> }
       <AccountProjectsForm account={account} loadProjects={loadProjects} save={saveProjects} onUnsavedChange={setProjectsUnsaved} />
       <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
       <section className="pool-settings-section">
