@@ -51,3 +51,20 @@ it.each(['request','provider'] as const)('does not claim newer %s work completed
  try{await new Promise(r=>setTimeout(r,50));expect(t.sent()).toBe(0);expect(await t.fake.bb.storage.kv.get('thread-resume-claims-v1')).toBeUndefined();}
  finally{service.controller.abort();await service.done;await t.fake.harness.lifecycle.dispose();}
 });
+
+it('does not spend continuation attempts while owned native restoration is failing',async()=>{
+ const t=await setup();t.connect();await t.fake.bb.storage.kv.set('owned-disabled-native-plugins-v2',['provider-codex']);
+ let enabled=false;let failEnable=true;
+ const reloaded=await t.fake.harness.lifecycle.reload(plugin);let continued=0;
+ reloaded.harness.sdk.stub('threads.send',async()=>{continued++;return {ok:true,delivery:'sent'} as never;});
+ reloaded.harness.sdk.stub('plugins.list',async()=>({plugins:[{id:'provider-codex',enabled}]}) as never);
+ reloaded.harness.sdk.stub('plugins.enable',async()=>{if(failEnable)throw Error('temporary restore failure');enabled=true;return {} as never;});
+ vi.useFakeTimers();
+ const tick=async()=>{const service=reloaded.harness.behavior.runService('reconcile');await vi.advanceTimersByTimeAsync(0);service.controller.abort();await service.done;};
+ try{
+  for(const delay of [0,31_000,122_000]){await vi.advanceTimersByTimeAsync(delay);await tick();}expect(t.sent()).toBe(0);
+  const rows=await reloaded.bb.storage.kv.get('automatic-stop-recovery-v1') as {attempts:number;state:string}[];
+  expect(rows[0]).toMatchObject({attempts:0,state:'pending'});
+  failEnable=false;await tick();expect(continued).toBe(1);
+ }finally{await reloaded.harness.lifecycle.dispose();vi.useRealTimers();}
+});

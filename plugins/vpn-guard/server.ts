@@ -449,7 +449,11 @@ export default async function plugin(bb: BbPluginApi) {
     save:value=>bb.storage.kv.set('automatic-stop-recovery-v1',value),
     now:Date.now,
     claimed:(threadId,at)=>resumeClaims===null||resumeClaims.some(value=>value.threadId===threadId&&value.stoppedAt===at),
-    allowed:async hostId=>!disposed&&!config.manualBlock&&config.hostIds.includes(hostId)&&await vpn(hostId)==='connected',
+    allowed:async(hostId,threadId,at)=>{
+      const proof=stopProofs.find(value=>value.threadId===threadId&&value.at===at);
+      return !!proof&&!disposed&&!config.manualBlock&&config.hostIds.includes(hostId)&&
+        !owned.has(nativePluginFor(proof.providerId))&&!pending.has(nativePluginFor(proof.providerId))&&await vpn(hostId)==='connected';
+    },
     resume:async(threadId,at)=>{await resumeThread(threadId,at,true);},
     warn:()=>bb.log.warn('Automatic continuation could not be confirmed. Open the stopped thread to check.'),
   });

@@ -55,6 +55,16 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
       if(disposed)return;
       const entry=queue.find(row=>row.id===claim.queuedMessageId||(claim.originalRequestId&&row.payload.kind==='retry'&&row.payload.retryOfTurnRequestId===claim.originalRequestId&&row.payload.reason===`Temporary connection failure. Retry ${claim.attempt}/3.`));
       if(entry?.payload.kind==='retry')await bb.sdk.threads.queuedMessages.delete({threadId,queuedMessageId:entry.id});
+      if(entry?.payload.kind==='retry'||(!entry&&claim.queuedMessageId)){
+        // A confirmed queued row is gone/cancelled. An uncertain scheduling
+        // call without a returned row ID must retain ownership of any late row.
+        const settle=claimTail.then(async()=>{
+          if(disposed||!claims)return;
+          const next=claims.filter(value=>value.threadId!==claim.threadId||value.requestId!==claim.requestId);
+          await bb.storage.kv.set(KEY,next);claims=next;
+        });
+        claimTail=settle.then(()=>undefined,()=>undefined);await settle;
+      }
     }
   }
   // Native retries are checked again at queue drain: an RPC can lose its reply
@@ -123,7 +133,8 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
       const originalRequestId=currentRequest.data.retryOfRequestId??failure.requestId;
       const claim=claimTail.then(async()=>{
         if(disposed||!claims||claims.some(value=>value.threadId===thread.id&&value.requestId===failure.requestId))return false;
-        const next=[...claims,{threadId:thread.id,requestId:failure.requestId,originalRequestId,attempt:failure.attemptNumber}].slice(-256);
+        if(claims.length>=256){bb.log.warn('Pooler retry journal is full; new automatic retries are paused.');return false;}
+        const next=[...claims,{threadId:thread.id,requestId:failure.requestId,originalRequestId,attempt:failure.attemptNumber}];
         await bb.storage.kv.set(KEY,next);claims=next;return true;
       });
       claimTail=claim.then(()=>undefined,()=>undefined);

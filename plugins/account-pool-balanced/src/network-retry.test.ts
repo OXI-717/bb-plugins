@@ -135,3 +135,20 @@ it('bounds a stalled dispatch history read and shares its slot until the underly
   release([{threadId:'thread-one',type:'client/turn/requested',data:{requestId:'request-one'}}] as never);await Promise.resolve();await Promise.resolve();
  }finally{await fake.harness.lifecycle.dispose();vi.useRealTimers();}
 });
+
+it('refuses new scheduling at capacity without evicting queued ownership, and reclaims confirmed completed rows',async()=>{
+ const fake=createFakePluginHost({pluginId:'account-pool-balanced'});
+ const claims=Array.from({length:256},(_,i)=>({threadId:`old-${i}`,requestId:`request-${i}`,originalRequestId:`request-${i}`,attempt:1,queuedMessageId:`queue-${i}`}));
+ await fake.bb.storage.kv.set('network-retry-claims-v1',claims);
+ const retry=vi.fn(async()=>({ok:true,delivery:'queued',queuedMessageId:'fresh-queue'}) as never);
+ fake.harness.sdk.stub('threads.retry',retry);fake.harness.sdk.stub('threads.get',async()=>makeThreadResponse({id:'fresh-thread',status:'error'}));
+ fake.harness.sdk.stub('threads.events.list',async()=>[{threadId:'fresh-thread',type:'client/turn/requested',data:{requestId:'fresh-request'}}] as never);
+ fake.harness.sdk.stub('threads.queue.list',async()=>[]);
+ await registerNetworkRetry(fake.bb,async()=>true);
+ const fail=()=>fake.harness.behavior.emitThreadEvent('turn.failed',makeTurnFailedEvent({threadId:'fresh-thread',requestId:'fresh-request',errorInfo:{category:'connection-failed',httpStatusCode:503,providerCode:null}}));
+ await fail();expect(retry).not.toHaveBeenCalled();expect(await fake.bb.storage.kv.get('network-retry-claims-v1')).toEqual(claims);
+ fake.harness.sdk.stub('threads.queue.list',async()=>[]);
+ await fake.harness.behavior.emitThreadEvent('thread.active',{thread:makeThreadResponse({id:'old-0',status:'active'})});
+ await fail();expect(retry).toHaveBeenCalledTimes(1);
+ expect((await fake.bb.storage.kv.get('network-retry-claims-v1') as unknown[])).toHaveLength(256);await fake.harness.lifecycle.dispose();
+});
