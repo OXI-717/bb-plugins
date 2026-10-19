@@ -1,5 +1,6 @@
 import {createGuardNetworkCheck} from "./guard-network.js";
 import {z} from "zod";
+import { describeTransportError } from "./transport-diagnostics.js";
 import {
   createUpstreamTransport,
   transportErrorCode,
@@ -159,10 +160,13 @@ export function createAccountPoolPlugin(
       importCodexCredentials: options.importCodexCredentials,
       drainTimeoutMs: options.drainTimeoutMs,
       maxAffinityBindings: options.maxAffinityBindings,
-      onUpstreamError: (provider, error) =>
+      onUpstreamError: (provider, error, context) => {
+        const diagnostic = describeTransportError(error);
         bb.log.warn(
-          `Account Pooler ${provider} transport failed: ${transportErrorCode(error)}.`,
-        ),
+          `Account Pooler ${provider} transport failed: ${transportErrorCode(error)}. ` +
+          JSON.stringify({ ...diagnostic, ...context }),
+        );
+      },
       onAccountsChanged: () =>
         bb.realtime.publish(ACCOUNT_POOL_ACCOUNTS_CHANGED, {}),
     });

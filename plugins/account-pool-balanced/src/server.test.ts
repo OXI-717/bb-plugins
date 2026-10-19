@@ -7170,10 +7170,16 @@ it("logs a sanitized transport cause when pooled fetch fails", async () => {
   );
   expect(response.status).toBe(502);
   expect(await response.text()).not.toContain("secret-token");
-  expect(fixture.host.harness.inspection.logEntries).toContainEqual({
-    level: "warn",
-    message:
-      "Account Pooler claude transport failed: ERR_HTTP2_INVALID_SESSION.",
+  const transportLogs = fixture.host.harness.inspection.logEntries.filter(
+    entry => entry.message.startsWith("Account Pooler claude transport failed:"),
+  );
+  expect(transportLogs).toHaveLength(1);
+  expect(transportLogs[0]?.level).toBe("warn");
+  const prefix = "Account Pooler claude transport failed: ERR_HTTP2_INVALID_SESSION. ";
+  expect(transportLogs[0]?.message).toMatch(/^Account Pooler claude transport failed: ERR_HTTP2_INVALID_SESSION\. /);
+  expect(JSON.parse(transportLogs[0]!.message.slice(prefix.length))).toEqual({
+    code: "ERR_HTTP2_INVALID_SESSION", category: "session", elapsedMs: expect.any(Number),
+    stage: "fetch_headers", transport: "ipv4", operation: "model",
   });
   expect(
     JSON.stringify(fixture.host.harness.inspection.logEntries),
