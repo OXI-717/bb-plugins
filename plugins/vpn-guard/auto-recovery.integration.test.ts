@@ -78,3 +78,42 @@ it('loads the original stop proof when more than one hundred other proofs exist'
  const service=reloaded.harness.behavior.runService('reconcile');
  try{await vi.waitFor(()=>expect(sent).toBe(1));}finally{service.controller.abort();await service.done;await reloaded.harness.lifecycle.dispose();}
 });
+
+it('uses retained ownership rather than recent display history for automatic continuation',async()=>{
+ const t=await setup();t.connect();await t.fake.bb.storage.kv.set('stop-observations-v1',[]);
+ const reloaded=await t.fake.harness.lifecycle.reload(plugin);let sent=0;
+ reloaded.harness.sdk.stub('threads.send',async()=>{sent++;return {ok:true,delivery:'sent'} as never;});
+ const service=reloaded.harness.behavior.runService('reconcile');
+ try{await vi.waitFor(()=>expect(sent).toBe(1));}finally{service.controller.abort();await service.done;await reloaded.harness.lifecycle.dispose();}
+});
+it('keeps continuation claim validation functional with more than one hundred thread claims',async()=>{
+ const t=await setup();t.connect();await t.fake.bb.storage.kv.set('thread-resume-claims-v1',Array.from({length:101},(_,n)=>({threadId:`other-${n}`,stoppedAt:1})));
+ const reloaded=await t.fake.harness.lifecycle.reload(plugin);let sent=0;
+ reloaded.harness.sdk.stub('threads.send',async()=>{sent++;return {ok:true,delivery:'sent'} as never;});
+ const service=reloaded.harness.behavior.runService('reconcile');
+ try{await vi.waitFor(()=>expect(sent).toBe(1));const claims=await reloaded.bb.storage.kv.get('thread-resume-claims-v1') as unknown[];expect(claims).toHaveLength(102);}
+ finally{service.controller.abort();await service.done;await reloaded.harness.lifecycle.dispose();}
+});
+it('recovers all 105 actually stopped threads after reload even though UI history contains only 100',async()=>{
+ let connected=false;const stops=new Map<string,number>();const sends=new Set<string>();
+ const ids=Array.from({length:105},(_,n)=>`thread-${n}`);
+ const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{
+  hosts:{list:async()=>[makeHostResponse({id:'host-a'})]},plugins:{list:async()=>({plugins:[]}) as never},
+  threads:{
+   listRunning:async()=>ids.filter(id=>!stops.has(id)).map(id=>({id,hostId:'host-a'})),
+   get:async({threadId})=>makeThreadResponse({id:threadId,providerId:'codex',status:stops.has(threadId)?'idle':'active',updatedAt:stops.get(threadId)??0}),
+   stop:async({threadId})=>{stops.set(threadId,Date.now());return {} as never;},
+   events:{list:async({threadId})=>[
+    {threadId,seq:3,createdAt:stops.get(threadId),scope:{kind:'turn',turnId:`turn-${threadId}`},type:'turn/completed',data:{status:'interrupted'}},
+    {threadId,seq:2,createdAt:0,scope:{kind:'turn',turnId:`turn-${threadId}`},type:'turn/started',data:{}},
+    {threadId,seq:1,createdAt:0,scope:{kind:'thread'},type:'client/turn/requested',data:{requestId:`request-${threadId}`}},
+   ] as never},
+   send:async({threadId})=>{expect(sends.has(threadId)).toBe(false);sends.add(threadId);return {ok:true,delivery:'sent'} as never;},
+  },
+ },experimental_callHostRpc:async()=>verifiedHostResult(connected?'connected':'disconnected')});
+ await plugin(fake.bb);await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});await fake.harness.behavior.callRpc('setMode',{mode:'enforce'});
+ expect(stops.size).toBe(105);const before=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));expect(before.stopHistory).toHaveLength(100);
+ const reloaded=await fake.harness.lifecycle.reload(plugin);connected=true;const service=reloaded.harness.behavior.runService('reconcile');
+ try{await vi.waitFor(()=>expect(sends.size).toBe(105),{timeout:3000});expect(sends.has('thread-0')).toBe(true);expect(await reloaded.bb.storage.kv.get('thread-resume-claims-v1')).toHaveLength(105);}
+ finally{service.controller.abort();await service.done;await reloaded.harness.lifecycle.dispose();}
+});

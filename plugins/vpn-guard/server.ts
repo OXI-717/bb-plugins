@@ -422,7 +422,7 @@ export default async function plugin(bb: BbPluginApi) {
       return state==='connected'?decision(true,'connected'):decision(false,'vpn_unavailable');
     }
   }
-  const resumeClaimSchema=z.array(z.object({threadId:z.string(),stoppedAt:z.number().int().nonnegative()})).max(100);
+  const resumeClaimSchema=z.array(z.object({threadId:z.string().min(1).max(160),stoppedAt:z.number().int().nonnegative()}));
   const savedResumeClaims=resumeClaimSchema.safeParse((await bb.storage.kv.get('thread-resume-claims-v1'))??[]);
   let resumeClaims=savedResumeClaims.success?savedResumeClaims.data:null;
   const resumeFlights=new Set<string>();
@@ -474,7 +474,11 @@ export default async function plugin(bb: BbPluginApi) {
     const version=policyVersion;
     const assertCurrent=()=>{
       if(disposed||version!==policyVersion||config.manualBlock)throw Error('Protection policy changed; open the thread to continue.');
-      const record=stopHistory.slice().reverse().find(stop=>stop.threadId===threadId);
+      // UI history can expire independently of unresolved ownership. A new
+      // proof supersedes an older stop even before its display row is written.
+      const retained=autoRecovery.snapshot().slice().reverse().find(stop=>stop.threadId===threadId);
+      if(proof&&stopProofs.find(value=>value.threadId===threadId)?.at!==stoppedAt)throw Error('This Guard stop was superseded.');
+      const record=proof?retained:stopHistory.slice().reverse().find(stop=>stop.threadId===threadId);
       if(!record||record.at!==stoppedAt||!config.hostIds.includes(record.hostId))throw Error('This Guard stop is no longer current. Open the thread to continue.');
       return record;
     };
@@ -496,7 +500,7 @@ export default async function plugin(bb: BbPluginApi) {
       const claim=resumeClaimTail.then(async()=>{
         assertCurrent();
         if(!resumeClaims||resumeClaims.some(value=>value.threadId===threadId&&value.stoppedAt===stoppedAt))throw Error('Resume was already requested or is uncertain. Open the thread to check.');
-        const next=[...resumeClaims,{threadId,stoppedAt}].slice(-100);
+        const next=[...resumeClaims.filter(value=>value.threadId!==threadId),{threadId,stoppedAt}];
         await bb.storage.kv.set('thread-resume-claims-v1',next);resumeClaims=next;
       });
       resumeClaimTail=claim.then(()=>undefined,()=>undefined);await claim;claimAcquired=true;assertCurrent();
