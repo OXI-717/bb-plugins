@@ -172,8 +172,8 @@ describe("browserExecutableCandidates", () => {
     expect(candidates[0]).toBe("/opt/helium/Helium");
   });
   it("uses the bundle-id data dir on macOS", () => {
-    expect(heliumDataRoot("darwin", "/Users/test")).toBe(
-      "/Users/test/Library/Application Support/net.imput.helium",
+    expect(heliumDataRoot("darwin", "/tmp/pool-fake-home")).toBe(
+      "/tmp/pool-fake-home/Library/Application Support/net.imput.helium",
     );
   });
 });
