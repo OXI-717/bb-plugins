@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe,it,expect } from 'vitest';
+import { describe,it,expect,vi } from 'vitest';
 import { HubTokenStore } from './store.js';
 import { combinedTokens } from './external-clients.js';
 it('binds opaque tokens to projects and preserves real host across restart/rotation/pruning',async()=>{
@@ -54,5 +54,21 @@ it('keeps new thread metadata outside files read by the legacy strict loader',as
   const store=new HubTokenStore(dir);await store.forThread('host-one',null,'thread-one');
   const names=await readdir(dir);expect(names.filter(name=>name.startsWith('hub-thread-token-'))).toHaveLength(1);
   for(const name of names.filter(name=>name.startsWith('hub-token-'))){expect(JSON.parse(await readFile(path.join(dir,name),'utf8'))).not.toHaveProperty('threadId');}
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+it('authenticates current and grace tokens without enumerating historical thread records',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'pool-token-index-'));let now=1000;
+ try{
+  const store=new HubTokenStore(dir,()=>now);
+  for(let i=0;i<32;i++)await store.forThread('host-one','project-a',`thread-${i}`);
+  const original=await store.forThread('host-one','project-a','thread-31');await store.rotate('host-one');
+  const current=await store.forThread('host-one','project-a','thread-31');
+  const restarted=new HubTokenStore(dir,()=>now);await restarted.initialize();
+  const scan=vi.spyOn(restarted as unknown as {readAll:()=>unknown[]},'readAll').mockImplementation(()=>{throw Error('authentication scanned history');});
+  expect(await restarted.authenticateContext(current)).toEqual({hostId:'host-one',projectId:'project-a',threadId:'thread-31'});
+  expect(await restarted.authenticate(original)).toBe('host-one');expect(await restarted.projectForToken(current)).toBe('project-a');
+  expect(await restarted.authenticate('unknown')).toBeNull();now+=600001;expect(await restarted.authenticate(original)).toBeNull();
+  scan.mockRestore();await restarted.remove('host-one');expect(await restarted.authenticate(current)).toBeNull();
  }finally{await rm(dir,{recursive:true,force:true});}
 });

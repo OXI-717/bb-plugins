@@ -336,6 +336,7 @@ export class HubTokenStore {
   private readonly groupLocks = new Map<string, Promise<void>>();
   private readonly tokens = new Map<string, StoredHubToken>();
   private readonly persistedLastUsedAt = new Map<string, number | null>();
+  private readonly tokenIndex = new Map<string, string>();
   private initialization: Promise<void> | null = null;
 
   constructor(
@@ -359,7 +360,7 @@ export class HubTokenStore {
       const token = storedHubTokenSchema.parse(
         JSON.parse(await fs.readFile(path.join(this.secretsDir, name), "utf8")),
       );
-      this.tokens.set(token.hostId, token);
+      this.cacheToken(token);
       this.persistedLastUsedAt.set(token.hostId, token.lastUsedAt);
     }
   }
@@ -413,7 +414,9 @@ export class HubTokenStore {
   async projectForToken(presented: string | null): Promise<string | null> {
     if (presented === null) return null;
     await this.initialize();
-    return this.readAll().find(token => matchesStoredToken(token, presented, this.now()))?.projectId ?? null;
+    const key=this.tokenIndex.get(this.tokenDigest(presented));
+    const token=key?this.read(key):null;
+    return token&&matchesStoredToken(token,presented,this.now())?token.projectId??null:null;
   }
 
   async rotate(hostId: string): Promise<HubTokenSummary> {
@@ -449,13 +452,8 @@ export class HubTokenStore {
   async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string } | null> {
     if (presented === null) return null;
     await this.initialize();
-    const now = this.now();
-    let matchedHostId: string | null = null;
-    for (const token of this.readAll()) {
-      if (matchesStoredToken(token, presented, now))
-        matchedHostId = token.hostId;
-    }
-    if (matchedHostId === null) return null;
+    const matchedHostId=this.tokenIndex.get(this.tokenDigest(presented));
+    if (matchedHostId === undefined) return null;
     return this.serialized(matchedHostId, async () => {
       const matched = this.read(matchedHostId);
       if (
@@ -476,7 +474,7 @@ export class HubTokenStore {
       ) {
         await this.write(matched.hostId, next);
       } else {
-        this.tokens.set(matched.hostId, next);
+        this.cacheToken(next);
       }
       return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null,...(matched.threadId?{threadId:matched.threadId}:{}) };
     });
@@ -510,6 +508,8 @@ export class HubTokenStore {
   private async removeRecord(hostId: string): Promise<void> {
     await this.serialized(hostId, async () => {
       await fs.rm(this.tokenPath(hostId), { force: true });
+      const old=this.tokens.get(hostId);
+      if(old)for(const value of [old.value,...old.previous.map(item=>item.value)])this.tokenIndex.delete(this.tokenDigest(value));
       this.tokens.delete(hostId);
       this.persistedLastUsedAt.delete(hostId);
     });
@@ -542,7 +542,7 @@ export class HubTokenStore {
     );
     if (previous.length === token.previous.length) return token;
     const pruned = storedHubTokenSchema.parse({ ...token, previous });
-    this.tokens.set(hostId, pruned);
+    this.cacheToken(pruned);
     return pruned;
   }
 
@@ -553,6 +553,18 @@ export class HubTokenStore {
     });
   }
 
+  private tokenDigest(value:string):string{return createHash('sha256').update(value).digest('hex');}
+
+  // Request authentication is independent of the number of historical threads.
+  // Keep rotation grace values indexed; matching still checks their expiry and
+  // compares the stored secret inside the per-record serialization lock.
+  private cacheToken(token:StoredHubToken):void{
+    const old=this.tokens.get(token.hostId);
+    if(old)for(const value of [old.value,...old.previous.map(item=>item.value)])this.tokenIndex.delete(this.tokenDigest(value));
+    this.tokens.set(token.hostId,token);
+    for(const value of [token.value,...token.previous.map(item=>item.value)])this.tokenIndex.set(this.tokenDigest(value),token.hostId);
+  }
+
   private async write(hostId: string, token: StoredHubToken): Promise<void> {
     await this.initialize();
     const destination = this.tokenPath(hostId);
@@ -560,7 +572,7 @@ export class HubTokenStore {
     await this.writeFile(temporary, token);
     await fs.rename(temporary, destination);
     await fs.chmod(destination, 0o600);
-    this.tokens.set(hostId, token);
+    this.cacheToken(token);
     this.persistedLastUsedAt.set(hostId, token.lastUsedAt);
   }
 
