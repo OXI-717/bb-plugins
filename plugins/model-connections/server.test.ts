@@ -290,6 +290,31 @@ describe("model connections RPC", () => {
       }),
     ).rejects.toThrow("Запрос изменился");
   });
+  it("releases an authoritative pre-creation rejection and accepts the corrected request", async () => {
+    const f = await setup();
+    f.harness.sdk.stub("threads.spawn", async () => {
+      throw Object.assign(Error("HTTP 400: invalid model"), {
+        name: "BbHttpError",
+        status: 400,
+        code: "invalid_request",
+        body: { code: "invalid_request" },
+      });
+    });
+    const input = create();
+    await expect(f.harness.behavior.callRpc("create", input)).rejects.toThrow(
+      "invalid model",
+    );
+    expect(await f.bb.storage.kv.get("creation-claims")).toEqual([]);
+    f.harness.sdk.stub("threads.spawn", async () =>
+      makeThreadResponse({ id: "thread-corrected" }),
+    );
+    await expect(
+      f.harness.behavior.callRpc("create", {
+        ...input,
+        request: { ...input.request, model: "corrected" },
+      }),
+    ).resolves.toEqual({ threadId: "thread-corrected" });
+  });
   it("rejects inherited execution provenance instead of spawning a different default", async () => {
     const f = await setup();
     const input = create();

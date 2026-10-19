@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { classifyConnections, pooledRoutes } from "./catalog";
 import { contract, catalogInput } from "./contract";
+import { knownSpawnRejection } from "./spawn-rejection";
 
 const poolOutput = z.object({
   routing: z.object({
@@ -266,10 +267,31 @@ export default function plugin(bb: BbPluginApi) {
         rows.push({ id: requestId, hash, threadId: null });
         await bb.storage.kv.set("creation-claims", rows);
       });
-      const created = await bb.sdk.threads.spawn({
-        ...request,
-        ...(sourceThreadId ? { parentThreadId: sourceThreadId } : {}),
-      });
+      const created = await bb.sdk.threads
+        .spawn({
+          ...request,
+          ...(sourceThreadId ? { parentThreadId: sourceThreadId } : {}),
+        })
+        .catch(async (error) => {
+          if (knownSpawnRejection(error))
+            await journal(async () => {
+              const rows = creations.parse(
+                await bb.storage.kv.get("creation-claims"),
+              );
+              await bb.storage.kv.set(
+                "creation-claims",
+                rows.filter(
+                  (row) =>
+                    !(
+                      row.id === requestId &&
+                      row.hash === hash &&
+                      row.threadId === null
+                    ),
+                ),
+              );
+            });
+          throw error;
+        });
       await journal(async () => {
         const rows = creations.parse(
           await bb.storage.kv.get("creation-claims"),
