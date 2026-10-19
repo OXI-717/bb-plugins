@@ -117,7 +117,12 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end
                 cli.chmod(0o755)
                 env=dict(os.environ, HOME=tmp, PATH=tmp+os.pathsep+os.environ['PATH'], CURSOR_API_ENDPOINT=f'http://127.0.0.1:{hub.server_port}/cursor', CURSOR_POOL_RPC_GATEWAY='1')
                 request={'jsonrpc':'2.0','id':7,'method':'session/prompt','params':{'sessionId':'synthetic'}}
-                result=subprocess.run([sys.executable,str(WRAPPER),'acp'],input=json.dumps(request)+'\n',env=env,capture_output=True,text=True,timeout=15)
+                try:
+                    result=subprocess.run([sys.executable,'-c',
+                        'import faulthandler,runpy,sys; faulthandler.dump_traceback_later(20); path=sys.argv[1]; sys.argv=sys.argv[1:]; runpy.run_path(path,run_name="__main__")',
+                        str(WRAPPER),'acp'],input=json.dumps(request)+'\n',env=env,capture_output=True,text=True,timeout=60)
+                except subprocess.TimeoutExpired as error:
+                    self.fail('Synthetic ACP roundtrip stalled: '+str(error.stderr))
                 self.assertEqual(result.returncode,0,result.stderr)
                 messages=[json.loads(line) for line in result.stdout.splitlines()]
                 self.assertEqual(len(messages),3)
