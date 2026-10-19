@@ -38,9 +38,17 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   const flights=new Set<string>();
   let claimTail:Promise<void>=Promise.resolve();
   bb.onDispose(()=>{disposed=true;});
-  async function cancelQueued(threadId:string){
+  async function cancelIfSuperseded(threadId:string,status:string){
     if(disposed||!claims)return;
-    const owned=claims.filter(claim=>claim.threadId===threadId&&(claim.queuedMessageId||claim.originalRequestId));
+    if(status==='active'||status==='idle')return cancelQueued(threadId);
+    const rows=await bb.sdk.threads.events.list({threadId,order:'desc',limit:'1',types:['client/turn/requested']});
+    const current=rows.find(row=>row.type==='client/turn/requested');
+    if(!current)return;
+    return cancelQueued(threadId,current.data.requestId);
+  }
+  async function cancelQueued(threadId:string,currentRequestId?:string){
+    if(disposed||!claims)return;
+    const owned=claims.filter(claim=>claim.threadId===threadId&&claim.requestId!==currentRequestId&&(claim.queuedMessageId||claim.originalRequestId));
     if(!owned.length)return;
     const queue=await bb.sdk.threads.queue.list({threadId});
     for(const claim of owned){
@@ -51,8 +59,8 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   }
   // An own retry is removed from the queue before it activates its thread.
   // A still-queued owned row when something else starts (or stops) is stale.
-  for(const name of ['thread.active','thread.idle'] as const)bb.events.on(name,async({thread})=>{
-    try{await cancelQueued(thread.id);}catch{if(!disposed)bb.log.warn('Pooler queued retry cancellation could not be confirmed.');}
+  for(const name of ['thread.active','thread.idle','thread.failed'] as const)bb.events.on(name,async({thread})=>{
+    try{await cancelIfSuperseded(thread.id,thread.status);}catch{if(!disposed)bb.log.warn('Pooler queued retry cancellation could not be confirmed.');}
   });
   bb.background.service('network-retry-recovery',{
     async start(signal){
@@ -64,7 +72,7 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
           const threadId=ids[index++]!;
           try{
             const thread=await bb.sdk.threads.get({threadId,signal});
-            if(thread.status==='active'||thread.status==='idle')await cancelQueued(threadId);
+            await cancelIfSuperseded(threadId,thread.status);
           }catch{if(!disposed&&!signal.aborted)bb.log.warn('Pooler retry recovery could not be confirmed.');}
         }
       }));
@@ -105,7 +113,7 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
         });
         claimTail=record.then(()=>undefined,()=>undefined);await record;
         const current=await bb.sdk.threads.get({threadId:thread.id});
-        if(current.status==='active'||current.status==='idle')await cancelQueued(thread.id);
+        await cancelIfSuperseded(thread.id,current.status);
       }
     } catch {
       // A timed-out RPC may already have queued the retry. Keep the durable

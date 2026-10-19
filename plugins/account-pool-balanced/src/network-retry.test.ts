@@ -81,3 +81,23 @@ it('cancels an uncertain native retry after reload when the user has moved on',a
  const service=reloaded.harness.behavior.runService('network-retry-recovery');await service.done;
  expect(remove).toHaveBeenCalledExactlyOnceWith({threadId:'thread-one',queuedMessageId:'uncertain-retry'});expect(retry).toHaveBeenCalledTimes(1);await reloaded.harness.lifecycle.dispose();
 });
+it('removes an old retry on reload when newer user work also ended in error',async()=>{
+ const {fake,retry,fail}=await setup();retry.mockRejectedValue(Error('lost reply'));await fail();
+ const reloaded=await fake.harness.lifecycle.reload(bb=>registerNetworkRetry(bb,async()=>true));
+ reloaded.harness.sdk.stub('threads.events.list',async()=>[{threadId:'thread-one',type:'client/turn/requested',data:{requestId:'new-request'}}] as never);
+ reloaded.harness.sdk.stub('threads.queue.list',async()=>[{id:'owned',payload:{kind:'retry',retryOfTurnRequestId:'request-one',reason:'Temporary connection failure. Retry 1/3.'}},{id:'foreign',payload:{kind:'retry',retryOfTurnRequestId:'different-request',reason:'Manual'}}] as never);
+ const remove=vi.fn(async()=>({ok:true}) as never);reloaded.harness.sdk.stub('threads.queuedMessages.delete',remove);
+ const service=reloaded.harness.behavior.runService('network-retry-recovery');await service.done;
+ expect(remove).toHaveBeenCalledExactlyOnceWith({threadId:'thread-one',queuedMessageId:'owned'});await reloaded.harness.lifecycle.dispose();
+});
+it('removes a late scheduling result after a newer user failure',async()=>{
+ const {fake,retry,fail}=await setup();let release!:(value:never)=>void;let entered!:()=>void;const ready=new Promise<void>(r=>{entered=r;});
+ retry.mockImplementation(()=>{entered();return new Promise(r=>{release=r;});});
+ const failed=fail();await ready;
+ await fake.harness.behavior.emitThreadEvent('thread.active',{thread:makeThreadResponse({id:'thread-one',status:'active'})});
+ fake.harness.sdk.stub('threads.events.list',async()=>[{threadId:'thread-one',type:'client/turn/requested',data:{requestId:'new-user-request'}}] as never);
+ fake.harness.sdk.stub('threads.queue.list',async()=>[{id:'late-owned',payload:{kind:'retry',retryOfTurnRequestId:'request-one',reason:'Temporary connection failure. Retry 1/3.'}}] as never);
+ const remove=vi.fn(async()=>({ok:true}) as never);fake.harness.sdk.stub('threads.queuedMessages.delete',remove);
+ release({ok:true,delivery:'queued',queuedMessageId:'late-owned'} as never);await failed;
+ expect(remove).toHaveBeenCalledExactlyOnceWith({threadId:'thread-one',queuedMessageId:'late-owned'});await fake.harness.lifecycle.dispose();
+});

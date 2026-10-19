@@ -5,7 +5,7 @@ export async function automaticStopRecovery(options:Options){
  const loaded=z.array(recordSchema).max(100).safeParse((await options.load())??[]);
  let records=loaded.success?loaded.data:null;
  if(!records)options.warn();
- let tail:Promise<void>=Promise.resolve();let closed=false;const flights=new Set<string>();
+ let tail:Promise<void>=Promise.resolve();let closed=false;const flights=new Set<string>();let workers=0;
  const mutate=<T>(operation:()=>Promise<T>)=>{const next=tail.then(operation);tail=next.then(()=>undefined,()=>undefined);return next;};
  async function patch(threadId:string,at:number,change:Partial<z.infer<typeof recordSchema>>){
   return mutate(async()=>{
@@ -26,33 +26,36 @@ export async function automaticStopRecovery(options:Options){
   },
   async run(){
    if(closed||!records)return;
+   const snapshot=[...records];let index=0;
    const jobs:Promise<void>[]=[];
-   try {
-    for(const record of [...records]){
-     if(closed||flights.size>=4)break;
-     if(flights.has(record.threadId))continue;
-     if(record.state!=='pending'||record.nextAt>options.now())continue;
-     flights.add(record.threadId);
-     jobs.push((async()=>{
-     const latest=records!.filter(value=>value.threadId===record.threadId).at(-1);
-     if(latest?.at!==record.at){await patch(record.threadId,record.at,{state:'done'});return;}
-     if(options.claimed(record.threadId,record.at)){await patch(record.threadId,record.at,{state:'uncertain'});return;}
-     if(!await options.allowed(record.hostId)||closed)return;
-     const attempts=record.attempts+1;
-     if(attempts>3){await patch(record.threadId,record.at,{state:'exhausted'});return;}
-     // Persist before the call; the actual continuation separately claims its
-     // dispatch so a reload cannot blindly duplicate an uncertain send.
-     if(!await patch(record.threadId,record.at,{attempts,nextAt:options.now()+[30_000,120_000,300_000][attempts-1]!})||closed)return;
-     try{await options.resume(record.threadId,record.at);await patch(record.threadId,record.at,{state:'done'});}
-     catch{
-      const uncertain=options.claimed(record.threadId,record.at);
-      await patch(record.threadId,record.at,{state:uncertain?'uncertain':attempts===3?'exhausted':'pending'});
-      if(uncertain||attempts===3)options.warn();
+   while(workers<4&&index<snapshot.length){
+    workers++;
+    jobs.push((async()=>{
+     while(!closed&&index<snapshot.length){
+      const item=snapshot[index++]!;
+      const record=records?.find(value=>value.threadId===item.threadId&&value.at===item.at);
+      if(!record||record.state!=='pending'||record.nextAt>options.now()||flights.has(record.threadId))continue;
+      flights.add(record.threadId);
+      try{
+       const latest=records!.filter(value=>value.threadId===record.threadId).at(-1);
+       if(latest?.at!==record.at){await patch(record.threadId,record.at,{state:'done'});continue;}
+       if(options.claimed(record.threadId,record.at)){await patch(record.threadId,record.at,{state:'uncertain'});continue;}
+       if(!await options.allowed(record.hostId)||closed)continue;
+       const attempts=record.attempts+1;
+       if(attempts>3){await patch(record.threadId,record.at,{state:'exhausted'});continue;}
+       if(!await patch(record.threadId,record.at,{attempts,nextAt:options.now()+[30_000,120_000,300_000][attempts-1]!})||closed)continue;
+       try{await options.resume(record.threadId,record.at);await patch(record.threadId,record.at,{state:'done'});}
+       catch{
+        const uncertain=options.claimed(record.threadId,record.at);
+        await patch(record.threadId,record.at,{state:uncertain?'uncertain':attempts===3?'exhausted':'pending'});
+        if(uncertain||attempts===3)options.warn();
+       }
+      }catch{if(!closed)options.warn();}
+      finally{flights.delete(record.threadId);}
      }
-     })().catch(()=>{if(!closed)options.warn();}).finally(()=>flights.delete(record.threadId)));
-    }
-    await Promise.all(jobs);
-   }catch{if(!closed)options.warn();}
+    })().finally(()=>{workers--;}));
+   }
+   await Promise.all(jobs);
   },
  };
 }
