@@ -5,8 +5,8 @@
  * is dependency-injected so tests stay hermetic: no network, no spawning.
  */
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { existsSync, readdirSync } from "node:fs";
+import { mkdir, stat } from "node:fs/promises";
 import { homedir, platform as currentPlatform } from "node:os";
 import path from "node:path";
 import { request as httpRequest } from "undici";
@@ -104,28 +104,50 @@ export async function fetchExitGeo(
   }
 }
 
-/** Chrome/Chromium executable candidates per platform, first existing wins. */
-export function chromeExecutableCandidates(
+/** Dedicated browser for pool profiles: the Playwright-cached Chromium build,
+ * never the user's daily Chrome. Override with POOL_BROWSER_CHROMIUM. */
+const BROWSER_PATH_ENV = "POOL_BROWSER_CHROMIUM";
+
+/** Candidate executables: env override first, then newest cached Chromium. */
+export function browserExecutableCandidates(
   platformName: NodeJS.Platform = currentPlatform(),
   home: string = homedir(),
+  env: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  if (platformName === "darwin") {
-    return [
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      path.join(home, "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-    ];
+  const override = env[BROWSER_PATH_ENV];
+  const out: string[] = override ? [override] : [];
+  const cacheRoots = platformName === "darwin"
+    ? [path.join(home, "Library", "Caches", "ms-playwright")]
+    : platformName === "win32"
+      ? [path.join(home, "AppData", "Local", "ms-playwright")]
+      : [path.join(home, ".cache", "ms-playwright")];
+  const subPaths = platformName === "darwin"
+    ? [
+        "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
+        "chrome-mac-x64/Chromium.app/Contents/MacOS/Chromium",
+        "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+      ]
+    : platformName === "win32"
+      ? ["chrome-win/chrome.exe"]
+      : ["chrome-linux/chrome", "chrome-linux64/chrome"];
+  for (const root of cacheRoots) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(root)
+        .filter((name) => name.startsWith("chromium-"))
+        .sort()
+        .reverse();
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      for (const sub of subPaths) out.push(path.join(root, entry, sub));
+    }
   }
-  if (platformName === "win32") {
-    const programFiles = [
-      process.env["ProgramFiles"],
-      process.env["ProgramFiles(x86)"],
-      process.env["LOCALAPPDATA"],
-    ].filter((value): value is string => typeof value === "string" && value !== "");
-    return programFiles.map((base) =>
-      path.join(base, "Google", "Chrome", "Application", "chrome.exe")
-    );
-  }
-  return ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
+  return out;
 }
 
 export interface OpenAccountBrowserOptions {
@@ -177,10 +199,16 @@ export async function openAccountBrowser(
     );
   }
   const exists = options.exists ?? existsSync;
-  const executable = chromeExecutableCandidates(options.platformName ?? currentPlatform())
-    .find((candidate) => exists(candidate));
+  const executable = browserExecutableCandidates(
+    options.platformName ?? currentPlatform(),
+    undefined,
+    options.env ?? process.env,
+  ).find((candidate) => exists(candidate));
   if (executable === undefined) {
-    throw new Error("Chrome/Chromium executable not found on this machine.");
+    throw new Error(
+      "Chromium executable not found. Install the shared build once with " +
+        "`npx playwright install chromium` or set POOL_BROWSER_CHROMIUM to a Chromium-family binary.",
+    );
   }
   const profileDir = path.join(
     options.dataDir,
@@ -209,6 +237,50 @@ export async function openAccountBrowser(
     url,
     guarded,
   };
+}
+
+export interface BrowserProfileInfo {
+  accountId: string;
+  provider: string;
+  label: string;
+  email: string | null;
+  profileDir: string;
+  exists: boolean;
+  updatedAt: number | null;
+}
+
+/** Registry view: every pool account and the state of its browser profile. */
+export async function listBrowserProfiles(options: {
+  accounts: readonly AccountSummary[];
+  dataDir: string;
+  pluginId: string;
+}): Promise<BrowserProfileInfo[]> {
+  const root = path.join(
+    options.dataDir,
+    "plugins",
+    options.pluginId,
+    "browser-profiles",
+  );
+  const rows: BrowserProfileInfo[] = [];
+  for (const account of options.accounts) {
+    const profileDir = path.join(root, account.id);
+    let updatedAt: number | null = null;
+    try {
+      updatedAt = Math.round((await stat(profileDir)).mtimeMs);
+    } catch {
+      // profile not created yet — expected state, not an error
+    }
+    rows.push({
+      accountId: account.id,
+      provider: account.provider,
+      label: account.label,
+      email: account.email,
+      profileDir,
+      exists: updatedAt !== null,
+      updatedAt,
+    });
+  }
+  return rows;
 }
 
 /** Fail fast when the browser process dies during the settle window. */

@@ -1,11 +1,13 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AccountSummary } from "./contracts.js";
 import {
+  browserExecutableCandidates,
   fetchExitGeo,
+  listBrowserProfiles,
   openAccountBrowser,
   resolveAccount,
 } from "./browser-profiles.js";
@@ -87,6 +89,32 @@ describe("resolveAccount", () => {
   });
   it("rejects unknown queries", () => {
     expect(() => resolveAccount(ACCOUNTS, "nobody")).toThrow(/not found/);
+  });
+});
+
+describe("browserExecutableCandidates", () => {
+  it("puts the POOL_BROWSER_CHROMIUM override first", () => {
+    const candidates = browserExecutableCandidates("darwin", "/home/x", {
+      POOL_BROWSER_CHROMIUM: "/opt/chromium/Chromium",
+    });
+    expect(candidates[0]).toBe("/opt/chromium/Chromium");
+  });
+});
+
+describe("listBrowserProfiles", () => {
+  it("reports existing and missing profiles per account", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "pool-browser-list-"));
+    const existing = path.join(root, "plugins", "account-pool-balanced", "browser-profiles", ACCOUNTS[0]!.id);
+    mkdirSync(existing, { recursive: true });
+    const rows = await listBrowserProfiles({
+      accounts: ACCOUNTS,
+      dataDir: root,
+      pluginId: "account-pool-balanced",
+    });
+    expect(rows).toHaveLength(ACCOUNTS.length);
+    expect(rows[0]).toMatchObject({ accountId: ACCOUNTS[0]!.id, exists: true });
+    expect(rows[0]!.updatedAt).not.toBeNull();
+    expect(rows[1]).toMatchObject({ accountId: ACCOUNTS[1]!.id, exists: false, updatedAt: null });
   });
 });
 

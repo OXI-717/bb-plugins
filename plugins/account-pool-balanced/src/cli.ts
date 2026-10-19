@@ -25,7 +25,7 @@ import {
   type PoolStatusReport,
 } from "./contracts.js";
 import type { PoolOperations } from "./operations.js";
-import { openAccountBrowser } from "./browser-profiles.js";
+import { listBrowserProfiles, openAccountBrowser } from "./browser-profiles.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
 import type { ExternalClients } from "./external-clients.js";
@@ -66,6 +66,7 @@ const HELP = [
   "  bb pool client revoke <name>",
   "  bb pool bypass <thread-id> [--off]",
   "  bb pool browser open <id|email|label> [--url <url>]",
+  "  bb pool browser list [--json]",
   "",
   "Accounts run sequentially by priority, then order added. The current fallback stays active until unavailable.",
   "Reorder includes every account for the provider and changes the next failover sequence; existing conversations stay pinned.",
@@ -423,6 +424,11 @@ export function registerPoolCli(
           "Open a persistent per-account browser profile with the exit IP timezone",
         usage: "bb pool browser open <id|email|label> [--url <url>]",
       },
+      {
+        name: "browser-list",
+        summary: "List pool accounts and the state of their browser profiles",
+        usage: "bb pool browser list [--json]",
+      },
     ],
     async run(argv, ctx): Promise<PluginCliResult> {
       try {
@@ -658,6 +664,23 @@ export function registerPoolCli(
               ? json({ accounts })
               : `${formatAccounts(accounts)}\n`,
           };
+        }
+        if (argv[0] === "browser" && argv[1] === "list") {
+          const flags = parseFlags(argv.slice(2), ["json"], []);
+          const profiles = await listBrowserProfiles({
+            accounts: await operations.list(),
+            dataDir: bb.server.experimental_dataDir,
+            pluginId: bb.pluginId,
+          });
+          if (flags.booleans.has("json")) {
+            return { exitCode: 0, stdout: json({ profiles }) };
+          }
+          const lines = profiles.map(
+            (row) =>
+              `${row.provider}\t${row.label}\t${row.email ?? "-"}\t` +
+              (row.exists ? `profile (updated ${new Date(row.updatedAt ?? 0).toISOString()})` : "no profile"),
+          );
+          return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
         }
         if (argv[0] === "browser" && argv[1] === "open") {
           const query = argv[2];
