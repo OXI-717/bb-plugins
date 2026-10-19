@@ -103,6 +103,30 @@
       "icon": {
         "url": "./icons/oxi-projects.svg"
       }
+    },
+    {
+      "id": "model-connections",
+      "icon": {
+        "url": "./icons/model-connections.svg"
+      },
+      "displayName": "Модели и подключения",
+      "description": "Выбор моделей: локальные подключения и Pooler, без изменений ядра BB.",
+      "author": {
+        "name": "OXI",
+        "github": "OXI-717"
+      },
+      "tags": [
+        "agents",
+        "models"
+      ],
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/model-connections",
+          "range": "^0.1.0",
+          "tagPrefix": "model-connections/"
+        }
+      }
     }
   ]
 }

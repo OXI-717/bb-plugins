@@ -1,0 +1,56 @@
+{
+  "name": "bb-plugin-model-connections",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "description": "A grouped model chooser for local and pooled connections without changing BB core.",
+  "engines": {
+    "bb": ">=0.46.1",
+    "bbPluginSdk": ">=0.6.49"
+  },
+  "bb": {
+    "name": "Model Connections",
+    "description": "Local and pooled model connections",
+    "branding": {
+      "icon": "Layers"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.49",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "better-sqlite3": "^12.11.1",
+    "cron-parser": "^5.10.2",
+    "esbuild": "^0.28.1",
+    "hono": "^4.13.13",
+    "jsdom": "^29.1.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.11"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "bb plugin build .",
+    "preview:build": "esbuild preview/main.tsx --bundle --format=esm --platform=browser --jsx=automatic --alias:@get-bb/plugin-sdk/app=./preview/sdk.tsx --alias:@get-bb/plugin-sdk=./preview/sdk.tsx --outfile=preview/main.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OXI-717/bb-plugins.git",
+    "directory": "plugins/model-connections"
+  }
+}
