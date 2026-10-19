@@ -2,7 +2,7 @@ import type { BbPluginApi, PluginTurnFailedEvent } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 
 const KEY='network-retry-claims-v1';
-const claimsSchema=z.array(z.object({threadId:z.string().min(1).max(160),requestId:z.string().min(1).max(160),queuedMessageId:z.string().min(1).max(160).optional()})).max(256);
+const claimsSchema=z.array(z.object({threadId:z.string().min(1).max(160),requestId:z.string().min(1).max(160),queuedMessageId:z.string().min(1).max(160).optional(),originalRequestId:z.string().min(1).max(160).optional(),attempt:z.number().int().min(1).max(3).optional()})).max(256);
 const DELAYS=[30_000,120_000,300_000] as const;
 export function retryableNetworkFailure(failure:PluginTurnFailedEvent):boolean {
   if(!Number.isInteger(failure.attemptNumber)||failure.attemptNumber<1||failure.attemptNumber>3)return false;
@@ -40,12 +40,12 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   bb.onDispose(()=>{disposed=true;});
   async function cancelQueued(threadId:string){
     if(disposed||!claims)return;
-    const owned=claims.filter(claim=>claim.threadId===threadId&&claim.queuedMessageId);
+    const owned=claims.filter(claim=>claim.threadId===threadId&&(claim.queuedMessageId||claim.originalRequestId));
     if(!owned.length)return;
     const queue=await bb.sdk.threads.queue.list({threadId});
     for(const claim of owned){
       if(disposed)return;
-      const entry=queue.find(row=>row.id===claim.queuedMessageId);
+      const entry=queue.find(row=>row.id===claim.queuedMessageId||(claim.originalRequestId&&row.payload.kind==='retry'&&row.payload.retryOfTurnRequestId===claim.originalRequestId&&row.payload.reason===`Temporary connection failure. Retry ${claim.attempt}/3.`));
       if(entry?.payload.kind==='retry')await bb.sdk.threads.queuedMessages.delete({threadId,queuedMessageId:entry.id});
     }
   }
@@ -53,6 +53,22 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   // A still-queued owned row when something else starts (or stops) is stale.
   for(const name of ['thread.active','thread.idle'] as const)bb.events.on(name,async({thread})=>{
     try{await cancelQueued(thread.id);}catch{if(!disposed)bb.log.warn('Pooler queued retry cancellation could not be confirmed.');}
+  });
+  bb.background.service('network-retry-recovery',{
+    async start(signal){
+      // A lost RPC reply can still be identified by its original chain and reason.
+      const ids=[...new Set((claims??[]).map(claim=>claim.threadId))];
+      let index=0;
+      await Promise.all(Array.from({length:Math.min(4,ids.length)},async()=>{
+        while(!disposed&&!signal.aborted&&index<ids.length){
+          const threadId=ids[index++]!;
+          try{
+            const thread=await bb.sdk.threads.get({threadId,signal});
+            if(thread.status==='active'||thread.status==='idle')await cancelQueued(threadId);
+          }catch{if(!disposed&&!signal.aborted)bb.log.warn('Pooler retry recovery could not be confirmed.');}
+        }
+      }));
+    },
   });
   bb.events.on('turn.failed',async failure=>{
     if(disposed||!claims||!Number.isInteger(failure.attemptNumber)||failure.attemptNumber<1||failure.attemptNumber>3||flights.has(failure.threadId))return;
@@ -64,9 +80,13 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
       const classified=thread.providerId==='acp-oxi-cursor'?await normalizedCursorFailure(bb,failure):failure;
       if(!retryableNetworkFailure(classified))return;
       if((await bb.sdk.threads.queue.list({threadId:thread.id})).length)return;
+      const requests=await bb.sdk.threads.events.list({threadId:thread.id,order:'desc',limit:'1',types:['client/turn/requested']});
+      const currentRequest=requests.find(row=>row.type==='client/turn/requested');
+      if(!currentRequest||currentRequest.data.requestId!==failure.requestId)return;
+      const originalRequestId=currentRequest.data.retryOfRequestId??failure.requestId;
       const claim=claimTail.then(async()=>{
         if(disposed||!claims||claims.some(value=>value.threadId===thread.id&&value.requestId===failure.requestId))return false;
-        const next=[...claims,{threadId:thread.id,requestId:failure.requestId}].slice(-256);
+        const next=[...claims,{threadId:thread.id,requestId:failure.requestId,originalRequestId,attempt:failure.attemptNumber}].slice(-256);
         await bb.storage.kv.set(KEY,next);claims=next;return true;
       });
       claimTail=claim.then(()=>undefined,()=>undefined);

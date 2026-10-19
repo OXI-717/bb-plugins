@@ -3,7 +3,7 @@ import { expect, it, vi } from 'vitest';
 import { registerNetworkRetry } from './network-retry.js';
 async function setup() {
  const retry=vi.fn(async(_input:unknown)=>({ok:true,delivery:'queued'}) as never);
- const fake=createFakePluginHost({pluginId:'account-pool-balanced',sdk:{threads:{get:async()=>makeThreadResponse({id:'thread-one',status:'error'}),queue:{list:async()=>[]},retry}}});
+ const fake=createFakePluginHost({pluginId:'account-pool-balanced',sdk:{threads:{get:async()=>makeThreadResponse({id:'thread-one',status:'error'}),queue:{list:async()=>[]},events:{list:async()=>[{threadId:'thread-one',type:'client/turn/requested',data:{requestId:'request-one'}}] as never},retry}}});
  const eligible=vi.fn(async()=>true);await registerNetworkRetry(fake.bb,eligible,()=>100_000,()=>0);
  const fail=async(overrides:Parameters<typeof makeTurnFailedEvent>[0]={})=>fake.harness.behavior.emitThreadEvent('turn.failed',makeTurnFailedEvent({threadId:'thread-one',requestId:'request-one',attemptNumber:1,errorInfo:{category:'connection-failed',httpStatusCode:502,providerCode:'POOL_UPSTREAM_UNAVAILABLE'},...overrides}));
  return {fake,retry,eligible,fail};
@@ -71,4 +71,13 @@ it('retains durable ownership across reload and does not schedule twice',async()
  const reloaded=await fake.harness.lifecycle.reload(bb=>registerNetworkRetry(bb,async()=>true,()=>100_000,()=>0));
  await reloaded.harness.behavior.emitThreadEvent('turn.failed',makeTurnFailedEvent({threadId:'thread-one',requestId:'request-one',attemptNumber:1,errorInfo:{category:'connection-failed',httpStatusCode:502,providerCode:null}}));
  expect(retry).toHaveBeenCalledTimes(1);await reloaded.harness.lifecycle.dispose();
+});
+it('cancels an uncertain native retry after reload when the user has moved on',async()=>{
+ const {fake,retry,fail}=await setup();retry.mockRejectedValue(Error('lost reply'));await fail();
+ const reloaded=await fake.harness.lifecycle.reload(bb=>registerNetworkRetry(bb,async()=>true));
+ reloaded.harness.sdk.stub('threads.get',async()=>makeThreadResponse({id:'thread-one',status:'idle'}));
+ reloaded.harness.sdk.stub('threads.queue.list',async()=>[{id:'uncertain-retry',payload:{kind:'retry',retryOfTurnRequestId:'request-one',reason:'Temporary connection failure. Retry 1/3.'}},{id:'user-retry',payload:{kind:'retry',retryOfTurnRequestId:'request-one',reason:'Manual retry'}}] as never);
+ const remove=vi.fn(async()=>({ok:true}) as never);reloaded.harness.sdk.stub('threads.queuedMessages.delete',remove);
+ const service=reloaded.harness.behavior.runService('network-retry-recovery');await service.done;
+ expect(remove).toHaveBeenCalledExactlyOnceWith({threadId:'thread-one',queuedMessageId:'uncertain-retry'});expect(retry).toHaveBeenCalledTimes(1);await reloaded.harness.lifecycle.dispose();
 });
