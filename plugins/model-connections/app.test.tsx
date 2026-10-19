@@ -161,6 +161,23 @@ describe("separate model chooser", () => {
       screen.getByRole("button", { name: /^Pi/ }).hasAttribute("disabled"),
     ).toBe(true);
   });
+  it.each([undefined, "project-one"])(
+    "loads the initial catalog with JSON-only input before a host is selected (project %s)",
+    async (projectId) => {
+      state.call.mockImplementation(async (method: string, input: unknown) => {
+        // The live frontend RPC boundary rejects undefined values before fetch.
+        JSON.stringify(input, (_key, value) => {
+          if (value === undefined) throw Error("RPC input is not JSON");
+          return value;
+        });
+        return method === "catalog" ? snapshot() : { ok: true };
+      });
+      render(<ConnectionsPanel projectId={projectId} />);
+      await screen.findByRole("button", { name: /^Codex/ });
+      expect(state.call).toHaveBeenCalledWith("catalog", {});
+      expect(screen.queryByText(/Не удалось обновить/)).toBeNull();
+    },
+  );
   it("applies a selection without sending or creating a thread", async () => {
     render(<ConnectionsPanel threadId="thread-one" />);
     fireEvent.click(await screen.findByRole("button", { name: /^Codex/ }));

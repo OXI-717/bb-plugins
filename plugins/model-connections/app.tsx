@@ -67,7 +67,7 @@ export function ConnectionsPanel({
     try {
       const result = await rpc.call(
         "catalog",
-        threadId ? { threadId } : { hostId },
+        threadId ? { threadId } : hostId ? { hostId } : {},
       );
       if (alive.current && version === generation.current) setCatalog(result);
     } catch {
