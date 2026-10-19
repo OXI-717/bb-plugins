@@ -226,10 +226,10 @@ describe("openAccountBrowser", () => {
       fetcher: geoFetcher,
       spawnImpl,
     });
-    const second = fakeSpawn(4242);
+    const second = fakeSpawn(9999); // транзиентный handoff-процесс, не main
     const impl2 = (command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
       second.captured.push({ command, args, env: options.env });
-      const child = new FakeChild(4242);
+      const child = new FakeChild(9999);
       queueMicrotask(() => child.emit("exit", 0)); // process-singleton handoff: clean fast exit
       return child;
     };
@@ -243,6 +243,12 @@ describe("openAccountBrowser", () => {
     });
     expect(result.profileDirectory).toBe("Profile 2");
     expect(second.captured).toHaveLength(1);
+    // маркер по-прежнему указывает на живой main (4242), не на транзиентный handoff
+    const marker = JSON.parse(readFileSync(
+      path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "last-launch.json"),
+      "utf8",
+    ));
+    expect(marker.pid).toBe(4242);
     // picker-синк пропущен при живом Helium: Profile 2 пока не в Local State
     const lsPath = path.join(box.heliumRoot, "Local State");
     let cache = JSON.parse(readFileSync(lsPath, "utf8")).profile.info_cache;

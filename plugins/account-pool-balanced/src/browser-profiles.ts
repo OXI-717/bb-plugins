@@ -217,10 +217,11 @@ async function listHeliumProfileDirs(root: string): Promise<string[]> {
 
 const execFileAsync = promisify(execFile);
 
-/** Pids of running Helium main+helper processes (env unreadable under SIP). */
+/** Pids of running Helium main processes. Anchored at the end so helper
+ *  binaries ("Helium Helper.app/Contents/MacOS/Helium Helper") don't match. */
 export async function listRunningHelium(): Promise<number[]> {
   try {
-    const { stdout } = await execFileAsync("pgrep", ["-f", "Helium.app/Contents/MacOS/Helium"]);
+    const { stdout } = await execFileAsync("pgrep", ["-f", "Helium.app/Contents/MacOS/Helium$"]);
     return stdout
       .split("\n")
       .map((line) => Number(line.trim()))
@@ -422,8 +423,13 @@ export async function openAccountBrowser(
     url,
   ], { detached: true, stdio: "ignore", env });
   await waitForLaunch(child, options.settleMs ?? 800, wasRunning);
-  if (timezone !== null && child.pid !== undefined) {
-    await writeJsonAtomic(markerFile, { tz: timezone, pid: child.pid, at: Date.now() });
+  if (timezone !== null) {
+    // On handoff the spawned process exits immediately, so record the pid of the
+    // already-running main process, not the transient child.
+    const trustedPid = wasRunning ? running[0] : child.pid;
+    if (trustedPid !== undefined) {
+      await writeJsonAtomic(markerFile, { tz: timezone, pid: trustedPid, at: Date.now() });
+    }
   }
   return {
     accountId: account.id,
