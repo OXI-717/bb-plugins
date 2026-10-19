@@ -2,7 +2,7 @@ import type { BbPluginApi, PluginTurnFailedEvent } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 
 const KEY='network-retry-claims-v1';
-const claimsSchema=z.array(z.object({threadId:z.string().min(1).max(160),requestId:z.string().min(1).max(160),queuedMessageId:z.string().min(1).max(160).optional(),originalRequestId:z.string().min(1).max(160).optional(),attempt:z.number().int().min(1).max(3).optional()})).max(256);
+const claimsSchema=z.array(z.object({threadId:z.string().min(1).max(160),requestId:z.string().min(1).max(160),providerId:z.string().min(1).max(160).optional(),queuedMessageId:z.string().min(1).max(160).optional(),originalRequestId:z.string().min(1).max(160).optional(),attempt:z.number().int().min(1).max(3).optional()})).max(256);
 const DELAYS=[30_000,120_000,300_000] as const;
 export function retryableNetworkFailure(failure:PluginTurnFailedEvent):boolean {
   if(!Number.isInteger(failure.attemptNumber)||failure.attemptNumber<1||failure.attemptNumber>3)return false;
@@ -69,29 +69,39 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   }
   // Native retries are checked again at queue drain: an RPC can lose its reply
   // before a late row appears, after event/startup cancellation already ran.
-  const dispatchReads=new Map<string,Promise<string|null>>();
+  const dispatchReads=new Map<string,Promise<{requestId:string|null;eligible:boolean}>>();
   bb.experimental_hooks.on('message.dispatch',async context=>{
     const entry=context.queuedMessage;
-    if(!entry||entry.payload.kind!=='retry'||!claims)return {action:'proceed'};
+    if(!entry||entry.payload.kind!=='retry')return {action:'proceed'};
     const payload=entry.payload;
+    if(!claims)return /^Temporary connection failure\. Retry [123]\/3\.$/.test(payload.reason)?{action:'wait',reason:'Pooler retry journal unavailable',sendAt:now()+10_000}:{action:'proceed'};
     const claim=claims.find(value=>value.threadId===context.thread.id&&(value.queuedMessageId===entry.id||
       (value.originalRequestId===payload.retryOfTurnRequestId&&payload.reason===`Temporary connection failure. Retry ${value.attempt}/3.`)));
     if(!claim)return {action:'proceed'};
+    if(claim.providerId!==context.requestedExecution.providerId)return {action:'reject',message:'Automatic retry cancelled because its provider changed or cannot be verified.'};
     if(disposed)return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};
-    let read=dispatchReads.get(context.thread.id);
+    const readKey=JSON.stringify([context.thread.id,context.requestedExecution.providerId]);
+    let read=dispatchReads.get(readKey);
     if(!read&&dispatchReads.size<4){
       const controller=new AbortController();
       const deadline=setTimeout(()=>controller.abort(),1_500);
-      read=bb.sdk.threads.events.list({threadId:context.thread.id,order:'desc',limit:'1',types:['client/turn/requested'],signal:controller.signal})
-        .then(rows=>{const row=rows.find(value=>value.type==='client/turn/requested');return row?.type==='client/turn/requested'&&row.threadId===context.thread.id?row.data.requestId:null;});
-      dispatchReads.set(context.thread.id,read);
+      read=(async()=>{
+        if(!await eligible(context.thread.id,context.requestedExecution.providerId))return {requestId:null,eligible:false};
+        const rows=await bb.sdk.threads.events.list({threadId:context.thread.id,order:'desc',limit:'1',types:['client/turn/requested'],signal:controller.signal});
+        const row=rows.find(value=>value.type==='client/turn/requested');
+        return {requestId:row?.type==='client/turn/requested'&&row.threadId===context.thread.id?row.data.requestId:null,eligible:true};
+      })();
+      dispatchReads.set(readKey,read);
       const active=read;
-      void read.finally(()=>{clearTimeout(deadline);if(dispatchReads.get(context.thread.id)===active)dispatchReads.delete(context.thread.id);}).catch(()=>undefined);
+      void read.finally(()=>{clearTimeout(deadline);if(dispatchReads.get(readKey)===active)dispatchReads.delete(readKey);}).catch(()=>undefined);
     }
     let timer:ReturnType<typeof setTimeout>|undefined;
     try{
-      const requestId=read?await Promise.race([read,new Promise<null>(resolve=>{timer=setTimeout(()=>resolve(null),1_500);})]):null;
-      if(!requestId||disposed)return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};
+      const result=read?await Promise.race([read,new Promise<null>(resolve=>{timer=setTimeout(()=>resolve(null),1_500);})]):null;
+      if(disposed)return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};
+      if(result&&!result.eligible)return {action:'reject',message:'Automatic retry cancelled because the thread no longer uses an available pooled route.'};
+      const requestId=result?.requestId;
+      if(!requestId)return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};
       return requestId===claim.requestId?{action:'proceed'}:{action:'reject',message:'Automatic retry cancelled because the thread has newer work.'};
     }catch{return {action:'wait',reason:'Pooler retry verification unavailable',sendAt:now()+10_000};}
     finally{if(timer)clearTimeout(timer);}
@@ -134,7 +144,7 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
       const claim=claimTail.then(async()=>{
         if(disposed||!claims||claims.some(value=>value.threadId===thread.id&&value.requestId===failure.requestId))return false;
         if(claims.length>=256){bb.log.warn('Pooler retry journal is full; new automatic retries are paused.');return false;}
-        const next=[...claims,{threadId:thread.id,requestId:failure.requestId,originalRequestId,attempt:failure.attemptNumber}];
+        const next=[...claims,{threadId:thread.id,requestId:failure.requestId,providerId:thread.providerId,originalRequestId,attempt:failure.attemptNumber}];
         await bb.storage.kv.set(KEY,next);claims=next;return true;
       });
       claimTail=claim.then(()=>undefined,()=>undefined);
