@@ -172,7 +172,7 @@ describe("profile naming and allocation", () => {
 
 describe("browserExecutableCandidates", () => {
   it("puts the POOL_BROWSER_EXECUTABLE override first", () => {
-    const candidates = browserExecutableCandidates("darwin", "/home/x", {
+    const candidates = browserExecutableCandidates("darwin", "/nonexistent/fake-home", {
       POOL_BROWSER_EXECUTABLE: "/opt/helium/Helium",
     });
     expect(candidates[0]).toBe("/opt/helium/Helium");
