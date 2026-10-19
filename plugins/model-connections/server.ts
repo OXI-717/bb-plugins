@@ -190,7 +190,11 @@ export default function plugin(bb: BbPluginApi) {
           stored === null || stored === undefined
             ? []
             : creations.parse(stored);
-        return rows.find((row) => row.id === requestId) ?? null;
+        return (
+          rows.find((row) => row.id === requestId) ??
+          rows.find((row) => row.hash === hash && row.threadId === null) ??
+          null
+        );
       });
       if (prior) {
         if (prior.hash !== hash)
@@ -241,7 +245,13 @@ export default function plugin(bb: BbPluginApi) {
           stored === null || stored === undefined
             ? []
             : creations.parse(stored);
-        if (rows.some((row) => row.id === requestId))
+        if (
+          rows.some(
+            (row) =>
+              row.id === requestId ||
+              (row.hash === hash && row.threadId === null),
+          )
+        )
           throw Error("Этот запрос уже отправляется");
         const pending = rows.filter((row) => row.threadId === null);
         if (pending.length >= 64)

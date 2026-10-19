@@ -13,11 +13,21 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { z } from "zod";
 import type { contract, catalogOutput, rowSchema } from "./contract";
+import { requestIdFor, completeRequestId } from "./creation-id";
 import "./app.css";
 
 type Catalog = z.infer<typeof catalogOutput>;
 type Row = z.infer<typeof rowSchema>;
-const reasoning = z.enum(["none", "low", "medium", "high", "xhigh", "max", "ultra", "ultracode"]);
+const reasoning = z.enum([
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+  "ultracode",
+]);
 export function ConnectionsPanel({
   threadId,
   projectId,
@@ -39,7 +49,6 @@ export function ConnectionsPanel({
   const [creating, setCreating] = useState(false);
   const generation = useRef(0);
   const alive = useRef(true);
-  const creationId = useRef(crypto.randomUUID());
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -213,17 +222,19 @@ export function ConnectionsPanel({
               ? `Continue the work from @thread:${threadId}. Check the current state before repeating any actions.`
               : undefined
           }
-          draftKey={`model-connections:${threadId ?? "new"}:${catalog.hostId}`}
+          draftKey={`model-connections:${threadId ?? projectId ?? "new"}:${catalog.hostId}:${chosen.id}`}
           layout="document"
           onSubmit={async (request) => {
+            const scope = `${threadId ?? projectId ?? "new"}:${catalog.hostId}:${chosen.id}`;
+            const requestId = requestIdFor(localStorage, scope);
             const result = await rpc.call("create", {
               request,
-              requestId: creationId.current,
+              requestId,
               expectedProviderId: chosen.id,
               expectedGroup: chosen.group,
               ...(threadId ? { sourceThreadId: threadId } : {}),
             });
-            creationId.current = crypto.randomUUID();
+            completeRequestId(localStorage, scope, requestId);
             navigate.toThread(result.threadId);
           }}
         />

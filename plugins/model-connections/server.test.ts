@@ -269,6 +269,15 @@ describe("model connections RPC", () => {
     expect(next.harness.inspection.sdk.callsTo("threads.spawn")).toHaveLength(
       0,
     );
+    await expect(
+      next.harness.behavior.callRpc("create", {
+        ...input,
+        requestId: randomUUID(),
+      }),
+    ).rejects.toThrow("Запуск уже запрошен");
+    expect(next.harness.inspection.sdk.callsTo("threads.spawn")).toHaveLength(
+      0,
+    );
   });
   it("rejects a changed request with the same creation id", async () => {
     const f = await setup();

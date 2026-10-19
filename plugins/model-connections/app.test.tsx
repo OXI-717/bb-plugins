@@ -42,20 +42,22 @@ vi.mock("@get-bb/plugin-sdk/app", () => ({
       <p>{initialPrompt}</p>
       <button
         onClick={() =>
-          void onSubmit({
-            projectId: "project-one",
-            providerId: defaultProviderId!,
-            model: defaultModel!,
-            reasoningLevel: "medium",
-            permissionMode: "auto",
-            executionInputSources: {
-              providerId: "explicit",
-              model: "explicit",
-              reasoningLevel: "explicit",
-            },
-            environment: { type: "reuse", environmentId: "environment-one" },
-            input: [{ type: "text", text: "User draft", mentions: [] }],
-          })
+          void Promise.resolve(
+            onSubmit({
+              projectId: "project-one",
+              providerId: defaultProviderId!,
+              model: defaultModel!,
+              reasoningLevel: "medium",
+              permissionMode: "auto",
+              executionInputSources: {
+                providerId: "explicit",
+                model: "explicit",
+                reasoningLevel: "explicit",
+              },
+              environment: { type: "reuse", environmentId: "environment-one" },
+              input: [{ type: "text", text: "User draft", mentions: [] }],
+            }),
+          ).catch(() => {})
         }
       >
         Отправить новый тред
@@ -102,6 +104,7 @@ const snapshot = () => ({
   ),
 });
 beforeEach(() => {
+  localStorage.clear();
   state.call.mockReset();
   state.toThread.mockReset();
   state.call.mockImplementation(async (method: string) =>
@@ -114,6 +117,41 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 describe("separate model chooser", () => {
+  it("retains the submitted request ID when the native draft is restored after remount", async () => {
+    state.call.mockImplementation(async (method: string) =>
+      method === "catalog"
+        ? snapshot()
+        : method === "create"
+          ? Promise.reject(Error("reply lost"))
+          : { ok: true },
+    );
+    const first = render(<ConnectionsPanel threadId="thread-one" />);
+    async function submit() {
+      fireEvent.click(await screen.findByRole("button", { name: /^Cursor/ }));
+      fireEvent.click(screen.getByText("Выбрать тестовую модель"));
+      fireEvent.click(screen.getByText("Продолжить в новом треде"));
+      fireEvent.click(screen.getByText("Отправить новый тред"));
+    }
+    await submit();
+    await waitFor(() =>
+      expect(
+        state.call.mock.calls.filter((x) => x[0] === "create"),
+      ).toHaveLength(1),
+    );
+    const id = state.call.mock.calls.find((x) => x[0] === "create")?.[1]
+      .requestId;
+    first.unmount();
+    render(<ConnectionsPanel threadId="thread-one" />);
+    await submit();
+    await waitFor(() =>
+      expect(
+        state.call.mock.calls.filter((x) => x[0] === "create"),
+      ).toHaveLength(2),
+    );
+    expect(
+      state.call.mock.calls.filter((x) => x[0] === "create")[1][1].requestId,
+    ).toBe(id);
+  });
   it("separates local and pooled connections and collapses unavailable entries", async () => {
     render(<ConnectionsPanel threadId="thread-one" />);
     await screen.findByRole("heading", { name: /Локальные подключения/ });
