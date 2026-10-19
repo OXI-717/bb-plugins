@@ -24,6 +24,7 @@ const ACCOUNTS_KEY = "accounts:v1";
 const ACCOUNT_LAST_USED_PERSIST_MS = 60 * 1_000;
 const accountsSchema = z.array(accountSchema);
 const HUB_TOKEN_PREFIX = "hub-token-";
+const THREAD_TOKEN_PREFIX = "hub-thread-token-";
 const HUB_TOKEN_GRACE_MS = 10 * 60 * 1_000;
 const HUB_TOKEN_LAST_USED_PERSIST_MS = 60 * 1_000;
 
@@ -40,6 +41,7 @@ const storedHubTokenSchema = z
     value: tokenValueSchema,
     machineHostId: z.string().min(1).optional(),
     projectId: z.string().min(1).max(200).optional(),
+    threadId: z.string().min(1).max(200).optional(),
     mintedAt: z.number().int().nonnegative(),
     lastUsedAt: z.number().int().nonnegative().nullable(),
     previous: z.array(priorHubTokenSchema),
@@ -160,6 +162,15 @@ export class AccountStore {
 
   async setCap(id: string, cap: Account["cap"]): Promise<Account | null> {
     return this.update(id, (account) => ({ ...account, cap }));
+  }
+
+  async setEmail(id: string, email: string | null, expectedEmail?:string|null): Promise<Account | null> {
+    const parsed=z.string().trim().email().max(254).nullable().parse(email);
+    return this.update(id, account => {
+      if(account.kind==='oauth')throw Error('OAuth email is supplied by the provider.');
+      if(expectedEmail!==undefined&&account.email!==expectedEmail)throw Error('Account email changed; refresh before saving.');
+      return {...account,email:parsed};
+    });
   }
 
   async reorder(provider: PoolProvider, accountIds: string[]): Promise<void> {
@@ -343,7 +354,7 @@ export class HubTokenStore {
     await fs.rm(path.join(this.secretsDir, "hub-key"), { force: true });
     const names = await fs.readdir(this.secretsDir);
     for (const name of names) {
-      if (!name.startsWith(HUB_TOKEN_PREFIX) || !name.endsWith(".json"))
+      if ((!name.startsWith(HUB_TOKEN_PREFIX) && !name.startsWith(THREAD_TOKEN_PREFIX)) || !name.endsWith(".json"))
         continue;
       const token = storedHubTokenSchema.parse(
         JSON.parse(await fs.readFile(path.join(this.secretsDir, name), "utf8")),
@@ -384,6 +395,21 @@ export class HubTokenStore {
     }, this.groupLocks);
   }
 
+  async forThread(hostId: string, projectId: string | null, threadId: string): Promise<string> {
+    const thread=z.string().min(1).max(200).parse(threadId);
+    const key=`thread_scope_${createHash('sha256').update(JSON.stringify([hostId,projectId,thread])).digest('hex')}`;
+    await this.initialize();
+    return this.serialized(hostId,async()=>{
+      await this.forHostRecord(hostId);
+      return this.serialized(key,async()=>{
+        const existing=this.read(key);
+        if(existing!==null)return existing.value;
+        const token=storedHubTokenSchema.parse({...this.create(key),machineHostId:hostId,...(projectId===null?{}:{projectId}),threadId:thread});
+        await this.write(key,token);return token.value;
+      });
+    },this.groupLocks);
+  }
+
   async projectForToken(presented: string | null): Promise<string | null> {
     if (presented === null) return null;
     await this.initialize();
@@ -404,7 +430,7 @@ export class HubTokenStore {
     return this.serialized(hostId, async () => {
       const current = this.read(hostId);
       const now = this.now();
-      const next = { ...this.create(hostId), ...(current?.machineHostId ? { machineHostId: current.machineHostId, projectId: current.projectId } : {}) };
+      const next = { ...this.create(hostId), ...(current?.machineHostId ? { machineHostId: current.machineHostId, projectId: current.projectId,threadId:current.threadId } : {}) };
       if (current !== null) {
         next.previous = [
           { value: current.value, expiresAt: now + HUB_TOKEN_GRACE_MS },
@@ -420,7 +446,7 @@ export class HubTokenStore {
     return (await this.authenticateContext(presented))?.hostId ?? null;
   }
 
-  async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null } | null> {
+  async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string } | null> {
     if (presented === null) return null;
     await this.initialize();
     const now = this.now();
@@ -452,14 +478,14 @@ export class HubTokenStore {
       } else {
         this.tokens.set(matched.hostId, next);
       }
-      return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null };
+      return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null,...(matched.threadId?{threadId:matched.threadId}:{}) };
     });
   }
 
   async list(): Promise<HubTokenSummary[]> {
     await this.initialize();
     return this.readAll()
-      .filter(token => !token.projectId)
+      .filter(token => !token.machineHostId)
       .map(token => this.summary({ ...token, lastUsedAt: this.readAll()
         .filter(scoped => scoped.machineHostId === token.hostId)
         .reduce<number | null>((last, scoped) => scoped.lastUsedAt === null ? last : Math.max(last ?? 0, scoped.lastUsedAt), token.lastUsedAt) }))
@@ -554,7 +580,8 @@ export class HubTokenStore {
       .string()
       .regex(/^[A-Za-z0-9_-]+$/u)
       .parse(hostId);
-    return path.join(this.secretsDir, `${HUB_TOKEN_PREFIX}${safeHostId}.json`);
+    const prefix=hostId.startsWith('thread_scope_')?THREAD_TOKEN_PREFIX:HUB_TOKEN_PREFIX;
+    return path.join(this.secretsDir, `${prefix}${safeHostId}.json`);
   }
 
   private async serialized<T>(

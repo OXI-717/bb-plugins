@@ -34,3 +34,25 @@ it('revokes a project token being minted concurrently with client removal',async
   expect(await new HubTokenStore(dir).authenticate(token)).toBeNull();
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+it('keeps thread identity isolated inside one host and project through rotation and restart',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'pool-thread-token-'));let now=1000;
+ try{
+  const store=new HubTokenStore(dir,()=>now);
+  const first=await store.forThread('host-one','project-a','thread-one');const second=await store.forThread('host-one','project-a','thread-two');
+  expect(first).not.toBe(second);expect(await store.authenticateContext(first)).toEqual({hostId:'host-one',projectId:'project-a',threadId:'thread-one'});
+  const restart=new HubTokenStore(dir,()=>now);expect(await restart.authenticateContext(second)).toMatchObject({threadId:'thread-two'});
+  await restart.rotate('host-one');expect(await restart.authenticateContext(first)).toMatchObject({threadId:'thread-one'});
+  now+=600001;expect(await restart.authenticate(first)).toBeNull();
+  const fresh=await restart.forThread('host-one',null,'thread-one');expect(await restart.authenticateContext(fresh)).toEqual({hostId:'host-one',projectId:null,threadId:'thread-one'});
+  expect(await restart.list()).toHaveLength(1);await restart.prune([]);expect(await restart.authenticate(fresh)).toBeNull();
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+it('keeps new thread metadata outside files read by the legacy strict loader',async()=>{
+ const {readdir,readFile}=await import('node:fs/promises');
+ const dir=await mkdtemp(path.join(tmpdir(),'pool-thread-legacy-'));
+ try{
+  const store=new HubTokenStore(dir);await store.forThread('host-one',null,'thread-one');
+  const names=await readdir(dir);expect(names.filter(name=>name.startsWith('hub-thread-token-'))).toHaveLength(1);
+  for(const name of names.filter(name=>name.startsWith('hub-token-'))){expect(JSON.parse(await readFile(path.join(dir,name),'utf8'))).not.toHaveProperty('threadId');}
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

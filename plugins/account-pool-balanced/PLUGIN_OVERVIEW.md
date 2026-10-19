@@ -32,3 +32,5 @@ An automation controller is not required for Pooler or its VPN Guard linkage and
 [Ошибки пула / Pooler errors](../../docs/pool-errors.md): stable reason codes, provider-native responses and distinct quota threshold/exhaustion messages. Коды причин и сообщения отличают настроенный порог от исчерпания лимита провайдера.
 
 Automatic recovery uses ordinary BB admission and preserves manual blocks and newer user activity. See [recovery policy / правила продолжения](../../docs/pool-errors.md).
+
+[Аккаунт в заголовке треда](docs/account-identities.md): email или сохранённое название реально использованной подписки для всех провайдеров. Для API-ключей email можно указать в карточке; OAuth-адрес приходит от провайдера.

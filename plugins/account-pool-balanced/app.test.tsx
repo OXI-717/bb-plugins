@@ -1152,3 +1152,8 @@ it('enables fail-closed VPN Guard linkage through the existing autosave config R
   await waitFor(()=>expect(slot.rpcCalls).toContainEqual(expect.objectContaining({method:'config.set',input:{vpnGuardEnabled:true}})));
   slot.unmount();
 });
+
+it.each(['kimi','zai','opencode-go','cursor','devin'] as const)('shows the observed %s email in the thread header',async provider=>{
+ const ui=renderSlot(app.threadHeaderActions[0]!,{threadId:'thread-one',projectId:'project',isCompactViewport:false},{rpc:{'thread.account':()=>({state:'observed',account:account({provider,kind:'api-key',email:'other@example.com',label:'Subscription'}),lastUsedAt:1800000000000})}});
+ expect(await ui.findByRole('button',{name:/Подписка треда: other@example.com/})).toBeTruthy();
+});

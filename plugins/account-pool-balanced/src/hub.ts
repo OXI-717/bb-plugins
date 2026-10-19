@@ -272,7 +272,11 @@ export class AccountPoolHub {
     const body = new Uint8Array(await request.arrayBuffer());
     const refusal = adapter.guardRequest?.(request, body);
     if (refusal !== null && refusal !== undefined) return refusal;
-    return this.forward(request, body, adapter, context.hostId, context.projectId);
+    return this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null);
+  }
+
+  threadObservation(provider:PoolProvider,hostId:string,threadId:string,projectId:string|null):AccountBinding|null {
+    return this.options.affinity.observation(JSON.stringify(['thread',provider,hostId,projectId,threadId]));
   }
 
   sessionObservation(provider: PoolProvider, hostId: string, sessionId: string, projectId: string | null = null): AccountBinding | null {
@@ -508,6 +512,7 @@ export class AccountPoolHub {
     adapter: ProviderAdapter,
     hostId: string,
     projectId: string | null,
+    threadId: string | null = null,
   ): Promise<Response> {
     const signal = AbortSignal.any([request.signal, this.stopped.signal]);
     const attempted = new Set<string>();
@@ -775,6 +780,7 @@ export class AccountPoolHub {
             break;
           }
           if (response.ok) {
+            if(threadId!==null)this.options.affinity.recordObservation(JSON.stringify(['thread',adapter.provider,hostId,projectId,threadId]),selected.account.id,this.options.now());
             selected.accept();
             this.options.quotas.recordSuccessfulRequest(selected.account.id);
           }
