@@ -58,6 +58,10 @@ export function ConnectionsPanel({
   }, []);
   const refresh = useCallback(async () => {
     const version = ++generation.current;
+    setSelectedId(null);
+    setSelection(null);
+    setCreating(false);
+    setNotice("");
     setLoading(true);
     setError("");
     try {

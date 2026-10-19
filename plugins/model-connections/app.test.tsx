@@ -213,6 +213,30 @@ describe("separate model chooser", () => {
       state.call.mock.calls.filter((x) => x[0] === "catalog"),
     ).toHaveLength(2);
   });
+  it("requires a fresh selection after Refresh reclassifies a connection route", async () => {
+    render(<ConnectionsPanel threadId="thread-one" />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Codex/ }));
+    fireEvent.click(screen.getByText("Выбрать тестовую модель"));
+    const changed = snapshot();
+    changed.connections = changed.connections.map((row) =>
+      row.id === "codex"
+        ? { ...row, group: "local", detail: "Локальная авторизация" }
+        : row,
+    );
+    state.call.mockImplementation(async (method: string) =>
+      method === "catalog" ? changed : { ok: true },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Обновить подключения" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /^Codex/ }).textContent,
+      ).toContain("Локальная авторизация"),
+    );
+    expect(screen.queryByText("Применить со следующего хода")).toBeNull();
+    expect(state.call.mock.calls.some((x) => x[0] === "apply")).toBe(false);
+  });
   it("hiding affects chooser preferences only", async () => {
     render(<ConnectionsPanel threadId="thread-one" />);
     await screen.findByRole("button", { name: /^Codex/ });
