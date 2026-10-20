@@ -17,10 +17,10 @@ process.on('uncaughtException', e => { fs.writeFileSync(process.argv[1] + '.erro
 const args = process.argv.slice(2);
 const root = args.find(a => a.startsWith('--user-data-dir=')).slice(16);
 try { fs.writeFileSync(root + '/pid', String(process.pid), { flag: 'wx' }); } catch { process.exit(0); }
-fs.writeFileSync(root + '/capture.json', JSON.stringify({ args, tz: process.env.TZ }));
+fs.writeFileSync(root + '/capture.json', JSON.stringify({ args, tz: process.env.TZ, secretPresent: process.env.POOL_SYNTHETIC_SECRET !== undefined, electronFlag: process.env.ELECTRON_RUN_AS_NODE }));
 setInterval(() => {}, 1000);
 setTimeout(() => process.exit(0), 15000);
-if (process.env.FIXTURE_EXIT_MS) setTimeout(() => process.exit(0), +process.env.FIXTURE_EXIT_MS);
+setTimeout(() => process.exit(0), ${Number(extraEnv.FIXTURE_EXIT_MS ?? 15000)});
 `, { mode: 0o700 });
   const options: TransportLaunch = {
     root, socketPath: path.join(root, "control.sock"), executable,
@@ -36,7 +36,7 @@ if (process.env.FIXTURE_EXIT_MS) setTimeout(() => process.exit(0), +process.env.
   });
   return options;
 }
-async function capture(options: TransportLaunch): Promise<{ args: string[]; tz: string }> {
+async function capture(options: TransportLaunch): Promise<{ args: string[]; tz: string; secretPresent: boolean; electronFlag?: string }> {
   for (let i = 0; i < 100; i++) {
     try { return JSON.parse(await readFile(path.join(options.root, "capture.json"), "utf8")); }
     catch { await delay(10); }
@@ -59,7 +59,7 @@ async function proxyPort(options: TransportLaunch): Promise<number> {
 
 describe("detached browser supervisor", () => {
   it("survives the caller and reopens only the same timezone through its private socket", async () => {
-    const options = await fixture();
+    const options = await fixture({ POOL_SYNTHETIC_SECRET: "synthetic-private-value" });
     expect(await handoffBrowser(options)).toBe(false);
     await startBrowserTransport(options);
     await capture(options);
@@ -67,6 +67,9 @@ describe("detached browser supervisor", () => {
     await expect(handoffBrowser({ ...options, timezone: "Europe/Paris" })).rejects.toThrow(/timezone/);
     const { args, tz } = await capture(options);
     expect(tz).toBe("UTC");
+    const envCapture = await capture(options);
+    expect(envCapture.secretPresent).toBe(false);
+    expect(envCapture.electronFlag).toBeUndefined();
     expect(args).toContain("--proxy-bypass-list=<-loopback>");
     expect(args).toContain("--disable-quic");
     expect(args).toContain("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");

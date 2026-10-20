@@ -1,7 +1,7 @@
 /** Per-account browser profiles for the Account Pooler, on a dedicated Helium.
  *
- * One Helium installation carries one native profile per pool account (the
- * standard profile picker works for manual use). Profiles are named
+ * One Helium installation serves isolated user-data roots per pool account.
+ * Original native profiles are retained during migration. Profiles are named
  * "<Provider> · <email>" so the window always shows which account it serves.
  * `open` launches Helium with the profile and a process timezone aligned to
  * the current exit IP. All IO is dependency-injected so tests stay hermetic.
@@ -314,7 +314,12 @@ async function listRunningNativeHelium(executable: string, nativeRoot: string): 
   for (const pid of await listRunningHelium(executable)) {
     try {
       const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "args="], { timeout: 2000, maxBuffer: 65536 });
-      if (!stdout.includes("--user-data-dir=") || stdout.includes(`--user-data-dir=${nativeRoot} `)) result.push(pid);
+      // Only our canonical isolated roots are a positive reason to ignore a
+      // live browser. Arbitrary native-root spellings/aliases remain blockers.
+      const isolatedPrefix = path.join(nativeRoot, "Pool Accounts", "Profile ");
+      const escaped = isolatedPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const knownIsolated = new RegExp(`--user-data-dir=${escaped}[1-9]\\d{0,6}(?:\\s|$)`).test(stdout);
+      if (!knownIsolated) result.push(pid);
     } catch { throw new Error("Cannot verify original Helium is closed for migration."); }
   }
   return result;

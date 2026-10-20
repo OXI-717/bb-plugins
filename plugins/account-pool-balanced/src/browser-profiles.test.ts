@@ -1,9 +1,9 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn as spawnProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import dns from "node:dns";
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -322,6 +322,31 @@ describe("openAccountBrowser", () => {
     await openAccountBrowser(opts);
     expect(readFileSync(path.join(result.profileDir, "fixture-state"), "utf8")).toBe("new settings");
     expect(readFileSync(path.join(source, "fixture-state"), "utf8")).toBe("synthetic opaque state");
+  });
+  it.each(["final", "alias", "isolated"])("checks real native processes before migration (%s)", async mode => {
+    const box = sandbox(); const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
+    mkdirSync(path.join(box.heliumRoot, "Profile 1"), { recursive: true });
+    mkdirSync(path.dirname(registryFile), { recursive: true });
+    writeFileSync(path.join(box.heliumRoot, "Profile 1", "Preferences"), JSON.stringify({ custom: true }));
+    writeFileSync(registryFile, JSON.stringify({ [ACCOUNTS[0]!.id]: { profileDirectory: "Profile 1", profileName: "saved", createdAt: 1 } }));
+    const executable = path.join(box.dataDir, "synthetic-native-browser");
+    writeFileSync(executable, `#!${process.execPath}\nsetInterval(() => {}, 1000); setTimeout(() => process.exit(0), 15000);`, { mode: 0o700 });
+    const dataRootArg = mode === "isolated" ? path.join(realpathSync(box.heliumRoot), "Pool Accounts", "Profile 99")
+      : mode === "final" ? realpathSync(box.heliumRoot) : box.heliumRoot + "/.";
+    const native = spawnProcess(executable, [`--user-data-dir=${dataRootArg}`, ...(mode === "alias" ? ["about:blank"] : [])], { stdio: "ignore" });
+    await new Promise<void>((resolve, reject) => { native.once("spawn", resolve); native.once("error", reject); });
+    let launched = false;
+    try {
+      const opening = openAccountBrowser({ accounts: ACCOUNTS, dataDir: box.dataDir, heliumRoot: box.heliumRoot,
+        pluginId: "account-pool-balanced", query: "a@example.test", readVpn: verifiedVpn, fetcher: geoFetcher,
+        env: { PATH: process.env.PATH, POOL_BROWSER_EXECUTABLE: executable },
+        transportImpl: async () => { launched = true; },
+      });
+      if (mode === "isolated") { await expect(opening).resolves.toMatchObject({ guarded: true }); expect(launched).toBe(true); return; }
+      await expect(opening).rejects.toThrow(/migration requires closing/);
+      expect(launched).toBe(false);
+      expect(JSON.parse(readFileSync(registryFile, "utf8"))[ACCOUNTS[0]!.id].isolated).toBeUndefined();
+    } finally { native.kill(); await new Promise(resolve => native.once("exit", resolve)); }
   });
   it("launches Helium with the native profile and the exit timezone", async () => {
     const box = sandbox();

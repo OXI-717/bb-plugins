@@ -65,9 +65,13 @@ async function boot(cfg) {
     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
     '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'
   ];
+  const browserEnv = {};
+  for (const key of ['PATH','HOME','USER','LOGNAME','TMPDIR','TMP','TEMP','DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_CACHE_HOME','XDG_DATA_HOME','DBUS_SESSION_BUS_ADDRESS','LANG','LANGUAGE','LC_ALL','LC_CTYPE','TZ']) {
+    if (process.env[key] !== undefined) browserEnv[key] = process.env[key];
+  }
   function launch(url, first) {
     return new Promise((resolve, reject) => {
-      const child = spawn(cfg.executable, [...args, url], { stdio: 'ignore', env: process.env });
+      const child = spawn(cfg.executable, [...args, url], { stdio: 'ignore', env: browserEnv });
       if (first) primary = child;
       let settled = false;
       const done = err => { if (settled) return; settled = true; clearTimeout(timer); err ? reject(err) : resolve(); };
@@ -149,7 +153,7 @@ export async function handoffBrowser(options: TransportLaunch): Promise<boolean>
 export async function startBrowserTransport(options: TransportLaunch): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(process.execPath, ["-e", BROWSER_WORKER], {
-      detached: true, stdio: ["pipe", "pipe", "ignore"], env: { ...options.env, ...(options.timezone ? { TZ: options.timezone } : {}) },
+      detached: true, stdio: ["pipe", "pipe", "ignore"], env: { ...options.env, ELECTRON_RUN_AS_NODE: "1", ...(options.timezone ? { TZ: options.timezone } : {}) },
     });
     let data = "";
     const timer = setTimeout(() => { child.kill(); reject(new Error("Browser supervisor startup timed out.")); }, 10000);
