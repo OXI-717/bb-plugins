@@ -212,7 +212,7 @@ function moment(timestamp: number): string {
 }
 
 function accountFullName(account: AccountSummary): string {
-  return account.email ?? account.label;
+  return account.email?.trim() || "Email не указан";
 }
 function relative(timestamp: number, now = Date.now()): string {
   const minutes = Math.max(0, Math.round((now - timestamp) / 60_000));
@@ -368,11 +368,6 @@ function tier(account: AccountSummary): string {
     account.subscriptionType ??
     (account.kind === "api-key" ? "API-ключ" : "OAuth")
   );
-}
-function secondaryEmail(account: AccountSummary): string | null {
-  return account.email === null || account.email === account.label
-    ? null
-    : account.email;
 }
 function SettingsBadge({ children }: { children: ReactNode }) {
   return (
@@ -554,7 +549,6 @@ function AccountRow({
   const cap = capText(account);
   const status = statusPresentation(account, threshold);
   const slots = quotaSlots(account, threshold);
-  const email = secondaryEmail(account);
   const {
     attributes,
     isDragging,
@@ -580,7 +574,7 @@ function AccountRow({
         size="icon"
         className="size-8 shrink-0 touch-none text-muted-foreground enabled:cursor-grab enabled:active:cursor-grabbing"
         disabled={pending || reorderDisabled}
-        aria-label={`Переместить ${account.label}`}
+        aria-label={`Переместить ${accountFullName(account)}`}
         {...attributes}
         {...listeners}
       >
@@ -595,19 +589,14 @@ function AccountRow({
         <button
           type="button"
           className="grid min-w-0 flex-1 grid-cols-1 items-center gap-y-1.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-y-0"
-          aria-label={`Открыть ${account.label}`}
+          aria-label={`Открыть ${accountFullName(account)}`}
           onClick={onOpen}
         >
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex min-w-0 items-center gap-1.5">
               <span className="truncate text-sm font-medium text-foreground">
-                {account.label}
+                {accountFullName(account)}
               </span>
-              {email === null ? null : (
-                <span className="min-w-0 truncate text-xs text-subtle-foreground/75">
-                  {email}
-                </span>
-              )}
               <SettingsBadge>{tier(account)}</SettingsBadge>
               {account.drainOnce ? <SettingsBadge>До исчерпания</SettingsBadge> : null}
               {account.policy?.enabled ? <SettingsBadge>Свои настройки</SettingsBadge> : null}
@@ -647,7 +636,7 @@ function AccountRow({
               variant="ghost"
               size="icon"
               className="h-7 w-7 shrink-0 data-[state=open]:bg-state-active"
-              aria-label={`Действия: ${account.label}`}
+              aria-label={`Действия: ${accountFullName(account)}`}
             >
               <Icon name="MoreHorizontal" className="size-4" />
             </Button>
@@ -701,7 +690,7 @@ function AccountRow({
         </DropdownMenu>
         <button
           type="button"
-          aria-label={`Открыть карточку: ${account.label}`}
+          aria-label={`Открыть карточку: ${accountFullName(account)}`}
           onClick={onOpen}
         >
           <ResourceRowDetailChevron />
@@ -1381,7 +1370,8 @@ function AccountPoolSettings() {
     "машин нет";
   const currentLabel = (provider: PoolProvider): string => {
     const id = status?.activeAccounts[provider] ?? null;
-    return accounts.find((account) => account.id === id)?.label ?? "нет";
+    const selected = accounts.find((account) => account.id === id);
+    return selected ? accountFullName(selected) : "Не выбран";
   };
   const currentId = (provider: PoolProvider): string | null =>
     status?.activeAccounts[provider] ?? null;
@@ -1408,13 +1398,18 @@ function AccountPoolSettings() {
       <p className="text-xs text-subtle-foreground">Блокирует сетевые вызовы пула к Codex, Claude, Cursor и Devin по решению Guard. Если Guard недоступен — отказ до отправки. Kimi и Z.ai не затрагиваются.</p>
       <p className="text-xs text-muted-foreground">Включать после обновления VPN-гарда. Старый /1 будет отклонён. Защищённые запросы пула используют IPv4; китайские провайдеры сохраняют обычный транспорт.</p>
       </div>
-      <p className="flex flex-wrap gap-x-3 text-xs text-subtle-foreground/75">
-        {PROVIDERS.map((provider) => (
-          <span key={provider.id}>
-            {`Сейчас ${provider.title}: ${currentLabel(provider.id)}`}
-          </span>
-        ))}
-      </p>
+      <section aria-label="Выбранные аккаунты" className="space-y-3">
+        <h2 className="text-sm font-medium">Выбранные аккаунты</h2>
+        <p className="text-xs text-subtle-foreground">Последний выбор пула для каждого провайдера. В разных проектах и сессиях аккаунты могут отличаться.</p>
+        <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {PROVIDERS.map((provider) => (
+            <div key={provider.id} className="min-w-0 rounded-md border border-border px-3 py-2">
+              <dt className="text-xs text-subtle-foreground">{provider.title}</dt>
+              <dd className="break-all text-sm font-medium">{currentLabel(provider.id)}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
       <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-subtle-foreground/75">
         {[
           { dot: "bg-success", label: "берёт трафик" },
@@ -1932,6 +1927,7 @@ function AccountPoolSettings() {
               </>
             }
           >
+            {error === null ? null : <p role="alert" className="text-sm text-destructive-text">{error}</p>}
             <p className="text-sm text-muted-foreground">
               Основные аккаунты берут трафик как обычно. Резервные включаются,
               только когда ни один основной не подходит или близок недельный
@@ -2087,7 +2083,7 @@ function AccountPoolSettings() {
         ) : null}
         {dialog?.kind === "remove" && selectedAccount !== null ? (
           <DialogFrame
-            title={`Удалить ${selectedAccount.label}?`}
+            title={`Удалить ${accountFullName(selectedAccount)}?`}
             footer={
               <>
                 <span className="flex-1" />
@@ -2204,7 +2200,7 @@ function AccountDialog({
   current: boolean;
   drainHours: number;
   close: () => void;
-  act: (action: "toggle" | "refresh" | "remove" | "drain") => void;
+  act: (action: "toggle" | "refresh" | "remove" | "drain" | "role") => void;
   pending: boolean;
   reauthorize: () => void;
 }) {
@@ -2239,7 +2235,7 @@ function AccountDialog({
       : account.codexAccountId;
   return (
     <DialogFrame
-      title={account.label}
+      title={accountFullName(account)}
       className="pool-settings sm:max-w-xl"
       footer={
         <>
@@ -2272,6 +2268,9 @@ function AccountDialog({
         <SettingsBadge>
           {account.role === "reserve" ? "Резерв" : "Основной"}
         </SettingsBadge>
+        <Button size="sm" variant="outline" disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onClick={() => act("role")}>
+          Изменить роль
+        </Button>
         {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
       </div>
       {account.kind==='api-key'&&<AccountEmailForm email={account.email} save={saveEmail} onUnsavedChange={setEmailUnsaved}/> }
@@ -2561,7 +2560,7 @@ export function ThreadAccountIndicator({ threadId, isCompactViewport }: { thread
   if (status?.state === "unsupported") return null;
   const account = status?.account;
   const availability = account === null || account === undefined ? "" : !account.enabled ? "выключен" : account.eligible ? "доступен" : "сейчас недоступен";
-  const label = error ? "Пул: ошибка проверки" : status === null ? "Пул: проверка…" : status.state === "bypassed" ? "Вне пула" : status.state === "unobserved" ? "Пул: ещё нет данных" : `${account?.email ?? account?.label ?? "Удалённый аккаунт"} · ${availability}`;
+  const label = error ? "Пул: ошибка проверки" : status === null ? "Пул: проверка…" : status.state === "bypassed" ? "Вне пула" : status.state === "unobserved" ? "Пул: ещё нет данных" : `${(account ? accountFullName(account) : "Удалённый аккаунт")} · ${availability}`;
   const details = status?.state === "observed"
     ? `Последний подтверждённый запрос: ${label}. ${status.lastUsedAt === null ? "" : new Date(status.lastUsedAt).toLocaleString("ru-RU")}. Следующий запрос может выбрать другой аккаунт. Активных запросов аккаунта: ${account?.inFlight ?? 0}.`
     : "Аккаунт выбирается при запросе. Здесь отображаются только подтверждённые данные пула.";
