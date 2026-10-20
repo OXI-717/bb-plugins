@@ -545,6 +545,14 @@ describe("Account Pool settings", () => {
     await waitFor(() => expect(slot.rpcCalls).toContainEqual({ method: "account.setRole", input: { accountId: reserved.id, role: "primary" } }));
   });
 
+  it("names the delete confirmation with the selected email", async () => {
+    const slot = render([account({ label: "Shared Display Name", email: "selected@example.com" })]);
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть selected@example.com" }));
+    fireEvent.click(await slot.findByRole("button", { name: "Удалить" }));
+    expect(await slot.findByRole("dialog", { name: "Удалить selected@example.com?" })).toBeTruthy();
+    expect(slot.queryByText("Shared Display Name")).toBeNull();
+  });
+
   it("keeps role selection open and reports a rejected save", async () => {
     const slot = render([account({ role: "reserve" })], {
       "account.setRole": () => { throw new Error("Role update failed"); },
@@ -553,7 +561,7 @@ describe("Account Pool settings", () => {
     fireEvent.click(await slot.findByRole("button", { name: "Изменить роль" }));
     fireEvent.click(await slot.findByRole("button", { name: "Основной" }));
     fireEvent.click(slot.getByRole("button", { name: "Сохранить" }));
-    expect(await slot.findByText("Role update failed")).toBeTruthy();
+    expect(await within(slot.getByRole("dialog", { name: "Роль" })).findByRole("alert")).toHaveProperty("textContent", "Role update failed");
     expect(slot.getByRole("button", { name: "Основной" }).getAttribute("aria-pressed")).toBe("true");
   });
 

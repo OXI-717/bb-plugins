@@ -1927,6 +1927,7 @@ function AccountPoolSettings() {
               </>
             }
           >
+            {error === null ? null : <p role="alert" className="text-sm text-destructive-text">{error}</p>}
             <p className="text-sm text-muted-foreground">
               Основные аккаунты берут трафик как обычно. Резервные включаются,
               только когда ни один основной не подходит или близок недельный
@@ -2082,7 +2083,7 @@ function AccountPoolSettings() {
         ) : null}
         {dialog?.kind === "remove" && selectedAccount !== null ? (
           <DialogFrame
-            title={`Удалить ${selectedAccount.label}?`}
+            title={`Удалить ${accountFullName(selectedAccount)}?`}
             footer={
               <>
                 <span className="flex-1" />
