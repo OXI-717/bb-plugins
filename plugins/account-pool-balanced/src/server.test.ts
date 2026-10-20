@@ -2588,6 +2588,45 @@ describe("Account Pool plugin", () => {
     );
   });
 
+  it("resolves pooled env without a thread for bb model listing", async () => {
+    const upstream = await startUpstream(async (request, response) => {
+      await readRequestBody(request);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    cleanups.push(upstream.close);
+    const fixture = await createFixture({ upstreamUrl: upstream.url });
+    // bb resolves provider env with a null thread and project when it lists models;
+    // SDK types before 0.6.57 still declare both as strings.
+    const catalogContext = {
+      threadId: null,
+      projectId: null,
+      hostId: "host-one",
+    } as unknown as Parameters<
+      typeof fixture.host.harness.behavior.resolveProviderEnv
+    >[1];
+    const entries = await fixture.host.harness.behavior.resolveProviderEnv(
+      "claude-code",
+      catalogContext,
+    );
+    const token = entries.find(
+      (entry) => entry.name === "ANTHROPIC_AUTH_TOKEN",
+    )?.value;
+    if (typeof token !== "string") {
+      throw new Error("Catalog env omitted the hub token.");
+    }
+    const response = await fixture.host.harness.behavior.fetchHttp(
+      "POST",
+      "/v1/messages",
+      { headers: authHeaders(token), body: "{}" },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(await fixture.host.bb.storage.kv.list("routed:")).not.toContain(
+      "routed:null",
+    );
+  });
+
   it("resolves distinct secret machine tokens and honors per-thread bypass", async () => {
     const upstream = await startUpstream(async (request, response) => {
       await readRequestBody(request);

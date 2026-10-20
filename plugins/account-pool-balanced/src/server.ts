@@ -76,6 +76,12 @@ export interface AccountPoolPluginOptions {
   codexAuthBaseUrl?: string;
 }
 
+interface ProviderEnvScope {
+  hostId: string;
+  projectId: string | null;
+  threadId: string | null;
+}
+
 const DISPOSE_INSPECTION_TIMEOUT_MS = 2_000;
 const DISPOSE_INSPECTION_TIMEOUT = Symbol("dispose-inspection-timeout");
 function hubBasePath(pluginId: string): string {
@@ -126,6 +132,13 @@ export function createAccountPoolPlugin(
     const externalClients = new ExternalClients(path.join(secretDir, "external-clients"));
     await externalClients.tokens.initialize();
     const routing = new RoutingStore(bb.storage.kv, now);
+    // bb resolves provider env with a null thread and project when it lists models.
+    const isThreadBypassed = async (context: ProviderEnvScope) =>
+      context.threadId !== null && (await routing.isBypassed(context.threadId));
+    const scopedHubToken = (context: ProviderEnvScope) =>
+      context.threadId === null
+        ? hubTokens.forProject(context.hostId, context.projectId)
+        : hubTokens.forThread(context.hostId, context.projectId, context.threadId);
     const db = bb.storage.database();
     bb.storage.migrate(db, QUOTA_MIGRATIONS);
     const quotas = new QuotaStore(db);
@@ -173,10 +186,10 @@ export function createAccountPoolPlugin(
     });
     if (transport !== null) {
       bb.providers.experimental_contributeEnv("acp-oxi-devin-pool", async context => {
-        if (!(await operations.isRoutingEnabled("devin")) || await routing.isBypassed(context.threadId) ||
+        if (!(await operations.isRoutingEnabled("devin")) || await isThreadBypassed(context) ||
           !(await operations.hasUsableEnabledAccount("devin"))) return [];
         return [
-          { name: "OXI_DEVIN_POOL_TOKEN", value: await hubTokens.forThread(context.hostId, context.projectId, context.threadId), reason: "Project-bound Account Pooler token" },
+          { name: "OXI_DEVIN_POOL_TOKEN", value: await scopedHubToken(context), reason: "Project-bound Account Pooler token" },
           { name: "OXI_DEVIN_POOL_URL", value: { serverPath: hubBasePath(bb.pluginId) }, reason: "Account Pooler route" },
         ];
       });
@@ -278,13 +291,15 @@ export function createAccountPoolPlugin(
     bb.providers.experimental_contributeEnv("claude-code", async (context) => {
       if (
         !(await operations.isRoutingEnabled("claude")) ||
-        (await routing.isBypassed(context.threadId)) ||
+        (await isThreadBypassed(context)) ||
         !(await operations.hasUsableEnabledAccount("claude"))
       ) {
         return [];
       }
-      const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
-      await routing.recordRouted(context.threadId, context.hostId);
+      const token = await scopedHubToken(context);
+      if (context.threadId !== null) {
+        await routing.recordRouted(context.threadId, context.hostId);
+      }
       return [
         {
           name: "ANTHROPIC_BASE_URL",
@@ -316,12 +331,12 @@ export function createAccountPoolPlugin(
     bb.providers.experimental_contributeEnv("codex", async (context) => {
       if (
         !(await operations.isRoutingEnabled("codex")) ||
-        (await routing.isBypassed(context.threadId)) ||
+        (await isThreadBypassed(context)) ||
         !(await operations.hasUsableEnabledAccount("codex"))
       ) {
         return [];
       }
-      const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
+      const token = await scopedHubToken(context);
       return [
         {
           name: "CODEX_OPENAI_BASE_URL",
@@ -414,12 +429,12 @@ export function createAccountPoolPlugin(
       bb.providers.experimental_contributeEnv(cursorProviderId, async (context) => {
       if (
         !(await operations.isRoutingEnabled("cursor")) ||
-        (await routing.isBypassed(context.threadId)) ||
+        (await isThreadBypassed(context)) ||
         !(await operations.hasUsableEnabledAccount("cursor"))
       ) {
         return [];
       }
-      const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
+      const token = await scopedHubToken(context);
       return [
         {
           name: "CURSOR_API_ENDPOINT",
@@ -470,12 +485,12 @@ export function createAccountPoolPlugin(
         async (context) => {
           if (
             !(await operations.isRoutingEnabled(entry.provider)) ||
-            (await routing.isBypassed(context.threadId)) ||
+            (await isThreadBypassed(context)) ||
             !(await operations.hasUsableEnabledAccount(entry.provider))
           ) {
             return [];
           }
-          const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
+          const token = await scopedHubToken(context);
           return [
             {
               name: entry.baseUrlEnv,
@@ -503,12 +518,12 @@ export function createAccountPoolPlugin(
       bb.providers.experimental_contributeEnv(providerId, async (context) => {
         if (
           !(await operations.isRoutingEnabled("kimi")) ||
-          (await routing.isBypassed(context.threadId)) ||
+          (await isThreadBypassed(context)) ||
           !(await operations.hasUsableEnabledAccount("kimi"))
         ) {
           return [];
         }
-        const token = await hubTokens.forThread(context.hostId, context.projectId, context.threadId);
+        const token = await scopedHubToken(context);
         return [
           {
             name: "OXI_KIMI_BASE_URL",

@@ -7,13 +7,17 @@
  * the current exit IP. All IO is dependency-injected so tests stay hermetic.
  */
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:net";
+import { constants } from "node:fs";
+import { handoffBrowser, startBrowserTransport, removeStaleBrowserSocket, type TransportLaunch } from "./browser-transport.js";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { homedir, platform as currentPlatform } from "node:os";
+import { mkdir, readdir, rename, stat, writeFile, open, rm, cp, copyFile, realpath, lstat } from "node:fs/promises";
+import { homedir, platform as currentPlatform, tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { request as httpRequest } from "undici";
+import { Agent, request as httpRequest } from "undici";
 import type { AccountSummary } from "./contracts.js";
 import { readVpnEvidence } from "./vpn-policy.js";
 import type { VpnEvidence } from "./vpn-evidence.js";
@@ -64,23 +68,59 @@ export type VpnReader = (file: string) => Promise<VpnEvidence>;
 const defaultVpnReader: VpnReader = (file) => readVpnEvidence(file, Date.now());
 
 const defaultGeoFetcher: GeoFetcher = async (url) => {
-  // family 4: the verified VPN evidence covers the IPv4 route; do not let the
-  // geo probe itself leak through a non-VPN IPv6 path on dual-stack hosts.
-  const res = await httpRequest(url, {
-    method: "GET",
-    headersTimeout: 4000,
-    bodyTimeout: 4000,
-    // @ts-expect-error undici forwards connect options; family is runtime-valid
-    connect: { family: 4 },
-  });
-  if (res.statusCode !== 200) {
-    await res.body.dump();
-    return null;
+  const target = new URL(url);
+  if (target.hostname.startsWith("[") || target.username || target.password || !["http:", "https:"].includes(target.protocol)) return null;
+  const dispatcher = new Agent({ connect: { family: 4, timeout: 4000 } });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const res = await httpRequest(url, {
+      method: "GET", dispatcher, signal: controller.signal,
+      headersTimeout: 4000, bodyTimeout: 4000,
+    });
+    if (res.statusCode !== 200) { res.body.destroy(); return null; }
+    const chunks: Buffer[] = []; let size = 0;
+    for await (const chunk of res.body) {
+      size += chunk.length;
+      if (size > GEO_MAX_BYTES) { res.body.destroy(); return null; }
+      chunks.push(Buffer.from(chunk));
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  } finally {
+    clearTimeout(timer);
+    await dispatcher.destroy();
   }
-  const text = await res.body.text();
-  if (text.length > GEO_MAX_BYTES) return null;
-  return JSON.parse(text) as unknown;
 };
+
+const storeTails = new Map<string, Promise<void>>();
+async function withProfileStore<T>(root: string, action: () => Promise<T>): Promise<T> {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const key = await realpath(root);
+  const result = (storeTails.get(key) ?? Promise.resolve()).then(async () => {
+    // Kernel-owned loopback lease: released even if a CLI/RPC process crashes.
+    // Hash collisions or an occupied port only cause a bounded, closed failure.
+    const port = 40000 + createHash("sha256").update(key).digest().readUInt32BE(0) % 20000;
+    const deadline = Date.now() + 10000;
+    const lock = createServer(socket => socket.destroy());
+    while (true) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          lock.once("error", reject);
+          lock.listen({ port, host: "127.0.0.1", exclusive: true }, () => { lock.removeAllListeners("error"); resolve(); });
+        });
+        break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE" || Date.now() >= deadline) throw new Error("Browser profile store is busy; retry shortly.");
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+    try { return await action(); }
+    finally { await new Promise<void>(resolve => lock.close(() => resolve())); }
+  });
+  const tail = result.then(() => {}, () => {});
+  storeTails.set(key, tail);
+  return result.finally(() => { if (storeTails.get(key) === tail) storeTails.delete(key); });
+}
 
 /** Match one account by exact id, then email, then label (case-insensitive). */
 export function resolveAccount(
@@ -117,7 +157,8 @@ export async function fetchExitGeo(
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
     const record = payload as Record<string, unknown>;
     const timezone = record.timezone;
-    if (typeof timezone !== "string" || timezone === "") return null;
+    if (typeof timezone !== "string" || timezone.length > 128 || !/^[A-Za-z_]+(?:\/[A-Za-z0-9_+.-]+)*$/.test(timezone)) return null;
+    try { new Intl.DateTimeFormat("en", { timeZone: timezone }); } catch { return null; }
     return {
       timezone,
       city: typeof record.city === "string" ? record.city : null,
@@ -173,25 +214,54 @@ interface RegistryEntry {
   profileDirectory: string;
   profileName: string;
   createdAt: number;
+  isolated?: boolean;
 }
 
 type Registry = Record<string, RegistryEntry>;
 
-async function readRegistry(file: string): Promise<Registry> {
+async function readObject(file: string, maxBytes = 4 * 1024 * 1024): Promise<Record<string, unknown>> {
+  let handle;
   try {
-    const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return parsed as Registry;
-  } catch {
-    return {};
+    handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > maxBytes) throw new Error("Invalid browser state file.");
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let size = 0;
+    while (size <= maxBytes) {
+      const result = await handle.read(buffer, size, buffer.length - size, null);
+      if (result.bytesRead === 0) break;
+      size += result.bytesRead;
+    }
+    if (size > maxBytes) throw new Error("Browser state file exceeds size limit.");
+    const parsed: unknown = JSON.parse(buffer.subarray(0, size).toString("utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid browser state object.");
+    return parsed as Record<string, unknown>;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new Error("Cannot read browser state safely; existing bindings were preserved.");
+  } finally { await handle?.close(); }
+}
+
+async function readRegistry(file: string): Promise<Registry> {
+  const parsed = await readObject(file, 1024 * 1024);
+  const seen = new Set<string>();
+  for (const entry of Object.values(parsed)) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Invalid browser registry entry.");
+    const e = entry as RegistryEntry;
+    if (!/^Profile [1-9]\d{0,6}$/.test(e.profileDirectory) || typeof e.profileName !== "string" || e.profileName.length > 1024 || !Number.isFinite(e.createdAt) || (e.isolated !== undefined && e.isolated !== true)) throw new Error("Invalid browser registry binding.");
+    if (seen.has(e.profileDirectory)) throw new Error("Duplicate browser profile binding; refusing account mixing.");
+    seen.add(e.profileDirectory);
   }
+  return parsed as Registry;
 }
 
 async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}`;
-  await writeFile(tmp, JSON.stringify(value, null, 2));
-  await rename(tmp, file);
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.tmp-${randomUUID()}`;
+  try {
+    await writeFile(tmp, JSON.stringify(value, null, 2), { flag: "wx", mode: 0o600 });
+    await rename(tmp, file);
+  } finally { await rm(tmp, { force: true }); }
 }
 
 /** Next free "Profile N" directory name (Default counts as taken). */
@@ -210,43 +280,44 @@ async function listHeliumProfileDirs(root: string): Promise<string[]> {
     return entries
       .filter((entry) => entry.isDirectory() && (entry.name === "Default" || /^Profile \d+$/.test(entry.name)))
       .map((entry) => entry.name);
-  } catch {
-    return [];
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw e;
   }
 }
 
 const execFileAsync = promisify(execFile);
 
-/** Pids of running Helium main processes. Anchored at the end so helper
- *  binaries ("Helium Helper.app/Contents/MacOS/Helium Helper") don't match. */
-export async function listRunningHelium(): Promise<number[]> {
+/** Match an exact executable followed by its optional command-line arguments. */
+export function browserProcessPattern(executable: string): string {
+  return executable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([[:space:]]|$)";
+}
+
+export async function listRunningHelium(executable = path.join("/Applications", HELIUM_APP_BINARY)): Promise<number[]> {
   try {
-    const { stdout } = await execFileAsync("pgrep", ["-f", "Helium.app/Contents/MacOS/Helium$"]);
+    const { stdout } = await execFileAsync("pgrep", ["-f", "--", browserProcessPattern(executable)], {
+      timeout: 2000,
+      maxBuffer: 65536,
+    });
     return stdout
       .split("\n")
       .map((line) => Number(line.trim()))
       .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
-  } catch {
-    return [];
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === 1) return [];
+    throw new Error("Cannot inspect running browser processes; refusing an unverified timezone handoff.");
   }
 }
 
-interface LaunchMarker {
-  tz: string;
-  pid: number;
-  at: number;
-}
-
-async function readLaunchMarker(file: string): Promise<LaunchMarker | null> {
-  try {
-    const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const record = parsed as Record<string, unknown>;
-    if (typeof record.tz !== "string" || typeof record.pid !== "number") return null;
-    return { tz: record.tz, pid: record.pid, at: typeof record.at === "number" ? record.at : 0 };
-  } catch {
-    return null;
+async function listRunningNativeHelium(executable: string, nativeRoot: string): Promise<number[]> {
+  const result: number[] = [];
+  for (const pid of await listRunningHelium(executable)) {
+    try {
+      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "args="], { timeout: 2000, maxBuffer: 65536 });
+      if (!stdout.includes("--user-data-dir=") || stdout.includes(`--user-data-dir=${nativeRoot} `)) result.push(pid);
+    } catch { throw new Error("Cannot verify original Helium is closed for migration."); }
   }
+  return result;
 }
 
 export interface EnsureProfileOptions {
@@ -262,15 +333,7 @@ export async function syncLocalStateProfiles(
   entries: readonly RegistryEntry[],
 ): Promise<void> {
   const localStateFile = path.join(heliumRoot, "Local State");
-  let localState: Record<string, unknown> = {};
-  try {
-    const parsed: unknown = JSON.parse(await readFile(localStateFile, "utf8"));
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      localState = parsed as Record<string, unknown>;
-    }
-  } catch {
-    // first launch — file absent, created here
-  }
+  const localState = await readObject(localStateFile);
   const profile =
     localState["profile"] !== null &&
     typeof localState["profile"] === "object" &&
@@ -303,17 +366,34 @@ export async function ensureProfile(
   account: AccountSummary,
   options: EnsureProfileOptions,
 ): Promise<RegistryEntry> {
+  return withProfileStore(options.heliumRoot, () => ensureProfileLocked(account, options));
+}
+
+async function ensureProfileLocked(
+  account: AccountSummary,
+  options: EnsureProfileOptions,
+): Promise<RegistryEntry> {
   const registry = await readRegistry(options.registryFile);
   const existing = registry[account.id];
-  if (existing !== undefined) return existing;
+  if (existing !== undefined) return { ...existing, profileName: profileNameFor(account) };
   const name = profileNameFor(account);
-  const profileDirectory = nextProfileDirectory(await listHeliumProfileDirs(options.heliumRoot));
-  const profileDir = path.join(options.heliumRoot, profileDirectory);
-  await mkdir(profileDir, { recursive: true });
-  await writeJsonAtomic(path.join(profileDir, "Preferences"), {
-    profile: { name },
-  });
-  const entry: RegistryEntry = { profileDirectory, profileName: name, createdAt: Date.now() };
+  const profileDirectory = nextProfileDirectory([
+    ...await listHeliumProfileDirs(options.heliumRoot),
+    ...await listHeliumProfileDirs(path.join(options.heliumRoot, "Pool Accounts")),
+    ...Object.values(registry).map(e => e.profileDirectory),
+  ]);
+  const root = isolatedRoot(options.heliumRoot, profileDirectory);
+  await mkdir(path.dirname(root), { recursive: true, mode: 0o700 });
+  // Exclusive reservation, including unknown/orphaned roots from earlier runs.
+  try { await mkdir(root, { mode: 0o700 }); }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return ensureProfileLocked(account, options);
+    throw e;
+  }
+  const entry: RegistryEntry = { profileDirectory, profileName: name, createdAt: Date.now(), isolated: true };
+  await mkdir(path.join(root, profileDirectory), { mode: 0o700 });
+  await writeJsonAtomic(path.join(root, profileDirectory, "Preferences"), { profile: { name } });
+  await syncLocalStateProfiles(root, [entry]);
   registry[account.id] = entry;
   await writeJsonAtomic(options.registryFile, registry);
   return entry;
@@ -335,6 +415,7 @@ export interface OpenAccountBrowserOptions {
   env?: NodeJS.ProcessEnv | undefined;
   platformName?: NodeJS.Platform | undefined;
   settleMs?: number | undefined;
+  transportImpl?: ((options: TransportLaunch) => Promise<void>) | undefined;
 }
 
 export interface OpenAccountBrowserResult {
@@ -352,6 +433,14 @@ export interface OpenAccountBrowserResult {
 export async function openAccountBrowser(
   options: OpenAccountBrowserOptions,
 ): Promise<OpenAccountBrowserResult> {
+  const root = options.heliumRoot ?? heliumDataRoot(options.platformName ?? currentPlatform());
+  return withProfileStore(root, async () => openAccountBrowserLocked({ ...options, heliumRoot: await realpath(root) }));
+}
+
+async function openAccountBrowserLocked(
+  options: OpenAccountBrowserOptions,
+): Promise<OpenAccountBrowserResult> {
+  if ((options.platformName ?? currentPlatform()) === "win32") throw new Error("Account browser transport currently requires macOS or Linux.");
   const account = resolveAccount(options.accounts, options.query);
   const guarded = GUARDED_BROWSER_PROVIDERS.has(account.provider);
   if (guarded) {
@@ -386,58 +475,89 @@ export async function openAccountBrowser(
   const heliumRoot = options.heliumRoot ?? heliumDataRoot(options.platformName ?? currentPlatform());
   const profileStore = path.join(options.dataDir, "plugins", options.pluginId, "browser-profiles");
   const registryFile = path.join(profileStore, "registry.json");
-  const markerFile = path.join(profileStore, "last-launch.json");
-  const running = await (options.listRunning ?? listRunningHelium)();
   const timezone = geo?.timezone ?? null;
-  if (timezone !== null && running.length > 0) {
-    // SIP hides process env on macOS, so trust is established by our own marker:
-    // the running instance is accepted only when WE started it with this timezone
-    // and the recorded pid is still a live Helium process.
-    const marker = await readLaunchMarker(markerFile);
-    const trusted = marker !== null && marker.tz === timezone && running.includes(marker.pid);
-    if (!trusted) {
-      throw new Error(
-        "Helium is already running with an unverified timezone. " +
-          "Quit Helium (Cmd+Q) and open the profile again so the exit timezone applies.",
-      );
+  const url = safeBrowserUrl(options.url ?? PROVIDER_HOME[account.provider] ?? "about:blank");
+  const entry = await ensureProfileLocked(account, { heliumRoot, registryFile });
+  const root = isolatedRoot(heliumRoot, entry.profileDirectory);
+  const socketPath = path.join(tmpdir(), `bb-pool-${createHash("sha256").update(root).digest("hex").slice(0, 24)}.sock`);
+  const launch: TransportLaunch = {
+    root, socketPath, executable, profileDirectory: entry.profileDirectory, timezone, url,
+    settleMs: options.settleMs ?? 800, env: options.env ?? process.env,
+  };
+  if (!options.transportImpl && !options.spawnImpl) {
+    try {
+      if (await handoffBrowser(launch)) return browserResult(account, entry, root, timezone, url, guarded);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ECONNREFUSED") throw e;
     }
   }
-  const entry = await ensureProfile(account, { heliumRoot, registryFile });
-  // Helium rewrites Local State live: sync the picker only while it is closed.
-  if (running.length === 0) {
+  // No supervisor proof: never trust a stale PID marker. Check this isolated root.
+  const running = await (options.listRunning ?? (() => listRunningHelium(`--user-data-dir=${root}`)))();
+  if (running.length) throw new Error("Account browser is running without a live transport supervisor; close only that account window and retry.");
+  if (!entry.isolated) {
+    const nativeRunning = await (options.listRunning ?? (() => listRunningNativeHelium(executable, heliumRoot)))();
+    if (nativeRunning.length) throw new Error("One-time profile migration requires closing the original Helium; existing profiles remain untouched.");
+    await migrateProfile(heliumRoot, root, entry);
     const registry = await readRegistry(registryFile);
-    await syncLocalStateProfiles(heliumRoot, Object.values(registry));
+    entry.isolated = true; registry[account.id] = entry;
+    await writeJsonAtomic(registryFile, registry);
   }
-  const url = options.url ?? PROVIDER_HOME[account.provider] ?? "about:blank";
-  const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
-  if (timezone !== null) env.TZ = timezone;
-  const wasRunning = running.length > 0;
-  const child = (options.spawnImpl ?? spawn)(executable, [
-    `--profile-directory=${entry.profileDirectory}`,
-    "--no-first-run",
-    "--no-default-browser-check",
-    // The verified VPN evidence covers IPv4 only; keep the browser off any
-    // non-VPN IPv6 route on dual-stack hosts (system-level IPv6 off is the
-    // full guarantee, this flag is the in-process constraint).
-    "--disable-ipv6",
-    url,
-  ], { detached: true, stdio: "ignore", env });
-  await waitForLaunch(child, options.settleMs ?? 800, wasRunning);
-  if (timezone !== null) {
-    // On handoff the spawned process exits immediately, so record the pid of the
-    // already-running main process, not the transient child.
-    const trustedPid = wasRunning ? running[0] : child.pid;
-    if (trustedPid !== undefined) {
-      await writeJsonAtomic(markerFile, { tz: timezone, pid: trustedPid, at: Date.now() });
-    }
-  }
+  const profileInfo = await lstat(path.join(root, entry.profileDirectory));
+  if (!profileInfo.isDirectory() || profileInfo.isSymbolicLink()) throw new Error("Isolated browser profile is missing or unsafe; original bindings preserved.");
+  await removeStaleBrowserSocket(socketPath);
+  if (options.transportImpl) await options.transportImpl(launch);
+  else if (options.spawnImpl) {
+    // Hermetic launch adapter used by profile/CLI tests. Production always uses the supervisor.
+    const child = options.spawnImpl(executable, [`--user-data-dir=${root}`, `--profile-directory=${entry.profileDirectory}`, url], {
+      detached: true, stdio: "ignore", env: { ...launch.env, ...(timezone ? { TZ: timezone } : {}) },
+    });
+    await waitForLaunch(child, launch.settleMs, false);
+  } else await startBrowserTransport(launch);
+  return browserResult(account, entry, root, timezone, url, guarded);
+}
+
+export function safeBrowserUrl(value: string): string {
+  if (value === "about:blank") return value;
+  const parsed = new URL(value);
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || value.length > 8192) throw new Error("Browser URL must use HTTPS without embedded credentials.");
+  return parsed.href;
+}
+
+function isolatedRoot(heliumRoot: string, directory: string): string {
+  return path.join(heliumRoot, "Pool Accounts", directory);
+}
+
+async function migrateProfile(nativeRoot: string, root: string, entry: RegistryEntry): Promise<void> {
+  const stage = `${root}.migrate-${randomUUID()}`;
+  // A complete prior copy can be reused after a registry-write failure. Never
+  // overwrite it: it may already contain newer user settings/authentication.
+  try {
+    const info = await lstat(root);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe migrated profile root.");
+    const completed = await readObject(path.join(root, "pool-migration.json"));
+    if (completed.profileDirectory !== entry.profileDirectory || completed.createdAt !== entry.createdAt) throw new Error("Unverified existing migration; original profile preserved.");
+    return;
+  } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+  await mkdir(stage, { recursive: true, mode: 0o700 });
+  try {
+    // Opaque filesystem copies, no inspection or logging of authentication data.
+    await cp(path.join(nativeRoot, entry.profileDirectory), path.join(stage, entry.profileDirectory), { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+    try { await copyFile(path.join(nativeRoot, "Local State"), path.join(stage, "Local State"), constants.COPYFILE_EXCL); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+    await syncLocalStateProfiles(stage, [entry]);
+    await writeJsonAtomic(path.join(stage, "pool-migration.json"), { profileDirectory: entry.profileDirectory, createdAt: entry.createdAt });
+    await rename(stage, root);
+  } finally { await rm(stage, { recursive: true, force: true }); }
+}
+
+function browserResult(account: AccountSummary, entry: RegistryEntry, root: string, timezone: string | null, url: string, guarded: boolean): OpenAccountBrowserResult {
   return {
     accountId: account.id,
     provider: account.provider,
     label: account.label,
     profileName: entry.profileName,
     profileDirectory: entry.profileDirectory,
-    profileDir: path.join(heliumRoot, entry.profileDirectory),
+    profileDir: path.join(root, entry.profileDirectory),
     timezone,
     url,
     guarded,
@@ -471,7 +591,7 @@ export async function listBrowserProfiles(options: {
   for (const account of options.accounts) {
     const entry = registry[account.id];
     const profileDirectory = entry?.profileDirectory ?? "";
-    const profileDir = entry === undefined ? "" : path.join(heliumRoot, profileDirectory);
+    const profileDir = entry === undefined ? "" : path.join(entry.isolated ? isolatedRoot(heliumRoot, profileDirectory) : heliumRoot, profileDirectory);
     let updatedAt: number | null = null;
     if (entry !== undefined) {
       try {
@@ -485,7 +605,7 @@ export async function listBrowserProfiles(options: {
       provider: account.provider,
       label: account.label,
       email: account.email,
-      profileName: entry?.profileName ?? "",
+      profileName: entry === undefined ? "" : profileNameFor(account),
       profileDirectory,
       profileDir,
       exists: updatedAt !== null,

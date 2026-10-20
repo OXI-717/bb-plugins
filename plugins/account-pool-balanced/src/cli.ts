@@ -677,7 +677,7 @@ export function registerPoolCli(
           }
           const lines = profiles.map(
             (row) =>
-              `${row.provider}\t${row.profileName === "" ? row.label : row.profileName}\t` +
+              `${row.provider}\t${row.email ?? (row.profileName === "" ? row.label : row.profileName)}\t` +
               (row.exists
                 ? `${row.profileDirectory} (updated ${new Date(row.updatedAt ?? 0).toISOString()})`
                 : "no profile yet"),
@@ -702,7 +702,7 @@ export function registerPoolCli(
               `Opened "${result.profileName}" in Helium.\n` +
               `  profile: ${result.profileDirectory}\n` +
               `  timezone: ${result.timezone ?? "system"}\n` +
-              `  url: ${result.url}\n`,
+              `  site: ${result.url === "about:blank" ? result.url : new URL(result.url).origin}\n`,
           };
         }
         if (

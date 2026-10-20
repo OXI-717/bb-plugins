@@ -302,6 +302,7 @@ describe("Account Pool settings", () => {
         id: "22222222-2222-4222-8222-222222222222",
         provider: "codex",
         label: "pro@example.com",
+        email: "pro@example.com",
         codexAccountId: "chatgpt-account",
         status: "exhausted",
         fiveHourUtilization: 0.25,
@@ -507,12 +508,61 @@ describe("Account Pool settings", () => {
         }),
     });
     expect(
-      await slot.findByText("Сейчас Claude: person@example.com"),
+      await slot.findByRole("region", { name: "Выбранные аккаунты" }),
     ).toBeTruthy();
-    expect(slot.getByText("Сейчас Codex: нет")).toBeTruthy();
+    expect(within(slot.getByRole("region", { name: "Выбранные аккаунты" })).getAllByText("Не выбран")).toHaveLength(6);
     expect(slot.getAllByText("Текущий")).toHaveLength(1);
     expect(slot.getAllByText("Резерв")).toHaveLength(1);
     expect(slot.getByText("потолок сейчас 39% (15%→98%)")).toBeTruthy();
+  });
+
+  it("uses email instead of display names in the overview, rows and account dialog", async () => {
+    const named = account({ label: "Synthetic Display Name", email: "identity@example.com" });
+    const slot = render([named], {
+      "status.get": () => status([named], { claude: named.id, codex: null, kimi: null, zai: null, "opencode-go": null, cursor: null, devin: null }),
+    });
+    const overview = await slot.findByRole("region", { name: "Выбранные аккаунты" });
+    expect(within(overview).getByText("identity@example.com")).toBeTruthy();
+    expect(slot.queryByText("Synthetic Display Name")).toBeNull();
+    fireEvent.click(slot.getByRole("button", { name: "Открыть identity@example.com" }));
+    expect(await slot.findByRole("heading", { name: "identity@example.com" })).toBeTruthy();
+    expect(slot.queryByText("Synthetic Display Name")).toBeNull();
+  });
+
+  it("shows missing email explicitly instead of a display name", async () => {
+    const slot = render([account({ label: "Hidden Name", email: null })]);
+    expect(await slot.findByRole("button", { name: "Открыть Email не указан" })).toBeTruthy();
+    expect(slot.queryByText("Hidden Name")).toBeNull();
+  });
+
+  it("changes a reserve account to primary from inside its detail dialog", async () => {
+    const reserved = account({ role: "reserve" });
+    const slot = render([reserved], { "account.setRole": () => ({ account: reserved }) });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.click(await slot.findByRole("button", { name: "Изменить роль" }));
+    fireEvent.click(await slot.findByRole("button", { name: "Основной" }));
+    fireEvent.click(slot.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({ method: "account.setRole", input: { accountId: reserved.id, role: "primary" } }));
+  });
+
+  it("names the delete confirmation with the selected email", async () => {
+    const slot = render([account({ label: "Shared Display Name", email: "selected@example.com" })]);
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть selected@example.com" }));
+    fireEvent.click(await slot.findByRole("button", { name: "Удалить" }));
+    expect(await slot.findByRole("dialog", { name: "Удалить selected@example.com?" })).toBeTruthy();
+    expect(slot.queryByText("Shared Display Name")).toBeNull();
+  });
+
+  it("keeps role selection open and reports a rejected save", async () => {
+    const slot = render([account({ role: "reserve" })], {
+      "account.setRole": () => { throw new Error("Role update failed"); },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.click(await slot.findByRole("button", { name: "Изменить роль" }));
+    fireEvent.click(await slot.findByRole("button", { name: "Основной" }));
+    fireEvent.click(slot.getByRole("button", { name: "Сохранить" }));
+    expect(await within(slot.getByRole("dialog", { name: "Роль" })).findByRole("alert")).toHaveProperty("textContent", "Role update failed");
+    expect(slot.getByRole("button", { name: "Основной" }).getAttribute("aria-pressed")).toBe("true");
   });
 
   it("saves a role and a weekly cap from the row actions", async () => {
@@ -724,6 +774,7 @@ describe("Account Pool settings", () => {
     const slot = render([account({
       provider: "codex",
       label: "codex@example.com",
+      email: "codex@example.com",
       resetCredits: {
         availableCount: 2,
         credits: [
@@ -785,7 +836,7 @@ describe("Account Pool settings", () => {
     expect(slot.getByText("Opus, неделя")).toBeTruthy();
   });
 
-  it("shows the email beside a display-name label in the row and detail dialog", async () => {
+  it("shows only email in the row and detail dialog", async () => {
     const slot = render([
       account({ label: "Person Example", email: "person@example.com" }),
       account({
@@ -794,13 +845,14 @@ describe("Account Pool settings", () => {
         email: null,
       }),
     ]);
-    expect(await slot.findByText("Person Example")).toBeTruthy();
+    expect(await slot.findByRole("button", { name: "Открыть person@example.com" })).toBeTruthy();
+    expect(slot.queryByText("Person Example")).toBeNull();
     expect(slot.getAllByText("person@example.com")).toHaveLength(1);
     fireEvent.click(
-      slot.getByRole("button", { name: "Открыть карточку: Person Example" }),
+      slot.getByRole("button", { name: "Открыть карточку: person@example.com" }),
     );
     expect(await slot.findByText("Почта")).toBeTruthy();
-    expect(slot.getAllByText("person@example.com")).toHaveLength(2);
+    expect(slot.getAllByText("person@example.com")).toHaveLength(3);
   });
 
   function codexLoginStart() {
@@ -1001,16 +1053,18 @@ describe("Account Pool settings", () => {
     "reorders %s accounts with the keyboard and persists the displayed order",
     async (provider) => {
       measureAccountRows();
-      const first = account({ label: "First", provider });
+      const first = account({ label: "First", email: "first@example.com", provider });
       const second = account({
         id: "22222222-2222-4222-8222-222222222222",
         label: "Second",
+        email: "second@example.com",
         provider,
       });
       const other = account({
         id: "33333333-3333-4333-8333-333333333333",
         provider: provider === "claude" ? "codex" : "claude",
         label: "Other",
+        email: "other@example.com",
       });
       const accounts = [first, second, other];
       let finishSave = () => {};
@@ -1024,7 +1078,7 @@ describe("Account Pool settings", () => {
           }),
       });
       const handle = await slot.findByRole("button", {
-        name: "Переместить First",
+        name: "Переместить first@example.com",
       });
       await keyboardMove(handle);
       fireEvent.keyDown(document, { code: "Space" });
@@ -1036,22 +1090,22 @@ describe("Account Pool settings", () => {
       );
       const providerOrder = () =>
         slot
-          .getAllByRole("button", { name: /Переместить (First|Second)/ })
+          .getAllByRole("button", { name: /Переместить (first|second)@example\.com/ })
           .map((button) => button.getAttribute("aria-label"));
       expect(providerOrder()).toEqual([
-        "Переместить Second",
-        "Переместить First",
+        "Переместить second@example.com",
+        "Переместить first@example.com",
       ]);
       expect(handle.hasAttribute("disabled")).toBe(true);
       finishSave();
       await waitFor(() => expect(handle.hasAttribute("disabled")).toBe(false));
       expect(providerOrder()).toEqual([
-        "Переместить Second",
-        "Переместить First",
+        "Переместить second@example.com",
+        "Переместить first@example.com",
       ]);
       expect(
         slot
-          .getByRole("button", { name: "Переместить Other" })
+          .getByRole("button", { name: "Переместить other@example.com" })
           .hasAttribute("disabled"),
       ).toBe(true);
     },
@@ -1061,10 +1115,11 @@ describe("Account Pool settings", () => {
     measureAccountRows();
     const slot = render(
       [
-        account({ label: "First" }),
+        account({ label: "First", email: "first@example.com" }),
         account({
           id: "22222222-2222-4222-8222-222222222222",
           label: "Second",
+          email: "second@example.com",
         }),
       ],
       {
@@ -1074,7 +1129,7 @@ describe("Account Pool settings", () => {
       },
     );
     const handle = await slot.findByRole("button", {
-      name: "Переместить First",
+      name: "Переместить first@example.com",
     });
     await keyboardMove(handle);
     fireEvent.keyDown(document, { code: "Space" });
@@ -1085,7 +1140,7 @@ describe("Account Pool settings", () => {
       slot
         .getAllByRole("button", { name: /Переместить/ })
         .map((button) => button.getAttribute("aria-label")),
-    ).toEqual(["Переместить First", "Переместить Second"]);
+    ).toEqual(["Переместить first@example.com", "Переместить second@example.com"]);
     expect(handle.hasAttribute("disabled")).toBe(false);
   });
 
@@ -1094,14 +1149,15 @@ describe("Account Pool settings", () => {
     async (action) => {
       measureAccountRows();
       const slot = render([
-        account({ label: "First" }),
+        account({ label: "First", email: "first@example.com" }),
         account({
           id: "22222222-2222-4222-8222-222222222222",
           label: "Second",
+          email: "second@example.com",
         }),
       ]);
       const handle = await slot.findByRole("button", {
-        name: "Переместить First",
+        name: "Переместить first@example.com",
       });
       await keyboardMove(handle, action === "cancel" ? "ArrowDown" : "ArrowUp");
       fireEvent.keyDown(document, {
@@ -1117,7 +1173,7 @@ describe("Account Pool settings", () => {
         slot
           .getAllByRole("button", { name: /Переместить/ })
           .map((button) => button.getAttribute("aria-label")),
-      ).toEqual(["Переместить First", "Переместить Second"]);
+      ).toEqual(["Переместить first@example.com", "Переместить second@example.com"]);
     },
   );
 });

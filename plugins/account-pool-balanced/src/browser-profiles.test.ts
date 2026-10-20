@@ -1,11 +1,16 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { createServer } from "node:http";
+import dns from "node:dns";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AccountSummary } from "./contracts.js";
 import {
   browserExecutableCandidates,
+  browserProcessPattern,
   ensureProfile,
   fetchExitGeo,
   heliumDataRoot,
@@ -111,6 +116,33 @@ describe("resolveAccount", () => {
 });
 
 describe("fetchExitGeo", () => {
+  it("configures IPv4 on the real default fetcher connector", async () => {
+    const server = createServer((_req, res) => {
+      res.end(JSON.stringify({ timezone: "UTC" }));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    const original = dns.lookup;
+    const families: unknown[] = [];
+    const lookup = vi.spyOn(dns, "lookup").mockImplementation(((host: string, options: any, callback: any) => {
+      if (host !== "geo.fixture.test") return original(host, options, callback);
+      families.push(options.family);
+      const family = options.family === 4 ? 4 : 6;
+      const address = family === 4 ? "127.0.0.1" : "::1";
+      if (options.all) callback(null, [{ address, family }]);
+      else callback(null, address, family);
+    }) as typeof dns.lookup);
+    try {
+      expect(await fetchExitGeo(undefined, `http://geo.fixture.test:${port}/`)).toEqual({
+        timezone: "UTC", city: null, country: null,
+      });
+      expect(families).toEqual([4]);
+    } finally {
+      lookup.mockRestore();
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
   it("parses a valid payload", async () => {
     const geo = await fetchExitGeo(geoFetcher, "https://example.test/geo");
     expect(geo).toEqual({ timezone: "Europe/Amsterdam", city: "Amsterdam", country: "NL" });
@@ -119,12 +151,66 @@ describe("fetchExitGeo", () => {
     expect(await fetchExitGeo(() => Promise.resolve({ city: "X" }))).toBeNull();
     expect(await fetchExitGeo(() => Promise.resolve(null))).toBeNull();
   });
+  it("rejects invalid timezone values", async () => {
+    expect(await fetchExitGeo(async () => ({ timezone: "../../etc/localtime" }))).toBeNull();
+  });
+  it("bounds streamed geo bodies and the total request deadline", async () => {
+    const timers = new Set<ReturnType<typeof setInterval>>();
+    const server = createServer((req, res) => {
+      if (req.url === "/large") { res.end("x".repeat(65537)); return; }
+      const timer = setInterval(() => res.write(" "), 50); timers.add(timer);
+      res.on("close", () => { clearInterval(timer); timers.delete(timer); });
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      expect(await fetchExitGeo(undefined, `http://127.0.0.1:${port}/large`)).toBeNull();
+      const start = Date.now();
+      expect(await fetchExitGeo(undefined, `http://127.0.0.1:${port}/dribble`)).toBeNull();
+      expect(Date.now() - start).toBeLessThan(5500);
+    } finally {
+      for (const timer of timers) clearInterval(timer);
+      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }, 8000);
   it("returns null when the fetcher throws", async () => {
     expect(await fetchExitGeo(() => Promise.reject(new Error("offline")))).toBeNull();
   });
 });
 
 describe("profile naming and allocation", () => {
+  it("allocates distinct profiles and retains both accounts on concurrent first use", async () => {
+    const box = sandbox();
+    const registryFile = path.join(box.dataDir, "registry.json");
+    const entries = await Promise.all(ACCOUNTS.slice(0, 2).map(account =>
+      ensureProfile(account, { heliumRoot: box.heliumRoot, registryFile })));
+    expect(new Set(entries.map(entry => entry.profileDirectory)).size).toBe(2);
+    const registry = JSON.parse(readFileSync(registryFile, "utf8"));
+    expect(Object.keys(registry).sort()).toEqual(ACCOUNTS.slice(0, 2).map(a => a.id).sort());
+    for (const entry of entries) {
+      const prefs = JSON.parse(readFileSync(path.join(box.heliumRoot, "Pool Accounts", entry.profileDirectory, entry.profileDirectory, "Preferences"), "utf8"));
+      expect(prefs.profile.name).toBe(entry.profileName);
+    }
+  });
+  it("refuses malformed registry without overwriting it", async () => {
+    const box = sandbox();
+    const registryFile = path.join(box.dataDir, "registry.json");
+    mkdirSync(box.dataDir, { recursive: true });
+    writeFileSync(registryFile, "broken");
+    await expect(ensureProfile(ACCOUNTS[0]!, { heliumRoot: box.heliumRoot, registryFile })).rejects.toThrow();
+    expect(readFileSync(registryFile, "utf8")).toBe("broken");
+  });
+  it("serializes independent CLI processes and repeated allocation without lost bindings", async () => {
+    const box = sandbox(); const registryFile = path.join(box.dataDir, "registry.json");
+    const script = `import { ensureProfile } from './src/browser-profiles.ts';
+      await ensureProfile(JSON.parse(process.argv[1]), JSON.parse(process.argv[2]));`;
+    const run = promisify(execFile);
+    await Promise.all([ACCOUNTS[0]!, ACCOUNTS[1]!, ACCOUNTS[0]!].map(a => run(process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", script, JSON.stringify(a), JSON.stringify({ heliumRoot: box.heliumRoot, registryFile })], { timeout: 15000 })));
+    const registry = JSON.parse(readFileSync(registryFile, "utf8"));
+    expect(Object.keys(registry).length).toBe(2);
+    expect(new Set(Object.values(registry).map((e: any) => e.profileDirectory)).size).toBe(2);
+  }, 20000);
   it("names profiles '<Provider> · <email>'", () => {
     expect(profileNameFor(ACCOUNTS[0]!)).toBe("Claude · a@example.test");
     expect(profileNameFor(ACCOUNTS[2]!)).toBe("Kimi · Kimi");
@@ -143,7 +229,7 @@ describe("profile naming and allocation", () => {
     });
     expect(entry.profileDirectory).toBe("Profile 1");
     expect(entry.profileName).toBe("Claude · a@example.test");
-    const prefs = JSON.parse(readFileSync(path.join(box.heliumRoot, "Profile 1", "Preferences"), "utf8"));
+    const prefs = JSON.parse(readFileSync(path.join(box.heliumRoot, "Pool Accounts", "Profile 1", "Profile 1", "Preferences"), "utf8"));
     expect(prefs.profile.name).toBe("Claude · a@example.test");
     // picker-регистрация — только через sync (Helium должен быть закрыт)
     expect(existsSync(path.join(box.heliumRoot, "Local State"))).toBe(false);
@@ -165,6 +251,14 @@ describe("profile naming and allocation", () => {
 });
 
 describe("browserExecutableCandidates", () => {
+  it("matches the browser main process with arguments and escapes the executable", () => {
+    const executable = "/fixture/Helium.app/Contents/MacOS/Helium";
+    const pattern = new RegExp(browserProcessPattern(executable).replace("[[:space:]]", "\\s"));
+    expect(pattern.test(executable + " --profile-directory=Profile 1")).toBe(true);
+    expect(pattern.test(executable)).toBe(true);
+    expect(pattern.test(executable.replace("Helium.app", "HeliumXapp"))).toBe(false);
+    expect(pattern.test("/fixture/Helium Helper.app/Contents/MacOS/Helium Helper --type=renderer")).toBe(false);
+  });
   it("puts the POOL_BROWSER_EXECUTABLE override first", () => {
     const candidates = browserExecutableCandidates("darwin", "/nonexistent/fake-home", {
       POOL_BROWSER_EXECUTABLE: "/opt/helium/Helium",
@@ -203,68 +297,31 @@ describe("openAccountBrowser", () => {
       }),
     ).rejects.toThrow(/timezone/);
   });
-  it("refuses to join a Helium instance running with an unverified timezone", async () => {
+  it("refuses an isolated browser without a live supervisor", async () => {
     const box = sandbox();
-    await expect(
-      openAccountBrowser({
-        ...baseOptions(box),
-        query: "a@example.test",
-        readVpn: verifiedVpn,
-        fetcher: geoFetcher,
-        listRunning: () => Promise.resolve([42]),
-        spawnImpl: fakeSpawn().spawnImpl,
-      }),
-    ).rejects.toThrow(/unverified timezone/);
+    await expect(openAccountBrowser({
+      ...baseOptions(box), query: "a@example.test", readVpn: verifiedVpn,
+      fetcher: geoFetcher, listRunning: async () => [42], spawnImpl: fakeSpawn().spawnImpl,
+    })).rejects.toThrow(/without a live transport supervisor/);
   });
-  it("joins a running instance we launched ourselves with the same timezone", async () => {
+  it("preserves opaque profile data and original settings during migration and retry", async () => {
     const box = sandbox();
-    const { spawnImpl } = fakeSpawn(4242);
-    await openAccountBrowser({
-      ...baseOptions(box),
-      query: "a@example.test",
-      readVpn: verifiedVpn,
-      fetcher: geoFetcher,
-      spawnImpl,
-    });
-    const second = fakeSpawn(9999); // транзиентный handoff-процесс, не main
-    const impl2 = (command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
-      second.captured.push({ command, args, env: options.env });
-      const child = new FakeChild(9999);
-      queueMicrotask(() => child.emit("exit", 0)); // process-singleton handoff: clean fast exit
-      return child;
-    };
-    const result = await openAccountBrowser({
-      ...baseOptions(box),
-      query: "b@example.test",
-      readVpn: verifiedVpn,
-      fetcher: geoFetcher,
-      listRunning: () => Promise.resolve([4242]),
-      spawnImpl: impl2 as never,
-    });
-    expect(result.profileDirectory).toBe("Profile 2");
-    expect(second.captured).toHaveLength(1);
-    // маркер по-прежнему указывает на живой main (4242), не на транзиентный handoff
-    const marker = JSON.parse(readFileSync(
-      path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "last-launch.json"),
-      "utf8",
-    ));
-    expect(marker.pid).toBe(4242);
-    // picker-синк пропущен при живом Helium: Profile 2 пока не в Local State
-    const lsPath = path.join(box.heliumRoot, "Local State");
-    let cache = JSON.parse(readFileSync(lsPath, "utf8")).profile.info_cache;
-    expect(Object.keys(cache)).toEqual(["Profile 1"]);
-    // self-heal: следующий open при закрытом Helium догоняет picker
-    const third = fakeSpawn(4343);
-    await openAccountBrowser({
-      ...baseOptions(box),
-      query: "b@example.test",
-      readVpn: verifiedVpn,
-      fetcher: geoFetcher,
-      listRunning: () => Promise.resolve([]),
-      spawnImpl: third.spawnImpl,
-    });
-    cache = JSON.parse(readFileSync(lsPath, "utf8")).profile.info_cache;
-    expect(cache["Profile 2"].name).toBe("Claude · b@example.test");
+    const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
+    const entry = { profileDirectory: "Profile 1", profileName: "Claude · a@example.test", createdAt: 1 };
+    const source = path.join(box.heliumRoot, entry.profileDirectory);
+    mkdirSync(source, { recursive: true }); mkdirSync(path.dirname(registryFile), { recursive: true });
+    writeFileSync(registryFile, JSON.stringify({ [ACCOUNTS[0]!.id]: entry }));
+    writeFileSync(path.join(source, "fixture-state"), "synthetic opaque state");
+    writeFileSync(path.join(source, "Preferences"), JSON.stringify({ profile: { name: "saved email" }, custom: true }));
+    const opts = { ...baseOptions(box), query: "a@example.test", readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
+    const result = await openAccountBrowser(opts);
+    expect(result.profileDir).not.toBe(source);
+    expect(readFileSync(path.join(result.profileDir, "fixture-state"), "utf8")).toBe("synthetic opaque state");
+    expect(JSON.parse(readFileSync(path.join(result.profileDir, "Preferences"), "utf8")).custom).toBe(true);
+    writeFileSync(path.join(result.profileDir, "fixture-state"), "new settings");
+    await openAccountBrowser(opts);
+    expect(readFileSync(path.join(result.profileDir, "fixture-state"), "utf8")).toBe("new settings");
+    expect(readFileSync(path.join(source, "fixture-state"), "utf8")).toBe("synthetic opaque state");
   });
   it("launches Helium with the native profile and the exit timezone", async () => {
     const box = sandbox();
@@ -284,7 +341,7 @@ describe("openAccountBrowser", () => {
     const launch = captured[0]!;
     expect(launch.env?.TZ).toBe("Europe/Amsterdam");
     expect(launch.args.join(" ")).toContain("--profile-directory=Profile 1");
-    expect(launch.args).toContain("--disable-ipv6");
+    expect(launch.args.some(arg => arg.startsWith("--user-data-dir=") && arg.includes("Pool Accounts"))).toBe(true);
   });
   it("does not read VPN state for unguarded providers", async () => {
     const box = sandbox();
