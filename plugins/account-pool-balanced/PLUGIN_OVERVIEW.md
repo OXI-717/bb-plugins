@@ -14,6 +14,18 @@ BB 0.46.1 или новее, Node/npm для установки из Git и ак
 
 Настройки доступны через интерфейс и `bb pool --help`. Инструкция для Devin CLI и других внешних клиентов — [External clients](docs/external-clients.md). Проверка состояния — `bb pool status`, обновление — `bb plugin update account-pool-balanced`. Не включайте одновременно встроенный Account Pooler: оба используют команду `bb pool`.
 
+`bb pool browser open <id|email|label> [--url <https-url>]` opens a persistent Helium account browser named `<Provider> · <email>`. Claude and Codex default to their provider consoles; other providers open a blank page unless a URL is supplied. URLs accept HTTPS without embedded credentials; command output shows only the site origin. `POOL_BROWSER_EXECUTABLE` overrides the Helium binary.
+
+Each account has a separate browser process and user-data root under Helium's native data location, in `Pool Accounts/Profile N`; its profile is `Profile N` inside that root. Ordinary Helium and different account windows can remain open. The registry stays in the BB server plugin data directory under `browser-profiles/registry.json`. `bb pool browser list [--json]` displays the stored account email and profile state.
+
+On first use of an older native profile, the original Helium must be closed once. The command copies that account's profile and Local State into a staged isolated root, then atomically publishes the completed copy. Original profiles, settings and authentication files remain intact. Copies use the same Helium application and OS storage; moving them to another host or browser is unsupported. Later opens reuse the migrated data and never overwrite it from the original. Malformed or inaccessible registry/state files fail closed. Concurrent CLI/RPC processes serialize allocation using a kernel-owned loopback lease; a conflicting port produces a bounded retry error.
+
+The browser timezone is validated from a bounded IPv4 geo probe. Guarded providers (claude/codex/cursor/devin) require VPN/2 `connected` + `verified_ipv4` and a known exit timezone before each open. A detached supervisor owns a private Unix control socket and one local HTTPS CONNECT proxy per account. Proxy destination sockets use IPv4; browser launches use a fixed proxy without DIRECT fallback, remove the loopback bypass, disable QUIC and restrict non-proxied WebRTC UDP. Plain HTTP is rejected. [Chromium proxy behavior](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md) describes fixed-proxy and CONNECT semantics. This constrains browser URL traffic; it is not a system packet sandbox or a claim about extensions and every browser subsystem. No system IPv6 or overlay changes are required.
+
+The supervisor survives plugin reloads and closes its proxy/control resources when the account browser exits. Reopening uses the live socket rather than a stale PID marker. Changing the exit timezone while that account browser runs requires closing that account window and reopening it. A supervisor failure leaves the fixed proxy unavailable; close that account window and retry. Other Helium windows are unaffected. The transport currently supports macOS/Linux Unix sockets.
+
+Use the provider UI for manual login, billing and [saved resets](docs/saved-resets.md). The command does not log in, export cookies or change pool routing.
+
 
 ## Защита без изменения BB / Plugin-only network protection
 

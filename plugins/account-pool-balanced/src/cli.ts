@@ -25,6 +25,7 @@ import {
   type PoolStatusReport,
 } from "./contracts.js";
 import type { PoolOperations } from "./operations.js";
+import { listBrowserProfiles, openAccountBrowser } from "./browser-profiles.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
 import type { ExternalClients } from "./external-clients.js";
@@ -64,6 +65,8 @@ const HELP = [
   "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>]",
   "  bb pool client revoke <name>",
   "  bb pool bypass <thread-id> [--off]",
+  "  bb pool browser open <id|email|label> [--url <url>]",
+  "  bb pool browser list [--json]",
   "",
   "Accounts run sequentially by priority, then order added. The current fallback stays active until unavailable.",
   "Reorder includes every account for the provider and changes the next failover sequence; existing conversations stay pinned.",
@@ -314,7 +317,7 @@ function json(value: object): string {
 }
 
 export function registerPoolCli(
-  bb: Pick<BbPluginApi, "cli">,
+  bb: Pick<BbPluginApi, "cli" | "server" | "pluginId">,
   operations: PoolOperations,
   login: ClaudeOAuthLogin,
   codexLogin: CodexDeviceLogin,
@@ -414,6 +417,17 @@ export function registerPoolCli(
         name: "bypass",
         summary: "Bypass Account Pooler routing for one thread",
         usage: "bb pool bypass <thread-id> [--off]",
+      },
+      {
+        name: "browser-open",
+        summary:
+          "Open a persistent per-account browser profile with the exit IP timezone",
+        usage: "bb pool browser open <id|email|label> [--url <url>]",
+      },
+      {
+        name: "browser-list",
+        summary: "List pool accounts and the state of their browser profiles",
+        usage: "bb pool browser list [--json]",
       },
     ],
     async run(argv, ctx): Promise<PluginCliResult> {
@@ -649,6 +663,46 @@ export function registerPoolCli(
             stdout: flags.booleans.has("json")
               ? json({ accounts })
               : `${formatAccounts(accounts)}\n`,
+          };
+        }
+        if (argv[0] === "browser" && argv[1] === "list") {
+          const flags = parseFlags(argv.slice(2), ["json"], []);
+          const profiles = await listBrowserProfiles({
+            accounts: await operations.list(),
+            dataDir: bb.server.experimental_dataDir,
+            pluginId: bb.pluginId,
+          });
+          if (flags.booleans.has("json")) {
+            return { exitCode: 0, stdout: json({ profiles }) };
+          }
+          const lines = profiles.map(
+            (row) =>
+              `${row.provider}\t${row.email ?? (row.profileName === "" ? row.label : row.profileName)}\t` +
+              (row.exists
+                ? `${row.profileDirectory} (updated ${new Date(row.updatedAt ?? 0).toISOString()})`
+                : "no profile yet"),
+          );
+          return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+        }
+        if (argv[0] === "browser" && argv[1] === "open") {
+          const query = argv[2];
+          if (query === undefined || query.startsWith("--")) throw new Error(HELP);
+          const flags = parseFlags(argv.slice(3), [], ["url"]);
+          const result = await openAccountBrowser({
+            accounts: await operations.list(),
+            query,
+            url: flags.values.get("url"),
+            dataDir: bb.server.experimental_dataDir,
+            pluginId: bb.pluginId,
+            vpnStatusFile: config.get().vpnStatusFile,
+          });
+          return {
+            exitCode: 0,
+            stdout:
+              `Opened "${result.profileName}" in Helium.\n` +
+              `  profile: ${result.profileDirectory}\n` +
+              `  timezone: ${result.timezone ?? "system"}\n` +
+              `  site: ${result.url === "about:blank" ? result.url : new URL(result.url).origin}\n`,
           };
         }
         if (
