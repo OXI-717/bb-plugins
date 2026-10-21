@@ -191,3 +191,36 @@ it("unrelated active thread changes do not prevent an old independent root archi
   );
   expect((await runOperation(h.bb, config, { now })).archivedRoots).toBe(1);
 });
+it("a newly attached active descendant aborts before mutations", async () => {
+  const h = host();
+  let n = 0;
+  const original = h.list.getMockImplementation()!;
+  h.list.mockImplementation(async (args) => {
+    if (++n === 3)
+      h.rows.push({
+        ...h.rows[0],
+        id: "new-child",
+        parentThreadId: "root",
+        latestAttentionAt: now,
+      });
+    return original(args);
+  });
+  await expect(runOperation(h.bb, config, { now })).rejects.toThrow(
+    "inventory changed",
+  );
+  expect(h.archive).not.toHaveBeenCalled();
+  expect(h.update).not.toHaveBeenCalled();
+});
+it("workspace dirtied after detach blocks archive and leaves target safe", async () => {
+  const h = host({}, [{ parentThreadId: "root", latestAttentionAt: now }]);
+  let n = 0;
+  h.status.mockImplementation(async () => ({
+    outcome: "available",
+    workspace: { workingTree: { hasUncommittedChanges: ++n >= 4 } },
+  }));
+  await expect(
+    runOperation(h.bb, { ...config, detachActiveDescendants: true }, { now }),
+  ).rejects.toThrow("Tree changed after detach");
+  expect(h.update).toHaveBeenCalledOnce();
+  expect(h.archive).not.toHaveBeenCalled();
+});
