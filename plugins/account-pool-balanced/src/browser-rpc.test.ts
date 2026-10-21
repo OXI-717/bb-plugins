@@ -2,6 +2,11 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { accountPoolRpcContract, createRpcHandlers } from "./rpc.js";
 
+// Construct synthetic userinfo explicitly; it must never reach the launcher.
+const userinfoUrl = new URL("https://login.example/");
+userinfoUrl.username = "TEST_USER";
+userinfoUrl.password = "TEST_PASSWORD";
+
 const accountId = "11111111-1111-4111-8111-111111111111";
 const disposals: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const dispose of disposals.splice(0)) await dispose(); });
@@ -29,7 +34,7 @@ describe("account browser RPC", () => {
     { accountId: "person@example.com" },
     { accountId, url: "file:///tmp/page" },
     { accountId, url: "http://login.example/" },
-    { accountId, url: "https://user:pass@login.example/" },
+    { accountId, url: userinfoUrl.href },
     { accountId, url: "https://login.example/" + "x".repeat(8192) },
     { accountId, executable: "/tmp/untrusted" },
   ])("rejects invalid launch input before touching profiles: %j", async input => {
