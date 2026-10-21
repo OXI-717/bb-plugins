@@ -13,8 +13,9 @@ const { createServer } = require('node:http');
 const net = require('node:net');
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 let input = '', primary, proxy, control, socketPath, closing = false;
-const sockets = new Set();
+const sockets = new Set(), selectors = new Set();
 function track(s) {
   if (sockets.size >= 512) { s.destroy(); return; }
   sockets.add(s); s.on('error', () => {}); s.on('close', () => sockets.delete(s));
@@ -23,6 +24,7 @@ function track(s) {
 function close() {
   if (closing) return; closing = true;
   if (primary && primary.exitCode === null) primary.kill();
+  for (const child of selectors) if (child.exitCode === null) child.kill();
   for (const s of sockets) s.destroy();
   if (proxy) proxy.close(); if (control) control.close();
   if (socketPath) { try { fs.unlinkSync(socketPath); } catch {} }
@@ -37,6 +39,10 @@ function listen(server, address) {
 }
 async function boot(cfg) {
   socketPath = cfg.socketPath;
+  const shared = Array.isArray(cfg.profileDirectories);
+  const allowedProfiles = new Set(cfg.profileDirectories || [cfg.profileDirectory]);
+  if (!allowedProfiles.size || [...allowedProfiles].some(p => !/^Profile [1-9]\d{0,6}$/.test(p)) || !allowedProfiles.has(cfg.profileDirectory)) throw new Error('Invalid browser profiles.');
+  const protocol = shared ? 3 : 2;
   proxy = createServer({ maxHeaderSize: 16384, requestTimeout: 4000, headersTimeout: 4000 }, (_q, r) => {
     r.writeHead(405); r.end();
   });
@@ -73,7 +79,7 @@ async function boot(cfg) {
   let nextCommand = 0, output = '', navigationCount = 0, generation = 0;
   let sawPage = false, quitting = false, navigationUncertain = false, idleTimer;
   const pages = new Set(), commands = new Map();
-  function command(method, params, timeoutMs = 3500) {
+  function command(method, params, timeoutMs = 3500, sessionId) {
     if (commands.size >= 32) return Promise.reject(new Error('Browser navigation is busy.'));
     return new Promise((resolve, reject) => {
       const id = ++nextCommand;
@@ -81,22 +87,62 @@ async function boot(cfg) {
         commands.delete(id); reject(new Error('Browser navigation timed out.'));
       }, timeoutMs);
       commands.set(id, { resolve, reject, timer });
-      primary.stdio[3].write(JSON.stringify({ id, method, params }) + '\0', err => {
+      primary.stdio[3].write(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }) + '\0', err => {
         if (!err) return;
         const pending = commands.get(id);
         if (pending) { clearTimeout(pending.timer); commands.delete(id); pending.reject(new Error('Browser navigation channel closed.')); }
       });
     });
   }
-  async function navigate(url, initial = false) {
+  async function selectProfile(profileDirectory) {
+    if (!allowedProfiles.has(profileDirectory)) throw new Error('Unknown account browser profile; close Helium once to refresh its profile list.');
+    const marker = 'data:text/html,<!--pool-profile-' + randomUUID() + '-->';
+    // Helium rewrites about:blank fragments into chrome://newtab; a local empty
+    // HTML document preserves the unique marker without any network request.
+    // Chromium's default CDP context changes when the user switches profiles.
+    // Select a native profile using a harmless unique blank page, then navigate
+    // that exact target through the inherited pipe. Auth URLs never enter argv.
+    await new Promise((resolve, reject) => {
+      const child = spawn(cfg.executable, [
+        '--user-data-dir=' + cfg.root, '--profile-directory=' + profileDirectory,
+        '--no-first-run', '--no-default-browser-check', marker
+      ], { stdio: 'ignore', env: browserEnv });
+      selectors.add(child);
+      const timer = setTimeout(() => { child.kill(); reject(new Error('Browser profile selection timed out.')); }, 2000);
+      child.once('error', () => { clearTimeout(timer); selectors.delete(child); reject(new Error('Browser profile selection failed.')); });
+      child.once('exit', code => { clearTimeout(timer); selectors.delete(child); code === 0 ? resolve() : reject(new Error('Browser profile selection failed.')); });
+    });
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      const result = await command('Target.getTargets', {}, 1000);
+      const matches = Array.isArray(result?.targetInfos) ? result.targetInfos.filter(t => t?.type === 'page' && t.url === marker) : [];
+      if (matches.length === 1 && typeof matches[0].targetId === 'string') return matches[0].targetId;
+      if (matches.length > 1) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error('Selected browser profile was not confirmed; no authorization link was sent.');
+  }
+  async function navigate(url, initial = false, profileDirectory = cfg.profileDirectory) {
     if (quitting) throw new Error('Account browser is closing. Open it again after it finishes.');
+    if (!allowedProfiles.has(profileDirectory)) throw new Error('Unknown account browser profile; close Helium once to refresh its profile list.');
+    if (navigationCount >= 8) throw new Error('Browser navigation is busy.');
     navigationCount++; generation++; clearTimeout(idleTimer);
     try {
-      const result = await command('Target.createTarget', { url, newWindow: initial }, initial ? 7000 : 3500);
-      if (typeof result?.targetId !== 'string') throw new Error('Browser navigation failed.');
+      if (shared) {
+        const targetId = await selectProfile(profileDirectory);
+        const attached = await command('Target.attachToTarget', { targetId, flatten: true }, 1000);
+        if (typeof attached?.sessionId !== 'string') throw new Error('Selected browser profile could not be attached.');
+        try {
+          const result = await command('Page.navigate', { url }, 2000, attached.sessionId);
+          if (typeof result?.frameId !== 'string' || result.errorText) throw new Error('Browser navigation failed.');
+        } finally { await command('Target.detachFromTarget', { sessionId: attached.sessionId }, 1000).catch(() => {}); }
+      } else {
+        const result = await command('Target.createTarget', { url, newWindow: initial }, initial ? 7000 : 3500);
+        if (typeof result?.targetId !== 'string') throw new Error('Browser navigation failed.');
+      }
       sawPage = true;
     } catch (error) {
-      // A timed-out createTarget may still create a window later. Do not auto-quit
+      // A timed-out command may still create a window later. Do not auto-quit
       // this browser while its navigation outcome is unknown. Normal quit works.
       navigationUncertain = true; throw error;
     } finally { navigationCount--; checkIdle(); }
@@ -166,21 +212,23 @@ async function boot(cfg) {
     });
   }
   control = net.createServer(s => {
-    track(s); s.setTimeout(5000, () => s.destroy()); let data = '', negotiated = false;
+    // Shared selection + marker polling + attach/navigation/detach can take 9s.
+    // Leave room beyond the shared client's 10s total deadline. Legacy stays 5s.
+    track(s); s.setTimeout(shared ? 12000 : 5000, () => s.destroy()); let data = '', negotiated = false;
     s.on('data', chunk => {
       data += chunk; if (data.length > 16384) { s.destroy(); return; }
       if (!data.includes('\n')) return;
       const message = data; data = '';
       Promise.resolve().then(async () => {
         const cmd = JSON.parse(message);
-        if (!negotiated && cmd.type === 'hello') { negotiated = true; s.write(JSON.stringify({ protocol: 2, navigation: 'pipe' }) + '\n'); return; }
+        if (!negotiated && cmd.type === 'hello') { negotiated = true; s.write(JSON.stringify({ protocol, navigation: 'pipe', ...(shared ? { profiles: 'native' } : {}) }) + '\n'); return; }
         s.removeAllListeners('data');
-        if (!negotiated || cmd.protocol !== 2) throw new Error('Close this account browser and reopen it after updating Pooler.');
+        if (!negotiated || cmd.protocol !== protocol) throw new Error('Close this account browser and reopen it after updating Pooler.');
         if (cmd.timezone !== cfg.timezone || cmd.executable !== cfg.executable || !primary || primary.exitCode !== null) {
           throw new Error('Close this account browser window before changing its exit timezone or executable.');
         }
         if (typeof cmd.url !== 'string' || !(cmd.url === 'about:blank' || /^https:\/\//.test(cmd.url))) throw new Error('Invalid browser URL.');
-        await navigate(cmd.url); s.end(JSON.stringify({ ok: true }) + '\n');
+        await navigate(cmd.url, false, shared ? cmd.profileDirectory : cfg.profileDirectory); s.end(JSON.stringify({ ok: true }) + '\n');
       }).catch(e => s.end(JSON.stringify({ error: e.message }) + '\n'));
     });
   });
@@ -202,6 +250,8 @@ export interface TransportLaunch {
   root: string;
   executable: string;
   profileDirectory: string;
+  /** Native profiles sharing this supervised browser; absent for legacy isolated tests. */
+  profileDirectories?: readonly string[];
   timezone: string | null;
   url: string;
   settleMs: number;
@@ -229,7 +279,8 @@ export async function handoffBrowser(options: TransportLaunch): Promise<boolean>
       settled = true; clearTimeout(timer); socket.destroy();
       if (error) reject(error); else resolve(true);
     };
-    const timer = setTimeout(() => finish(new Error("Browser supervisor did not respond.")), 5000);
+    // Includes hello and the full bounded native-profile navigation chain.
+    const timer = setTimeout(() => finish(new Error("Browser supervisor did not respond.")), options.profileDirectories ? 10000 : 5000);
     socket.on("connect", () => socket.write(JSON.stringify({ type: "hello" }) + "\n"));
     socket.on("data", chunk => {
       data += chunk;
@@ -244,11 +295,11 @@ export async function handoffBrowser(options: TransportLaunch): Promise<boolean>
         } catch { finish(new Error("Invalid supervisor response.")); return; }
         data = data.slice(end + 1);
         if (!negotiated) {
-          if (result.protocol !== 2 || result.navigation !== "pipe") {
+          if (result.protocol !== (options.profileDirectories ? 3 : 2) || result.navigation !== "pipe" || (options.profileDirectories && result.profiles !== "native")) {
             finish(new Error("Close this account browser and reopen it after updating Pooler.")); return;
           }
           negotiated = true;
-          socket.write(JSON.stringify({ protocol: 2, timezone: options.timezone, executable: options.executable, url: options.url }) + "\n");
+          socket.write(JSON.stringify({ protocol: options.profileDirectories ? 3 : 2, profileDirectory: options.profileDirectory, timezone: options.timezone, executable: options.executable, url: options.url }) + "\n");
         } else if (result.ok === true) finish();
         else finish(new Error(typeof result.error === "string" ? result.error : "Browser handoff failed."));
       }
@@ -264,7 +315,9 @@ export async function startBrowserTransport(options: TransportLaunch): Promise<v
       detached: true, stdio: ["pipe", "pipe", "ignore"], env: { ...options.env, ELECTRON_RUN_AS_NODE: "1", ...(options.timezone ? { TZ: options.timezone } : {}) },
     });
     let data = "";
-    const timer = setTimeout(() => { child.kill(); reject(new Error("Browser supervisor startup timed out.")); }, 10000);
+    // Discovery (3.5s) precedes the shared chain (up to 9s, including the
+    // final in-flight marker read). Keep startup overhead within a 15s budget.
+    const timer = setTimeout(() => { child.kill(); reject(new Error("Browser supervisor startup timed out.")); }, options.profileDirectories ? 15000 : 10000);
     const fail = () => { clearTimeout(timer); reject(new Error("Browser supervisor failed to launch.")); };
     child.once("error", fail); child.once("exit", fail);
     child.stdin.on("error", () => {});

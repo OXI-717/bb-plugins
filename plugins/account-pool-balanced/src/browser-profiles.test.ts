@@ -93,6 +93,7 @@ function baseOptions(box: { dataDir: string; heliumRoot: string }) {
     settleMs: 1,
     exists: () => true,
     listRunning: noRunning,
+    readVpn: verifiedVpn,
     env: { PATH: "/usr/bin" } as NodeJS.ProcessEnv,
   };
 }
@@ -188,7 +189,7 @@ describe("profile naming and allocation", () => {
     const registry = JSON.parse(readFileSync(registryFile, "utf8"));
     expect(Object.keys(registry).sort()).toEqual(ACCOUNTS.slice(0, 2).map(a => a.id).sort());
     for (const entry of entries) {
-      const prefs = JSON.parse(readFileSync(path.join(box.heliumRoot, "Pool Accounts", entry.profileDirectory, entry.profileDirectory, "Preferences"), "utf8"));
+      const prefs = JSON.parse(readFileSync(path.join(box.heliumRoot, entry.profileDirectory, "Preferences"), "utf8"));
       expect(prefs.profile.name).toBe(entry.profileName);
     }
   });
@@ -220,7 +221,7 @@ describe("profile naming and allocation", () => {
     expect(nextProfileDirectory(["Default"])).toBe("Profile 1");
     expect(nextProfileDirectory(["Default", "Profile 1", "Profile 3"])).toBe("Profile 4");
   });
-  it("creates Preferences on first use; picker sync is a separate step", async () => {
+  it("creates Preferences and registers the native picker on first use", async () => {
     const box = sandbox();
     const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
     const entry = await ensureProfile(ACCOUNTS[0]!, {
@@ -229,10 +230,10 @@ describe("profile naming and allocation", () => {
     });
     expect(entry.profileDirectory).toBe("Profile 1");
     expect(entry.profileName).toBe("Claude · a@example.test");
-    const prefs = JSON.parse(readFileSync(path.join(box.heliumRoot, "Pool Accounts", "Profile 1", "Profile 1", "Preferences"), "utf8"));
+    const prefs = JSON.parse(readFileSync(path.join(box.heliumRoot, "Profile 1", "Preferences"), "utf8"));
     expect(prefs.profile.name).toBe("Claude · a@example.test");
-    // picker-регистрация — только через sync (Helium должен быть закрыт)
-    expect(existsSync(path.join(box.heliumRoot, "Local State"))).toBe(false);
+    // Native picker registration is written together with profile creation.
+    expect(existsSync(path.join(box.heliumRoot, "Local State"))).toBe(true);
     const second = await ensureProfile(ACCOUNTS[1]!, {
       heliumRoot: box.heliumRoot,
       registryFile,
@@ -313,7 +314,7 @@ describe("openAccountBrowser", () => {
       fetcher: geoFetcher, listRunning: async () => [42], spawnImpl: fakeSpawn().spawnImpl,
     })).rejects.toThrow(/without a live transport supervisor/);
   });
-  it("preserves opaque profile data and original settings during migration and retry", async () => {
+  it("reuses existing native profile data without making another copy", async () => {
     const box = sandbox();
     const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
     const entry = { profileDirectory: "Profile 1", profileName: "Claude · a@example.test", createdAt: 1 };
@@ -324,13 +325,13 @@ describe("openAccountBrowser", () => {
     writeFileSync(path.join(source, "Preferences"), JSON.stringify({ profile: { name: "saved email" }, custom: true }));
     const opts = { ...baseOptions(box), query: "a@example.test", readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
     const result = await openAccountBrowser(opts);
-    expect(result.profileDir).not.toBe(source);
+    expect(result.profileDir).toBe(realpathSync(source));
     expect(readFileSync(path.join(result.profileDir, "fixture-state"), "utf8")).toBe("synthetic opaque state");
     expect(JSON.parse(readFileSync(path.join(result.profileDir, "Preferences"), "utf8")).custom).toBe(true);
     writeFileSync(path.join(result.profileDir, "fixture-state"), "new settings");
     await openAccountBrowser(opts);
     expect(readFileSync(path.join(result.profileDir, "fixture-state"), "utf8")).toBe("new settings");
-    expect(readFileSync(path.join(source, "fixture-state"), "utf8")).toBe("synthetic opaque state");
+    expect(readFileSync(path.join(source, "fixture-state"), "utf8")).toBe("new settings");
   });
   it.each(["final", "alias", "isolated"])("checks real native processes before migration (%s)", async mode => {
     const box = sandbox(); const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
@@ -351,8 +352,7 @@ describe("openAccountBrowser", () => {
         env: { PATH: process.env.PATH, POOL_BROWSER_EXECUTABLE: executable },
         transportImpl: async () => { launched = true; },
       });
-      if (mode === "isolated") { await expect(opening).resolves.toMatchObject({ guarded: true }); expect(launched).toBe(true); return; }
-      await expect(opening).rejects.toThrow(/migration requires closing/);
+      await expect(opening).rejects.toThrow(/Close Helium once/);
       expect(launched).toBe(false);
       expect(JSON.parse(readFileSync(registryFile, "utf8"))[ACCOUNTS[0]!.id].isolated).toBeUndefined();
     } finally { native.kill(); await new Promise(resolve => native.once("exit", resolve)); }
@@ -375,21 +375,13 @@ describe("openAccountBrowser", () => {
     const launch = captured[0]!;
     expect(launch.env?.TZ).toBe("Europe/Amsterdam");
     expect(launch.args.join(" ")).toContain("--profile-directory=Profile 1");
-    expect(launch.args.some(arg => arg.startsWith("--user-data-dir=") && arg.includes("Pool Accounts"))).toBe(true);
+    expect(launch.args).toContain("--user-data-dir=" + realpathSync(box.heliumRoot));
   });
-  it("does not read VPN state for unguarded providers", async () => {
+  it("requires verified VPN for the shared browser even when selecting Kimi", async () => {
     const box = sandbox();
-    const { spawnImpl, captured } = fakeSpawn();
-    const result = await openAccountBrowser({
-      ...baseOptions(box),
-      query: "kimi",
-      readVpn: () => Promise.reject(new Error("must not be called")),
-      fetcher: geoFetcher,
-      spawnImpl,
-    });
-    expect(result.guarded).toBe(false);
-    expect(captured[0]?.env?.TZ).toBe("Europe/Amsterdam");
-    expect(result.url).toBe("about:blank");
+    await expect(openAccountBrowser({ ...baseOptions(box), query: "kimi",
+      readVpn: () => Promise.resolve(UNVERIFIED), fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl,
+    })).rejects.toThrow(/verified_ipv4/);
   });
   it("honours an explicit --url", async () => {
     const box = sandbox();
@@ -454,7 +446,7 @@ describe("listBrowserProfiles", () => {
     expect(kimi.exists).toBe(true);
     expect(kimi.updatedAt).not.toBeNull();
     const primary = rows.find((row) => row.label === "Primary")!;
-    expect(primary.exists).toBe(false);
-    expect(primary.profileDirectory).toBe("");
+    expect(primary.exists).toBe(true);
+    expect(primary.profileDirectory).toBe("Profile 1");
   });
 });
