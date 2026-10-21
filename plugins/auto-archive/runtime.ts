@@ -222,8 +222,9 @@ export function parseKeep(raw: string): string[] {
 /** Bound CLI and persisted diagnostics independently of inventory size. */
 export function summarize(report: Report) {
   const limit = 100;
+  const { pruneAncestorIds: _executionContext, ...publicReport } = report;
   return {
-    ...report,
+    ...publicReport,
     candidateCount: report.actions.length,
     blockedCount: report.blocked.length,
     detachCount:

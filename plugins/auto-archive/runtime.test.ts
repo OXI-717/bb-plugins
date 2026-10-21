@@ -1,6 +1,12 @@
 import { it, expect, vi } from "vitest";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { runOperation, collect, parseKeep, parseDays } from "./runtime.js";
+import {
+  runOperation,
+  collect,
+  parseKeep,
+  parseDays,
+  summarize,
+} from "./runtime.js";
 import { DAY } from "./policy.js";
 const config = {
   inactivityDays: 14,
@@ -265,4 +271,21 @@ it("prune archives a quiet sibling while retaining a recent ancestor", async () 
   expect(r.archivedRoots).toBe(1);
   expect(h.archive).toHaveBeenCalledWith({ threadId: "side" });
   expect(h.rows[0].archivedAt).toBeNull();
+});
+
+it("omits unbounded internal prune ancestry from diagnostics", () => {
+  const report = {
+    actions: [],
+    detachIds: [],
+    blocked: [],
+    backlogRoots: 0,
+    dryRun: true,
+    scanned: 0,
+    archivedRoots: 0,
+    detached: 0,
+    candidates: [],
+    pruneAncestorIds: Array.from({ length: 105 }, (_, i) => "thread-" + i),
+  };
+  expect(summarize(report)).not.toHaveProperty("pruneAncestorIds");
+  expect(report.pruneAncestorIds).toHaveLength(105);
 });
