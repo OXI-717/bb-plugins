@@ -30,17 +30,6 @@ export const GUARDED_BROWSER_PROVIDERS: ReadonlySet<string> = new Set([
   "devin",
 ]);
 
-/** Provider consoles used when no explicit --url is given. */
-const PROVIDER_HOME: Readonly<Record<string, string>> = {
-  claude: "https://claude.ai/",
-  codex: "https://chatgpt.com/",
-  kimi: "https://www.kimi.com/code",
-  zai: "https://z.ai/manage-apikey/apikey-list",
-  "opencode-go": "https://opencode.ai/go",
-  cursor: "https://cursor.com/dashboard",
-  devin: "https://app.devin.ai/",
-};
-
 const PROVIDER_TITLE: Readonly<Record<string, string>> = {
   claude: "Claude",
   codex: "Codex",
@@ -486,7 +475,7 @@ async function openAccountBrowserLocked(
   const profileStore = path.join(options.dataDir, "plugins", options.pluginId, "browser-profiles");
   const registryFile = path.join(profileStore, "registry.json");
   const timezone = geo?.timezone ?? null;
-  const url = safeBrowserUrl(options.url ?? PROVIDER_HOME[account.provider] ?? "about:blank");
+  const url = safeBrowserUrl(options.url ?? "about:blank");
   const entry = await ensureProfileLocked(account, { heliumRoot, registryFile });
   const root = isolatedRoot(heliumRoot, entry.profileDirectory);
   const socketPath = path.join(tmpdir(), `bb-pool-${createHash("sha256").update(root).digest("hex").slice(0, 24)}.sock`);
