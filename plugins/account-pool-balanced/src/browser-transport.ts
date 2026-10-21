@@ -22,6 +22,7 @@ function track(s) {
 }
 function close() {
   if (closing) return; closing = true;
+  if (primary && primary.exitCode === null) primary.kill();
   for (const s of sockets) s.destroy();
   if (proxy) proxy.close(); if (control) control.close();
   if (socketPath) { try { fs.unlinkSync(socketPath); } catch {} }
@@ -59,7 +60,7 @@ async function boot(cfg) {
   const port = proxy.address().port;
   const args = [
     '--user-data-dir=' + cfg.root, '--profile-directory=' + cfg.profileDirectory,
-    '--no-first-run', '--no-default-browser-check',
+    '--no-first-run', '--no-default-browser-check', '--no-startup-window', '--remote-debugging-pipe',
     '--proxy-server=http://127.0.0.1:' + port,
     '--proxy-bypass-list=<-loopback>', '--disable-quic',
     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
@@ -69,38 +70,70 @@ async function boot(cfg) {
   for (const key of ['PATH','HOME','USER','LOGNAME','TMPDIR','TMP','TEMP','DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_CACHE_HOME','XDG_DATA_HOME','DBUS_SESSION_BUS_ADDRESS','LANG','LANGUAGE','LC_ALL','LC_CTYPE','TZ']) {
     if (process.env[key] !== undefined) browserEnv[key] = process.env[key];
   }
-  function launch(url, first) {
+  let nextCommand = 0, output = '';
+  const commands = new Map();
+  function navigate(url, initial = false) {
+    if (commands.size >= 32) return Promise.reject(new Error('Browser navigation is busy.'));
     return new Promise((resolve, reject) => {
-      const child = spawn(cfg.executable, [...args, url], { stdio: 'ignore', env: browserEnv });
-      if (first) primary = child;
-      let settled = false;
-      const done = err => { if (settled) return; settled = true; clearTimeout(timer); err ? reject(err) : resolve(); };
-      const timer = setTimeout(() => done(), cfg.settleMs);
-      child.on('error', () => { done(new Error('Browser spawn failed.')); if (first) close(); });
-      child.on('exit', code => {
-        if (first) { done(new Error('Browser exited during launch.')); close(); }
-        else done(code === 0 ? null : new Error('Browser handoff failed.'));
+      const id = ++nextCommand;
+      const timer = setTimeout(() => {
+        commands.delete(id); reject(new Error('Browser navigation timed out.'));
+      }, initial ? 7000 : 3500);
+      commands.set(id, { resolve, reject, timer });
+      primary.stdio[3].write(JSON.stringify({ id, method: 'Target.createTarget', params: { url, newWindow: initial } }) + '\0', err => {
+        if (!err) return;
+        const pending = commands.get(id);
+        if (pending) { clearTimeout(pending.timer); commands.delete(id); pending.reject(new Error('Browser navigation channel closed.')); }
       });
     });
   }
+  function launch() {
+    // No URL or remote debugging TCP port enters argv. Only inherited pipes
+    // carry navigation commands, including one-time authorization links.
+    primary = spawn(cfg.executable, args, { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: browserEnv });
+    primary.on('error', close); primary.on('exit', close);
+    primary.stdio[3].on('error', close);
+    primary.stdio[4].on('error', close); primary.stdio[4].on('end', close);
+    primary.stdio[4].setEncoding('utf8');
+    primary.stdio[4].on('data', chunk => {
+      output += chunk;
+      if (output.length > 1024 * 1024) { close(); return; }
+      let end;
+      while ((end = output.indexOf('\0')) >= 0) {
+        let response;
+        try { response = JSON.parse(output.slice(0, end)); } catch { close(); return; }
+        output = output.slice(end + 1);
+        const pending = commands.get(response.id);
+        if (!pending) continue;
+        clearTimeout(pending.timer); commands.delete(response.id);
+        // Protocol diagnostics may echo the URL; never forward them.
+        if (response.error || typeof response.result?.targetId !== 'string') pending.reject(new Error('Browser navigation failed.'));
+        else pending.resolve();
+      }
+    });
+  }
   control = net.createServer(s => {
-    track(s); s.setTimeout(5000, () => s.destroy()); let data = '';
+    track(s); s.setTimeout(5000, () => s.destroy()); let data = '', negotiated = false;
     s.on('data', chunk => {
       data += chunk; if (data.length > 16384) { s.destroy(); return; }
       if (!data.includes('\n')) return;
-      s.removeAllListeners('data');
+      const message = data; data = '';
       Promise.resolve().then(async () => {
-        const cmd = JSON.parse(data);
+        const cmd = JSON.parse(message);
+        if (!negotiated && cmd.type === 'hello') { negotiated = true; s.write(JSON.stringify({ protocol: 2, navigation: 'pipe' }) + '\n'); return; }
+        s.removeAllListeners('data');
+        if (!negotiated || cmd.protocol !== 2) throw new Error('Close this account browser and reopen it after updating Pooler.');
         if (cmd.timezone !== cfg.timezone || cmd.executable !== cfg.executable || !primary || primary.exitCode !== null) {
           throw new Error('Close this account browser window before changing its exit timezone or executable.');
         }
         if (typeof cmd.url !== 'string' || !(cmd.url === 'about:blank' || /^https:\/\//.test(cmd.url))) throw new Error('Invalid browser URL.');
-        await launch(cmd.url, false); s.end(JSON.stringify({ ok: true }) + '\n');
+        await navigate(cmd.url); s.end(JSON.stringify({ ok: true }) + '\n');
       }).catch(e => s.end(JSON.stringify({ error: e.message }) + '\n'));
     });
   });
   await listen(control, socketPath); fs.chmodSync(socketPath, 0o600);
-  await launch(cfg.url, true);
+  launch();
+  await navigate(cfg.url, true);
   process.stdout.write(JSON.stringify({ ok: true, port }) + '\n');
   process.stdout.end();
 }
@@ -132,21 +165,42 @@ export async function handoffBrowser(options: TransportLaunch): Promise<boolean>
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw e;
   }
+  // Negotiate on this same socket before sending any URL. Replacing the
+  // socket path between handshake and navigation cannot select a legacy worker.
   return new Promise((resolve, reject) => {
     const socket = createConnection(options.socketPath);
-    let data = "";
-    const timer = setTimeout(() => { socket.destroy(); reject(new Error("Browser supervisor did not respond.")); }, 5000);
-    socket.on("connect", () => socket.write(JSON.stringify({ timezone: options.timezone, executable: options.executable, url: options.url }) + "\n"));
-    socket.on("data", chunk => { data += chunk; if (data.length > 16384) socket.destroy(new Error("Invalid supervisor response.")); });
-    socket.on("error", error => { clearTimeout(timer); reject(error); });
-    socket.on("end", () => {
-      clearTimeout(timer);
-      try {
-        const result = JSON.parse(data) as { ok?: boolean; error?: string };
-        if (result.ok !== true) throw new Error(result.error ?? "Browser handoff failed.");
-        resolve(true);
-      } catch (e) { reject(e); }
+    let data = "", negotiated = false, settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); socket.destroy();
+      if (error) reject(error); else resolve(true);
+    };
+    const timer = setTimeout(() => finish(new Error("Browser supervisor did not respond.")), 5000);
+    socket.on("connect", () => socket.write(JSON.stringify({ type: "hello" }) + "\n"));
+    socket.on("data", chunk => {
+      data += chunk;
+      if (data.length > 16384) { finish(new Error("Invalid supervisor response.")); return; }
+      let end: number;
+      while (!settled && (end = data.indexOf("\n")) >= 0) {
+        let result: Record<string, unknown>;
+        try {
+          const parsed: unknown = JSON.parse(data.slice(0, end));
+          if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+          result = parsed as Record<string, unknown>;
+        } catch { finish(new Error("Invalid supervisor response.")); return; }
+        data = data.slice(end + 1);
+        if (!negotiated) {
+          if (result.protocol !== 2 || result.navigation !== "pipe") {
+            finish(new Error("Close this account browser and reopen it after updating Pooler.")); return;
+          }
+          negotiated = true;
+          socket.write(JSON.stringify({ protocol: 2, timezone: options.timezone, executable: options.executable, url: options.url }) + "\n");
+        } else if (result.ok === true) finish();
+        else finish(new Error(typeof result.error === "string" ? result.error : "Browser handoff failed."));
+      }
     });
+    socket.on("error", error => finish(error));
+    socket.on("end", () => finish(new Error("Browser supervisor closed before confirming navigation.")));
   });
 }
 

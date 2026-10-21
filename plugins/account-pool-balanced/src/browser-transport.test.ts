@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, readFile, rm, access } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm, access, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createConnection, createServer, type Socket } from "node:net";
@@ -18,6 +18,23 @@ const args = process.argv.slice(2);
 const root = args.find(a => a.startsWith('--user-data-dir=')).slice(16);
 try { fs.writeFileSync(root + '/pid', String(process.pid), { flag: 'wx' }); } catch { process.exit(0); }
 fs.writeFileSync(root + '/capture.json', JSON.stringify({ args, tz: process.env.TZ, secretPresent: process.env.POOL_SYNTHETIC_SECRET !== undefined, electronFlag: process.env.ELECTRON_RUN_AS_NODE }));
+if (args.includes('--remote-debugging-pipe')) {
+  let input = '';
+  const pipe = new (require('node:net').Socket)({ fd: 3, readable: true, writable: false });
+  pipe.on('data', chunk => {
+    input += chunk;
+    let end;
+    while ((end = input.indexOf('\\0')) >= 0) {
+      const cmd = JSON.parse(input.slice(0, end)); input = input.slice(end + 1);
+      fs.appendFileSync(root + '/commands.jsonl', JSON.stringify(cmd) + '\\n');
+      const mode = ${JSON.stringify(extraEnv.FIXTURE_CDP_MODE ?? '')};
+      if (mode === 'hang' && cmd.id > 1) continue;
+      const response = mode === 'error' ? { id: cmd.id, error: { message: cmd.params.url } } : { id: cmd.id, result: { targetId: 'fixture-target' } };
+      fs.writeSync(4, JSON.stringify(response) + '\\0');
+    }
+  });
+}
+
 setInterval(() => {}, 1000);
 setTimeout(() => process.exit(0), 15000);
 setTimeout(() => process.exit(0), ${Number(extraEnv.FIXTURE_EXIT_MS ?? 15000)});
@@ -75,6 +92,43 @@ describe("detached browser supervisor", () => {
     expect(args).toContain("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
     expect(args).not.toContain("--disable-ipv6");
   });
+  it("keeps initial and subsequent authorization URLs out of process arguments", async () => {
+    const options = await fixture();
+    options.url = "https://login.example/authorize?state=synthetic-first";
+    await startBrowserTransport(options);
+    const pid = await readFile(path.join(options.root, "pid"), "utf8");
+    const first = await capture(options);
+    expect(first.args.join(" ")).not.toContain("synthetic-first");
+    expect(first.args).toContain("--remote-debugging-pipe");
+    await handoffBrowser({ ...options, url: "https://login.example/authorize?state=synthetic-second" });
+    expect(await readFile(path.join(options.root, "pid"), "utf8")).toBe(pid);
+    expect(await readFile(path.join(options.root, "commands.jsonl"), "utf8")).toContain("synthetic-second");
+    expect((await capture(options)).args.join(" ")).not.toContain("synthetic-second");
+  });
+  it("refuses legacy supervisors before sending an authorization URL", async () => {
+    const options = await fixture();
+    const requests: string[] = [];
+    const legacy = createServer(socket => socket.on("data", data => {
+      requests.push(data.toString()); socket.end(JSON.stringify({ ok: true }) + "\n");
+    }));
+    await new Promise<void>(resolve => legacy.listen(options.socketPath, resolve));
+    await chmod(options.socketPath, 0o600);
+    cleanup.push(async () => { await new Promise<void>(resolve => legacy.close(() => resolve())); });
+    await expect(handoffBrowser({ ...options, url: "https://login.example/?state=synthetic-private" })).rejects.toThrow(/close|reopen/i);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).not.toContain("synthetic-private");
+  });
+  it("redacts protocol errors that echo the authorization URL", async () => {
+    const options = await fixture({ FIXTURE_CDP_MODE: "error" });
+    options.url = "https://login.example/?state=synthetic-private";
+    await expect(startBrowserTransport(options)).rejects.toThrow("Browser supervisor failed to launch.");
+    expect((await capture(options)).args.join(" ")).not.toContain("synthetic-private");
+  });
+  it("bounds an unresponsive navigation command without reporting success", async () => {
+    const options = await fixture({ FIXTURE_CDP_MODE: "hang" });
+    await startBrowserTransport(options);
+    await expect(handoffBrowser({ ...options, url: "https://login.example/?state=synthetic-private" })).rejects.toThrow("Browser navigation timed out.");
+  }, 10000);
   it("uses a real IPv4 CONNECT socket and rejects an IPv6-only trap", async () => {
     const options = await fixture();
     const peers: string[] = []; const sockets = new Set<Socket>();
