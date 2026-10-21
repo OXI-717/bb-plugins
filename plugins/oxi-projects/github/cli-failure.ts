@@ -12,8 +12,8 @@ export function cliFailureKind(error:unknown,stderr:string):CliFailureKind{
  if(value?.killed&&value.signal==='SIGTERM')return 'timeout';
  if(/rate limit|secondary rate|abuse detection|HTTP 429/i.test(stderr))return 'rate_limit';
  if(/HTTP 401|bad credentials|requires authentication|not logged into/i.test(stderr))return 'authentication';
- if(/HTTP 403/i.test(stderr))return 'forbidden';
- if(/HTTP 404/i.test(stderr))return 'not_found';
+ if(/HTTP 403|Resource not accessible by|required scopes to execute this query/i.test(stderr))return 'forbidden';
+ if(/HTTP 404|Could not resolve to a Repository/i.test(stderr))return 'not_found';
  if(['ENOTFOUND','EAI_AGAIN','ECONNRESET','ETIMEDOUT','ECONNREFUSED','EHOSTUNREACH'].includes(String(value?.code))||/unexpected EOF|connection reset|dial tcp|no such host|i\/o timeout|TLS handshake timeout|error connecting to|network is unreachable|connection refused|HTTP 50[0234]/i.test(stderr))return 'network';
  return 'unknown';
 }

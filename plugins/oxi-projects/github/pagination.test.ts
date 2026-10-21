@@ -40,7 +40,7 @@ it('does not publish a successful prefix at the repository boundary after a page
  let pageCalls=0;
  const runner=vi.fn(async(args:string[])=>{
   if(args[0]==='auth')return 'synthetic-local-lookup';
-  if(++pageCalls===1)return JSON.stringify(Array.from({length:100},(_,i)=>row(i+1)));
+  if(++pageCalls===1)return JSON.stringify({data:{repository:{issues:{pageInfo:{hasNextPage:true,endCursor:'next'},nodes:Array.from({length:100},(_,i)=>({number:i+1,title:`Task ${i+1}`,body:'Body',state:'OPEN',author:null,updatedAt:'2026-10-15T10:00:00Z',url:`https://github.com/example/project/issues/${i+1}`,labels:{nodes:[],pageInfo:{hasNextPage:false}},assignees:{nodes:[],pageInfo:{hasNextPage:false}}}))}}}});
   throw new GithubCliError('timeout',null);
  });
  const result=await listProject({id:'example',name:'Example',bbProjectId:'p',autopilotProject:null,repositories:[{repo:'example/project',account:'example-account'}]},{projectId:'example',repos:[],account:null,kind:'issue',state:'all'},runner);
@@ -48,4 +48,17 @@ it('does not publish a successful prefix at the repository boundary after a page
  expect(result.errors[0]).toMatchObject({repo:'example/project',account:'example-account'});
  expect(result.errors[0]?.message).toContain('страница 2');
  expect(pageCalls).toBe(3);
+});
+it('keeps PR browsing on REST and uses the selected account without a global auth switch',async()=>{
+ const calls:Array<{args:string[];token:string|undefined}>=[];
+ const runner=vi.fn(async(args:string[],env:NodeJS.ProcessEnv)=>{
+  calls.push({args,token:env.GH_TOKEN});
+  if(args[0]==='auth')return 'synthetic-account-token';
+  return JSON.stringify([row(42,true)]);
+ });
+ const result=await listProject({id:'example',name:'Example',bbProjectId:'p',autopilotProject:null,repositories:[{repo:'example/project',account:'example-account'}]},{projectId:'example',repos:[],account:null,kind:'pr',state:'all'},runner);
+ expect(result.errors).toEqual([]);expect(result.items.map(i=>i.number)).toEqual([42]);
+ expect(calls[0]?.args).toContain('example-account');
+ expect(calls.filter(c=>c.args[0]==='api').every(c=>c.args[1].startsWith('repos/')&&c.token==='synthetic-account-token')).toBe(true);
+ expect(calls.some(c=>c.args.includes('switch'))).toBe(false);
 });
