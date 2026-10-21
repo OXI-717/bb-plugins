@@ -510,6 +510,7 @@ const restrictAccountDragToVerticalAxis: Modifier = ({ transform }) => ({
 const accountDragModifiers: Modifier[] = [restrictAccountDragToVerticalAxis];
 
 type AccountAction =
+  | "browser"
   | "toggle"
   | "drain"
   | "priority"
@@ -642,6 +643,11 @@ function AccountRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuItem disabled={pending} onSelect={() => onAction("browser")}>
+              <Icon name="ExternalLink" />
+              Открыть в браузере
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               disabled={pending}
               onSelect={() => onAction("toggle")}
@@ -1050,6 +1056,9 @@ function AccountPoolSettings() {
   const [policyUnsaved, setPolicyUnsaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
+  const browserBusy = useRef(false);
+  const [browserNotice, setBrowserNotice] = useState<{ accountId: string; text: string } | null>(null);
+  const [browserError, setBrowserError] = useState<{ accountId: string; text: string } | null>(null);
   const [optimisticOrder, setOptimisticOrder] = useState<{
     provider: PoolProvider;
     ids: string[];
@@ -1301,6 +1310,7 @@ function AccountPoolSettings() {
     account: AccountSummary,
     action: AccountAction,
   ): Promise<void> {
+    if (action === "browser") { await openBrowser(account.id); return; }
     if (policyUnsaved && ["priority", "role", "cap", "remove"].includes(action)) return;
     if (action === "priority") {
       setPriority(String(account.priority));
@@ -1332,6 +1342,23 @@ function AccountPoolSettings() {
       if (action === "refresh")
         await rpc.call("account.refreshUsage", { accountId: account.id });
     });
+  }
+  async function openBrowser(accountId: string, url?: string): Promise<void> {
+    if (pending !== null || browserBusy.current) return;
+    browserBusy.current = true;
+    setPending(`browser-${accountId}`);
+    setError(null);
+    setBrowserNotice(null);
+    setBrowserError(null);
+    try {
+      await rpc.call("browser.open", { accountId, ...(url?.trim() ? { url: url.trim() } : {}) });
+      if (mounted.current) setBrowserNotice({ accountId, text: "Браузер открыт на машине Pooler." });
+    } catch (launchError) {
+      if (mounted.current) setBrowserError({ accountId, text: errorText(launchError) });
+    } finally {
+      browserBusy.current = false;
+      if (mounted.current) setPending(null);
+    }
   }
   async function reorderAccounts(
     provider: PoolProvider,
@@ -1426,6 +1453,8 @@ function AccountPoolSettings() {
           </span>
         ))}
       </p>
+      {browserNotice !== null && dialog === null ? <p role="status" className="text-sm text-muted-foreground">{browserNotice.text}</p> : null}
+      {browserError !== null && dialog === null ? <p role="alert" className="text-sm text-destructive-text">{browserError.text}</p> : null}
       {error === null ? null : (
         <div
           role="alert"
@@ -1847,7 +1876,10 @@ function AccountPoolSettings() {
               await refresh();
             }}
             account={selectedAccount}
-            refreshError={error}
+            openBrowser={(url) => void openBrowser(selectedAccount.id, url)}
+            browserPending={pending === `browser-${selectedAccount.id}`}
+            browserNotice={browserNotice?.accountId === selectedAccount.id ? browserNotice.text : null}
+            refreshError={browserError?.accountId === selectedAccount.id ? browserError.text : error}
             threshold={threshold}
             current={selectedAccount.id === currentId(selectedAccount.provider)}
             drainHours={
@@ -2123,9 +2155,11 @@ function AccountPoolSettings() {
             pending={pending !== null}
             pastedCode={pastedCode}
             countdown={0}
-            error={error}
+            error={browserError?.accountId === reauthorizeAccountId ? browserError.text : error}
             close={closeDialog}
             openUrl={navigate.openUrl}
+            openAccountUrl={reauthorizeAccountId === null ? undefined : url => void openBrowser(reauthorizeAccountId, url)}
+            browserNotice={browserNotice?.accountId === reauthorizeAccountId ? browserNotice.text : null}
             setPastedCode={setPastedCode}
             complete={() =>
               void run("complete-claude", async () => {
@@ -2175,6 +2209,9 @@ function capSummary(account: AccountSummary): string | null {
 
 function AccountDialog({
   account,
+  openBrowser,
+  browserPending,
+  browserNotice,
   saveEmail,
   savePolicy,
   saveProjects,
@@ -2190,6 +2227,9 @@ function AccountDialog({
   reauthorize,
 }: {
   account: AccountSummary;
+  openBrowser: (url?: string) => void;
+  browserPending: boolean;
+  browserNotice: string | null;
   saveEmail:(email:string|null,expectedEmail:string|null)=>Promise<void>;
   saveProjects: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
   loadProjects: () => Promise<Array<{ id: string; name: string }>>;
@@ -2204,6 +2244,7 @@ function AccountDialog({
   pending: boolean;
   reauthorize: () => void;
 }) {
+  const [browserUrl, setBrowserUrl] = useState("");
   const [emailUnsaved,setEmailUnsaved]=useState(false);
   const [projectsUnsaved, setProjectsUnsaved] = useState(false);
   const [quotaUnsaved, setQuotaUnsaved] = useState(false);
@@ -2258,6 +2299,17 @@ function AccountDialog({
       }
     >
       <AccountSettingsStyle />
+      <section className="pool-settings-section space-y-2">
+        <div className="text-sm font-medium">Браузер аккаунта</div>
+        <p className="text-sm text-muted-foreground">Отдельный профиль для этого аккаунта. Если его ещё нет, он создастся при открытии. Окно откроется на машине Pooler.</p>
+        <label className="block text-sm" htmlFor="pool-browser-url">Ссылка для открытия</label>
+        <Input id="pool-browser-url" className="box-border min-w-0 max-w-full" type="url" autoComplete="off" placeholder="Необязательно — иначе откроется сайт провайдера" value={browserUrl} onChange={event => setBrowserUrl(event.target.value)} disabled={browserPending} />
+        <Button size="sm" variant="outline" disabled={pending} onClick={() => openBrowser(browserUrl)}>
+          <Icon name="ExternalLink" />
+          {browserPending ? "Открываю…" : "Открыть в браузере"}
+        </Button>
+        {browserNotice === null ? null : <p role="status" className="text-sm text-muted-foreground">{browserNotice}</p>}
+      </section>
       {account.error&&<p role="alert" className="text-sm text-destructive-text">{account.error}</p>}
       {refreshError === null ? null : <p role="alert" className="text-sm text-destructive-text">{refreshError}</p>}
       <div className="flex flex-wrap items-center gap-2">
@@ -2430,6 +2482,8 @@ function LoginDialog({
   error,
   close,
   openUrl,
+  openAccountUrl,
+  browserNotice = null,
   setPastedCode,
   complete,
   restart,
@@ -2445,6 +2499,8 @@ function LoginDialog({
   error: string | null;
   close: () => void;
   openUrl: (url: string) => boolean;
+  openAccountUrl?: (url: string) => void;
+  browserNotice?: string | null;
   setPastedCode: (value: string) => void;
   complete: () => void;
   restart: () => void;
@@ -2515,6 +2571,11 @@ function LoginDialog({
             <UserCodeBlock userCode={codexStep.userCode} />
           )}
           <AuthorizationUrlRow name={name} url={url} openUrl={openUrl} />
+          {openAccountUrl === undefined ? null : <div className="space-y-1">
+            <Button variant="outline" disabled={pending} onClick={() => openAccountUrl(url)}>Открыть в профиле аккаунта</Button>
+            <p className="text-sm text-muted-foreground">Окно откроется на машине Pooler.</p>
+            {browserNotice === null ? null : <p role="status" className="text-sm text-muted-foreground">{browserNotice}</p>}
+          </div>}
           {provider === "claude" ? (
             <Input
               aria-label="Код авторизации Claude"

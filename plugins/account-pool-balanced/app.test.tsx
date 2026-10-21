@@ -168,6 +168,54 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it("opens the selected account browser from its menu", async () => {
+    const selected = account();
+    const slot = render([selected], { "browser.open": () => ({ opened: true }) });
+    fireEvent.pointerDown(await slot.findByRole("button", { name: "Действия: person@example.com" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await slot.findByRole("menuitem", { name: "Открыть в браузере" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({ method: "browser.open", input: { accountId: selected.id } }));
+    await slot.findByText("Браузер открыт на машине Pooler.");
+  });
+
+  it("opens a pasted authorization link in the selected profile without adding an account", async () => {
+    const selected = account();
+    const response = deferred<object>();
+    const slot = render([selected], { "browser.open": () => response.promise });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    const dialog = within(slot.getByRole("dialog"));
+    fireEvent.change(dialog.getByRole("textbox", { name: "Ссылка для открытия" }), { target: { value: "https://login.example/authorize?state=synthetic" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Открыть в браузере" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({ method: "browser.open", input: { accountId: selected.id, url: "https://login.example/authorize?state=synthetic" } }));
+    expect(dialog.getByRole("button", { name: "Открываю…" }).hasAttribute("disabled")).toBe(true);
+    await act(async () => response.resolve({ opened: true }));
+    await dialog.findByText("Браузер открыт на машине Pooler.");
+    expect(slot.rpcCalls.some(call => call.method === "account.add")).toBe(false);
+  });
+
+  it("keeps browser errors in the card and permits retry without losing the link", async () => {
+    let attempts = 0;
+    const slot = render([account()], { "browser.open": () => { if (++attempts === 1) throw new Error("VPN confirmation unavailable"); return { opened: true }; } });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    const dialog = within(slot.getByRole("dialog"));
+    fireEvent.change(dialog.getByRole("textbox", { name: "Ссылка для открытия" }), { target: { value: "https://login.example/" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Открыть в браузере" }));
+    await dialog.findByText("VPN confirmation unavailable");
+    expect((dialog.getByRole("textbox", { name: "Ссылка для открытия" }) as HTMLInputElement).value).toBe("https://login.example/");
+    fireEvent.click(dialog.getByRole("button", { name: "Открыть в браузере" }));
+    await dialog.findByText("Браузер открыт на машине Pooler.");
+  });
+
+  it("opens the existing reauthorization URL in that account profile", async () => {
+    const selected = account();
+    const slot = render([selected], {
+      "login.reauthorize": () => ({ sessionId: "fixture-session", authorizeUrl: "https://login.example/authorize?state=synthetic", expiresAt: Date.now() + 600000 }),
+      "browser.open": () => ({ opened: true }),
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.click(slot.getByRole("button", { name: "Авторизоваться заново" }));
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть в профиле аккаунта" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({ method: "browser.open", input: { accountId: selected.id, url: "https://login.example/authorize?state=synthetic" } }));
+  });
   it.each(['start','complete'])('shows a Claude reauthorization %s error and offers retry',async stage=>{
     const selected=account();
     const failure='Вы вошли в другой аккаунт';

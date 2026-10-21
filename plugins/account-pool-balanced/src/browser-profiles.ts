@@ -34,6 +34,11 @@ export const GUARDED_BROWSER_PROVIDERS: ReadonlySet<string> = new Set([
 const PROVIDER_HOME: Readonly<Record<string, string>> = {
   claude: "https://claude.ai/",
   codex: "https://chatgpt.com/",
+  kimi: "https://www.kimi.com/code",
+  zai: "https://z.ai/manage-apikey/apikey-list",
+  "opencode-go": "https://opencode.ai/go",
+  cursor: "https://cursor.com/dashboard",
+  devin: "https://app.devin.ai/",
 };
 
 const PROVIDER_TITLE: Readonly<Record<string, string>> = {
