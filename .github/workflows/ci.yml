@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['account-pool-balanced/v*', 'automation-catalog/v*', 'vpn-guard/v*', 'oxi-projects/v*', 'model-connections/v*']
+    tags: ['account-pool-balanced/v*', 'automation-catalog/v*', 'vpn-guard/v*', 'oxi-projects/v*', 'model-connections/v*', 'auto-archive/v*']
   pull_request:
   workflow_dispatch:
 
