@@ -1,0 +1,42 @@
+{
+  "name": "bb-plugin-auto-archive",
+  "version": "0.2.0",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "author": "Shane Logsdon",
+  "contributors": [
+    "OXI-717"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OXI-717/bb-plugins.git",
+    "directory": "plugins/auto-archive"
+  },
+  "engines": {
+    "bb": ">=0.46.1",
+    "bbPluginSdk": ">=0.6.49 <0.7.0"
+  },
+  "bb": {
+    "name": "Auto Archive",
+    "description": "Archive quiet thread trees with handoff protection and a manual prune preview.",
+    "branding": {
+      "icon": "Archive"
+    },
+    "server": "./server.ts",
+    "skills": [
+      "skills"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "bb plugin build ."
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.49",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.12"
+  }
+}

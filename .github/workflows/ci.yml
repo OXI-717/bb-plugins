@@ -116,3 +116,23 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp/gitleaks-bin gitleaks
       - name: Scan all fetched history
         run: /tmp/gitleaks-bin/gitleaks git --redact --no-banner --log-opts='--all' .
+
+  auto-archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: plugins/auto-archive/package-lock.json
+      - run: npm ci
+        working-directory: plugins/auto-archive
+      - run: npm run typecheck
+        working-directory: plugins/auto-archive
+      - run: npm test
+        working-directory: plugins/auto-archive
+      - run: npm exec --yes --package=bb-app@0.46.1 -- bb plugin build .
+        working-directory: plugins/auto-archive
+      - run: git diff --exit-code
