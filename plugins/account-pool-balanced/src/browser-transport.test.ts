@@ -19,7 +19,7 @@ const root = args.find(a => a.startsWith('--user-data-dir=')).slice(16);
 try { fs.writeFileSync(root + '/pid', String(process.pid), { flag: 'wx' }); } catch { process.exit(0); }
 fs.writeFileSync(root + '/capture.json', JSON.stringify({ args, tz: process.env.TZ, secretPresent: process.env.POOL_SYNTHETIC_SECRET !== undefined, electronFlag: process.env.ELECTRON_RUN_AS_NODE }));
 if (args.includes('--remote-debugging-pipe')) {
-  let input = ''; let discovered = false; const targets = new Map(); let targetSequence = 0;
+  let input = ''; let discovered = false; const targets = new Map(); let targetSequence = 0, snapshotCount = 0;
   const send = value => fs.writeSync(4, JSON.stringify(value) + '\\0');
   const pipe = new (require('node:net').Socket)({ fd: 3, readable: true, writable: false });
   pipe.on('end', () => { fs.writeFileSync(root + '/graceful-exit', 'pipe-eof'); process.exit(0); });
@@ -32,6 +32,8 @@ if (args.includes('--remote-debugging-pipe')) {
       const mode = ${JSON.stringify(extraEnv.FIXTURE_CDP_MODE ?? '')};
       if (cmd.method === 'Target.setDiscoverTargets') { discovered = true; for (const targetInfo of targets.values()) send({method:'Target.targetCreated',params:{targetInfo}}); send({id:cmd.id,result:{}}); continue; }
       if (cmd.method === 'Target.getTargets') {
+        snapshotCount++;
+        if (mode === 'snapshot-once' && snapshotCount === 1) { send({id:cmd.id,error:{message:'temporary'}}); continue; }
         if (mode === 'snapshot-error') { send({id:cmd.id,error:{message:'fixture failure'}}); continue; }
         if (mode === 'snapshot-new-window') {
           const targetInfo = {targetId:'manual-window',type:'page'}; targets.set(targetInfo.targetId,targetInfo);
@@ -140,6 +142,21 @@ describe("detached browser supervisor", () => {
     await expect.poll(() => handoffBrowser(options), { timeout: 2000 }).toBe(false);
     await expect(tunnel(port, "127.0.0.1:443")).rejects.toThrow();
     expect(await handoffBrowser(other)).toBe(true);
+  });
+  it("retries a transient snapshot failure after the last page closes", async () => {
+    const options = await fixture({ FIXTURE_CDP_MODE: "snapshot-once" }); await startBrowserTransport(options);
+    await writeFile(path.join(options.root, "close-pages"), "yes");
+    await expect.poll(async () => {
+      try { return await readFile(path.join(options.root, "graceful-exit"), "utf8"); } catch { return null; }
+    }, { timeout: 3000 }).toBe("pipe-eof");
+  });
+  it("bounds snapshot retries and does not quit on a persistent error", async () => {
+    const options = await fixture({ FIXTURE_CDP_MODE: "snapshot-error" }); await startBrowserTransport(options);
+    await writeFile(path.join(options.root, "close-pages"), "yes");
+    const snapshots = async () => (await readFile(path.join(options.root, "commands.jsonl"), "utf8")).trim().split("\n").map(s => JSON.parse(s)).filter(c => c.method === "Target.getTargets").length;
+    await expect.poll(snapshots, { timeout: 3000 }).toBe(3); await delay(600);
+    expect(await snapshots()).toBe(3);
+    await expect(access(path.join(options.root, "close-requested"))).rejects.toThrow();
   });
   it("keeps the browser alive when another page remains", async () => {
     const options = await fixture(); await startBrowserTransport(options);

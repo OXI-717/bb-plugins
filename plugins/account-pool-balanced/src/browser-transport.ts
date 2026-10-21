@@ -101,15 +101,16 @@ async function boot(cfg) {
       navigationUncertain = true; throw error;
     } finally { navigationCount--; checkIdle(); }
   }
-  function checkIdle() {
+  function checkIdle(attempt = 0) {
     clearTimeout(idleTimer);
     if (!sawPage || pages.size || navigationCount || navigationUncertain || quitting) return;
     idleTimer = setTimeout(async () => {
       const version = generation;
+      const retry = () => { if (attempt < 2 && version === generation) checkIdle(attempt + 1); };
       try {
         // A fresh snapshot covers windows created outside Pooler and target churn.
         const result = await command('Target.getTargets', {});
-        if (!Array.isArray(result?.targetInfos) || result.targetInfos.some(t => !t || typeof t.type !== 'string')) return;
+        if (!Array.isArray(result?.targetInfos) || result.targetInfos.some(t => !t || typeof t.type !== 'string')) { retry(); return; }
         if (version !== generation || navigationCount || navigationUncertain || pages.size || result.targetInfos.some(t => t.type === 'page')) return;
         quitting = true;
         // Browser.close alone can leave a no-startup-window Chromium in the Dock.
@@ -118,8 +119,11 @@ async function boot(cfg) {
         await command('Browser.close', {}).catch(() => {});
         primary.stdio[3].end();
         setTimeout(close, 10000).unref();
-      } catch { /* Unknown target state is not permission to close a window. */ }
-    }, 250);
+      } catch {
+        // Retry a transient observation failure, but never turn unknown into quit.
+        retry();
+      }
+    }, 250 * 2 ** attempt);
   }
   function targetEvent(message) {
     if (message.method === 'Target.targetCreated' || message.method === 'Target.targetInfoChanged') {
