@@ -2,7 +2,9 @@
 /** Milliseconds until the next top-of-hour; exactly on the hour → a full hour. */
 export function msUntilNextHour(now: Date = new Date()): number {
   return (
-    (60 - now.getMinutes()) * 60_000 - now.getSeconds() * 1000 - now.getMilliseconds()
+    (60 - now.getMinutes()) * 60_000 -
+    now.getSeconds() * 1000 -
+    now.getMilliseconds()
   );
 }
 

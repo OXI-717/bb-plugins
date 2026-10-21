@@ -114,7 +114,7 @@ shows background sweep summaries.
 ```sh
 npm ci
 npm run typecheck
-npm test -- policy.test.ts runtime.test.ts
+npm test -- policy.test.ts runtime.test.ts server.test.ts
 bb plugin build .
 ```
 
