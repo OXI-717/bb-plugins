@@ -51,4 +51,28 @@ describe('interactive native browser transport',()=>{
   const o=await fixture();let received='';const server=createServer(s=>s.on('data',b=>{received+=b;s.write(JSON.stringify({protocol:3,navigation:'pipe',profiles:'native'})+'\n');}));await new Promise<void>(r=>server.listen(o.socketPath,r));await chmod(o.socketPath,0o600);cleanup.push(()=>new Promise<void>(r=>server.close(()=>r())));
   await expect(handoffBrowser({...o,url:'https://example.test/private'})).rejects.toThrow(/reopen/);expect(received).not.toContain('private');
  });
+ it('cleans a partially written owned document and keeps later navigation available',async()=>{
+  const o=await fixture(),preload=o.root+'/partial-write.cjs';
+  await writeFile(preload,`const fs=require('node:fs'),open=fs.openSync,write=fs.writeFileSync,paths=new Map();let injected=false;fs.openSync=(file,...args)=>{const fd=open(file,...args);paths.set(fd,String(file));return fd;};fs.writeFileSync=(file,data,...args)=>{const name=typeof file==='number'?paths.get(file):String(file);if(name?.includes('/pool-browser-links-')&&String(data).includes('partial-marker')&&!injected){injected=true;write(file,String(data).slice(0,-8),...args);throw Object.assign(new Error('synthetic partial write'),{code:'ENOSPC'});}return write(file,data,...args);};`);
+  o.env.NODE_OPTIONS='--require='+preload;await startBrowserTransport(o);const dir=path.dirname(fileURLToPath((await calls(o))[0].args.at(-1)));
+  await expect(handoffBrowser({...o,url:'https://example.test/?state=partial-marker'})).rejects.toThrow();
+  const names=await(await import('node:fs/promises')).readdir(dir);expect(names).toHaveLength(1);expect(await readFile(path.join(dir,names[0]),'utf8')).not.toContain('partial-marker');
+  expect(await handoffBrowser({...o,url:'https://example.test/retry'})).toBe(true);
+ });
+ it('does not unlink a file whose exclusive creation failed',async()=>{
+  const o=await fixture(),preload=o.root+'/collision.cjs';
+  await writeFile(preload,`const fs=require('node:fs'),open=fs.openSync,write=fs.writeFileSync;let count=0;fs.openSync=(file,...args)=>{if(String(file).includes('/pool-browser-links-')&&++count===2){const fd=open(file,...args);write(fd,'synthetic-existing-file');fs.closeSync(fd);throw Object.assign(new Error('synthetic collision'),{code:'EEXIST'});}return open(file,...args);};`);
+  o.env.NODE_OPTIONS='--require='+preload;await startBrowserTransport(o);const dir=path.dirname(fileURLToPath((await calls(o))[0].args.at(-1)));
+  await expect(handoffBrowser({...o,url:'https://example.test/collision'})).rejects.toThrow();
+  const names=await(await import('node:fs/promises')).readdir(dir);expect(names).toHaveLength(2);expect(await Promise.all(names.map(n=>readFile(path.join(dir,n),'utf8')))).toContain('synthetic-existing-file');
+ });
+ it('retains the file-cap slot when partial-write cleanup is denied',async()=>{
+  const o=await fixture(),preload=o.root+'/denied-cleanup.cjs';
+  await writeFile(preload,`const fs=require('node:fs'),open=fs.openSync,write=fs.writeFileSync,unlink=fs.unlinkSync,paths=new Map();let blocked;fs.openSync=(file,...args)=>{const fd=open(file,...args);paths.set(fd,String(file));return fd;};fs.writeFileSync=(file,data,...args)=>{const name=typeof file==='number'?paths.get(file):String(file);if(name?.includes('/pool-browser-links-')&&String(data).includes('partial-marker')){blocked=name;write(file,String(data).slice(0,-8),...args);throw Object.assign(new Error('synthetic partial write'),{code:'ENOSPC'});}return write(file,data,...args);};fs.unlinkSync=file=>{if(String(file)===blocked)throw Object.assign(new Error('synthetic cleanup denied'),{code:'EACCES'});return unlink(file);};`);
+  o.env.NODE_OPTIONS='--require='+preload;await startBrowserTransport(o);
+  await expect(handoffBrowser({...o,url:'https://example.test/?state=partial-marker'})).rejects.toThrow('Could not prepare browser navigation.');
+  for(let i=0;i<30;i++)await handoffBrowser({...o,url:'https://example.test/'+i});
+  await expect(handoffBrowser({...o,url:'https://example.test/overflow'})).rejects.toThrow(/busy/);
+  expect(await handoffBrowser(o)).toBe(true);
+ },20000);
 });

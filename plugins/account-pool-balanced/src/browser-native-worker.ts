@@ -26,9 +26,12 @@ function documentURL(url,initial){
  const file=path.join(documents,randomUUID()+'.html');
  const nonce=randomUUID();let confirm;const ready=new Promise(resolve=>{confirm=resolve;});
  const encoded=JSON.stringify(url).replace(/[<>&\u2028\u2029]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0'));
- fs.writeFileSync(file,'<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; script-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; connect-src http://pool-ready.invalid"><title>Opening account</title><script>const ready="http://pool-ready.invalid/'+nonce+'";fetch(ready,{mode:"no-cors",credentials:"omit",cache:"no-store"}).then(()=>location.replace('+encoded+'))</script>',{mode:0o600,flag:'wx'});
+ const fd=fs.openSync(file,'wx',0o600);
+ const discard=()=>{try{fs.unlinkSync(file);}catch(e){if(e.code!=='ENOENT')return false;}clearTimeout(files.get(file));files.delete(file);receipts.delete(nonce);return true;};
+ const expire=()=>{if(!discard()){const retry=setTimeout(expire,60000);retry.unref();files.set(file,retry);}};
+ const timer=setTimeout(expire,300000);timer.unref();files.set(file,timer);
+ try{fs.writeFileSync(fd,'<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; script-src &#39;unsafe-inline&#39;; base-uri &#39;none&#39;; connect-src http://pool-ready.invalid"><title>Opening account</title><script>const ready="http://pool-ready.invalid/'+nonce+'";fetch(ready,{mode:"no-cors",credentials:"omit",cache:"no-store"}).then(()=>location.replace('+encoded+'))</script>',{encoding:'utf8'});fs.closeSync(fd);}catch{try{fs.closeSync(fd);}catch{}discard();throw new Error('Could not prepare browser navigation.');}
  receipts.set(nonce,confirm);
- const timer=setTimeout(()=>{try{fs.unlinkSync(file);}catch{}files.delete(file);receipts.delete(nonce);},300000);timer.unref();files.set(file,timer);
  return {url:pathToFileURL(file).href,ready};
 }
 async function boot(cfg){
