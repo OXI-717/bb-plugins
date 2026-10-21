@@ -212,7 +212,9 @@ async function boot(cfg) {
     });
   }
   control = net.createServer(s => {
-    track(s); s.setTimeout(5000, () => s.destroy()); let data = '', negotiated = false;
+    // Shared selection + marker polling + attach/navigation/detach can take 9s.
+    // Leave room beyond the shared client's 10s total deadline. Legacy stays 5s.
+    track(s); s.setTimeout(shared ? 12000 : 5000, () => s.destroy()); let data = '', negotiated = false;
     s.on('data', chunk => {
       data += chunk; if (data.length > 16384) { s.destroy(); return; }
       if (!data.includes('\n')) return;
@@ -277,7 +279,8 @@ export async function handoffBrowser(options: TransportLaunch): Promise<boolean>
       settled = true; clearTimeout(timer); socket.destroy();
       if (error) reject(error); else resolve(true);
     };
-    const timer = setTimeout(() => finish(new Error("Browser supervisor did not respond.")), 5000);
+    // Includes hello and the full bounded native-profile navigation chain.
+    const timer = setTimeout(() => finish(new Error("Browser supervisor did not respond.")), options.profileDirectories ? 10000 : 5000);
     socket.on("connect", () => socket.write(JSON.stringify({ type: "hello" }) + "\n"));
     socket.on("data", chunk => {
       data += chunk;
@@ -312,7 +315,9 @@ export async function startBrowserTransport(options: TransportLaunch): Promise<v
       detached: true, stdio: ["pipe", "pipe", "ignore"], env: { ...options.env, ELECTRON_RUN_AS_NODE: "1", ...(options.timezone ? { TZ: options.timezone } : {}) },
     });
     let data = "";
-    const timer = setTimeout(() => { child.kill(); reject(new Error("Browser supervisor startup timed out.")); }, 10000);
+    // Discovery (3.5s) precedes the shared chain (up to 9s, including the
+    // final in-flight marker read). Keep startup overhead within a 15s budget.
+    const timer = setTimeout(() => { child.kill(); reject(new Error("Browser supervisor startup timed out.")); }, options.profileDirectories ? 15000 : 10000);
     const fail = () => { clearTimeout(timer); reject(new Error("Browser supervisor failed to launch.")); };
     child.once("error", fail); child.once("exit", fail);
     child.stdin.on("error", () => {});

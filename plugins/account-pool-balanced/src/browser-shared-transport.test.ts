@@ -13,6 +13,7 @@ const fs=require('node:fs'),net=require('node:net'),args=process.argv.slice(2),r
 if(!args.includes('--remote-debugging-pipe')) {
  fs.appendFileSync(root+'/selectors.jsonl',JSON.stringify(args)+'\\n');
  if(${JSON.stringify(mode)}==='no-target') process.exit(0);
+ if(${JSON.stringify(mode)}==='slow-handoff' && args.includes('--profile-directory=Profile 2')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1500);
  fs.appendFileSync(root+'/requests.jsonl',JSON.stringify({url:args.at(-1),profile:args.find(a=>a.startsWith('--profile-directory=')).slice(20)})+'\\n');process.exit(0);
 }
 fs.writeFileSync(root+'/pid',String(process.pid));fs.writeFileSync(root+'/capture',JSON.stringify({args,tz:process.env.TZ}));
@@ -20,7 +21,8 @@ const targets=new Map(),sessions=new Map();let input='',seq=0,seen=0;
 const send=m=>fs.writeSync(4,JSON.stringify(m)+'\\0');
 const pipe=new net.Socket({fd:3,readable:true,writable:false});pipe.on('end',()=>process.exit(0));
 setInterval(()=>{let lines=[];try{lines=fs.readFileSync(root+'/requests.jsonl','utf8').trim().split('\\n');}catch{}
- for(const line of lines.slice(seen)){seen++;const r=JSON.parse(line),t={targetId:'t'+(++seq),type:'page',url:r.url,browserContextId:r.profile};targets.set(t.targetId,t);send({method:'Target.targetCreated',params:{targetInfo:t}});}
+ for(const line of lines.slice(seen)){seen++;const r=JSON.parse(line);if(${JSON.stringify(mode)}==='slow-handoff' && r.profile==='Profile 2'){setTimeout(()=>publish(r),1500);continue;}publish(r);}
+ function publish(r){const t={targetId:'t'+(++seq),type:'page',url:r.url,browserContextId:r.profile};targets.set(t.targetId,t);send({method:'Target.targetCreated',params:{targetInfo:t}});}
  if(fs.existsSync(root+'/close-pages')){fs.unlinkSync(root+'/close-pages');for(const targetId of targets.keys())send({method:'Target.targetDestroyed',params:{targetId}});targets.clear();}
 },10);
 pipe.on('data',chunk=>{input+=chunk;let end;while((end=input.indexOf('\\0'))>=0){const m=JSON.parse(input.slice(0,end));input=input.slice(end+1);fs.appendFileSync(root+'/commands.jsonl',JSON.stringify(m)+'\\n');
@@ -30,7 +32,9 @@ pipe.on('data',chunk=>{input+=chunk;let end;while((end=input.indexOf('\\0'))>=0)
  if(m.method==='Target.attachToTarget'){sessions.set('s'+m.params.targetId,m.params.targetId);result={sessionId:'s'+m.params.targetId};}
  if(m.method==='Page.navigate'){const t=targets.get(sessions.get(m.sessionId));fs.appendFileSync(root+'/navigations.jsonl',JSON.stringify({profile:t?.browserContextId,url:m.params.url})+'\\n');if(t)t.url=m.params.url;result={frameId:'frame'};}
  if(m.method==='Browser.close')fs.writeFileSync(root+'/closed','yes');
- send({id:m.id,result,...(m.sessionId?{sessionId:m.sessionId}:{})});
+ const response={id:m.id,result,...(m.sessionId?{sessionId:m.sessionId}:{})};
+ const wait=${JSON.stringify(mode)}==='slow-handoff' ? ({'Target.attachToTarget':600,'Page.navigate':1400,'Target.detachFromTarget':600}[m.method]||0) : 0;
+ setTimeout(()=>send(response),wait);
 }});setTimeout(()=>process.exit(0),15000);
 `, { mode: 0o700 });
  const options: TransportLaunch & { profileDirectories: string[] } = { root, executable, socketPath:path.join(root,'control.sock'), profileDirectory:'Profile 1',profileDirectories:['Profile 1','Profile 2'],timezone:'UTC',url:'about:blank',settleMs:20,env:{PATH:process.env.PATH} };
@@ -47,6 +51,14 @@ describe('shared profile transport',()=>{
   expect(await readFile(o.root+'/selectors.jsonl','utf8')).not.toContain('state=');
   expect(await readFile(o.root+'/capture','utf8')).not.toContain('state=');
  });
+ it('acknowledges a shared handoff whose bounded stages together exceed five seconds',async()=>{
+  const o=await fixture('slow-handoff');await startBrowserTransport(o);
+  const started=Date.now();
+  await expect(handoffBrowser({...o,profileDirectory:'Profile 2',url:'https://example.test/slow'})).resolves.toBe(true);
+  expect(Date.now()-started).toBeGreaterThan(5000);
+  const rows=(await readFile(o.root+'/navigations.jsonl','utf8')).trim().split('\n').map(s=>JSON.parse(s));
+  expect(rows.at(-1)).toEqual({profile:'Profile 2',url:'https://example.test/slow'});
+ },20000);
  it('rejects unregistered profiles before spawning or sending navigation',async()=>{
   const o=await fixture();await startBrowserTransport(o);
   await expect(handoffBrowser({...o,profileDirectory:'Profile 99'})).rejects.toThrow(/profile/i);
