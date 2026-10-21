@@ -1,6 +1,6 @@
 /** Shared account-card layout; colours follow the host's light/dark theme. */
 export const accountSettingsCss = `
-.pool-settings { --pool-control:36px; --pool-field:224px; --pool-number:112px; --pool-action:160px; font-size:14px; line-height:1.5; }
+.pool-settings { --pool-control:32px; --pool-field:224px; --pool-number:112px; font-size:14px; line-height:1.5; }
 .pool-settings-section { border-top:1px solid var(--border,#ddd); padding-top:16px; display:grid; gap:12px; min-width:0; }
 .pool-settings-heading { margin:0; font-size:14px; line-height:20px; font-weight:600; }
 .pool-settings-help { margin:0; color:var(--muted-foreground,#666); font-size:12px; line-height:18px; }
@@ -29,10 +29,16 @@ export const accountSettingsCss = `
 .pool-settings-days .pool-settings-toggle { font-size:12px; gap:4px; }
 .pool-settings-times { display:grid; grid-template-columns:var(--pool-number) var(--pool-number); gap:12px; }
 .pool-settings-schedule-actions { display:flex; flex-wrap:wrap; gap:8px; }
-.pool-settings button:not([aria-label='Закрыть']) { box-sizing:border-box; height:var(--pool-control); min-height:var(--pool-control); width:var(--pool-action); padding:6px 10px; border:1px solid var(--input,#ddd); border-radius:6px; font:inherit; font-size:12px; line-height:18px; justify-self:start; }
+.pool-settings button:not([aria-label='Закрыть']) { box-sizing:border-box; height:var(--pool-control); min-height:var(--pool-control); width:auto; max-width:100%; white-space:nowrap; padding:6px 10px; border:1px solid var(--input,#ddd); border-radius:6px; font:inherit; font-size:12px; line-height:18px; justify-self:start; }
 .pool-settings .pool-settings-remove { width:36px!important; padding:0!important; font-size:18px!important; }
-.pool-settings button[aria-label='Закрыть'] { width:36px; height:var(--pool-control); padding:0; }
+.pool-settings button[aria-label='Закрыть'] { width:28px; height:28px; padding:0; border:0; background:transparent; }
 .pool-settings footer, .pool-settings .pool-settings-footer { display:flex; flex-wrap:wrap; justify-content:flex-start; gap:8px; }
+.pool-settings button.pool-settings-link { border-color:transparent; background:transparent; padding-inline:4px; color:var(--muted-foreground,#666); }
+.pool-settings button.pool-settings-link:hover { color:var(--foreground,#222); text-decoration:underline; }
+.pool-browser-section { display:grid; gap:8px; min-width:0; }
+.pool-browser-actions { display:flex; flex-wrap:wrap; align-items:center; gap:4px 12px; }
+.pool-browser-link { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:8px; }
+.pool-browser-link .pool-settings-control { width:100%; }
 /* All setting labels and controls share the same left edge at every width. */
 .pool-settings-inline { grid-template-columns:minmax(0,1fr); justify-items:start; }
 .pool-settings-inline > .pool-settings-control { grid-column:1; }

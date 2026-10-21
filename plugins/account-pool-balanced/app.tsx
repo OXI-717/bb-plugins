@@ -1180,6 +1180,7 @@ function AccountPoolSettings() {
     if (pending !== null) return;
     setPending(key);
     setError(null);
+    setBrowserError(null);
     try {
       await action();
       await refresh();
@@ -1387,6 +1388,8 @@ function AccountPoolSettings() {
       void rpc.call("codexLogin.cancel", { sessionId: codexStep.sessionId });
     if (dialog?.kind === "api-key") setApiKey("");
     setDialog(null);
+    setBrowserError(null);
+    setBrowserNotice(null);
     setLoginStep(null);
     setCodexStep(null);
     setLoginDone(null);
@@ -1879,7 +1882,7 @@ function AccountPoolSettings() {
             openBrowser={(url) => void openBrowser(selectedAccount.id, url)}
             browserPending={pending === `browser-${selectedAccount.id}`}
             browserNotice={browserNotice?.accountId === selectedAccount.id ? browserNotice.text : null}
-            refreshError={browserError?.accountId === selectedAccount.id ? browserError.text : error}
+            refreshError={error ?? (browserError?.accountId === selectedAccount.id ? browserError.text : null)}
             threshold={threshold}
             current={selectedAccount.id === currentId(selectedAccount.provider)}
             drainHours={
@@ -2155,7 +2158,7 @@ function AccountPoolSettings() {
             pending={pending !== null}
             pastedCode={pastedCode}
             countdown={0}
-            error={browserError?.accountId === reauthorizeAccountId ? browserError.text : error}
+            error={error ?? (browserError?.accountId === reauthorizeAccountId ? browserError.text : null)}
             close={closeDialog}
             openUrl={navigate.openUrl}
             openAccountUrl={reauthorizeAccountId === null ? undefined : url => void openBrowser(reauthorizeAccountId, url)}
@@ -2245,6 +2248,7 @@ function AccountDialog({
   reauthorize: () => void;
 }) {
   const [browserUrl, setBrowserUrl] = useState("");
+  const [showBrowserUrl, setShowBrowserUrl] = useState(false);
   const [emailUnsaved,setEmailUnsaved]=useState(false);
   const [projectsUnsaved, setProjectsUnsaved] = useState(false);
   const [quotaUnsaved, setQuotaUnsaved] = useState(false);
@@ -2280,35 +2284,55 @@ function AccountDialog({
       className="pool-settings sm:max-w-xl"
       footer={
         <>
-          <Button size="sm" variant="outline" onClick={() => act("toggle")}>
-            {account.enabled ? "Выключить" : "Включить"}
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => act("refresh")}>
+          <Button size="sm" variant="outline" disabled={pending} onClick={() => act("refresh")}>
             Обновить квоты
           </Button>
-          {account.provider==='claude'&&account.kind==='oauth'&&<Button size="sm" variant="outline" disabled={pending || projectsUnsaved || quotaUnsaved} onClick={reauthorize}>Авторизоваться заново</Button>}
-          <Button
-            size="sm"
-            variant="ghost"
-            className="text-destructive-text"
-            onClick={() => act("remove")}
-          >
-            Удалить
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="outline" aria-label="Другие действия аккаунта">
+                Ещё <Icon name="MoreHorizontal" className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem disabled={pending} onSelect={() => act("toggle")}>
+                {account.enabled ? "Выключить" : "Включить"}
+              </DropdownMenuItem>
+              {account.provider === "claude" && account.kind === "oauth" && (
+                <DropdownMenuItem disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onSelect={reauthorize}>
+                  Авторизоваться заново
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled={pending} className="text-destructive-text" onSelect={() => act("remove")}>
+                Удалить
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </>
       }
     >
       <AccountSettingsStyle />
-      <section className="pool-settings-section space-y-2">
-        <div className="text-sm font-medium">Браузер аккаунта</div>
-        <p className="text-sm text-muted-foreground">Отдельный профиль для этого аккаунта. Если его ещё нет, он создастся при открытии. Окно откроется на машине Pooler.</p>
-        <label className="block text-sm" htmlFor="pool-browser-url">Ссылка для открытия</label>
-        <Input id="pool-browser-url" className="box-border min-w-0 max-w-full" type="url" autoComplete="off" placeholder="Необязательно — иначе откроется сайт провайдера" value={browserUrl} onChange={event => setBrowserUrl(event.target.value)} disabled={browserPending} />
-        <Button size="sm" variant="outline" disabled={pending} onClick={() => openBrowser(browserUrl)}>
-          <Icon name="ExternalLink" />
-          {browserPending ? "Открываю…" : "Открыть в браузере"}
-        </Button>
-        {browserNotice === null ? null : <p role="status" className="text-sm text-muted-foreground">{browserNotice}</p>}
+      <section className="pool-browser-section">
+        <div className="pool-browser-actions">
+          <Button size="sm" variant="outline" disabled={pending} onClick={() => openBrowser()}>
+            <Icon name="ExternalLink" className="size-4" />
+            {browserPending && !showBrowserUrl ? "Открываю…" : "Открыть в браузере"}
+          </Button>
+          <button type="button" className="pool-settings-link" aria-expanded={showBrowserUrl} aria-controls="pool-browser-link" onClick={() => setShowBrowserUrl(value => !value)} disabled={browserPending}>
+            {showBrowserUrl ? "Скрыть ссылку" : "Открыть другую ссылку"}
+          </button>
+        </div>
+        <p className="pool-settings-help">Отдельный профиль · на машине Pooler</p>
+        {showBrowserUrl && <div id="pool-browser-link" className="pool-browser-link">
+          <label className="pool-settings-field" htmlFor="pool-browser-url">
+            Ссылка для открытия
+            <Input id="pool-browser-url" className="pool-settings-control" type="url" autoComplete="off" placeholder="https://…" value={browserUrl} onChange={event => setBrowserUrl(event.target.value)} disabled={browserPending} />
+          </label>
+          <Button size="sm" variant="outline" disabled={pending || !browserUrl.trim()} onClick={() => openBrowser(browserUrl)}>
+            {browserPending ? "Открываю…" : "Открыть ссылку"}
+          </Button>
+        </div>}
+        {browserNotice === null ? null : <p role="status" className="pool-settings-help">{browserNotice}</p>}
       </section>
       {account.error&&<p role="alert" className="text-sm text-destructive-text">{account.error}</p>}
       {refreshError === null ? null : <p role="alert" className="text-sm text-destructive-text">{refreshError}</p>}
@@ -2320,7 +2344,7 @@ function AccountDialog({
         <SettingsBadge>
           {account.role === "reserve" ? "Резерв" : "Основной"}
         </SettingsBadge>
-        <Button size="sm" variant="outline" disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onClick={() => act("role")}>
+        <Button size="sm" variant="ghost" className="pool-settings-link" disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onClick={() => act("role")}>
           Изменить роль
         </Button>
         {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
