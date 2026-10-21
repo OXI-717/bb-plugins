@@ -70,22 +70,74 @@ async function boot(cfg) {
   for (const key of ['PATH','HOME','USER','LOGNAME','TMPDIR','TMP','TEMP','DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_CACHE_HOME','XDG_DATA_HOME','DBUS_SESSION_BUS_ADDRESS','LANG','LANGUAGE','LC_ALL','LC_CTYPE','TZ']) {
     if (process.env[key] !== undefined) browserEnv[key] = process.env[key];
   }
-  let nextCommand = 0, output = '';
-  const commands = new Map();
-  function navigate(url, initial = false) {
+  let nextCommand = 0, output = '', navigationCount = 0, generation = 0;
+  let sawPage = false, quitting = false, navigationUncertain = false, idleTimer;
+  const pages = new Set(), commands = new Map();
+  function command(method, params, timeoutMs = 3500) {
     if (commands.size >= 32) return Promise.reject(new Error('Browser navigation is busy.'));
     return new Promise((resolve, reject) => {
       const id = ++nextCommand;
       const timer = setTimeout(() => {
         commands.delete(id); reject(new Error('Browser navigation timed out.'));
-      }, initial ? 7000 : 3500);
+      }, timeoutMs);
       commands.set(id, { resolve, reject, timer });
-      primary.stdio[3].write(JSON.stringify({ id, method: 'Target.createTarget', params: { url, newWindow: initial } }) + '\0', err => {
+      primary.stdio[3].write(JSON.stringify({ id, method, params }) + '\0', err => {
         if (!err) return;
         const pending = commands.get(id);
         if (pending) { clearTimeout(pending.timer); commands.delete(id); pending.reject(new Error('Browser navigation channel closed.')); }
       });
     });
+  }
+  async function navigate(url, initial = false) {
+    if (quitting) throw new Error('Account browser is closing. Open it again after it finishes.');
+    navigationCount++; generation++; clearTimeout(idleTimer);
+    try {
+      const result = await command('Target.createTarget', { url, newWindow: initial }, initial ? 7000 : 3500);
+      if (typeof result?.targetId !== 'string') throw new Error('Browser navigation failed.');
+      sawPage = true;
+    } catch (error) {
+      // A timed-out createTarget may still create a window later. Do not auto-quit
+      // this browser while its navigation outcome is unknown. Normal quit works.
+      navigationUncertain = true; throw error;
+    } finally { navigationCount--; checkIdle(); }
+  }
+  function checkIdle(attempt = 0) {
+    clearTimeout(idleTimer);
+    if (!sawPage || pages.size || navigationCount || navigationUncertain || quitting) return;
+    idleTimer = setTimeout(async () => {
+      const version = generation;
+      const retry = () => { if (attempt < 2 && version === generation) checkIdle(attempt + 1); };
+      try {
+        // A fresh snapshot covers windows created outside Pooler and target churn.
+        const result = await command('Target.getTargets', {});
+        if (!Array.isArray(result?.targetInfos) || result.targetInfos.some(t => !t || typeof t.type !== 'string')) { retry(); return; }
+        const stillIdle = () => version === generation && !navigationCount && !navigationUncertain && !pages.size && !quitting;
+        if (!stillIdle() || result.targetInfos.some(t => t.type === 'page')) return;
+        // Responses and target events can arrive in separate pipe chunks. Let
+        // queued window events invalidate the snapshot before committing to quit.
+        await new Promise(resolve => setTimeout(resolve, 250));
+        if (!stillIdle()) return;
+        quitting = true;
+        // Browser.close alone can leave a no-startup-window Chromium in the Dock.
+        // Pipe EOF releases its remote-debugging lifetime and requests normal quit.
+        // Keep the proxy alive until the browser has exited and saved its profile.
+        await command('Browser.close', {}).catch(() => {});
+        primary.stdio[3].end();
+        setTimeout(close, 10000).unref();
+      } catch {
+        // Retry a transient observation failure, but never turn unknown into quit.
+        retry();
+      }
+    }, 250 * 2 ** attempt);
+  }
+  function targetEvent(message) {
+    if (message.method === 'Target.targetCreated' || message.method === 'Target.targetInfoChanged') {
+      const target = message.params?.targetInfo;
+      if (target?.type !== 'page' || typeof target.targetId !== 'string') return;
+      sawPage = true; pages.add(target.targetId); generation++; clearTimeout(idleTimer);
+    } else if (message.method === 'Target.targetDestroyed' && pages.delete(message.params?.targetId)) {
+      generation++; checkIdle();
+    }
   }
   function launch() {
     // No URL or remote debugging TCP port enters argv. Only inherited pipes
@@ -93,7 +145,7 @@ async function boot(cfg) {
     primary = spawn(cfg.executable, args, { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'], env: browserEnv });
     primary.on('error', close); primary.on('exit', close);
     primary.stdio[3].on('error', close);
-    primary.stdio[4].on('error', close); primary.stdio[4].on('end', close);
+    primary.stdio[4].on('error', close); primary.stdio[4].on('end', () => { if (!quitting) close(); });
     primary.stdio[4].setEncoding('utf8');
     primary.stdio[4].on('data', chunk => {
       output += chunk;
@@ -103,12 +155,13 @@ async function boot(cfg) {
         let response;
         try { response = JSON.parse(output.slice(0, end)); } catch { close(); return; }
         output = output.slice(end + 1);
+        if (response.method) { targetEvent(response); continue; }
         const pending = commands.get(response.id);
         if (!pending) continue;
         clearTimeout(pending.timer); commands.delete(response.id);
         // Protocol diagnostics may echo the URL; never forward them.
-        if (response.error || typeof response.result?.targetId !== 'string') pending.reject(new Error('Browser navigation failed.'));
-        else pending.resolve();
+        if (response.error || !response.result || typeof response.result !== 'object') pending.reject(new Error('Browser navigation failed.'));
+        else pending.resolve(response.result);
       }
     });
   }
@@ -133,6 +186,7 @@ async function boot(cfg) {
   });
   await listen(control, socketPath); fs.chmodSync(socketPath, 0o600);
   launch();
+  await command('Target.setDiscoverTargets', { discover: true });
   await navigate(cfg.url, true);
   process.stdout.write(JSON.stringify({ ok: true, port }) + '\n');
   process.stdout.end();

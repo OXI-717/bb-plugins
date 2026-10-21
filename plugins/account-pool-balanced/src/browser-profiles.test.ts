@@ -273,18 +273,12 @@ describe("browserExecutableCandidates", () => {
 });
 
 describe("openAccountBrowser", () => {
-  it.each([
-    ["kimi", "https://www.kimi.com/code"],
-    ["zai", "https://z.ai/manage-apikey/apikey-list"],
-    ["opencode-go", "https://opencode.ai/go"],
-    ["cursor", "https://cursor.com/dashboard"],
-    ["devin", "https://app.devin.ai/"],
-  ] as const)("opens the %s console and reuses its profile", async (provider, url) => {
+  it.each(["claude", "codex", "kimi", "zai", "opencode-go", "cursor", "devin"] as const)("opens a neutral page for %s and reuses its profile", async (provider) => {
     const box = sandbox();
     const selected = account({ id: ACCOUNTS[0]!.id, provider, label: "Synthetic", email: "person@example.test" });
     const options = { ...baseOptions(box), accounts: [selected], query: selected.id, readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
     const first = await openAccountBrowser(options);
-    expect(first.url).toBe(url);
+    expect(first.url).toBe("about:blank");
     const second = await openAccountBrowser(options);
     expect(second.profileDir).toBe(first.profileDir);
   });
@@ -374,7 +368,7 @@ describe("openAccountBrowser", () => {
       spawnImpl,
     });
     expect(result.timezone).toBe("Europe/Amsterdam");
-    expect(result.url).toBe("https://claude.ai/");
+    expect(result.url).toBe("about:blank");
     expect(result.profileName).toBe("Claude · a@example.test");
     expect(result.profileDirectory).toBe("Profile 1");
     expect(captured).toHaveLength(1);
@@ -395,7 +389,7 @@ describe("openAccountBrowser", () => {
     });
     expect(result.guarded).toBe(false);
     expect(captured[0]?.env?.TZ).toBe("Europe/Amsterdam");
-    expect(result.url).toBe("https://www.kimi.com/code");
+    expect(result.url).toBe("about:blank");
   });
   it("honours an explicit --url", async () => {
     const box = sandbox();

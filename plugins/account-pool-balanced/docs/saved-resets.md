@@ -2,7 +2,7 @@
 
 Open a Claude or Codex account card to see saved manual resets, their remaining count, and each expiry date and time. Deadlines include seconds and the explicit Moscow time zone (MSK, UTC+3). Automatic five-hour and weekly window resets are shown separately.
 
-The pool only reads reset information. Apply a saved reset using the provider's own UI — `bb pool browser open <id|email|label>` opens it in the account's persistent browser profile with the exit IP timezone. Credentials and redemption handles are not returned to the browser.
+The pool only reads reset information. Apply a saved reset using the provider's own UI — `bb pool browser open <id|email|label> --url <https-url>` opens the specified page in the account's persistent browser profile with the exit IP timezone. Credentials and redemption handles are not returned to the browser.
 
 For Codex, the quota response provides the available count and a separate read supplies individual expiry dates. If details cannot be fetched, the card keeps the known count and reports that expiry details are unavailable.
 

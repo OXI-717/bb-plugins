@@ -19,8 +19,10 @@ const root = args.find(a => a.startsWith('--user-data-dir=')).slice(16);
 try { fs.writeFileSync(root + '/pid', String(process.pid), { flag: 'wx' }); } catch { process.exit(0); }
 fs.writeFileSync(root + '/capture.json', JSON.stringify({ args, tz: process.env.TZ, secretPresent: process.env.POOL_SYNTHETIC_SECRET !== undefined, electronFlag: process.env.ELECTRON_RUN_AS_NODE }));
 if (args.includes('--remote-debugging-pipe')) {
-  let input = '';
+  let input = ''; let discovered = false; const targets = new Map(); let targetSequence = 0, snapshotCount = 0;
+  const send = value => fs.writeSync(4, JSON.stringify(value) + '\\0');
   const pipe = new (require('node:net').Socket)({ fd: 3, readable: true, writable: false });
+  pipe.on('end', () => { fs.writeFileSync(root + '/graceful-exit', 'pipe-eof'); process.exit(0); });
   pipe.on('data', chunk => {
     input += chunk;
     let end;
@@ -28,11 +30,34 @@ if (args.includes('--remote-debugging-pipe')) {
       const cmd = JSON.parse(input.slice(0, end)); input = input.slice(end + 1);
       fs.appendFileSync(root + '/commands.jsonl', JSON.stringify(cmd) + '\\n');
       const mode = ${JSON.stringify(extraEnv.FIXTURE_CDP_MODE ?? '')};
-      if (mode === 'hang' && cmd.id > 1) continue;
-      const response = mode === 'error' ? { id: cmd.id, error: { message: cmd.params.url } } : { id: cmd.id, result: { targetId: 'fixture-target' } };
-      fs.writeSync(4, JSON.stringify(response) + '\\0');
+      if (cmd.method === 'Target.setDiscoverTargets') { discovered = true; for (const targetInfo of targets.values()) send({method:'Target.targetCreated',params:{targetInfo}}); send({id:cmd.id,result:{}}); continue; }
+      if (cmd.method === 'Target.getTargets') {
+        snapshotCount++;
+        if (mode === 'snapshot-once' && snapshotCount === 1) { send({id:cmd.id,error:{message:'temporary'}}); continue; }
+        if (mode === 'snapshot-error') { send({id:cmd.id,error:{message:'fixture failure'}}); continue; }
+        if (mode === 'snapshot-new-window') {
+          const targetInfo = {targetId:'manual-window',type:'page'}; targets.set(targetInfo.targetId,targetInfo);
+          send({id:cmd.id,result:{targetInfos:[]}}); setTimeout(() => send({method:'Target.targetCreated',params:{targetInfo}}), 5); continue;
+        }
+        send({id:cmd.id,result:{targetInfos:[...targets.values()]}}); continue;
+      }
+      if (cmd.method === 'Browser.close') { fs.writeFileSync(root + '/close-requested', 'yes'); send({id:cmd.id,result:{}}); continue; }
+      if (mode === 'hang' && targetSequence > 0) continue;
+      if (mode === 'error') { send({id:cmd.id,error:{message:cmd.params.url}}); continue; }
+      const targetId = 'fixture-target-' + (++targetSequence);
+      const targetInfo = {targetId,type:'page',url:cmd.params.url}; targets.set(targetId,targetInfo);
+      if (discovered) send({method:'Target.targetCreated',params:{targetInfo}});
+      send({id:cmd.id,result:{targetId}});
+
     }
   });
+  setInterval(() => {
+    const single = fs.existsSync(root + '/close-one');
+    if (!single && !fs.existsSync(root + '/close-pages')) return;
+    fs.unlinkSync(root + (single ? '/close-one' : '/close-pages'));
+    const ids = [...targets.keys()];
+    for (const targetId of single ? ids.slice(0,1) : ids) { targets.delete(targetId); if(discovered) send({method:'Target.targetDestroyed',params:{targetId}}); }
+  }, 20);
 }
 
 setInterval(() => {}, 1000);
@@ -105,6 +130,60 @@ describe("detached browser supervisor", () => {
     expect(await readFile(path.join(options.root, "commands.jsonl"), "utf8")).toContain("synthetic-second");
     expect((await capture(options)).args.join(" ")).not.toContain("synthetic-second");
   });
+  it("gracefully quits after the last page closes and releases only its own resources", async () => {
+    const options = await fixture();
+    const other = await fixture();
+    await startBrowserTransport(options); await startBrowserTransport(other);
+    const port = await proxyPort(options);
+    await writeFile(path.join(options.root, "close-pages"), "yes");
+    await expect.poll(async () => {
+      try { return await readFile(path.join(options.root, "graceful-exit"), "utf8"); } catch { return null; }
+    }, { timeout: 2500 }).toBe("pipe-eof");
+    await expect.poll(() => handoffBrowser(options), { timeout: 2000 }).toBe(false);
+    await expect(tunnel(port, "127.0.0.1:443")).rejects.toThrow();
+    expect(await handoffBrowser(other)).toBe(true);
+  });
+  it("retries a transient snapshot failure after the last page closes", async () => {
+    const options = await fixture({ FIXTURE_CDP_MODE: "snapshot-once" }); await startBrowserTransport(options);
+    await writeFile(path.join(options.root, "close-pages"), "yes");
+    await expect.poll(async () => {
+      try { return await readFile(path.join(options.root, "graceful-exit"), "utf8"); } catch { return null; }
+    }, { timeout: 3000 }).toBe("pipe-eof");
+  });
+  it("bounds snapshot retries and does not quit on a persistent error", async () => {
+    const options = await fixture({ FIXTURE_CDP_MODE: "snapshot-error" }); await startBrowserTransport(options);
+    await writeFile(path.join(options.root, "close-pages"), "yes");
+    const snapshots = async () => (await readFile(path.join(options.root, "commands.jsonl"), "utf8")).trim().split("\n").map(s => JSON.parse(s)).filter(c => c.method === "Target.getTargets").length;
+    await expect.poll(snapshots, { timeout: 3000 }).toBe(3); await delay(600);
+    expect(await snapshots()).toBe(3);
+    await expect(access(path.join(options.root, "close-requested"))).rejects.toThrow();
+  });
+  it("keeps the browser alive when another page remains", async () => {
+    const options = await fixture(); await startBrowserTransport(options);
+    await handoffBrowser({ ...options, url: "https://example.test/second" });
+    await writeFile(path.join(options.root, "close-one"), "yes"); await delay(500);
+    await expect(access(path.join(options.root, "close-requested"))).rejects.toThrow();
+    expect(await handoffBrowser(options)).toBe(true);
+  });
+  it.each(["snapshot-error", "snapshot-new-window"])("does not quit on %s", async mode => {
+    const options = await fixture({ FIXTURE_CDP_MODE: mode }); await startBrowserTransport(options);
+    await writeFile(path.join(options.root, "close-pages"), "yes"); await delay(650);
+    await expect(access(path.join(options.root, "close-requested"))).rejects.toThrow();
+    expect(await handoffBrowser(options)).toBe(true);
+  });
+  it("cancels shutdown when navigation arrives after the empty snapshot", async () => {
+    const options = await fixture(); await startBrowserTransport(options);
+    await writeFile(path.join(options.root, "close-pages"), "yes");
+    await expect.poll(async () => (await readFile(path.join(options.root, "commands.jsonl"), "utf8")).includes("Target.getTargets"), { interval: 10 }).toBe(true);
+    expect(await handoffBrowser(options)).toBe(true); await delay(500);
+    await expect(access(path.join(options.root, "close-requested"))).rejects.toThrow();
+  });
+  it("cancels last-page shutdown when a new navigation arrives", async () => {
+    const options = await fixture(); await startBrowserTransport(options);
+    await writeFile(path.join(options.root, "close-pages"), "yes"); await delay(80);
+    expect(await handoffBrowser(options)).toBe(true); await delay(500);
+    await expect(access(path.join(options.root, "close-requested"))).rejects.toThrow();
+  });
   it("refuses legacy supervisors before sending an authorization URL", async () => {
     const options = await fixture();
     const requests: string[] = [];
@@ -128,6 +207,8 @@ describe("detached browser supervisor", () => {
     const options = await fixture({ FIXTURE_CDP_MODE: "hang" });
     await startBrowserTransport(options);
     await expect(handoffBrowser({ ...options, url: "https://login.example/?state=synthetic-private" })).rejects.toThrow("Browser navigation timed out.");
+    await writeFile(path.join(options.root, "close-pages"), "yes"); await delay(500);
+    await expect(access(path.join(options.root, "close-requested"))).rejects.toThrow();
   }, 10000);
   it("uses a real IPv4 CONNECT socket and rejects an IPv6-only trap", async () => {
     const options = await fixture();
