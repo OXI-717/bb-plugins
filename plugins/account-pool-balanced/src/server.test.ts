@@ -22,6 +22,7 @@ import {
   type AccountSummary,
 } from "./contracts.js";
 import { z } from "zod";
+import * as accountBrowser from "./browser-profiles.js";
 import type {
   ImportedClaudeCredentials,
   ImportedCodexCredentials,
@@ -173,6 +174,28 @@ async function resolveKimiEnv(
 
 afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
+  vi.restoreAllMocks();
+});
+
+describe("account browser server wiring", () => {
+  it("uses the selected account inventory, server paths and latest VPN setting", async () => {
+    const launch = vi.spyOn(accountBrowser, "openAccountBrowser").mockRejectedValue(new Error("Synthetic launch stopped"));
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example" });
+    const vpnStatusFile = path.join(fixture.dataDir, "synthetic-vpn.json");
+    await fixture.host.harness.behavior.callRpc("config.set", { vpnStatusFile });
+    const url = "https://login.example/authorize?state=synthetic";
+    await expect(fixture.host.harness.behavior.callRpc("browser.open", { accountId: fixture.account.id, url })).rejects.toThrow("Synthetic launch stopped");
+    expect(launch).toHaveBeenCalledWith(expect.objectContaining({ query: fixture.account.id, url, dataDir: fixture.dataDir, pluginId: "account-pool", vpnStatusFile }));
+    expect(launch.mock.calls[0]![0].accounts.map(account => account.id)).toEqual([fixture.account.id]);
+  });
+
+  it("rejects an account removed from the inventory before touching browser files", async () => {
+    const launch = vi.spyOn(accountBrowser, "openAccountBrowser").mockRejectedValue(new Error("Browser should not be invoked"));
+    const fixture = await createFixture({ upstreamUrl: "https://upstream.example" });
+    await fixture.host.harness.behavior.callRpc("account.remove", { id: fixture.account.id });
+    await expect(fixture.host.harness.behavior.callRpc("browser.open", { accountId: fixture.account.id })).rejects.toThrow("Account no longer exists");
+    expect(launch).not.toHaveBeenCalled();
+  });
 });
 
 async function startUpstream(handler: UpstreamHandler): Promise<Upstream> {

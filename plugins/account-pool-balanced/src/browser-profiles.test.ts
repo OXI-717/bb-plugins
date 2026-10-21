@@ -273,6 +273,21 @@ describe("browserExecutableCandidates", () => {
 });
 
 describe("openAccountBrowser", () => {
+  it.each([
+    ["kimi", "https://www.kimi.com/code"],
+    ["zai", "https://z.ai/manage-apikey/apikey-list"],
+    ["opencode-go", "https://opencode.ai/go"],
+    ["cursor", "https://cursor.com/dashboard"],
+    ["devin", "https://app.devin.ai/"],
+  ] as const)("opens the %s console and reuses its profile", async (provider, url) => {
+    const box = sandbox();
+    const selected = account({ id: ACCOUNTS[0]!.id, provider, label: "Synthetic", email: "person@example.test" });
+    const options = { ...baseOptions(box), accounts: [selected], query: selected.id, readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
+    const first = await openAccountBrowser(options);
+    expect(first.url).toBe(url);
+    const second = await openAccountBrowser(options);
+    expect(second.profileDir).toBe(first.profileDir);
+  });
   it("refuses guarded providers without verified VPN evidence", async () => {
     const box = sandbox();
     await expect(
@@ -380,7 +395,7 @@ describe("openAccountBrowser", () => {
     });
     expect(result.guarded).toBe(false);
     expect(captured[0]?.env?.TZ).toBe("Europe/Amsterdam");
-    expect(result.url).toBe("about:blank");
+    expect(result.url).toBe("https://www.kimi.com/code");
   });
   it("honours an explicit --url", async () => {
     const box = sandbox();

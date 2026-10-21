@@ -36,6 +36,7 @@ import {
 import { PoolOperations } from "./operations.js";
 import { registerUsageSource } from "./usage-source.js";
 import { accountPoolRpcContract, createRpcHandlers } from "./rpc.js";
+import { openAccountBrowser } from "./browser-profiles.js";
 import { ClaudeOAuthLogin } from "./oauth-login.js";
 import { CodexDeviceLogin } from "./codex-device-login.js";
 import {
@@ -275,7 +276,16 @@ export function createAccountPoolPlugin(
         if (observation === null) return { state: "unobserved", ...empty };
         const account = (await operations.list()).find((item) => item.id === observation.accountId) ?? null;
         return { state: "observed", account, lastUsedAt: observation.lastUsedAt };
-      }, async () => (await bb.sdk.projects.list({ includePersonal: true })).map(project => ({ id: project.id, name: project.name }))),
+      }, async () => (await bb.sdk.projects.list({ includePersonal: true })).map(project => ({ id: project.id, name: project.name })), async ({ accountId, url }) => {
+        const inventory = await operations.list();
+        if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
+        await openAccountBrowser({
+          accounts: inventory, query: accountId, url,
+          dataDir: bb.server.experimental_dataDir, pluginId: bb.pluginId,
+          vpnStatusFile: config.get().vpnStatusFile,
+        });
+        return { opened: true };
+      }),
     );
     registerPoolCli(bb, operations, login, codexLogin, config, externalClients);
     registerUsageSource(bb, hub);

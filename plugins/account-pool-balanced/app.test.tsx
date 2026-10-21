@@ -168,6 +168,73 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it("opens the selected account browser from its menu", async () => {
+    const selected = account();
+    const slot = render([selected], { "browser.open": () => ({ opened: true }) });
+    fireEvent.pointerDown(await slot.findByRole("button", { name: "Действия: person@example.com" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await slot.findByRole("menuitem", { name: "Открыть в браузере" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({ method: "browser.open", input: { accountId: selected.id } }));
+    await slot.findByText("Браузер открыт на машине Pooler.");
+  });
+
+  it("opens a pasted authorization link in the selected profile without adding an account", async () => {
+    const selected = account();
+    const response = deferred<object>();
+    const slot = render([selected], { "browser.open": () => response.promise });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    const dialog = within(slot.getByRole("dialog"));
+    expect(dialog.queryByRole("textbox", { name: "Ссылка для открытия" })).toBeNull();
+    fireEvent.click(dialog.getByRole("button", { name: "Открыть другую ссылку" }));
+    fireEvent.change(dialog.getByRole("textbox", { name: "Ссылка для открытия" }), { target: { value: "https://login.example/authorize?state=synthetic" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Открыть ссылку" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({ method: "browser.open", input: { accountId: selected.id, url: "https://login.example/authorize?state=synthetic" } }));
+    expect(dialog.getByRole("button", { name: "Открываю…" }).hasAttribute("disabled")).toBe(true);
+    await act(async () => response.resolve({ opened: true }));
+    await dialog.findByText("Браузер открыт на машине Pooler.");
+    expect(slot.rpcCalls.some(call => call.method === "account.add")).toBe(false);
+  });
+
+  it("keeps browser errors in the card and permits retry without losing the link", async () => {
+    let attempts = 0;
+    const slot = render([account()], { "browser.open": () => { if (++attempts === 1) throw new Error("VPN confirmation unavailable"); return { opened: true }; } });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    const dialog = within(slot.getByRole("dialog"));
+    expect(dialog.queryByRole("textbox", { name: "Ссылка для открытия" })).toBeNull();
+    fireEvent.click(dialog.getByRole("button", { name: "Открыть другую ссылку" }));
+    fireEvent.change(dialog.getByRole("textbox", { name: "Ссылка для открытия" }), { target: { value: "https://login.example/" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Открыть ссылку" }));
+    await dialog.findByText("VPN confirmation unavailable");
+    expect((dialog.getByRole("textbox", { name: "Ссылка для открытия" }) as HTMLInputElement).value).toBe("https://login.example/");
+    fireEvent.click(dialog.getByRole("button", { name: "Открыть ссылку" }));
+    await dialog.findByText("Браузер открыт на машине Pooler.");
+  });
+
+  it("shows a new OAuth failure instead of a previous browser failure", async () => {
+    const slot = render([account()], {
+      "browser.open": () => { throw new Error("Synthetic browser VPN failure"); },
+      "login.reauthorize": () => { throw new Error("Synthetic OAuth failure"); },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.click(within(slot.getByRole("dialog")).getByRole("button", { name: "Открыть в браузере" }));
+    await within(slot.getByRole("dialog")).findByText("Synthetic browser VPN failure");
+    fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await slot.findByRole("menuitem", { name: "Авторизоваться заново" }));
+    await within(slot.getByRole("dialog")).findByText("Synthetic OAuth failure");
+    expect(within(slot.getByRole("dialog")).queryByText("Synthetic browser VPN failure")).toBeNull();
+  });
+
+  it("opens the existing reauthorization URL in that account profile", async () => {
+    const selected = account();
+    const slot = render([selected], {
+      "login.reauthorize": () => ({ sessionId: "fixture-session", authorizeUrl: "https://login.example/authorize?state=synthetic", expiresAt: Date.now() + 600000 }),
+      "browser.open": () => ({ opened: true }),
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await slot.findByRole("menuitem", { name: "Авторизоваться заново" }));
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть в профиле аккаунта" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({ method: "browser.open", input: { accountId: selected.id, url: "https://login.example/authorize?state=synthetic" } }));
+  });
   it.each(['start','complete'])('shows a Claude reauthorization %s error and offers retry',async stage=>{
     const selected=account();
     const failure='Вы вошли в другой аккаунт';
@@ -176,7 +243,8 @@ describe("Account Pool settings", () => {
       'login.complete':()=>{throw new Error(failure);},
     });
     fireEvent.click(await slot.findByRole('button',{name:'Открыть person@example.com'}));
-    fireEvent.click(slot.getByRole('button',{name:'Авторизоваться заново'}));
+    fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await slot.findByRole("menuitem", { name: "Авторизоваться заново" }));
     if(stage==='complete'){
       fireEvent.change(await slot.findByRole('textbox',{name:'Код авторизации Claude'}),{target:{value:'code#state'}});
       fireEvent.click(slot.getByRole('button',{name:'Завершить'}));
@@ -188,7 +256,8 @@ describe("Account Pool settings", () => {
     const selected=account({enabled:false,status:'disabled',error:'[OAUTH_REAUTH_REQUIRED] OAuth refresh failed with HTTP 400.'});
     const slot=render([selected],{'login.reauthorize':()=>({sessionId:'fixture-session',authorizeUrl:'https://login.example/authorize',expiresAt:Date.now()+600000})});
     fireEvent.click(await slot.findByRole('button',{name:'Открыть person@example.com'}));
-    fireEvent.click(slot.getByRole('button',{name:'Авторизоваться заново'}));
+    fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await slot.findByRole("menuitem", { name: "Авторизоваться заново" }));
     await slot.findByText('Повторная авторизация Claude');
     expect(slot.rpcCalls).toContainEqual({method:'login.reauthorize',input:{accountId:selected.id}});
     expect(slot.rpcCalls.some(call=>call.method==='login.start')).toBe(false);
@@ -548,7 +617,8 @@ describe("Account Pool settings", () => {
   it("names the delete confirmation with the selected email", async () => {
     const slot = render([account({ label: "Shared Display Name", email: "selected@example.com" })]);
     fireEvent.click(await slot.findByRole("button", { name: "Открыть selected@example.com" }));
-    fireEvent.click(await slot.findByRole("button", { name: "Удалить" }));
+    fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await slot.findByRole("menuitem", { name: "Удалить" }));
     expect(await slot.findByRole("dialog", { name: "Удалить selected@example.com?" })).toBeTruthy();
     expect(slot.queryByText("Shared Display Name")).toBeNull();
   });

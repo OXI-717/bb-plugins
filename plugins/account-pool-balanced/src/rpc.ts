@@ -40,7 +40,18 @@ export const threadAccountStatusSchema = z.object({
 });
 export type ThreadAccountStatus = z.infer<typeof threadAccountStatusSchema>;
 
+const browserOpenInputSchema = z.object({
+  accountId: z.string().uuid(),
+  url: z.string().max(8192).url().refine(value => {
+    if (!URL.canParse(value)) return false;
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password;
+  }, "Use an HTTPS link without embedded credentials").optional(),
+}).strict();
+export type BrowserOpenInput = z.infer<typeof browserOpenInputSchema>;
+
 export const accountPoolRpcContract = defineRpcContract({
+  "browser.open": { input: browserOpenInputSchema, output: z.object({ opened: z.literal(true) }).strict() },
   "thread.account": { input: z.object({ threadId: z.string().min(1) }).strict(), output: threadAccountStatusSchema },
   "account.add": {
     input: accountAddInputSchema,
@@ -162,8 +173,10 @@ export function createRpcHandlers(
   config: AccountPoolConfigController,
   threadAccount: (threadId: string) => Promise<ThreadAccountStatus> = async () => ({ state: "unobserved", account: null, lastUsedAt: null }),
   projectsList: () => Promise<Array<{ id: string; name: string }>> = async () => [],
+  openBrowser: (input: BrowserOpenInput) => Promise<{ opened: true }> = async () => { throw new Error("Account browser unavailable"); },
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
+    "browser.open": input => openBrowser(input),
     "projects.list": () => projectsList(),
     "account.setProjects": async ({ accountId, projects, expectedProjects }) => ({ account: await operations.setProjects(accountId, projects, expectedProjects) }),
     "thread.account": ({ threadId }) => threadAccount(threadId),

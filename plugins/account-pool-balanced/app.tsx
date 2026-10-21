@@ -510,6 +510,7 @@ const restrictAccountDragToVerticalAxis: Modifier = ({ transform }) => ({
 const accountDragModifiers: Modifier[] = [restrictAccountDragToVerticalAxis];
 
 type AccountAction =
+  | "browser"
   | "toggle"
   | "drain"
   | "priority"
@@ -642,6 +643,11 @@ function AccountRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuItem disabled={pending} onSelect={() => onAction("browser")}>
+              <Icon name="ExternalLink" />
+              Открыть в браузере
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               disabled={pending}
               onSelect={() => onAction("toggle")}
@@ -1050,6 +1056,9 @@ function AccountPoolSettings() {
   const [policyUnsaved, setPolicyUnsaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
+  const browserBusy = useRef(false);
+  const [browserNotice, setBrowserNotice] = useState<{ accountId: string; text: string } | null>(null);
+  const [browserError, setBrowserError] = useState<{ accountId: string; text: string } | null>(null);
   const [optimisticOrder, setOptimisticOrder] = useState<{
     provider: PoolProvider;
     ids: string[];
@@ -1171,6 +1180,7 @@ function AccountPoolSettings() {
     if (pending !== null) return;
     setPending(key);
     setError(null);
+    setBrowserError(null);
     try {
       await action();
       await refresh();
@@ -1301,6 +1311,7 @@ function AccountPoolSettings() {
     account: AccountSummary,
     action: AccountAction,
   ): Promise<void> {
+    if (action === "browser") { await openBrowser(account.id); return; }
     if (policyUnsaved && ["priority", "role", "cap", "remove"].includes(action)) return;
     if (action === "priority") {
       setPriority(String(account.priority));
@@ -1333,6 +1344,23 @@ function AccountPoolSettings() {
         await rpc.call("account.refreshUsage", { accountId: account.id });
     });
   }
+  async function openBrowser(accountId: string, url?: string): Promise<void> {
+    if (pending !== null || browserBusy.current) return;
+    browserBusy.current = true;
+    setPending(`browser-${accountId}`);
+    setError(null);
+    setBrowserNotice(null);
+    setBrowserError(null);
+    try {
+      await rpc.call("browser.open", { accountId, ...(url?.trim() ? { url: url.trim() } : {}) });
+      if (mounted.current) setBrowserNotice({ accountId, text: "Браузер открыт на машине Pooler." });
+    } catch (launchError) {
+      if (mounted.current) setBrowserError({ accountId, text: errorText(launchError) });
+    } finally {
+      browserBusy.current = false;
+      if (mounted.current) setPending(null);
+    }
+  }
   async function reorderAccounts(
     provider: PoolProvider,
     event: DragEndEvent,
@@ -1360,6 +1388,8 @@ function AccountPoolSettings() {
       void rpc.call("codexLogin.cancel", { sessionId: codexStep.sessionId });
     if (dialog?.kind === "api-key") setApiKey("");
     setDialog(null);
+    setBrowserError(null);
+    setBrowserNotice(null);
     setLoginStep(null);
     setCodexStep(null);
     setLoginDone(null);
@@ -1426,6 +1456,8 @@ function AccountPoolSettings() {
           </span>
         ))}
       </p>
+      {browserNotice !== null && dialog === null ? <p role="status" className="text-sm text-muted-foreground">{browserNotice.text}</p> : null}
+      {browserError !== null && dialog === null ? <p role="alert" className="text-sm text-destructive-text">{browserError.text}</p> : null}
       {error === null ? null : (
         <div
           role="alert"
@@ -1847,7 +1879,10 @@ function AccountPoolSettings() {
               await refresh();
             }}
             account={selectedAccount}
-            refreshError={error}
+            openBrowser={(url) => void openBrowser(selectedAccount.id, url)}
+            browserPending={pending === `browser-${selectedAccount.id}`}
+            browserNotice={browserNotice?.accountId === selectedAccount.id ? browserNotice.text : null}
+            refreshError={error ?? (browserError?.accountId === selectedAccount.id ? browserError.text : null)}
             threshold={threshold}
             current={selectedAccount.id === currentId(selectedAccount.provider)}
             drainHours={
@@ -2123,9 +2158,11 @@ function AccountPoolSettings() {
             pending={pending !== null}
             pastedCode={pastedCode}
             countdown={0}
-            error={error}
+            error={error ?? (browserError?.accountId === reauthorizeAccountId ? browserError.text : null)}
             close={closeDialog}
             openUrl={navigate.openUrl}
+            openAccountUrl={reauthorizeAccountId === null ? undefined : url => void openBrowser(reauthorizeAccountId, url)}
+            browserNotice={browserNotice?.accountId === reauthorizeAccountId ? browserNotice.text : null}
             setPastedCode={setPastedCode}
             complete={() =>
               void run("complete-claude", async () => {
@@ -2175,6 +2212,9 @@ function capSummary(account: AccountSummary): string | null {
 
 function AccountDialog({
   account,
+  openBrowser,
+  browserPending,
+  browserNotice,
   saveEmail,
   savePolicy,
   saveProjects,
@@ -2190,6 +2230,9 @@ function AccountDialog({
   reauthorize,
 }: {
   account: AccountSummary;
+  openBrowser: (url?: string) => void;
+  browserPending: boolean;
+  browserNotice: string | null;
   saveEmail:(email:string|null,expectedEmail:string|null)=>Promise<void>;
   saveProjects: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
   loadProjects: () => Promise<Array<{ id: string; name: string }>>;
@@ -2204,6 +2247,8 @@ function AccountDialog({
   pending: boolean;
   reauthorize: () => void;
 }) {
+  const [browserUrl, setBrowserUrl] = useState("");
+  const [showBrowserUrl, setShowBrowserUrl] = useState(false);
   const [emailUnsaved,setEmailUnsaved]=useState(false);
   const [projectsUnsaved, setProjectsUnsaved] = useState(false);
   const [quotaUnsaved, setQuotaUnsaved] = useState(false);
@@ -2239,25 +2284,56 @@ function AccountDialog({
       className="pool-settings sm:max-w-xl"
       footer={
         <>
-          <Button size="sm" variant="outline" onClick={() => act("toggle")}>
-            {account.enabled ? "Выключить" : "Включить"}
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => act("refresh")}>
+          <Button size="sm" variant="outline" disabled={pending} onClick={() => act("refresh")}>
             Обновить квоты
           </Button>
-          {account.provider==='claude'&&account.kind==='oauth'&&<Button size="sm" variant="outline" disabled={pending || projectsUnsaved || quotaUnsaved} onClick={reauthorize}>Авторизоваться заново</Button>}
-          <Button
-            size="sm"
-            variant="ghost"
-            className="text-destructive-text"
-            onClick={() => act("remove")}
-          >
-            Удалить
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="outline" aria-label="Другие действия аккаунта">
+                Ещё <Icon name="MoreHorizontal" className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem disabled={pending} onSelect={() => act("toggle")}>
+                {account.enabled ? "Выключить" : "Включить"}
+              </DropdownMenuItem>
+              {account.provider === "claude" && account.kind === "oauth" && (
+                <DropdownMenuItem disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onSelect={reauthorize}>
+                  Авторизоваться заново
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled={pending} className="text-destructive-text" onSelect={() => act("remove")}>
+                Удалить
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </>
       }
     >
       <AccountSettingsStyle />
+      <section className="pool-browser-section">
+        <div className="pool-browser-actions">
+          <Button size="sm" variant="outline" disabled={pending} onClick={() => openBrowser()}>
+            <Icon name="ExternalLink" className="size-4" />
+            {browserPending && !showBrowserUrl ? "Открываю…" : "Открыть в браузере"}
+          </Button>
+          <button type="button" className="pool-settings-link" aria-expanded={showBrowserUrl} aria-controls="pool-browser-link" onClick={() => setShowBrowserUrl(value => !value)} disabled={browserPending}>
+            {showBrowserUrl ? "Скрыть ссылку" : "Открыть другую ссылку"}
+          </button>
+        </div>
+        <p className="pool-settings-help">Отдельный профиль · на машине Pooler</p>
+        {showBrowserUrl && <div id="pool-browser-link" className="pool-browser-link">
+          <label className="pool-settings-field" htmlFor="pool-browser-url">
+            Ссылка для открытия
+            <Input id="pool-browser-url" className="pool-settings-control" type="url" autoComplete="off" placeholder="https://…" value={browserUrl} onChange={event => setBrowserUrl(event.target.value)} disabled={browserPending} />
+          </label>
+          <Button size="sm" variant="outline" disabled={pending || !browserUrl.trim()} onClick={() => openBrowser(browserUrl)}>
+            {browserPending ? "Открываю…" : "Открыть ссылку"}
+          </Button>
+        </div>}
+        {browserNotice === null ? null : <p role="status" className="pool-settings-help">{browserNotice}</p>}
+      </section>
       {account.error&&<p role="alert" className="text-sm text-destructive-text">{account.error}</p>}
       {refreshError === null ? null : <p role="alert" className="text-sm text-destructive-text">{refreshError}</p>}
       <div className="flex flex-wrap items-center gap-2">
@@ -2268,7 +2344,7 @@ function AccountDialog({
         <SettingsBadge>
           {account.role === "reserve" ? "Резерв" : "Основной"}
         </SettingsBadge>
-        <Button size="sm" variant="outline" disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onClick={() => act("role")}>
+        <Button size="sm" variant="ghost" className="pool-settings-link" disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onClick={() => act("role")}>
           Изменить роль
         </Button>
         {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
@@ -2430,6 +2506,8 @@ function LoginDialog({
   error,
   close,
   openUrl,
+  openAccountUrl,
+  browserNotice = null,
   setPastedCode,
   complete,
   restart,
@@ -2445,6 +2523,8 @@ function LoginDialog({
   error: string | null;
   close: () => void;
   openUrl: (url: string) => boolean;
+  openAccountUrl?: (url: string) => void;
+  browserNotice?: string | null;
   setPastedCode: (value: string) => void;
   complete: () => void;
   restart: () => void;
@@ -2515,6 +2595,11 @@ function LoginDialog({
             <UserCodeBlock userCode={codexStep.userCode} />
           )}
           <AuthorizationUrlRow name={name} url={url} openUrl={openUrl} />
+          {openAccountUrl === undefined ? null : <div className="space-y-1">
+            <Button variant="outline" disabled={pending} onClick={() => openAccountUrl(url)}>Открыть в профиле аккаунта</Button>
+            <p className="text-sm text-muted-foreground">Окно откроется на машине Pooler.</p>
+            {browserNotice === null ? null : <p role="status" className="text-sm text-muted-foreground">{browserNotice}</p>}
+          </div>}
           {provider === "claude" ? (
             <Input
               aria-label="Код авторизации Claude"
