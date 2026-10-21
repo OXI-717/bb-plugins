@@ -2,6 +2,7 @@
  * It survives plugin reloads; its private Unix socket is also the handoff proof.
  * No PID/JSON marker can authorize joining an unrelated browser process.
  */
+import { NATIVE_BROWSER_WORKER } from "./browser-native-worker.js";
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { lstat, unlink } from "node:fs/promises";
@@ -295,11 +296,11 @@ export async function handoffBrowser(options: TransportLaunch): Promise<boolean>
         } catch { finish(new Error("Invalid supervisor response.")); return; }
         data = data.slice(end + 1);
         if (!negotiated) {
-          if (result.protocol !== (options.profileDirectories ? 3 : 2) || result.navigation !== "pipe" || (options.profileDirectories && result.profiles !== "native")) {
+          if (result.protocol !== (options.profileDirectories ? 4 : 2) || result.navigation !== (options.profileDirectories ? "native-file" : "pipe") || (options.profileDirectories && result.profiles !== "native")) {
             finish(new Error("Close this account browser and reopen it after updating Pooler.")); return;
           }
           negotiated = true;
-          socket.write(JSON.stringify({ protocol: options.profileDirectories ? 3 : 2, profileDirectory: options.profileDirectory, timezone: options.timezone, executable: options.executable, url: options.url }) + "\n");
+          socket.write(JSON.stringify({ protocol: options.profileDirectories ? 4 : 2, profileDirectory: options.profileDirectory, timezone: options.timezone, executable: options.executable, url: options.url }) + "\n");
         } else if (result.ok === true) finish();
         else finish(new Error(typeof result.error === "string" ? result.error : "Browser handoff failed."));
       }
@@ -311,7 +312,7 @@ export async function handoffBrowser(options: TransportLaunch): Promise<boolean>
 
 export async function startBrowserTransport(options: TransportLaunch): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(process.execPath, ["-e", BROWSER_WORKER], {
+    const child = spawn(process.execPath, ["-e", options.profileDirectories ? NATIVE_BROWSER_WORKER : BROWSER_WORKER], {
       detached: true, stdio: ["pipe", "pipe", "ignore"], env: { ...options.env, ELECTRON_RUN_AS_NODE: "1", ...(options.timezone ? { TZ: options.timezone } : {}) },
     });
     let data = "";
