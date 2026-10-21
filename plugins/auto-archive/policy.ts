@@ -248,3 +248,18 @@ export function planRoot(
     targetId ? new Set(closure(targetId, threads).map((t) => t.id)) : new Set(),
   );
 }
+
+/** Include new descendants during revalidation, but ignore unrelated trees. */
+export function affectedSnapshots(
+  threads: readonly Snapshot[],
+  plan: Plan,
+): Snapshot[] {
+  const ids = new Set<string>();
+  for (const root of [
+    ...plan.actions.map((a) => a.rootId),
+    ...plan.detachIds,
+  ]) {
+    for (const t of closure(root, threads)) ids.add(t.id);
+  }
+  return threads.filter((t) => ids.has(t.id));
+}

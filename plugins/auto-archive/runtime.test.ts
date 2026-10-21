@@ -182,3 +182,12 @@ it("rejects malformed settings before destructive actions", () => {
   for (const value of ["{}", "[1]", '["anything"]'])
     expect(() => parseKeep(value)).toThrow();
 });
+it("unrelated active thread changes do not prevent an old independent root archive", async () => {
+  const h = host();
+  h.rows.push({ ...h.rows[0], id: "unrelated", latestAttentionAt: now });
+  let n = 0;
+  h.events.mockImplementation(async (args) =>
+    args?.threadId === "unrelated" ? [{ createdAt: now + ++n }] : [],
+  );
+  expect((await runOperation(h.bb, config, { now })).archivedRoots).toBe(1);
+});

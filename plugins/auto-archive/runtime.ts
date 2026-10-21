@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
+  affectedSnapshots,
   planRoot,
   planPrune,
   planSweep,
@@ -137,11 +138,14 @@ export async function runOperation(
       title: snapshots.find((t) => t.id === a.rootId)!.title,
     })),
   };
-  if (dryRun) return report;
+  if (dryRun || (!plan.actions.length && !plan.detachIds.length)) return report;
   // Public APIs offer no atomic conditional archive. Re-read before changing
   // anything, and again after detaching, to narrow the unavoidable race.
   const current = await collect(bb, config, now, options.signal);
-  if (JSON.stringify(current) !== JSON.stringify(snapshots))
+  if (
+    JSON.stringify(affectedSnapshots(current, plan)) !==
+    JSON.stringify(affectedSnapshots(snapshots, plan))
+  )
     throw new Error("Thread/workspace inventory changed; retry preview");
   for (const id of plan.detachIds) {
     options.signal?.throwIfAborted();
@@ -196,12 +200,16 @@ export function parseDays(raw: string): number {
   return value;
 }
 export function parseKeep(raw: string): string[] {
+  if (raw.length > 262144) throw new Error("keepThreadIds exceeds 256 KiB");
   const value: unknown = JSON.parse(raw);
   if (
     !Array.isArray(value) ||
     value.length > 10000 ||
     !value.every(
-      (id) => typeof id === "string" && /^thr_[a-zA-Z0-9_-]+$/.test(id),
+      (id) =>
+        typeof id === "string" &&
+        id.length <= 128 &&
+        /^thr_[a-zA-Z0-9_-]+$/.test(id),
     )
   ) {
     throw new Error("keepThreadIds must be a JSON array of thread IDs");
@@ -228,13 +236,11 @@ export function summarize(report: Report) {
       report.actions.some(
         (a) => a.archiveIds.length > limit || a.detachIds.length > limit,
       ),
-    actions: report.actions
-      .slice(0, limit)
-      .map((a) => ({
-        ...a,
-        archiveIds: a.archiveIds.slice(0, limit),
-        detachIds: a.detachIds.slice(0, limit),
-      })),
+    actions: report.actions.slice(0, limit).map((a) => ({
+      ...a,
+      archiveIds: a.archiveIds.slice(0, limit),
+      detachIds: a.detachIds.slice(0, limit),
+    })),
     detachIds: report.detachIds.slice(0, limit),
     blocked: report.blocked.slice(0, limit),
     candidates: report.candidates

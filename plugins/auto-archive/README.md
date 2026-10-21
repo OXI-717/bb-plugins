@@ -98,7 +98,7 @@ filesystem or worktree deletion is performed.
 
 Operations are serialized within the plugin. Before writes, before each
 archive entry point and after branch detachment, the plugin rechecks activity,
-relationships, exceptions and workspace state. Any change aborts further work.
+relationships, exceptions and workspace state. A change in an affected tree aborts further work. Unrelated trees may continue working.
 **BB has no atomic conditional archive API:** a thread can still change between
 the last check and archive. Detach and archive are separate API calls; failure
 can leave links already detached or earlier roots already archived. Nothing
