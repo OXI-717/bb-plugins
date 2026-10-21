@@ -198,3 +198,62 @@ describe("prune", () => {
     ).toEqual([]);
   });
 });
+it.each([false, true])(
+  "retains active subtrees across roots (detach=%s)",
+  (detachActiveDescendants) => {
+    const p = planSweep(
+      [
+        t("r1"),
+        t("r2"),
+        t("a", { parentThreadId: "r1", latestAttentionAt: now }),
+        t("leaf", { parentThreadId: "a", lifecycleOwnerThreadId: "r2" }),
+      ],
+      { ...config, detachActiveDescendants },
+      now,
+    );
+    expect(ids(p)).toEqual(detachActiveDescendants ? ["r1"] : []);
+    expect(p.actions.flatMap((a) => a.archiveIds)).not.toContain("leaf");
+  },
+);
+it("prune selects quiet side branches beneath a recent ancestor", () => {
+  const p = planPrune(
+    [
+      t("r", { latestAttentionAt: now }),
+      t("target", { parentThreadId: "r", latestAttentionAt: now }),
+      t("side", { parentThreadId: "r" }),
+    ],
+    config,
+    now,
+    "target",
+  );
+  expect(p.detachIds).toEqual(["target"]);
+  expect(ids(p)).toEqual(["side"]);
+});
+it("protects a kept branch across independent root ownership", () => {
+  const p = planSweep(
+    [
+      t("r1"),
+      t("r2"),
+      t("kept", { parentThreadId: "r1", pinnedAt: 1 }),
+      t("leaf", { parentThreadId: "kept", lifecycleOwnerThreadId: "r2" }),
+    ],
+    { ...config, detachActiveDescendants: true },
+    now,
+  );
+  expect(ids(p)).toEqual([]);
+});
+it("prune never archives target descendants through a second ancestor owner", () => {
+  const p = planPrune(
+    [
+      t("r2"),
+      t("r1", { parentThreadId: "r2" }),
+      t("target", { parentThreadId: "r1", latestAttentionAt: now }),
+      t("leaf", { parentThreadId: "target", lifecycleOwnerThreadId: "r2" }),
+    ],
+    config,
+    now,
+    "target",
+  );
+  expect(ids(p)).toEqual(["r1"]);
+  expect(p.actions.flatMap((a) => a.archiveIds)).not.toContain("leaf");
+});

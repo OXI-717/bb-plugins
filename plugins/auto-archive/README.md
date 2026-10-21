@@ -60,7 +60,8 @@ closed. `inactivityDays` accepts finite numbers from 1 through 36500.
 By default a fresh descendant keeps its old root alive. With
 `detachActiveDescendants=true`, the plugin clears the parent of each active
 branch before archiving a quiet root. All descendants of the retained branch
-stay with it. Protected exceptions and dirty workspaces still block the root.
+stay with it, even if another root also owns one of those descendants.
+Retention is computed across the entire graph for planning and revalidation. Protected exceptions and dirty workspaces still block the root.
 
 **Lifecycle ownership is immutable in BB's public API.** Neither
 `threads.update` nor `bb thread update` can clear it. A branch still connected
@@ -78,7 +79,8 @@ and branch parent links to clear, ancestor archive entry points, every live
 thread those archives would affect, and blocking reasons. Only quiet
 ancestors and quiet side branches qualify; the same 14-day threshold applies.
 Explicit prune may include pre-install backlog. Young ancestors, protected
-threads and active side branches stay. An active side branch may have its
+threads and active side branches stay. Quiet side branches can be archived
+independently beneath a retained young ancestor. An active side branch may have its
 parent cleared to preserve it. A pinned/kept/dirty target cannot be detached.
 If the target itself has a lifecycle owner, the operation reports that it
 cannot fully detach and changes nothing. Immutable dependencies elsewhere

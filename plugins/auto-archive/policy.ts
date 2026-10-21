@@ -30,6 +30,8 @@ export interface Plan {
   detachIds: string[];
   blocked: string[];
   backlogRoots: number;
+  /** Original target ancestors: manual prune may clean their quiet side branches. */
+  pruneAncestorIds?: string[];
 }
 const empty = (): Plan => ({
   actions: [],
@@ -84,6 +86,30 @@ const active = (t: Snapshot, cutoff: number) =>
   !["idle", "error"].includes(t.status) ||
   t.busy === true;
 
+// Retention is global: a quiet leaf may be reached from an active branch in
+// one root and an archive cascade in another. Every planner/revalidator must
+// preserve the same subtree even when that active branch is outside its root.
+function retainedAcrossGraph(
+  threads: readonly Snapshot[],
+  c: Config,
+  now: number,
+  exemptActiveAncestors = new Set<string>(),
+  preserve = new Set<string>(),
+): Set<string> {
+  const retained = new Set(preserve);
+  for (const t of threads) {
+    if (
+      !t.archived &&
+      (protectedThread(t, c) ||
+        (!exemptActiveAncestors.has(t.id) &&
+          active(t, now - c.inactivityDays * DAY)))
+    ) {
+      for (const child of closure(t.id, threads)) retained.add(child.id);
+    }
+  }
+  return retained;
+}
+
 function actionFor(
   root: Snapshot,
   threads: readonly Snapshot[],
@@ -99,11 +125,7 @@ function actionFor(
   if (exception)
     return `${root.id}: protected ${exception.id} (pin, keep, hidden or workspace)`;
   if (active(root, cutoff)) return `${root.id}: root is active`;
-  const retained = new Set(preserve);
-  for (const t of tree)
-    if (!t.archived && active(t, cutoff)) {
-      for (const child of closure(t.id, threads)) retained.add(child.id);
-    }
+  const retained = preserve;
   const needsCut = tree.filter((t) => retained.has(t.id));
   if (needsCut.length && !c.detachActiveDescendants)
     return `${root.id}: active descendant`;
@@ -135,6 +157,7 @@ export function planSweep(
   now: number,
 ): Plan {
   const p = empty();
+  const retained = retainedAcrossGraph(threads, config, now);
   for (const root of threads.filter(
     (t) => !t.archived && owners(t).length === 0,
   )) {
@@ -146,7 +169,7 @@ export function planSweep(
       tree.every((t) => !active(t, now - config.inactivityDays * DAY))
     )
       p.backlogRoots++;
-    const action = actionFor(root, threads, config, now);
+    const action = actionFor(root, threads, config, now, new Set(), retained);
     if (typeof action === "string") p.blocked.push(action);
     else p.actions.push(action);
   }
@@ -200,15 +223,28 @@ export function planPrune(
   if (target.parentThreadId) p.detachIds.push(targetId);
   const cuts = new Set(p.detachIds);
   const preserve = new Set(closure(targetId, threads).map((t) => t.id));
-  // Only ancestors can be entry points. Siblings are included solely through a
-  // safe ancestor's cascade. Young/protected ancestors stay and may have old
-  // children independently removed by this explicit command.
+  p.pruneAncestorIds = [...ancestors];
+  const retained = retainedAcrossGraph(
+    threads,
+    config,
+    now,
+    ancestors,
+    preserve,
+  );
+  const scope = new Set(ancestors);
+  for (const id of ancestors)
+    for (const t of closure(id, threads, cuts)) scope.add(t.id);
+  // Quiet side branches may be cleaned even when a shared ancestor stays
+  // active. Active branches outside the target's ancestry remain whole.
   const handled = new Set<string>();
+  const sizes = new Map(
+    threads
+      .filter((t) => scope.has(t.id))
+      .map((t) => [t.id, closure(t.id, threads, cuts).length]),
+  );
   const sorted = threads
-    .filter((t) => ancestors.has(t.id) && !t.archived)
-    .sort(
-      (a, b) => closure(b.id, threads).length - closure(a.id, threads).length,
-    );
+    .filter((t) => scope.has(t.id) && !preserve.has(t.id) && !t.archived)
+    .sort((a, b) => sizes.get(b.id)! - sizes.get(a.id)!);
   for (const root of sorted) {
     if (handled.has(root.id)) continue;
     const action = actionFor(
@@ -217,7 +253,7 @@ export function planPrune(
       { ...config, sinceInstallAt: 0, detachActiveDescendants: true },
       now,
       cuts,
-      preserve,
+      retained,
     );
     if (typeof action === "string") p.blocked.push(action);
     else {
@@ -234,6 +270,7 @@ export function planRoot(
   now: number,
   rootId: string,
   targetId?: string,
+  pruneAncestorIds: string[] = [],
 ): Action | string {
   const root = threads.find((t) => t.id === rootId && !t.archived);
   if (!root) return "root is no longer live";
@@ -245,7 +282,15 @@ export function planRoot(
       : config,
     now,
     new Set(),
-    targetId ? new Set(closure(targetId, threads).map((t) => t.id)) : new Set(),
+    retainedAcrossGraph(
+      threads,
+      config,
+      now,
+      new Set(pruneAncestorIds),
+      targetId
+        ? new Set(closure(targetId, threads).map((t) => t.id))
+        : new Set(),
+    ),
   );
 }
 

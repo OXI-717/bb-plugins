@@ -162,6 +162,7 @@ export async function runOperation(
       now,
       action.rootId,
       options.targetId,
+      plan.pruneAncestorIds,
     );
     if (
       typeof valid === "string" ||
@@ -179,6 +180,7 @@ export async function runOperation(
       now,
       action.rootId,
       options.targetId,
+      plan.pruneAncestorIds,
     );
     if (
       typeof safe === "string" ||

@@ -66,7 +66,25 @@ function host(
     },
   );
   const archive = vi.fn(async ({ threadId }: { threadId: string }) => {
-    Object.assign(rows.find((t) => t.id === threadId)!, { archivedAt: now });
+    const ids = new Set([threadId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const row of rows) {
+        if (
+          !ids.has(row.id) &&
+          [
+            row.parentThreadId,
+            row.lifecycleOwnerThreadId,
+            row.visibility === "hidden" ? row.sourceThreadId : null,
+          ].some((id) => id !== null && ids.has(id))
+        ) {
+          ids.add(row.id);
+          changed = true;
+        }
+      }
+    }
+    for (const row of rows) if (ids.has(row.id)) row.archivedAt = now;
     return {};
   });
   const events = vi.fn(
@@ -223,4 +241,28 @@ it("workspace dirtied after detach blocks archive and leaves target safe", async
   ).rejects.toThrow("Tree changed after detach");
   expect(h.update).toHaveBeenCalledOnce();
   expect(h.archive).not.toHaveBeenCalled();
+});
+it("full sweep preserves cross-owned descendants of a retained active branch", async () => {
+  const h = host({}, [
+    { id: "active", parentThreadId: "root", latestAttentionAt: now },
+    { id: "leaf", parentThreadId: "active", lifecycleOwnerThreadId: "root2" },
+  ]);
+  h.rows.push({ ...h.rows[0], id: "root2" });
+  await runOperation(
+    h.bb,
+    { ...config, detachActiveDescendants: true },
+    { now },
+  );
+  expect(h.archive.mock.calls.map(([a]) => a.threadId)).toEqual(["root"]);
+  expect(h.rows.find((t) => t.id === "leaf")!.archivedAt).toBeNull();
+});
+it("prune archives a quiet sibling while retaining a recent ancestor", async () => {
+  const h = host({ latestAttentionAt: now }, [
+    { id: "target", parentThreadId: "root", latestAttentionAt: now },
+    { id: "side", parentThreadId: "root" },
+  ]);
+  const r = await runOperation(h.bb, config, { now, targetId: "target" });
+  expect(r.archivedRoots).toBe(1);
+  expect(h.archive).toHaveBeenCalledWith({ threadId: "side" });
+  expect(h.rows[0].archivedAt).toBeNull();
 });
