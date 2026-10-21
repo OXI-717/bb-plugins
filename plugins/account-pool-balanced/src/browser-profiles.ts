@@ -1,6 +1,6 @@
 /** Per-account browser profiles for the Account Pooler, on a dedicated Helium.
  *
- * One Helium installation serves isolated user-data roots per pool account.
+ * One Helium process serves native profiles in a shared user-data root.
  * Original native profiles are retained during migration. Profiles are named
  * "<Provider> · <email>" so the window always shows which account it serves.
  * `open` launches Helium with the profile and a process timezone aligned to
@@ -16,7 +16,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, rename, stat, writeFile, open, rm, cp, copyFile, realpath, lstat } from "node:fs/promises";
 import { homedir, platform as currentPlatform, tmpdir } from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
+import { promisify, isDeepStrictEqual } from "node:util";
 import { Agent, request as httpRequest } from "undici";
 import type { AccountSummary } from "./contracts.js";
 import { readVpnEvidence } from "./vpn-policy.js";
@@ -303,22 +303,6 @@ export async function listRunningHelium(executable = path.join("/Applications", 
   }
 }
 
-async function listRunningNativeHelium(executable: string, nativeRoot: string): Promise<number[]> {
-  const result: number[] = [];
-  for (const pid of await listRunningHelium(executable)) {
-    try {
-      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "args="], { timeout: 2000, maxBuffer: 65536 });
-      // Only our canonical isolated roots are a positive reason to ignore a
-      // live browser. Arbitrary native-root spellings/aliases remain blockers.
-      const isolatedPrefix = path.join(nativeRoot, "Pool Accounts", "Profile ");
-      const escaped = isolatedPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const knownIsolated = new RegExp(`--user-data-dir=${escaped}[1-9]\\d{0,6}(?:\\s|$)`).test(stdout);
-      if (!knownIsolated) result.push(pid);
-    } catch { throw new Error("Cannot verify original Helium is closed for migration."); }
-  }
-  return result;
-}
-
 export interface EnsureProfileOptions {
   heliumRoot: string;
   registryFile: string;
@@ -374,28 +358,137 @@ async function ensureProfileLocked(
 ): Promise<RegistryEntry> {
   const registry = await readRegistry(options.registryFile);
   const existing = registry[account.id];
-  if (existing !== undefined) return { ...existing, profileName: profileNameFor(account) };
-  const name = profileNameFor(account);
+  if (existing !== undefined) {
+    if (existing.isolated) throw new Error("Close Helium once to migrate the account profiles together.");
+    await requireDirectory(path.join(options.heliumRoot, existing.profileDirectory));
+    const updated = { ...existing, profileName: profileNameFor(account) };
+    if (existing.profileName !== updated.profileName) {
+      registry[account.id] = updated;
+      await syncLocalStateProfiles(options.heliumRoot, [updated]);
+      await writeJsonAtomic(options.registryFile, registry);
+    }
+    return updated;
+  }
+  const state = await readObject(path.join(options.heliumRoot, "Local State"));
+  const cache = nativeProfileCache(state);
   const profileDirectory = nextProfileDirectory([
-    ...await listHeliumProfileDirs(options.heliumRoot),
-    ...await listHeliumProfileDirs(path.join(options.heliumRoot, "Pool Accounts")),
+    ...await listHeliumProfileDirs(options.heliumRoot), ...Object.keys(cache),
     ...Object.values(registry).map(e => e.profileDirectory),
   ]);
-  const root = isolatedRoot(options.heliumRoot, profileDirectory);
-  await mkdir(path.dirname(root), { recursive: true, mode: 0o700 });
-  // Exclusive reservation, including unknown/orphaned roots from earlier runs.
-  try { await mkdir(root, { mode: 0o700 }); }
-  catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "EEXIST") return ensureProfileLocked(account, options);
-    throw e;
-  }
-  const entry: RegistryEntry = { profileDirectory, profileName: name, createdAt: Date.now(), isolated: true };
-  await mkdir(path.join(root, profileDirectory), { mode: 0o700 });
-  await writeJsonAtomic(path.join(root, profileDirectory, "Preferences"), { profile: { name } });
-  await syncLocalStateProfiles(root, [entry]);
+  const name = profileNameFor(account);
+  const entry: RegistryEntry = { profileDirectory, profileName: name, createdAt: Date.now() };
+  const directory = path.join(options.heliumRoot, profileDirectory);
+  // Exclusive allocation: even an orphan from a failed write is never reused.
+  await mkdir(directory, { mode: 0o700 });
+  await writeJsonAtomic(path.join(directory, "Preferences"), { profile: { name } });
+  await syncLocalStateProfiles(options.heliumRoot, [entry]);
   registry[account.id] = entry;
   await writeJsonAtomic(options.registryFile, registry);
   return entry;
+}
+
+function nativeProfileCache(state: Record<string, unknown>): Record<string, unknown> {
+  const profile = state.profile;
+  if (profile === undefined) return {};
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) throw new Error("Invalid native profile state.");
+  const cache = (profile as Record<string, unknown>).info_cache;
+  if (cache === undefined) return {};
+  if (!cache || typeof cache !== "object" || Array.isArray(cache)) throw new Error("Invalid native profile cache.");
+  return cache as Record<string, unknown>;
+}
+
+async function requireDirectory(directory: string): Promise<void> {
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Missing or unsafe browser profile directory; originals preserved.");
+}
+
+/** Called only while all native and legacy account browsers are closed.
+ * A durable destination plan plus an opaque completed copy permits retry after
+ * any write failure. No source profile is removed or overwritten.
+ */
+async function migrateToNative(options: EnsureProfileOptions, assertClosed: () => Promise<void>): Promise<void> {
+  const { heliumRoot, registryFile } = options;
+  const registry = await readRegistry(registryFile);
+  if (!Object.values(registry).some(e => e.isolated)) return;
+  const stateFile = path.join(heliumRoot, "Local State");
+  const state = await readObject(stateFile), cache = { ...nativeProfileCache(state) };
+  const planFile = path.join(path.dirname(registryFile), "native-migration-plan.json");
+  const plan = await readRegistry(planFile) as Record<string, RegistryEntry & { sourceDirectory?: string }>;
+  for (const [id, item] of Object.entries(plan)) {
+    const original = registry[id];
+    if (!original || !/^Profile [1-9]\d{0,6}$/.test(item.sourceDirectory ?? "") || original.createdAt !== item.createdAt ||
+        original.profileDirectory !== (original.isolated ? item.sourceDirectory : item.profileDirectory)) {
+      throw new Error("Native migration plan does not match the profile registry; originals preserved.");
+    }
+  }
+  // Exact pre-migration metadata snapshots stay private alongside the registry.
+  for (const [source, backup] of [[registryFile, "registry.before-native.json"], [stateFile, "local-state.before-native.json"]]) {
+    try { await copyFile(source!, path.join(path.dirname(registryFile), backup!), constants.COPYFILE_EXCL); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST" && !(source === stateFile && (e as NodeJS.ErrnoException).code === "ENOENT")) throw e; }
+  }
+  const replacements = new Map<string, string>();
+  for (const [id, entry] of Object.entries(registry)) {
+    if (!entry.isolated) continue;
+    const sourceRoot = isolatedRoot(heliumRoot, entry.profileDirectory);
+    await requireDirectory(path.join(heliumRoot, "Pool Accounts"));
+    await requireDirectory(sourceRoot);
+    const source = path.join(sourceRoot, entry.profileDirectory);
+    await requireDirectory(source);
+    const sourceState = await readObject(path.join(sourceRoot, "Local State"));
+    if (!isDeepStrictEqual(state.os_crypt, sourceState.os_crypt)) {
+      throw new Error("Browser encryption settings differ; profile migration was not attempted.");
+    }
+    let item = plan[id];
+    if (!item) {
+      const directory = nextProfileDirectory([
+        ...await listHeliumProfileDirs(heliumRoot), ...Object.keys(cache),
+        ...Object.values(registry).map(e => e.profileDirectory), ...Object.values(plan).map(e => e.profileDirectory),
+      ]);
+      item = { profileDirectory: directory, profileName: entry.profileName, createdAt: entry.createdAt, sourceDirectory: entry.profileDirectory };
+      plan[id] = item;
+      await writeJsonAtomic(planFile, plan);
+    }
+    const destination = path.join(heliumRoot, item.profileDirectory);
+    const receipt = { accountId: id, createdAt: entry.createdAt, sourceDirectory: entry.profileDirectory };
+    let complete = false;
+    try {
+      await requireDirectory(destination);
+      if (!isDeepStrictEqual(await readObject(path.join(destination, ".pool-native-origin.json")), receipt)) {
+        throw new Error("Native migration destination is already occupied; original profiles preserved.");
+      }
+      complete = true;
+    } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+    if (!complete) {
+      await assertClosed();
+      const stage = path.join(heliumRoot, `.pool-native-${randomUUID()}`);
+      try {
+        await cp(source, stage, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+        await assertClosed();
+        await writeJsonAtomic(path.join(stage, ".pool-native-origin.json"), receipt);
+        // The store lease and closed-browser prerequisite exclude cooperating writers.
+        // Refuse a newly occupied destination rather than replacing it.
+        try { await lstat(destination); throw new Error("Native migration destination became occupied."); }
+        catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+        await rename(stage, destination);
+      } finally { await rm(stage, { recursive: true, force: true }); }
+    }
+    const sourceInfo = nativeProfileCache(sourceState)[entry.profileDirectory];
+    cache[item.profileDirectory] = {
+      ...(sourceInfo && typeof sourceInfo === "object" && !Array.isArray(sourceInfo) ? sourceInfo : {}),
+      name: entry.profileName, is_using_default_name: false,
+    };
+    const oldInfo = cache[entry.profileDirectory];
+    if (oldInfo && typeof oldInfo === "object" && (oldInfo as Record<string, unknown>).name === entry.profileName) {
+      delete cache[entry.profileDirectory]; replacements.set(entry.profileDirectory, item.profileDirectory);
+    }
+    registry[id] = { profileDirectory: item.profileDirectory, profileName: entry.profileName, createdAt: entry.createdAt };
+  }
+  const profile: Record<string, unknown> = { ...((state.profile ?? {}) as Record<string, unknown>), info_cache: cache };
+  if (typeof profile.last_used === "string") profile.last_used = replacements.get(profile.last_used) ?? profile.last_used;
+  if (Array.isArray(profile.last_active_profiles)) profile.last_active_profiles = [...new Set(profile.last_active_profiles.map(p => typeof p === "string" ? replacements.get(p) ?? p : p))];
+  await assertClosed();
+  await writeJsonAtomic(stateFile, { ...state, profile });
+  await writeJsonAtomic(registryFile, registry);
 }
 
 export interface OpenAccountBrowserOptions {
@@ -441,7 +534,8 @@ async function openAccountBrowserLocked(
 ): Promise<OpenAccountBrowserResult> {
   if ((options.platformName ?? currentPlatform()) === "win32") throw new Error("Account browser transport currently requires macOS or Linux.");
   const account = resolveAccount(options.accounts, options.query);
-  const guarded = GUARDED_BROWSER_PROVIDERS.has(account.provider);
+  // Native switching can reach any account without calling Pooler again.
+  const guarded = true;
   if (guarded) {
     const file = options.vpnStatusFile ??
       path.join(homedir(), ".local", "state", "vpnks", "vpn-state.json");
@@ -449,7 +543,7 @@ async function openAccountBrowserLocked(
     if (evidence.state !== "connected" || evidence.assurance !== "verified_ipv4") {
       throw new Error(
         `Refusing to open a browser for ${account.provider}: VPN evidence is "${evidence.assurance}" (${evidence.reason}). ` +
-          "Bring the VPN guard to verified_ipv4 first.",
+          "Bring the VPN guard to verified_ipv4 before opening the shared account browser.",
       );
     }
   }
@@ -476,33 +570,42 @@ async function openAccountBrowserLocked(
   const registryFile = path.join(profileStore, "registry.json");
   const timezone = geo?.timezone ?? null;
   const url = safeBrowserUrl(options.url ?? "about:blank");
-  const entry = await ensureProfileLocked(account, { heliumRoot, registryFile });
-  const root = isolatedRoot(heliumRoot, entry.profileDirectory);
+  const root = heliumRoot;
   const socketPath = path.join(tmpdir(), `bb-pool-${createHash("sha256").update(root).digest("hex").slice(0, 24)}.sock`);
-  const launch: TransportLaunch = {
-    root, socketPath, executable, profileDirectory: entry.profileDirectory, timezone, url,
-    settleMs: options.settleMs ?? 800, env: options.env ?? process.env,
-  };
-  if (!options.transportImpl && !options.spawnImpl) {
+  let registry = await readRegistry(registryFile);
+  let entry = registry[account.id];
+  const launchFor = (selected: RegistryEntry): TransportLaunch => ({
+    root, socketPath, executable, profileDirectory: selected.profileDirectory,
+    profileDirectories: Object.values(registry).filter(e => !e.isolated).map(e => e.profileDirectory),
+    timezone, url, settleMs: options.settleMs ?? 800, env: options.env ?? process.env,
+  });
+  if (entry && !entry.isolated && !options.transportImpl && !options.spawnImpl) {
+    await requireDirectory(path.join(root, entry.profileDirectory));
     try {
-      if (await handoffBrowser(launch)) return browserResult(account, entry, root, timezone, url, guarded);
+      if (await handoffBrowser(launchFor(entry))) return browserResult(account, entry, root, timezone, url, guarded);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ECONNREFUSED") throw e;
     }
   }
-  // No supervisor proof: never trust a stale PID marker. Check this isolated root.
-  const running = await (options.listRunning ?? (() => listRunningHelium(`--user-data-dir=${root}`)))();
-  if (running.length) throw new Error("Account browser is running without a live transport supervisor; close only that account window and retry.");
-  if (!entry.isolated) {
-    const nativeRunning = await (options.listRunning ?? (() => listRunningNativeHelium(executable, heliumRoot)))();
-    if (nativeRunning.length) throw new Error("One-time profile migration requires closing the original Helium; existing profiles remain untouched.");
-    await migrateProfile(heliumRoot, root, entry);
-    const registry = await readRegistry(registryFile);
-    entry.isolated = true; registry[account.id] = entry;
-    await writeJsonAtomic(registryFile, registry);
+  // A native or older isolated process may be writing either side of migration.
+  // Never join it without the current shared supervisor capability.
+  const assertClosed = async () => {
+    const running = await (options.listRunning ?? (() => listRunningHelium(executable)))();
+    if (running.length) throw new Error("Helium is running without a live transport supervisor for this profile. Close Helium once before updating the shared profile list.");
+  };
+  await assertClosed();
+  await migrateToNative({ heliumRoot, registryFile }, assertClosed);
+  // Register the full account list while Local State is closed, so switching
+  // does not depend on which account happened to be opened first.
+  for (const current of options.accounts) {
+    await assertClosed();
+    await ensureProfileLocked(current, { heliumRoot, registryFile });
   }
-  const profileInfo = await lstat(path.join(root, entry.profileDirectory));
-  if (!profileInfo.isDirectory() || profileInfo.isSymbolicLink()) throw new Error("Isolated browser profile is missing or unsafe; original bindings preserved.");
+  registry = await readRegistry(registryFile);
+  entry = registry[account.id]!;
+  await assertClosed();
+  await syncLocalStateProfiles(root, Object.values(registry));
+  const launch = launchFor(entry);
   await removeStaleBrowserSocket(socketPath);
   if (options.transportImpl) await options.transportImpl(launch);
   else if (options.spawnImpl) {
@@ -524,29 +627,6 @@ export function safeBrowserUrl(value: string): string {
 
 function isolatedRoot(heliumRoot: string, directory: string): string {
   return path.join(heliumRoot, "Pool Accounts", directory);
-}
-
-async function migrateProfile(nativeRoot: string, root: string, entry: RegistryEntry): Promise<void> {
-  const stage = `${root}.migrate-${randomUUID()}`;
-  // A complete prior copy can be reused after a registry-write failure. Never
-  // overwrite it: it may already contain newer user settings/authentication.
-  try {
-    const info = await lstat(root);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe migrated profile root.");
-    const completed = await readObject(path.join(root, "pool-migration.json"));
-    if (completed.profileDirectory !== entry.profileDirectory || completed.createdAt !== entry.createdAt) throw new Error("Unverified existing migration; original profile preserved.");
-    return;
-  } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
-  await mkdir(stage, { recursive: true, mode: 0o700 });
-  try {
-    // Opaque filesystem copies, no inspection or logging of authentication data.
-    await cp(path.join(nativeRoot, entry.profileDirectory), path.join(stage, entry.profileDirectory), { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
-    try { await copyFile(path.join(nativeRoot, "Local State"), path.join(stage, "Local State"), constants.COPYFILE_EXCL); }
-    catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
-    await syncLocalStateProfiles(stage, [entry]);
-    await writeJsonAtomic(path.join(stage, "pool-migration.json"), { profileDirectory: entry.profileDirectory, createdAt: entry.createdAt });
-    await rename(stage, root);
-  } finally { await rm(stage, { recursive: true, force: true }); }
 }
 
 function browserResult(account: AccountSummary, entry: RegistryEntry, root: string, timezone: string | null, url: string, guarded: boolean): OpenAccountBrowserResult {
