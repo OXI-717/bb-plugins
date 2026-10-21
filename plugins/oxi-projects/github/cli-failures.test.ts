@@ -17,11 +17,11 @@ it('retries a transient GET failure once with the same account environment',asyn
 });
 it.each([
  [{code:1},'gh: Bad credentials (HTTP 401)','авторизац'],
- [{code:1},'gh: Resource not accessible by integration (HTTP 403)','403'],
- [{code:1},'gh: Not Found (HTTP 404)','404'],
- [{code:1},'GraphQL: Resource not accessible by personal access token','403'],
- [{code:1},'GraphQL: Your token has not been granted the required scopes to execute this query','403'],
- [{code:1},'GraphQL: Could not resolve to a Repository with the name example/project','404'],
+ [{code:1},'gh: Resource not accessible by integration (HTTP 403)','доступ запрещён'],
+ [{code:1},'gh: Not Found (HTTP 404)','не найден'],
+ [{code:1},'GraphQL: Resource not accessible by personal access token','доступ запрещён'],
+ [{code:1},'GraphQL: Your token has not been granted the required scopes to execute this query','доступ запрещён'],
+ [{code:1},'GraphQL: Could not resolve to a Repository with the name example/project','не найден'],
  [{code:1},'gh: API rate limit exceeded (HTTP 403)','лимит'],
  [{code:'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'},'','объём'],
  [{code:'ABORT_ERR'},'','отменён'],
@@ -76,4 +76,9 @@ it('does not start a process after disposal',async()=>{
  const controller=new AbortController();controller.abort();
  await expect(makeRunner(controller.signal)(['api','repos/example/project/issues'],cleanEnv())).rejects.toMatchObject({kind:'cancelled'});
  expect(mocks.exec).not.toHaveBeenCalled();
+});
+it('reports GraphQL access denial without inventing an HTTP response status',async()=>{
+ respond({code:1},'GraphQL: Resource not accessible by personal access token');
+ const task=makeRunner()(['api','graphql','-f','query=query { viewer { login } }'],cleanEnv());
+ await expect(task).rejects.toMatchObject({kind:'forbidden'});await expect(task).rejects.not.toThrow('HTTP 403');
 });

@@ -24,8 +24,8 @@ export function cliFailureMessage(kind:CliFailureKind,error:unknown):string{
   response_too_large:'GitHub CLI: ответ превышает допустимый объём.',
   authentication:'GitHub CLI: ошибка авторизации (HTTP 401). Проверьте вход выбранного аккаунта.',
   rate_limit:'GitHub CLI: GitHub ограничил частоту запросов (лимит API). Обновите позже.',
-  forbidden:'GitHub CLI: доступ запрещён (HTTP 403). Проверьте права выбранного аккаунта и SSO.',
-  not_found:'GitHub CLI: репозиторий не найден или недоступен выбранному аккаунту (HTTP 404).',
+  forbidden:'GitHub CLI: доступ запрещён. Проверьте права выбранного аккаунта и SSO.',
+  not_found:'GitHub CLI: репозиторий не найден или недоступен выбранному аккаунту.',
   network:'GitHub CLI: временная ошибка соединения с GitHub.'
  };
  if(kind!=='unknown')return messages[kind];
