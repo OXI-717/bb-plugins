@@ -127,6 +127,30 @@
           "tagPrefix": "model-connections/"
         }
       }
+    },
+    {
+      "id": "auto-archive",
+      "displayName": "Auto Archive",
+      "description": "Preview and archive quiet thread trees with handoff and workspace protection.",
+      "author": {
+        "name": "Shane Logsdon; OXI-717 fork",
+        "github": "OXI-717"
+      },
+      "icon": {
+        "url": "./icons/auto-archive.svg"
+      },
+      "tags": [
+        "threads",
+        "automation"
+      ],
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/auto-archive",
+          "range": "^0.2.0",
+          "tagPrefix": "auto-archive/"
+        }
+      }
     }
   ]
 }

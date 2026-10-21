@@ -118,3 +118,9 @@ bash scripts/upgrade-pool.sh
 ```
 
 See [checks, waiting, backups and recovery](scripts/UPGRADE-POOL.md).
+
+## Auto Archive
+
+A fork of Shane Logsdon's MIT Auto Archive with a 14-day default, whole-tree
+activity, protected threads, dirty-workspace guards and manual handoff pruning.
+Starts in preview mode. See [Auto Archive setup](plugins/auto-archive/README.md).
