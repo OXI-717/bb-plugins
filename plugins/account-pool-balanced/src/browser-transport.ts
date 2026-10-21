@@ -111,7 +111,12 @@ async function boot(cfg) {
         // A fresh snapshot covers windows created outside Pooler and target churn.
         const result = await command('Target.getTargets', {});
         if (!Array.isArray(result?.targetInfos) || result.targetInfos.some(t => !t || typeof t.type !== 'string')) { retry(); return; }
-        if (version !== generation || navigationCount || navigationUncertain || pages.size || result.targetInfos.some(t => t.type === 'page')) return;
+        const stillIdle = () => version === generation && !navigationCount && !navigationUncertain && !pages.size && !quitting;
+        if (!stillIdle() || result.targetInfos.some(t => t.type === 'page')) return;
+        // Responses and target events can arrive in separate pipe chunks. Let
+        // queued window events invalidate the snapshot before committing to quit.
+        await new Promise(resolve => setTimeout(resolve, 250));
+        if (!stillIdle()) return;
         quitting = true;
         // Browser.close alone can leave a no-startup-window Chromium in the Dock.
         // Pipe EOF releases its remote-debugging lifetime and requests normal quit.

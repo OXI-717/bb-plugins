@@ -37,7 +37,7 @@ if (args.includes('--remote-debugging-pipe')) {
         if (mode === 'snapshot-error') { send({id:cmd.id,error:{message:'fixture failure'}}); continue; }
         if (mode === 'snapshot-new-window') {
           const targetInfo = {targetId:'manual-window',type:'page'}; targets.set(targetInfo.targetId,targetInfo);
-          send({id:cmd.id,result:{targetInfos:[]}}); send({method:'Target.targetCreated',params:{targetInfo}}); continue;
+          send({id:cmd.id,result:{targetInfos:[]}}); setTimeout(() => send({method:'Target.targetCreated',params:{targetInfo}}), 5); continue;
         }
         send({id:cmd.id,result:{targetInfos:[...targets.values()]}}); continue;
       }
@@ -170,6 +170,13 @@ describe("detached browser supervisor", () => {
     await writeFile(path.join(options.root, "close-pages"), "yes"); await delay(650);
     await expect(access(path.join(options.root, "close-requested"))).rejects.toThrow();
     expect(await handoffBrowser(options)).toBe(true);
+  });
+  it("cancels shutdown when navigation arrives after the empty snapshot", async () => {
+    const options = await fixture(); await startBrowserTransport(options);
+    await writeFile(path.join(options.root, "close-pages"), "yes");
+    await expect.poll(async () => (await readFile(path.join(options.root, "commands.jsonl"), "utf8")).includes("Target.getTargets"), { interval: 10 }).toBe(true);
+    expect(await handoffBrowser(options)).toBe(true); await delay(500);
+    await expect(access(path.join(options.root, "close-requested"))).rejects.toThrow();
   });
   it("cancels last-page shutdown when a new navigation arrives", async () => {
     const options = await fixture(); await startBrowserTransport(options);
