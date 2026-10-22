@@ -219,12 +219,20 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function turnIdentity(threadId:string){
     try{
-      const rows=await bb.sdk.threads.events.list({threadId,order:'desc',limit:'8',types:['client/turn/requested','turn/started','turn/completed']});
-      const request=rows.find(row=>row.type==='client/turn/requested');
-      const turn=rows.find(row=>row.type==='turn/started');
-      const completed=rows.find(row=>row.type==='turn/completed');
-      return request?.type==='client/turn/requested'&&turn?.scope.kind==='turn'?
-        {requestId:request.data.requestId,turnId:turn.scope.turnId,startedSeq:turn.seq,requestSeq:request.seq,completed}:null;
+      // In-turn user messages and child notifications are also requests. Read
+      // each boundary independently so those messages cannot hide the turn start.
+      const [requests,turns,completions]=await Promise.all([
+        bb.sdk.threads.events.list({threadId,order:'desc',limit:'1',types:['client/turn/requested']}),
+        bb.sdk.threads.events.list({threadId,order:'desc',limit:'1',types:['turn/started']}),
+        bb.sdk.threads.events.list({threadId,order:'desc',limit:'1',types:['turn/completed']}),
+      ]);
+      const request=requests.find(row=>row.type==='client/turn/requested');
+      const turn=turns.find(row=>row.type==='turn/started');
+      const completed=completions.find(row=>row.type==='turn/completed');
+      if(request?.type!=='client/turn/requested'||turn?.scope.kind!=='turn')return null;
+      const target=request.data.target;
+      const inTurn=request.seq>turn.seq&&(target?.kind==='auto'||target?.kind==='steer')&&target.expectedTurnId===turn.scope.turnId;
+      return {requestId:request.data.requestId,turnId:turn.scope.turnId,startedSeq:turn.seq,requestSeq:request.seq,requestAt:request.createdAt,inTurn,completed};
     }catch{return null;}
   }
   async function stopProtected(states:Map<string,VpnState>,snapshot:Awaited<ReturnType<typeof status>>):Promise<Error[]> {
@@ -436,8 +444,8 @@ export default async function plugin(bb: BbPluginApi) {
     const identity=await turnIdentity(threadId);
     const settled=await bb.sdk.threads.get({threadId});
     const ended=identity?.completed;
-    if(!identity||identity.requestSeq>=identity.startedSeq||ended?.type!=='turn/completed'||ended.data.status!=='interrupted'||
-       ended.scope.kind!=='turn'||ended.scope.turnId!==identity.turnId||ended.seq<=identity.startedSeq||ended.createdAt<attempt.calledAt||ended.createdAt>attempt.at||
+    if(!identity||(identity.requestSeq>=identity.startedSeq&&(!identity.inTurn||!Number.isFinite(identity.requestAt)||identity.requestAt>attempt.calledAt))||ended?.type!=='turn/completed'||ended.data.status!=='interrupted'||
+       ended.scope.kind!=='turn'||ended.scope.turnId!==identity.turnId||ended.seq<=Math.max(identity.startedSeq,identity.requestSeq)||ended.createdAt<attempt.calledAt||ended.createdAt>attempt.at||
        settled.status!=='idle'||settled.updatedAt>attempt.at||settled.providerId!==attempt.providerId||settled.environmentId!==attempt.environmentId)throw Error('The stopped turn changed or its interruption cannot be verified.');
     const confirmed={...attempt,requestId:identity.requestId,turnId:identity.turnId,updatedAt:settled.updatedAt};
     const write=resumeClaimTail.then(async()=>{

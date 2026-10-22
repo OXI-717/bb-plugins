@@ -4,15 +4,23 @@ import plugin from './server.js';
 import {verifiedHostResult} from './vpn-test-fixture.js';
 import {statusSchema} from './contract.js';
 
-async function setup(swap?:'request'|'provider'){
- let connected=false;let running=true;let updatedAt=0;let sent=0;let providerId='codex';let requestId='request-one';let interruptedAt=0;
- const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{hosts:{list:async()=>[makeHostResponse({id:'host-a'})]},plugins:{list:async()=>({plugins:[]}) as never},threads:{events:{list:async()=>[...(!running?[{threadId:'thread-one',seq:3,createdAt:interruptedAt,type:'turn/completed',scope:{kind:'turn',turnId:'turn-one'},data:{status:'interrupted'}}]:[]),{threadId:'thread-one',seq:2,type:'turn/started',scope:{kind:'turn',turnId:'turn-one'},data:{}},{threadId:'thread-one',seq:requestId==='request-one'?1:4,type:'client/turn/requested',scope:{kind:'thread'},data:{requestId}}] as never},listRunning:async()=>running?[{id:'thread-one',hostId:'host-a'}]:[],get:async()=>makeThreadResponse({id:'thread-one',providerId,status:running?'active':'idle',updatedAt}),stop:async()=>{running=false;updatedAt=Date.now();interruptedAt=updatedAt;if(swap){updatedAt-=500;if(swap==='provider')providerId='acp-opencode-kimi';else requestId='new-user-request';}return {} as never;},send:async()=>{const hook=fake.harness.registrations.hooks['message.dispatch']!;expect(await hook(makeMessageDispatchHookContext({requestedExecution:{providerId:'codex'},host:{id:'host-a',name:'host-a'}}))).toEqual({action:'proceed'});sent++;return {ok:true,delivery:'sent'} as never;}}},experimental_callHostRpc:async()=>verifiedHostResult(connected?'connected':'disconnected')});
+async function setup(swap?:'request'|'provider',steer?:'same'|'foreign'|'after-stop'){
+ let connected=false;let running=true;let updatedAt=0;let sent=0;let providerId='codex';let requestId='request-one';let interruptedAt=0;const steeringAt=Date.now()-1000;
+ const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{hosts:{list:async()=>[makeHostResponse({id:'host-a'})]},plugins:{list:async()=>({plugins:[]}) as never},threads:{events:{list:async()=>[...(steer?[{threadId:'thread-one',seq:3,createdAt:steer==='after-stop'?Date.now()+1000:steeringAt,type:'client/turn/requested',scope:{kind:'thread'},data:{requestId:'steering-request',target:{kind:'auto',expectedTurnId:steer==='foreign'?'other-turn':'turn-one'}}}]:[]),...(!running?[{threadId:'thread-one',seq:5,createdAt:interruptedAt,type:'turn/completed',scope:{kind:'turn',turnId:'turn-one'},data:{status:'interrupted'}}]:[]),{threadId:'thread-one',seq:2,type:'turn/started',scope:{kind:'turn',turnId:'turn-one'},data:{}},{threadId:'thread-one',seq:requestId==='request-one'?1:4,type:'client/turn/requested',scope:{kind:'thread'},data:{requestId}}] as never},listRunning:async()=>running?[{id:'thread-one',hostId:'host-a'}]:[],get:async()=>makeThreadResponse({id:'thread-one',providerId,status:running?'active':'idle',updatedAt}),stop:async()=>{running=false;updatedAt=Date.now();interruptedAt=updatedAt;if(swap){updatedAt-=500;if(swap==='provider')providerId='acp-opencode-kimi';else requestId='new-user-request';}return {} as never;},send:async()=>{const hook=fake.harness.registrations.hooks['message.dispatch']!;expect(await hook(makeMessageDispatchHookContext({requestedExecution:{providerId:'codex'},host:{id:'host-a',name:'host-a'}}))).toEqual({action:'proceed'});sent++;return {ok:true,delivery:'sent'} as never;}}},experimental_callHostRpc:async()=>verifiedHostResult(connected?'connected':'disconnected')});
  await plugin(fake.bb);await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});await fake.harness.behavior.callRpc('setMode',{mode:'enforce'});
  return {fake,connect:()=>{connected=true;},change:()=>{updatedAt=Date.now()+10_000;},sent:()=>sent};
 }
 it('automatically continues a new Guard stop after proof recovers, through admission',async()=>{
  const t=await setup();expect(t.sent()).toBe(0);t.connect();const service=t.fake.harness.behavior.runService('reconcile');
  try{await vi.waitFor(()=>expect(t.sent()).toBe(1));}finally{service.controller.abort();await service.done;await t.fake.harness.lifecycle.dispose();}
+});
+it('continues the same interrupted turn after an in-turn notification',async()=>{
+ const t=await setup(undefined,'same');t.connect();const service=t.fake.harness.behavior.runService('reconcile');
+ try{await vi.waitFor(()=>expect(t.sent()).toBe(1));}finally{service.controller.abort();await service.done;await t.fake.harness.lifecycle.dispose();}
+});
+it.each(['foreign','after-stop'] as const)('does not adopt %s steering as its interrupted turn',async steer=>{
+ const t=await setup(undefined,steer);t.connect();const service=t.fake.harness.behavior.runService('reconcile');
+ try{await new Promise(r=>setTimeout(r,50));expect(t.sent()).toBe(0);}finally{service.controller.abort();await service.done;await t.fake.harness.lifecycle.dispose();}
 });
 it('does not auto-continue after later user activity',async()=>{
  const t=await setup();t.connect();t.change();const service=t.fake.harness.behavior.runService('reconcile');
