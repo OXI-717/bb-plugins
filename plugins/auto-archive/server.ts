@@ -1,6 +1,12 @@
 // Fork of bb-plugin-auto-archive 0.1.0 by Shane Logsdon, MIT (see LICENSE).
 import { cliCommand, defineCli, type BbPluginApi } from "@get-bb/plugin-sdk";
-import { runOperation, parseDays, parseKeep, summarize } from "./runtime.js";
+import {
+  runOperation,
+  parseDays,
+  parseKeep,
+  summarize,
+  exclusionStatus,
+} from "./runtime.js";
 import { msUntilNextHour, sleep } from "./upstream-timing.js";
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
@@ -128,12 +134,15 @@ export default async function plugin(bb: BbPluginApi) {
         status: cliCommand({
           summary: "Show settings, install boundary and last result",
           options: { json: options.json },
-          async run() {
+          async run(_input, ctx) {
+            const config = await resolve();
+            const exclusions = await exclusionStatus(bb, config, ctx.signal);
             return {
               exitCode: 0,
               stdout: JSON.stringify(
                 {
-                  config: await resolve(),
+                  config,
+                  exclusions,
                   last: await bb.storage.kv.get("last-sweep"),
                 },
                 null,

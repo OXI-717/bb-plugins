@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
+  countThreadExclusions,
   affectedSnapshots,
   planRoot,
   planPrune,
@@ -90,7 +91,8 @@ export async function collect(
     }
     snapshots.push({
       id: t.id,
-      title: t.title ?? t.titleFallback ?? "untitled",
+      title: t.title,
+      titleFallback: t.titleFallback,
       parentThreadId: t.parentThreadId,
       lifecycleOwnerThreadId: t.lifecycleOwnerThreadId,
       sourceThreadId: t.sourceThreadId,
@@ -135,7 +137,10 @@ export async function runOperation(
     detached: 0,
     candidates: plan.actions.map((a) => ({
       id: a.rootId,
-      title: snapshots.find((t) => t.id === a.rootId)!.title,
+      title: (() => {
+        const t = snapshots.find((t) => t.id === a.rootId)!;
+        return t.title ?? t.titleFallback ?? "untitled";
+      })(),
     })),
   };
   if (dryRun || (!plan.actions.length && !plan.detachIds.length)) return report;
@@ -249,5 +254,37 @@ export function summarize(report: Report) {
     candidates: report.candidates
       .slice(0, limit)
       .map((t) => ({ ...t, title: t.title.slice(0, 200) })),
+  };
+}
+
+/** Read-only live counts need only list fields, no workspace/event probes. */
+export async function exclusionStatus(
+  bb: BbPluginApi,
+  config: Pick<Config, "keepThreadIds">,
+  signal?: AbortSignal,
+) {
+  const rows = new Map<
+    string,
+    { id: string; title: string | null; pinnedAt: number | null }
+  >();
+  for (let offset = 0; ; offset += 100) {
+    signal?.throwIfAborted();
+    const page = await bb.sdk.threads.list({
+      archived: false,
+      includeHidden: true,
+      limit: 100,
+      offset,
+      signal,
+    });
+    for (const t of page)
+      if (t.archivedAt === null && t.deletedAt === null) rows.set(t.id, t);
+    if (page.length < 100) break;
+    if (offset >= 100_000)
+      throw new Error("Thread inventory exceeds safety limit");
+  }
+  return {
+    scanned: rows.size,
+    reasons: countThreadExclusions([...rows.values()], config),
+    overlapping: true,
   };
 }

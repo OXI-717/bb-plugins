@@ -2,7 +2,8 @@
 export const DAY = 86_400_000;
 export interface Snapshot {
   id: string;
-  title: string;
+  title: string | null;
+  titleFallback?: string | null;
   parentThreadId: string | null;
   lifecycleOwnerThreadId: string | null;
   sourceThreadId: string | null;
@@ -74,10 +75,44 @@ function closure(
   }
   return threads.filter((t) => selected.has(t.id));
 }
+/** Ignore non-letter characters; only Latin/Cyrillic letters define this convention. */
+export function isUppercaseTitle(title: string | null): boolean {
+  const letters =
+    title
+      ?.match(/[\p{Script=Latin}\p{Script=Cyrillic}]/gu)
+      ?.filter((ch) => /\p{Letter}/u.test(ch)) ?? [];
+  return (
+    letters.length >= 2 &&
+    letters.every((ch) => /\p{Uppercase_Letter}/u.test(ch))
+  );
+}
+export function threadExclusions(
+  t: Pick<Snapshot, "id" | "title" | "pinnedAt">,
+  c: Pick<Config, "keepThreadIds">,
+) {
+  return {
+    pinned: t.pinnedAt !== null,
+    pinPrefix: t.title?.startsWith("📌") === true,
+    uppercase: isUppercaseTitle(t.title),
+    keepThreadIds: c.keepThreadIds.includes(t.id),
+  };
+}
+/** Independent reasons can overlap; counts cover live threads, not archive cascades. */
+export function countThreadExclusions(
+  threads: readonly Pick<Snapshot, "id" | "title" | "pinnedAt" | "archived">[],
+  c: Pick<Config, "keepThreadIds">,
+) {
+  const counts = { pinned: 0, pinPrefix: 0, uppercase: 0, keepThreadIds: 0 };
+  for (const t of threads)
+    if (!t.archived) {
+      const reasons = threadExclusions(t, c);
+      for (const key of Object.keys(counts) as (keyof typeof counts)[])
+        if (reasons[key]) counts[key]++;
+    }
+  return counts;
+}
 const protectedThread = (t: Snapshot, c: Config) =>
-  t.pinnedAt !== null ||
-  t.title.startsWith("📌") ||
-  c.keepThreadIds.includes(t.id) ||
+  Object.values(threadExclusions(t, c)).some(Boolean) ||
   t.visibility === "hidden" ||
   t.workspace !== "clean";
 const active = (t: Snapshot, cutoff: number) =>

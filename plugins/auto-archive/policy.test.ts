@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  countThreadExclusions,
   planSweep,
   planPrune,
   DAY,
@@ -256,4 +257,42 @@ it("prune never archives target descendants through a second ancestor owner", ()
   );
   expect(ids(p)).toEqual(["r1"]);
   expect(p.actions.flatMap((a) => a.archiveIds)).not.toContain("leaf");
+});
+describe("permanent explicit titles", () => {
+  it.each([
+    "VPN - GLM",
+    "GROWTH. AUTOMATION",
+    "📌 ДЕНЬ",
+    "DB",
+    "BB_MIMO_V26_PRO_READY_20260922",
+    "АВТОПИЛОТ",
+    "A 1 Я 😀",
+  ])("protects %s and its ancestors", (title) => {
+    expect(
+      ids(
+        planSweep(
+          [t("r"), t("c", { parentThreadId: "r", title })],
+          config,
+          now,
+        ),
+      ),
+    ).toEqual([]);
+  });
+  it.each(["Handoff: VPN Kimi", "", "A", "Я", "12 - 😀", "vpn", "День", null])(
+    "does not protect %j by title alone",
+    (title) => {
+      expect(ids(planSweep([t("r", { title })], config, now))).toEqual(["r"]);
+    },
+  );
+  it("keeps legacy pin-prefix protection and counts overlapping reasons independently", () => {
+    const rows = [
+      t("a", { title: "📌 ДЕНЬ", pinnedAt: 1 }),
+      t("b", { title: "DB" }),
+      t("c", { title: "Handoff: VPN Kimi" }),
+      t("archived", { title: "OLD", archived: true }),
+    ];
+    expect(
+      countThreadExclusions(rows, { ...config, keepThreadIds: ["a", "c"] }),
+    ).toEqual({ pinned: 1, pinPrefix: 1, uppercase: 2, keepThreadIds: 2 });
+  });
 });

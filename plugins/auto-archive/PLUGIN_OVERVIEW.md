@@ -2,7 +2,8 @@
 
 Auto Archive checks whole thread trees, including handoff lifecycle ownership,
 before selecting quiet roots. The default inactivity window is 14 days.
-Pinned threads, titles starting with 📌, configured keep IDs and dirty Git
+Pinned threads, titles starting with 📌, uppercase Latin/Cyrillic titles with
+at least two letters, configured keep IDs and dirty Git
 workspaces protect their ancestors. Active branches preserve the tree unless
 parent-only detachment is explicitly enabled.
 
