@@ -296,11 +296,11 @@ export async function handoffBrowser(options: TransportLaunch): Promise<boolean>
         } catch { finish(new Error("Invalid supervisor response.")); return; }
         data = data.slice(end + 1);
         if (!negotiated) {
-          if (result.protocol !== (options.profileDirectories ? 4 : 2) || result.navigation !== (options.profileDirectories ? "native-file" : "pipe") || (options.profileDirectories && result.profiles !== "native")) {
+          if (result.protocol !== (options.profileDirectories ? 5 : 2) || result.navigation !== (options.profileDirectories ? "native-file" : "pipe") || (options.profileDirectories && result.profiles !== "native")) {
             finish(new Error("Close this account browser and reopen it after updating Pooler.")); return;
           }
           negotiated = true;
-          socket.write(JSON.stringify({ protocol: options.profileDirectories ? 4 : 2, profileDirectory: options.profileDirectory, timezone: options.timezone, executable: options.executable, url: options.url }) + "\n");
+          socket.write(JSON.stringify({ protocol: options.profileDirectories ? 5 : 2, profileDirectory: options.profileDirectory, timezone: options.timezone, executable: options.executable, url: options.url }) + "\n");
         } else if (result.ok === true) finish();
         else finish(new Error(typeof result.error === "string" ? result.error : "Browser handoff failed."));
       }

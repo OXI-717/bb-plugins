@@ -702,7 +702,9 @@ export function registerPoolCli(
               `Opened "${result.profileName}" in Helium.\n` +
               `  profile: ${result.profileDirectory}\n` +
               `  timezone: ${result.timezone ?? "system"}\n` +
-              `  site: ${result.url === "about:blank" ? result.url : new URL(result.url).origin}\n`,
+              (result.url === "about:blank"
+                ? "  session: restore requested\n"
+                : `  site: ${new URL(result.url).origin}\n`),
           };
         }
         if (

@@ -274,7 +274,7 @@ describe("browserExecutableCandidates", () => {
 });
 
 describe("openAccountBrowser", () => {
-  it.each(["claude", "codex", "kimi", "zai", "opencode-go", "cursor", "devin"] as const)("opens a neutral page for %s and reuses its profile", async (provider) => {
+  it.each(["claude", "codex", "kimi", "zai", "opencode-go", "cursor", "devin"] as const)("uses the default destination for %s and reuses its profile", async (provider) => {
     const box = sandbox();
     const selected = account({ id: ACCOUNTS[0]!.id, provider, label: "Synthetic", email: "person@example.test" });
     const options = { ...baseOptions(box), accounts: [selected], query: selected.id, readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
@@ -282,6 +282,22 @@ describe("openAccountBrowser", () => {
     expect(first.url).toBe("about:blank");
     const second = await openAccountBrowser(options);
     expect(second.profileDir).toBe(first.profileDir);
+  });
+  it("preserves saved browsing data and startup preferences on repeated opens", async () => {
+    const box = sandbox();
+    const options = { ...baseOptions(box), query: ACCOUNTS[0]!.id, readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
+    const first = await openAccountBrowser(options);
+    mkdirSync(path.join(first.profileDir, "Sessions"), { recursive: true });
+    const saved = {
+      History: "synthetic-history-bytes",
+      Cookies: "synthetic-cookie-bytes",
+      "Sessions/Session_1": "synthetic-session-bytes",
+      Preferences: JSON.stringify({ profile: { name: first.profileName }, session: { restore_on_startup: 1 } }),
+    };
+    for (const [name, bytes] of Object.entries(saved)) writeFileSync(path.join(first.profileDir, name), bytes);
+    await openAccountBrowser(options);
+    await openAccountBrowser({ ...options, url: "https://example.test/login" });
+    for (const [name, bytes] of Object.entries(saved)) expect(readFileSync(path.join(first.profileDir, name), "utf8")).toBe(bytes);
   });
   it("refuses guarded providers without verified VPN evidence", async () => {
     const box = sandbox();
