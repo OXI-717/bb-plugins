@@ -7,7 +7,7 @@ license are preserved in [LICENSE](LICENSE). OXI-717 maintains this fork.
 Install on BB 0.46.1+ with Plugin SDK 0.6.49+:
 
 ```sh
-bb plugin install git:https://github.com/OXI-717/bb-plugins.git@semver:auto-archive/:^0.2.0 --subdirectory plugins/auto-archive
+bb plugin install git:https://github.com/OXI-717/bb-plugins.git@semver:auto-archive/:^0.2.1 --subdirectory plugins/auto-archive
 bb plugin config auto-archive set dryRun true
 bb auto-archive run --dry-run
 ```
@@ -43,6 +43,8 @@ tree's most recent activity must be at or after the saved installation time.
 The timestamp persists across reloads and upgrades. Preview reports
 `backlogRoots`: currently quiet roots older than the threshold whose entire
 live tree was already inactive before installation, including protected roots.
+
+Titles with at least two Latin/Cyrillic letters, all uppercase, are also protected using explicit `title` only (existing 📌 protection still uses the explicit-or-fallback title); `status` counts live pinned / 📌 prefix / uppercase / keepThreadIds reasons independently (counts may overlap).
 
 ## Settings
 

@@ -1,6 +1,7 @@
 import { it, expect, vi } from "vitest";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
+  exclusionStatus,
   runOperation,
   collect,
   parseKeep,
@@ -288,4 +289,59 @@ it("omits unbounded internal prune ancestry from diagnostics", () => {
   };
   expect(summarize(report)).not.toHaveProperty("pruneAncestorIds");
   expect(report.pruneAncestorIds).toHaveLength(105);
+});
+
+it("uses explicit title only for permanent protection; fallback is display-only", async () => {
+  const h = host({ title: null, titleFallback: "PERMANENT" });
+  const rows = await collect(h.bb, config, now);
+  expect(rows[0].title).toBeNull();
+  const r = await runOperation(h.bb, config, { now, dryRun: true });
+  expect(r.actions).toHaveLength(1);
+  expect(r.candidates[0].title).toBe("PERMANENT");
+});
+it("live exclusion status pages, deduplicates and counts reasons using title only", async () => {
+  const h = host({ title: "DB", pinnedAt: 1, deletedAt: null }, [
+    { id: "kept", title: "📌 lowercase", deletedAt: null },
+    {
+      id: "fallback",
+      title: null,
+      titleFallback: "UPPERCASE",
+      deletedAt: null,
+    },
+  ]);
+  h.rows.push(
+    ...Array.from({ length: 100 }, (_, i) => ({
+      ...h.rows[0],
+      id: "row" + i,
+      title: "regular",
+    })),
+  );
+  expect(
+    await exclusionStatus(h.bb, { keepThreadIds: ["kept", "missing"] }),
+  ).toEqual({
+    scanned: 103,
+    reasons: { pinned: 101, pinPrefix: 1, uppercase: 1, keepThreadIds: 1 },
+    overlapping: true,
+  });
+  expect(h.list).toHaveBeenCalledWith(expect.objectContaining({ offset: 100 }));
+  expect(h.events).not.toHaveBeenCalled();
+  expect(h.status).not.toHaveBeenCalled();
+  expect(h.archive).not.toHaveBeenCalled();
+  expect(h.update).not.toHaveBeenCalled();
+});
+it("preserves pin-prefixed fallback titles in selection and live status", async () => {
+  const h = host({
+    title: null,
+    titleFallback: "📌 permanent",
+    deletedAt: null,
+  });
+  expect(
+    (await runOperation(h.bb, config, { now, dryRun: true })).actions,
+  ).toEqual([]);
+  expect((await exclusionStatus(h.bb, config)).reasons).toEqual({
+    pinned: 0,
+    pinPrefix: 1,
+    uppercase: 0,
+    keepThreadIds: 0,
+  });
 });
