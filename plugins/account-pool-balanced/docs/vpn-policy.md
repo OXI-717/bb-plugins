@@ -2,7 +2,14 @@
 
 The **Only VPN** switch applies to every account of the selected provider. Claude, Codex, Cursor and Devin default to VPN-only. Kimi, Z.ai and OpenCode Go are independent of this switch. Use-until-exhaustion never bypasses the network gate.
 
-Before each outbound request the pool checks a local status file on the **pool server**. Model requests, token refresh, browser/device login, quota polling, account profiles, reset-credit details and standalone Devin cloud requests use the same gate. Missing, stale, corrupt, untrusted or disconnected status produces a local `403` with `x-bb-pool-error: VPN_REQUIRED` on model routes. No provider request is attempted and the account is not marked invalid. Cached account information remains visible. Manual quota refresh reports the refusal, including the BB usage panel's Account Pooler source.
+Before each outbound request the pool checks a local status file on the **pool server**. Model requests, token refresh, browser/device login, quota polling, account profiles, reset-credit details and standalone Devin cloud requests use the same gate. Missing, stale, corrupt, untrusted or disconnected status produces a local refusal with `x-bb-pool-error: VPN_REQUIRED` on model routes. No provider request is attempted and the account is not marked invalid. Cached account information remains visible. Manual quota refresh reports the refusal, including the BB usage panel's Account Pooler source.
+
+The response depends on the entry point and protocol:
+
+- **BB-hosted Pooler:** ordinary model responses use HTTP `503` with `Retry-After: 10`. Cursor streaming retains the Connect HTTP `200` envelope and carries the local `503` in `x-bb-pool-http-status`.
+- **Standalone HTTP server:** its initial VPN admission check returns HTTP `403` without `Retry-After`. If admission succeeds but a later check in the shared model hub refuses the request, the hub uses the response format described above. Standalone Devin cloud routes return HTTP `403` for VPN refusals.
+
+These are local network-policy refusals, not provider authentication failures. See [Pool errors and recovery](../../../docs/pool-errors.md) for the reason codes and retry behavior.
 
 ## Status writer
 
