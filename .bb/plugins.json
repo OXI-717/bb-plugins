@@ -22,6 +22,10 @@
     {
       "name": "model-connections",
       "source": "./plugins/model-connections"
+    },
+    {
+      "name": "auto-archive",
+      "source": "./plugins/auto-archive"
     }
   ]
 }

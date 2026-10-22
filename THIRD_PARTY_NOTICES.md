@@ -10,3 +10,9 @@ BB Projects (`oxi-projects`) is derived from Mateo Cerquetella's Taskboard in
 [MateoCerquetella/bb-plugins](https://github.com/MateoCerquetella/bb-plugins),
 MIT License, Copyright (c) 2026 Mateo Cerquetella. Its full notice is retained
 in [plugins/oxi-projects/LICENSE](plugins/oxi-projects/LICENSE).
+
+## Auto Archive
+
+`plugins/auto-archive` derives from `bb-plugin-auto-archive` 0.1.0 by Shane Logsdon
+(https://github.com/slogsdon/bb-plugin-auto-archive), MIT. The original license is
+preserved in `plugins/auto-archive/LICENSE`.

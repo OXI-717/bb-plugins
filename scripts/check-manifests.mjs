@@ -32,6 +32,7 @@ for (const entry of marketplace.plugins) {
   assert.equal(manifest.license, 'MIT');
   for (const kind of ['server', 'app']) {
     const file = manifest.bb[kind];
+    if (kind === 'app' && file === undefined) continue;
     assert(file && !file.includes('..') && !file.startsWith('/'));
     assert(existsSync(resolve(source.subdir, file)));
   }
