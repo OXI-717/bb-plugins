@@ -18,8 +18,9 @@ function close(){
 process.on('SIGTERM',close);process.on('SIGINT',close);process.on('uncaughtException',close);
 function track(s){if(sockets.size>=512){s.destroy();return;}sockets.add(s);s.on('error',()=>{});s.on('close',()=>sockets.delete(s));s.setTimeout(300000,()=>s.destroy());}
 function listen(server,address){return new Promise((resolve,reject)=>{server.once('error',reject);server.listen(address,()=>{server.off('error',reject);resolve();});});}
-function documentURL(url,initial){
- if(url==='about:blank'&&!initial)return {url,ready:Promise.resolve()};
+function documentURL(url){
+ // No destination means resume the profile, not add an empty startup tab.
+ if(url==='about:blank')return {url:null,ready:Promise.resolve()};
  let parsed;try{parsed=new URL(url);}catch{throw new Error('Invalid browser URL.');}
  if((url!=='about:blank'&&parsed.protocol!=='https:')||parsed.username||parsed.password||url.length>12000)throw new Error('Invalid browser URL.');
  if(files.size>=32)throw new Error('Browser navigation is busy. Try again later.');
@@ -58,9 +59,9 @@ async function boot(cfg){
   if(!profiles.has(profile))throw new Error('Unknown account browser profile; close Helium once to refresh its profile list.');
   if(active>=8)throw new Error('Browser navigation is busy.');active++;
   try{
-   const target=documentURL(url,initial);
+   const target=documentURL(url);
    await new Promise((resolve,reject)=>{
-    const child=spawn(cfg.executable,[...args(profile),target.url],{stdio:'ignore',env});children.add(child);
+    const child=spawn(cfg.executable,[...args(profile),...(target.url?[target.url]:[])],{stdio:'ignore',env});children.add(child);
     let settled=false,timer;
     const finish=error=>{if(settled)return;settled=true;clearTimeout(timer);error?reject(new Error('Browser profile launch failed.')):resolve();};
     child.once('error',()=>{children.delete(child);finish(true);});
@@ -79,9 +80,9 @@ async function boot(cfg){
    const message=data;data='';
    Promise.resolve().then(async()=>{
     const cmd=JSON.parse(message);
-    if(!negotiated&&cmd.type==='hello'){negotiated=true;s.write(JSON.stringify({protocol:4,navigation:'native-file',profiles:'native'})+'\n');return;}
+    if(!negotiated&&cmd.type==='hello'){negotiated=true;s.write(JSON.stringify({protocol:5,navigation:'native-file',profiles:'native'})+'\n');return;}
     s.removeAllListeners('data');
-    if(!negotiated||cmd.protocol!==4)throw new Error('Close this account browser and reopen it after updating Pooler.');
+    if(!negotiated||cmd.protocol!==5)throw new Error('Close this account browser and reopen it after updating Pooler.');
     if(cmd.timezone!==cfg.timezone||cmd.executable!==cfg.executable||!primary||primary.exitCode!==null)throw new Error('Close this account browser window before changing its exit timezone or executable.');
     if(typeof cmd.url!=='string')throw new Error('Invalid browser URL.');
     await launch(cmd.url,cmd.profileDirectory);s.end(JSON.stringify({ok:true})+'\n');

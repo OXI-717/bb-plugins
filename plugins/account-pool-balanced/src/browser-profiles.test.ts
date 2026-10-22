@@ -274,7 +274,7 @@ describe("browserExecutableCandidates", () => {
 });
 
 describe("openAccountBrowser", () => {
-  it.each(["claude", "codex", "kimi", "zai", "opencode-go", "cursor", "devin"] as const)("opens a neutral page for %s and reuses its profile", async (provider) => {
+  it.each(["claude", "codex", "kimi", "zai", "opencode-go", "cursor", "devin"] as const)("uses the default destination for %s and reuses its profile", async (provider) => {
     const box = sandbox();
     const selected = account({ id: ACCOUNTS[0]!.id, provider, label: "Synthetic", email: "person@example.test" });
     const options = { ...baseOptions(box), accounts: [selected], query: selected.id, readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
@@ -282,6 +282,52 @@ describe("openAccountBrowser", () => {
     expect(first.url).toBe("about:blank");
     const second = await openAccountBrowser(options);
     expect(second.profileDir).toBe(first.profileDir);
+  });
+  it("enables native restore once for every managed profile before launch", async () => {
+    const box = sandbox();
+    const registryFile = path.join(box.dataDir, "plugins/account-pool-balanced/browser-profiles/registry.json");
+    for (const selected of ACCOUNTS) {
+      const entry = await ensureProfile(selected, { heliumRoot: box.heliumRoot, registryFile });
+      writeFileSync(path.join(box.heliumRoot, entry.profileDirectory, "Preferences"), JSON.stringify({ session: { restore_on_startup: 5, startup_urls: ["https://example.test/start"] }, unrelated: { keep: true } }));
+    }
+    const prefs = () => Object.values(JSON.parse(readFileSync(registryFile, "utf8")) as Record<string, {profileDirectory:string}>).map(entry => path.join(box.heliumRoot, entry.profileDirectory, "Preferences"));
+    const options = { ...baseOptions(box), query: ACCOUNTS[0]!.id, fetcher: geoFetcher, transportImpl: async () => {
+      for (const file of prefs()) expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ session: { restore_on_startup: 1, startup_urls: ["https://example.test/start"] }, unrelated: { keep: true } });
+    }};
+    await openAccountBrowser(options);
+    const first = prefs()[0]!;
+    writeFileSync(first, JSON.stringify({ session: { restore_on_startup: 5 }, userChanged: true }));
+    await openAccountBrowser({ ...options, transportImpl: async () => {} });
+    expect(JSON.parse(readFileSync(first, "utf8"))).toEqual({ session: { restore_on_startup: 5 }, userChanged: true });
+  });
+  it("leaves malformed startup preferences untouched and does not launch", async () => {
+    const box = sandbox();
+    const registryFile = path.join(box.dataDir, "plugins/account-pool-balanced/browser-profiles/registry.json");
+    const entry = await ensureProfile(ACCOUNTS[0]!, { heliumRoot: box.heliumRoot, registryFile });
+    const file = path.join(box.heliumRoot, entry.profileDirectory, "Preferences");
+    const bytes = JSON.stringify({ session: ["invalid"], unrelated: true });
+    writeFileSync(file, bytes);
+    const transportImpl = vi.fn();
+    await expect(openAccountBrowser({ ...baseOptions(box), query: ACCOUNTS[0]!.id, fetcher: geoFetcher, transportImpl })).rejects.toThrow("Invalid browser session preferences");
+    expect(readFileSync(file, "utf8")).toBe(bytes);
+    expect(JSON.parse(readFileSync(registryFile, "utf8"))[ACCOUNTS[0]!.id].sessionRestoreConfigured).toBeUndefined();
+    expect(transportImpl).not.toHaveBeenCalled();
+  });
+  it("preserves saved browsing data and startup preferences on repeated opens", async () => {
+    const box = sandbox();
+    const options = { ...baseOptions(box), query: ACCOUNTS[0]!.id, readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
+    const first = await openAccountBrowser(options);
+    mkdirSync(path.join(first.profileDir, "Sessions"), { recursive: true });
+    const saved = {
+      History: "synthetic-history-bytes",
+      Cookies: "synthetic-cookie-bytes",
+      "Sessions/Session_1": "synthetic-session-bytes",
+      Preferences: JSON.stringify({ profile: { name: first.profileName }, session: { restore_on_startup: 1 } }),
+    };
+    for (const [name, bytes] of Object.entries(saved)) writeFileSync(path.join(first.profileDir, name), bytes);
+    await openAccountBrowser(options);
+    await openAccountBrowser({ ...options, url: "https://example.test/login" });
+    for (const [name, bytes] of Object.entries(saved)) expect(readFileSync(path.join(first.profileDir, name), "utf8")).toBe(bytes);
   });
   it("refuses guarded providers without verified VPN evidence", async () => {
     const box = sandbox();
