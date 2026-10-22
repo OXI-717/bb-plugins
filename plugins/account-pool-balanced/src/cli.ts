@@ -703,7 +703,7 @@ export function registerPoolCli(
               `  profile: ${result.profileDirectory}\n` +
               `  timezone: ${result.timezone ?? "system"}\n` +
               (result.url === "about:blank"
-                ? "  session: restore requested\n"
+                ? "  startup: saved profile settings\n"
                 : `  site: ${new URL(result.url).origin}\n`),
           };
         }

@@ -52,7 +52,7 @@ async function boot(cfg){
  });
  await listen(proxy,{port:0,host:'127.0.0.1'});
  const env={};for(const key of ['PATH','HOME','USER','LOGNAME','TMPDIR','TMP','TEMP','DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_CACHE_HOME','XDG_DATA_HOME','DBUS_SESSION_BUS_ADDRESS','LANG','LANGUAGE','LC_ALL','LC_CTYPE','TZ'])if(process.env[key]!==undefined)env[key]=process.env[key];
- const args=profile=>['--user-data-dir='+cfg.root,'--profile-directory='+profile,'--no-first-run','--no-default-browser-check','--restore-last-session',
+ const args=profile=>['--user-data-dir='+cfg.root,'--profile-directory='+profile,'--no-first-run','--no-default-browser-check',
  '--proxy-server=http://127.0.0.1:'+proxy.address().port,'--proxy-bypass-list=<-loopback>','--disable-quic',
  '--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'];
  async function launch(url,profile,initial=false){

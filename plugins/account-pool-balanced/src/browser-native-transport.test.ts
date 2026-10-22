@@ -19,14 +19,14 @@ if(!first){setTimeout(()=>process.exit(fs.existsSync(root+'/fail')?3:0),30);}els
 }
 async function calls(o:TransportLaunch){for(let i=0;i<50;i++){try{return(await readFile(o.root+'/calls','utf8')).trim().split('\n').map(s=>JSON.parse(s));}catch{await delay(20);}}throw new Error('Missing browser capture');}
 describe('interactive native browser transport',()=>{
- it('requests native session restore without opening a blank or temporary startup tab',async()=>{
+ it('uses native profile startup without opening a blank or temporary startup tab',async()=>{
   const o=await fixture();
   const history=path.join(o.root,'History'),session=path.join(o.root,'Session');
   await writeFile(history,'synthetic-history');await writeFile(session,'synthetic-session');
   await startBrowserTransport(o);await calls(o);await handoffBrowser({...o,profileDirectory:'Profile 2'});
   const rows=await calls(o);expect(rows).toHaveLength(2);
   for(const row of rows){
-   expect(row.args).toContain('--restore-last-session');
+   expect(row.args).not.toContain('--restore-last-session');
    expect(row.args.some((arg:string)=>arg==='about:blank'||arg.startsWith('file:'))).toBe(false);
    expect(row.doc).toBeNull();
   }
@@ -51,7 +51,7 @@ describe('interactive native browser transport',()=>{
  it('keeps links in private temporary files and cleans them on owned browser exit',async()=>{
   const o=await fixture();o.url='https://example.test/auth?state=synthetic-secret&next=</script>';await startBrowserTransport(o);await handoffBrowser({...o,profileDirectory:'Profile 2',url:'https://example.test/second'});
   const rows=await calls(o),files=rows.map(r=>fileURLToPath(r.args.at(-1)));
-  for(const row of rows)expect(row.args).toContain('--restore-last-session');
+  for(const row of rows)expect(row.args).not.toContain('--restore-last-session');
   for(let i=0;i<rows.length;i++){expect(rows[i].args.join(' ')).not.toContain('https://');expect((await stat(files[i])).mode&0o777).toBe(0o600);expect((await stat(path.dirname(files[i]))).mode&0o777).toBe(0o700);expect(rows[i].doc).toContain('location.replace(');}
   expect(rows[0].doc).toContain('synthetic-secret');const expression=rows[0].doc.match(/location.replace\((.*)\)\)<\/script>/)[1];expect(JSON.parse(expression)).toBe(o.url);expect(rows[0].doc.match(/<\/script>/g)).toHaveLength(1);expect(rows[1].doc).toContain('example.test/second');process.kill(Number(await readFile(o.root+'/pid','utf8')),'SIGTERM');await delay(400);for(const file of files)await expect(access(file)).rejects.toThrow();
  });

@@ -209,6 +209,7 @@ interface RegistryEntry {
   profileName: string;
   createdAt: number;
   isolated?: boolean;
+  sessionRestoreConfigured?: true;
 }
 
 type Registry = Record<string, RegistryEntry>;
@@ -242,7 +243,7 @@ async function readRegistry(file: string): Promise<Registry> {
   for (const entry of Object.values(parsed)) {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Invalid browser registry entry.");
     const e = entry as RegistryEntry;
-    if (!/^Profile [1-9]\d{0,6}$/.test(e.profileDirectory) || typeof e.profileName !== "string" || e.profileName.length > 1024 || !Number.isFinite(e.createdAt) || (e.isolated !== undefined && e.isolated !== true)) throw new Error("Invalid browser registry binding.");
+    if (!/^Profile [1-9]\d{0,6}$/.test(e.profileDirectory) || typeof e.profileName !== "string" || e.profileName.length > 1024 || !Number.isFinite(e.createdAt) || (e.isolated !== undefined && e.isolated !== true) || (e.sessionRestoreConfigured !== undefined && e.sessionRestoreConfigured !== true)) throw new Error("Invalid browser registry binding.");
     if (seen.has(e.profileDirectory)) throw new Error("Duplicate browser profile binding; refusing account mixing.");
     seen.add(e.profileDirectory);
   }
@@ -256,6 +257,27 @@ async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
     await writeFile(tmp, JSON.stringify(value, null, 2), { flag: "wx", mode: 0o600 });
     await rename(tmp, file);
   } finally { await rm(tmp, { force: true }); }
+}
+
+/** Chromium's restore switch only applies at process startup. Configure each
+ * managed profile once while closed, including profiles selected later in its picker. */
+async function prepareSessionRestore(options: EnsureProfileOptions, assertClosed: () => Promise<void>): Promise<void> {
+  const registry = await readRegistry(options.registryFile);
+  for (const entry of Object.values(registry)) {
+    if (entry.isolated || entry.sessionRestoreConfigured) continue;
+    const directory = path.join(options.heliumRoot, entry.profileDirectory);
+    await requireDirectory(directory);
+    const file = path.join(directory, "Preferences");
+    const prefs = await readObject(file);
+    const session = prefs.session === undefined ? {} : prefs.session;
+    if (!session || typeof session !== "object" || Array.isArray(session)) throw new Error("Invalid browser session preferences; originals preserved.");
+    await assertClosed();
+    await writeJsonAtomic(file, { ...prefs, session: { ...session, restore_on_startup: 1 } });
+    // Publish only after the preference write succeeds; interrupted setup retries.
+    // Later user changes to startup behavior must not be overwritten.
+    entry.sessionRestoreConfigured = true;
+    await writeJsonAtomic(options.registryFile, registry);
+  }
 }
 
 /** Next free "Profile N" directory name (Default counts as taken). */
@@ -601,6 +623,7 @@ async function openAccountBrowserLocked(
     await assertClosed();
     await ensureProfileLocked(current, { heliumRoot, registryFile });
   }
+  await prepareSessionRestore({ heliumRoot, registryFile }, assertClosed);
   registry = await readRegistry(registryFile);
   entry = registry[account.id]!;
   await assertClosed();

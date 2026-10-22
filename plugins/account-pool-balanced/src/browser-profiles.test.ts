@@ -283,6 +283,36 @@ describe("openAccountBrowser", () => {
     const second = await openAccountBrowser(options);
     expect(second.profileDir).toBe(first.profileDir);
   });
+  it("enables native restore once for every managed profile before launch", async () => {
+    const box = sandbox();
+    const registryFile = path.join(box.dataDir, "plugins/account-pool-balanced/browser-profiles/registry.json");
+    for (const selected of ACCOUNTS) {
+      const entry = await ensureProfile(selected, { heliumRoot: box.heliumRoot, registryFile });
+      writeFileSync(path.join(box.heliumRoot, entry.profileDirectory, "Preferences"), JSON.stringify({ session: { restore_on_startup: 5, startup_urls: ["https://example.test/start"] }, unrelated: { keep: true } }));
+    }
+    const prefs = () => Object.values(JSON.parse(readFileSync(registryFile, "utf8")) as Record<string, {profileDirectory:string}>).map(entry => path.join(box.heliumRoot, entry.profileDirectory, "Preferences"));
+    const options = { ...baseOptions(box), query: ACCOUNTS[0]!.id, fetcher: geoFetcher, transportImpl: async () => {
+      for (const file of prefs()) expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ session: { restore_on_startup: 1, startup_urls: ["https://example.test/start"] }, unrelated: { keep: true } });
+    }};
+    await openAccountBrowser(options);
+    const first = prefs()[0]!;
+    writeFileSync(first, JSON.stringify({ session: { restore_on_startup: 5 }, userChanged: true }));
+    await openAccountBrowser({ ...options, transportImpl: async () => {} });
+    expect(JSON.parse(readFileSync(first, "utf8"))).toEqual({ session: { restore_on_startup: 5 }, userChanged: true });
+  });
+  it("leaves malformed startup preferences untouched and does not launch", async () => {
+    const box = sandbox();
+    const registryFile = path.join(box.dataDir, "plugins/account-pool-balanced/browser-profiles/registry.json");
+    const entry = await ensureProfile(ACCOUNTS[0]!, { heliumRoot: box.heliumRoot, registryFile });
+    const file = path.join(box.heliumRoot, entry.profileDirectory, "Preferences");
+    const bytes = JSON.stringify({ session: ["invalid"], unrelated: true });
+    writeFileSync(file, bytes);
+    const transportImpl = vi.fn();
+    await expect(openAccountBrowser({ ...baseOptions(box), query: ACCOUNTS[0]!.id, fetcher: geoFetcher, transportImpl })).rejects.toThrow("Invalid browser session preferences");
+    expect(readFileSync(file, "utf8")).toBe(bytes);
+    expect(JSON.parse(readFileSync(registryFile, "utf8"))[ACCOUNTS[0]!.id].sessionRestoreConfigured).toBeUndefined();
+    expect(transportImpl).not.toHaveBeenCalled();
+  });
   it("preserves saved browsing data and startup preferences on repeated opens", async () => {
     const box = sandbox();
     const options = { ...baseOptions(box), query: ACCOUNTS[0]!.id, readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
