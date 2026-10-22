@@ -44,7 +44,7 @@ The timestamp persists across reloads and upgrades. Preview reports
 `backlogRoots`: currently quiet roots older than the threshold whose entire
 live tree was already inactive before installation, including protected roots.
 
-Titles with at least two Latin/Cyrillic letters, all uppercase, are also protected using explicit `title` only; `status` counts live pinned / 📌 prefix / uppercase / keepThreadIds reasons independently (counts may overlap).
+Titles with at least two Latin/Cyrillic letters, all uppercase, are also protected using explicit `title` only (existing 📌 protection still uses the explicit-or-fallback title); `status` counts live pinned / 📌 prefix / uppercase / keepThreadIds reasons independently (counts may overlap).
 
 ## Settings
 

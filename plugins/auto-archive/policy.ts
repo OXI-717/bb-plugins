@@ -87,19 +87,22 @@ export function isUppercaseTitle(title: string | null): boolean {
   );
 }
 export function threadExclusions(
-  t: Pick<Snapshot, "id" | "title" | "pinnedAt">,
+  t: Pick<Snapshot, "id" | "title" | "titleFallback" | "pinnedAt">,
   c: Pick<Config, "keepThreadIds">,
 ) {
   return {
     pinned: t.pinnedAt !== null,
-    pinPrefix: t.title?.startsWith("📌") === true,
+    pinPrefix: (t.title ?? t.titleFallback)?.startsWith("📌") === true,
     uppercase: isUppercaseTitle(t.title),
     keepThreadIds: c.keepThreadIds.includes(t.id),
   };
 }
 /** Independent reasons can overlap; counts cover live threads, not archive cascades. */
 export function countThreadExclusions(
-  threads: readonly Pick<Snapshot, "id" | "title" | "pinnedAt" | "archived">[],
+  threads: readonly Pick<
+    Snapshot,
+    "id" | "title" | "titleFallback" | "pinnedAt" | "archived"
+  >[],
   c: Pick<Config, "keepThreadIds">,
 ) {
   const counts = { pinned: 0, pinPrefix: 0, uppercase: 0, keepThreadIds: 0 };

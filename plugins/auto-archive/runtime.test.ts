@@ -329,3 +329,19 @@ it("live exclusion status pages, deduplicates and counts reasons using title onl
   expect(h.archive).not.toHaveBeenCalled();
   expect(h.update).not.toHaveBeenCalled();
 });
+it("preserves pin-prefixed fallback titles in selection and live status", async () => {
+  const h = host({
+    title: null,
+    titleFallback: "📌 permanent",
+    deletedAt: null,
+  });
+  expect(
+    (await runOperation(h.bb, config, { now, dryRun: true })).actions,
+  ).toEqual([]);
+  expect((await exclusionStatus(h.bb, config)).reasons).toEqual({
+    pinned: 0,
+    pinPrefix: 1,
+    uppercase: 0,
+    keepThreadIds: 0,
+  });
+});

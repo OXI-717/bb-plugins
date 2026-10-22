@@ -296,3 +296,14 @@ describe("permanent explicit titles", () => {
     ).toEqual({ pinned: 1, pinPrefix: 1, uppercase: 2, keepThreadIds: 2 });
   });
 });
+it("preserves legacy pin-prefix protection from fallback without uppercase fallback protection", () => {
+  const pin = t("p", { title: null, titleFallback: "📌 permanent" });
+  const upper = t("u", { title: null, titleFallback: "PERMANENT" });
+  expect(ids(planSweep([pin, upper], config, now))).toEqual(["u"]);
+  expect(countThreadExclusions([pin, upper], config)).toEqual({
+    pinned: 0,
+    pinPrefix: 1,
+    uppercase: 0,
+    keepThreadIds: 0,
+  });
+});

@@ -265,7 +265,12 @@ export async function exclusionStatus(
 ) {
   const rows = new Map<
     string,
-    { id: string; title: string | null; pinnedAt: number | null }
+    {
+      id: string;
+      title: string | null;
+      titleFallback?: string | null;
+      pinnedAt: number | null;
+    }
   >();
   for (let offset = 0; ; offset += 100) {
     signal?.throwIfAborted();
