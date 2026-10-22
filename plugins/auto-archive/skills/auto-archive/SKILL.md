@@ -13,7 +13,7 @@ This explicit command can include pre-install backlog; the hourly sweep cannot.
 
 Pinned, 📌-prefixed, uppercase titles (at least two Latin/Cyrillic letters,
 explicit title only), kept and dirty-workspace threads protect their ancestors.
-`status` counts pinned/pinPrefix/uppercase/keepThreadIds independently; overlaps count in each reason.
+`status` counts pinned / pinPrefix / uppercase / keepThreadIds independently; overlaps count in each reason.
 Active children preserve the tree unless parent-only detachment is enabled.
 Lifecycle owner and hidden-source links cannot be cleared through the public
 API: a blocking dependency must be reported, never bypassed with database edits.
