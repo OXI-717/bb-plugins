@@ -96,7 +96,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/oxi-projects",
-          "range": "^0.2.1",
+          "range": "^0.2.2",
           "tagPrefix": "oxi-projects/"
         }
       },

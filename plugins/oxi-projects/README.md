@@ -126,3 +126,20 @@ must never be committed.
 Legacy repository string arrays are accepted only when the saved project has an
 explicit account. Without one, the plugin keeps the original configuration and
 asks for repository accounts; it never guesses from the globally active login.
+
+### GitHub list retrieval
+
+Issue sync uses a cursor-paginated GraphQL read so pull requests are not downloaded
+and discarded while browsing issues. PR browsing keeps the REST traversal. The
+selected account remains isolated per repository. Each traversal shares a 120-second
+deadline, with bounded page attempts and one retry of a failed read page for a
+transient network error or timeout. Permission, authentication, rate-limit and
+cancellation failures are not retried. An incomplete traversal never replaces the
+last successful cache.
+
+Labels and assignees are checked for nested pagination. If a node exceeds the
+query metadata page, issue sync restarts a complete REST traversal inside the
+remaining original deadline; it never publishes truncated metadata. This fallback
+is not used to bypass an authorization failure.
+
+`npm run check` includes `npm run test:github` for these failure paths.

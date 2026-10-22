@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import {readIssuePages} from "./issue-pages";
 import { z } from "zod";
 import { login, item, scope, type Project } from "./contract";
 import { readApi } from "./upstream-read";
@@ -24,6 +25,7 @@ const repositoryItemSchema = z.object({
   body: z.string().nullable().default(null),
   pull_request: z.unknown().optional(),
 });
+export type RepositoryItem = z.infer<typeof repositoryItemSchema>;
 export function parseRepositoryItems(raw: string, kind: "issue" | "pr") {
   const pages = z.array(z.array(repositoryItemSchema)).parse(JSON.parse(raw));
   return pages.flat().filter((entry) =>
@@ -179,7 +181,9 @@ export async function listProject(
           try {
             const deadline=Date.now()+120_000;
             const gh = await accountClient(r.account, runner);
-            const raw = await readRepositoryPages(gh,r.repo,input.state,input.kind,deadline);
+            const raw = input.kind==='issue'
+              ? await readIssuePages(gh,r.repo,input.state,deadline,readRepositoryPages)
+              : await readRepositoryPages(gh,r.repo,input.state,input.kind,deadline);
             return {
               items: raw.map((v) =>
                 item.parse({

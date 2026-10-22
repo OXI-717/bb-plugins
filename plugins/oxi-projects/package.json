@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-oxi-projects",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Project tasks, repositories and agent sessions inside BB, with optional integrations.",
   "type": "module",
@@ -81,8 +81,9 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types test/*.test.ts",
     "verify:build": "node scripts/verify-build.mjs",
-    "check": "npm run typecheck && npm test && npm run test:registration && npm run build && npm run verify:build",
+    "check": "npm run typecheck && npm test && npm run test:registration && npm run test:github && npm run build && npm run verify:build",
     "test:changed": "vitest run",
-    "test:registration": "vitest run app-registration.test.ts"
+    "test:registration": "vitest run app-registration.test.ts",
+    "test:github": "vitest run github"
   }
 }
