@@ -232,7 +232,7 @@ export default async function plugin(bb: BbPluginApi) {
       if(request?.type!=='client/turn/requested'||turn?.scope.kind!=='turn')return null;
       const target=request.data.target;
       const inTurn=request.seq>turn.seq&&(target?.kind==='auto'||target?.kind==='steer')&&target.expectedTurnId===turn.scope.turnId;
-      return {requestId:request.data.requestId,turnId:turn.scope.turnId,startedSeq:turn.seq,requestSeq:request.seq,requestAt:request.createdAt,inTurn,completed};
+      return {requestId:request.data.requestId,turnId:turn.scope.turnId,startedSeq:turn.seq,startedAt:turn.createdAt,requestSeq:request.seq,requestAt:request.createdAt,inTurn,completed};
     }catch{return null;}
   }
   async function stopProtected(states:Map<string,VpnState>,snapshot:Awaited<ReturnType<typeof status>>):Promise<Error[]> {
@@ -444,7 +444,7 @@ export default async function plugin(bb: BbPluginApi) {
     const identity=await turnIdentity(threadId);
     const settled=await bb.sdk.threads.get({threadId});
     const ended=identity?.completed;
-    if(!identity||(identity.requestSeq>=identity.startedSeq&&(!identity.inTurn||!Number.isFinite(identity.requestAt)||identity.requestAt>attempt.calledAt))||ended?.type!=='turn/completed'||ended.data.status!=='interrupted'||
+    if(!identity||!Number.isFinite(identity.startedAt)||identity.startedAt>attempt.calledAt||(identity.requestSeq>=identity.startedSeq&&(!identity.inTurn||!Number.isFinite(identity.requestAt)||identity.requestAt>attempt.calledAt))||ended?.type!=='turn/completed'||ended.data.status!=='interrupted'||
        ended.scope.kind!=='turn'||ended.scope.turnId!==identity.turnId||ended.seq<=Math.max(identity.startedSeq,identity.requestSeq)||ended.createdAt<attempt.calledAt||ended.createdAt>attempt.at||
        settled.status!=='idle'||settled.updatedAt>attempt.at||settled.providerId!==attempt.providerId||settled.environmentId!==attempt.environmentId)throw Error('The stopped turn changed or its interruption cannot be verified.');
     const confirmed={...attempt,requestId:identity.requestId,turnId:identity.turnId,updatedAt:settled.updatedAt};

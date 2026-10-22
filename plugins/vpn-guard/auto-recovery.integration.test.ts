@@ -6,7 +6,7 @@ import {statusSchema} from './contract.js';
 
 async function setup(swap?:'request'|'provider',steer?:'same'|'foreign'|'after-stop'){
  let connected=false;let running=true;let updatedAt=0;let sent=0;let providerId='codex';let requestId='request-one';let interruptedAt=0;const steeringAt=Date.now()-1000;
- const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{hosts:{list:async()=>[makeHostResponse({id:'host-a'})]},plugins:{list:async()=>({plugins:[]}) as never},threads:{events:{list:async()=>[...(steer?[{threadId:'thread-one',seq:3,createdAt:steer==='after-stop'?Date.now()+1000:steeringAt,type:'client/turn/requested',scope:{kind:'thread'},data:{requestId:'steering-request',target:{kind:'auto',expectedTurnId:steer==='foreign'?'other-turn':'turn-one'}}}]:[]),...(!running?[{threadId:'thread-one',seq:5,createdAt:interruptedAt,type:'turn/completed',scope:{kind:'turn',turnId:'turn-one'},data:{status:'interrupted'}}]:[]),{threadId:'thread-one',seq:2,type:'turn/started',scope:{kind:'turn',turnId:'turn-one'},data:{}},{threadId:'thread-one',seq:requestId==='request-one'?1:4,type:'client/turn/requested',scope:{kind:'thread'},data:{requestId}}] as never},listRunning:async()=>running?[{id:'thread-one',hostId:'host-a'}]:[],get:async()=>makeThreadResponse({id:'thread-one',providerId,status:running?'active':'idle',updatedAt}),stop:async()=>{running=false;updatedAt=Date.now();interruptedAt=updatedAt;if(swap){updatedAt-=500;if(swap==='provider')providerId='acp-opencode-kimi';else requestId='new-user-request';}return {} as never;},send:async()=>{const hook=fake.harness.registrations.hooks['message.dispatch']!;expect(await hook(makeMessageDispatchHookContext({requestedExecution:{providerId:'codex'},host:{id:'host-a',name:'host-a'}}))).toEqual({action:'proceed'});sent++;return {ok:true,delivery:'sent'} as never;}}},experimental_callHostRpc:async()=>verifiedHostResult(connected?'connected':'disconnected')});
+ const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{hosts:{list:async()=>[makeHostResponse({id:'host-a'})]},plugins:{list:async()=>({plugins:[]}) as never},threads:{events:{list:async()=>[...(steer?[{threadId:'thread-one',seq:3,createdAt:steer==='after-stop'?Date.now()+1000:steeringAt,type:'client/turn/requested',scope:{kind:'thread'},data:{requestId:'steering-request',target:{kind:'auto',expectedTurnId:steer==='foreign'?'other-turn':'turn-one'}}}]:[]),...(!running?[{threadId:'thread-one',seq:5,createdAt:interruptedAt,type:'turn/completed',scope:{kind:'turn',turnId:'turn-one'},data:{status:'interrupted'}}]:[]),{threadId:'thread-one',seq:2,createdAt:0,type:'turn/started',scope:{kind:'turn',turnId:'turn-one'},data:{}},{threadId:'thread-one',seq:requestId==='request-one'?1:4,type:'client/turn/requested',scope:{kind:'thread'},data:{requestId}}] as never},listRunning:async()=>running?[{id:'thread-one',hostId:'host-a'}]:[],get:async()=>makeThreadResponse({id:'thread-one',providerId,status:running?'active':'idle',updatedAt}),stop:async()=>{running=false;updatedAt=Date.now();interruptedAt=updatedAt;if(swap){updatedAt-=500;if(swap==='provider')providerId='acp-opencode-kimi';else requestId='new-user-request';}return {} as never;},send:async()=>{const hook=fake.harness.registrations.hooks['message.dispatch']!;expect(await hook(makeMessageDispatchHookContext({requestedExecution:{providerId:'codex'},host:{id:'host-a',name:'host-a'}}))).toEqual({action:'proceed'});sent++;return {ok:true,delivery:'sent'} as never;}}},experimental_callHostRpc:async()=>verifiedHostResult(connected?'connected':'disconnected')});
  await plugin(fake.bb);await fake.harness.behavior.callRpc('setHosts',{hostIds:['host-a']});await fake.harness.behavior.callRpc('setMode',{mode:'enforce'});
  return {fake,connect:()=>{connected=true;},change:()=>{updatedAt=Date.now()+10_000;},sent:()=>sent};
 }
@@ -124,4 +124,22 @@ it('recovers all 105 actually stopped threads after reload even though UI histor
  const reloaded=await fake.harness.lifecycle.reload(plugin);connected=true;const service=reloaded.harness.behavior.runService('reconcile');
  try{await vi.waitFor(()=>expect(sends.size).toBe(105),{timeout:3000});expect(sends.has('thread-0')).toBe(true);expect(await reloaded.bb.storage.kv.get('thread-resume-claims-v1')).toHaveLength(105);}
  finally{service.controller.abort();await service.done;await reloaded.harness.lifecycle.dispose();}
+});
+
+it.each([1400,undefined,NaN])('rejects a post-stop turn with start time %s before acquiring ownership',async startedAt=>{
+ const t=await setup();t.connect();
+ const proofs=await t.fake.bb.storage.kv.get('thread-stop-proofs-v1') as Array<{at:number;calledAt:number}>;
+ await t.fake.bb.storage.kv.set('thread-stop-proofs-v1',proofs.map(p=>({...p,calledAt:1000,at:2000})));
+ const recovery=await t.fake.bb.storage.kv.get('automatic-stop-recovery-v1') as Array<{at:number}>;
+ await t.fake.bb.storage.kv.set('automatic-stop-recovery-v1',recovery.map(p=>({...p,at:2000})));
+ const reloaded=await t.fake.harness.lifecycle.reload(plugin);let sends=0;
+ reloaded.harness.sdk.stub('threads.get',async()=>makeThreadResponse({id:'thread-one',providerId:'codex',status:'idle',updatedAt:1500}));
+ reloaded.harness.sdk.stub('threads.events.list',async ({types})=>[
+  {threadId:'thread-one',seq:42,createdAt:1500,type:'turn/completed',scope:{kind:'turn',turnId:'turn-new'},data:{status:'interrupted'}},
+  {threadId:'thread-one',seq:41,createdAt:startedAt,type:'turn/started',scope:{kind:'turn',turnId:'turn-new'},data:{}},
+  {threadId:'thread-one',seq:40,createdAt:1300,type:'client/turn/requested',scope:{kind:'thread'},data:{requestId:'request-new',target:{kind:'new-turn'}}},
+ ].filter(e=>(types as readonly string[] | undefined)?.includes(e.type)) as never);
+ reloaded.harness.sdk.stub('threads.send',async()=>{sends++;return {ok:true,delivery:'sent'} as never;});
+ try{await expect(reloaded.harness.behavior.callRpc('resumeThread',{threadId:'thread-one',stoppedAt:2000})).rejects.toThrow('interruption cannot be verified');expect(sends).toBe(0);expect(await reloaded.bb.storage.kv.get('thread-resume-claims-v1')).toBeUndefined();}
+ finally{await reloaded.harness.lifecycle.dispose();}
 });
