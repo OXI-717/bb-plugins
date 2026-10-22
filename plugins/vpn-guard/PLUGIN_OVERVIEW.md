@@ -25,4 +25,4 @@ Enable the persisted Pooler linkage after upgrading both plugins. Guard covers C
 
 [Единая защита / Unified protection](../../docs/unified-protection.md): VPN evidence /2, optional automation controller, independent pause reasons and explicit recovery. VPN `/2` evidence is mandatory; the optional controller integration defaults off.
 
-Automatic recovery uses ordinary BB admission and preserves manual blocks and newer user activity. See [recovery policy / правила продолжения](../../docs/pool-errors.md).
+Automatic recovery uses ordinary BB admission and preserves manual blocks and newer user activity. Messages explicitly addressed to the same running turn before the Guard stop (including child notifications) remain part of that interrupted turn; later requests or another turn still prevent automatic continuation. See [recovery policy / правила продолжения](../../docs/pool-errors.md).
