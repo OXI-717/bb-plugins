@@ -1,3 +1,4 @@
+import {setupMachineMarks} from './machine-marks-server';
 import {setupIntegrations} from './integrations-server.js';
 import {taskLinkDirective, taskLinkInstructions} from './task-links.js';
 import {setupChatWatch} from './chat-watch-server.js';
@@ -472,6 +473,7 @@ function parseGithubRepoFromRemote(
 }
 
 export default async function plugin(bb: BbPluginApi) {
+  setupMachineMarks(bb);
   bb.agents.configure(context => ({tools:[],skills:[],instructions:taskLinkInstructions(context.project.id)}));
   const integrations=setupIntegrations(bb);
   const workspace=await setupWorkspace(bb,integrations);
