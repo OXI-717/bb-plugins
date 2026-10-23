@@ -1,4 +1,5 @@
-import {resolveMachineMark,type MachineHost,type MachineMarksConfig} from './machine-marks';
+import {resolveMachineMark,machineMarkStyle,type MachineHost,type MachineMarksConfig} from './machine-marks';
+import {createMachineGlyph} from './machine-glyph';
 
 type ThreadMachine={id:string;host:MachineHost|null};
 export function createMachineMarkStore(){
@@ -31,13 +32,14 @@ export function mountMachineMarks(doc:Document,store:ReturnType<typeof createMac
    let button=Array.from(owned).find(b=>b.parentElement===title.parentElement);
    if(!button){
     button=doc.createElement('button');button.type='button';button.dataset.oxiMachineMark='';
-    Object.assign(button.style,{position:'relative',zIndex:'10',pointerEvents:'auto',flex:'0 0 16px',width:'16px',height:'20px',padding:'0',border:'0',background:'transparent',color:'inherit',fontSize:'12px',lineHeight:'20px',cursor:'help'});
+    Object.assign(button.style,{position:'relative',zIndex:'10',pointerEvents:'auto',display:'inline-flex',alignItems:'center',justifyContent:'center',flex:'0 0 20px',width:'20px',height:'20px',marginInlineEnd:'6px',padding:'0',border:'0',cursor:'help'});
     button.addEventListener('pointerenter',()=>show(button!));button.addEventListener('pointerleave',hide);button.addEventListener('focus',()=>show(button!));button.addEventListener('blur',hide);
     button.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();show(button!);});
     button.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();});
     owned.add(button);title.before(button);
    }
-   if(button.textContent!==mark.icon)button.textContent=mark.icon;
+   if(button.dataset.oxiMachineIcon!==mark.icon){button.replaceChildren(createMachineGlyph(doc,mark.icon));button.dataset.oxiMachineIcon=mark.icon;}
+   if(button.dataset.oxiMachineKind!==mark.kind){Object.assign(button.style,machineMarkStyle(mark.kind));button.dataset.oxiMachineKind=mark.kind;}
    if(button.getAttribute('aria-label')!==mark.label){button.setAttribute('aria-label',mark.label);button.title=mark.label;if(active===button)show(button);}
    wanted.add(button);
   }
