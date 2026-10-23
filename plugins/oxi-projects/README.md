@@ -143,3 +143,11 @@ remaining original deadline; it never publishes truncated metadata. This fallbac
 is not used to bypass an authorization failure.
 
 `npm run check` includes `npm run test:github` for these failure paths.
+
+## Thread machine marks
+
+In plugin settings, open **Значки машин**, enable marks and assign each enrolled machine a role (local computer, primary server or other) and an optional icon from the fixed palette. Roles are bound to BB host IDs; names may change. Unconfigured machines use the other-server mark; threads without a known machine are never classified as local. Settings retain absent host assignments and reject concurrent stale saves. Marks start disabled.
+
+The sidebar decoration is additive: thread names, provider icons, status glyphs and navigation are retained. The header shows the current thread machine; hover, focus or tap a mark for its machine name. A content script targets native `data-sidebar-thread-id` rows and `.bb-thread-title`; unsupported layouts are left untouched. This DOM integration is version-sensitive and must be checked in the running BB after updates. The plugin removes its marks, tooltip, observer and event listeners on unload. No per-row network requests or title updates are issued.
+
+Malformed saved `threadMachineMarks` JSON hides marks and appears as a settings error. Machine-list/read/save failure is distinct from an empty successful list. Repair requires explicitly preparing a reset and saving it; no automatic reset occurs.

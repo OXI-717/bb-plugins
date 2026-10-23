@@ -13,4 +13,7 @@ it('keeps new-thread compose free of project homepage sections while retaining p
   expect(app.threadPanelActions.some(action => action.id === 'project-task-detail')).toBe(true);
   expect(app.threadPanelActions.some(action => action.id === 'taskboard-panel')).toBe(true);
   expect(app.newThreadPanelActions.map(action => action.id)).toEqual(['taskboard-new-thread-panel']);
+  expect(app.contentScripts.some(script=>script.id==='thread-machine-marks')).toBe(true);
+  expect(app.threadHeaderActions.some(action=>action.id==='machine-mark')).toBe(true);
+  expect(app.settingsSections.some(section=>section.id==='machine-marks')).toBe(true);
 });

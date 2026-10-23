@@ -1,3 +1,4 @@
+import {registerMachineMarks} from './machine-marks-view';
 import {ProjectTaskLink} from './task-links-view';
 import {taskItemSubPath, parseTaskPanelTarget, TASK_DETAIL_PANEL_ID} from './task-links';
 import {browseCache,visibleProjectItems,recoverBrowseFailure} from './browse-cache';
@@ -7154,6 +7155,7 @@ function TaskboardSettingsInfo() {
 }
 
 export default definePluginApp(app => {
+  registerMachineMarks(app);
   app.slots.messageDirective({id:'project-task',component:ProjectTaskLink});
   app.slots.threadPanelAction({id:TASK_DETAIL_PANEL_ID,title:'Задача проекта',icon:'Target',component:ProjectTaskDetailPanel,layout:'flush'});
   app.composer.customize({
