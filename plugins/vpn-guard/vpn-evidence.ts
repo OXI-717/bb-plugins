@@ -7,6 +7,8 @@ export type VpnEvidence = {
   updatedAt: number | null;
   probeAt: number | null;
 };
+export const VPN_FILE_TTL_MS=90_000;
+export const VPN_PROBE_TTL_MS=390_000;
 const reasons = new Set(['ok','no_route','no_core','probe_failed','probe_stale','healing']);
 const object = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 const integer = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
@@ -16,7 +18,7 @@ const fresh = (v: unknown, now: number, ttl: number) => integer(v) && now-v*1000
 export function evaluateVpnEvidence(payload: unknown, nowMs: number): VpnEvidence {
   const invalid = (reason = 'invalid_evidence'): VpnEvidence => ({state:'unknown',assurance:'invalid',reason,updatedAt:null,probeAt:null});
   if (!Number.isFinite(nowMs) || !object(payload) || !integer(payload.updated_unix) || typeof payload.state !== 'string' || !['connected','disconnected'].includes(payload.state)) return invalid();
-  if (payload.schema !== 'oxi-vpnks/vpn-state/2' || !fresh(payload.updated_unix,nowMs,90)) return invalid('file_stale_or_schema');
+  if (payload.schema !== 'oxi-vpnks/vpn-state/2' || !fresh(payload.updated_unix,nowMs,VPN_FILE_TTL_MS/1000)) return invalid('file_stale_or_schema');
   const tunnel = payload.tunnel, attempt = payload.last_probe_attempt;
   if (!text(payload.reason) || !reasons.has(payload.reason) || payload.coverage !== 'ipv4' ||
       !text(payload.guard_version,64) || !object(tunnel) || !text(tunnel.iface,64) || !integer(tunnel.core_pid) ||
@@ -29,7 +31,7 @@ export function evaluateVpnEvidence(payload: unknown, nowMs: number): VpnEvidenc
   const evidence: VpnEvidence = {state:payload.state as VpnState,assurance:'unverified',reason:payload.reason,updatedAt:payload.updated_unix*1000,probeAt:integer(payload.traffic_probe_unix)?payload.traffic_probe_unix*1000:null};
   if (payload.state === 'disconnected') return evidence;
   if (tunnel.iface !== 'utun244' || tunnel.core_pid <= 0 || !payload.traffic_probe_ok ||
-      payload.epoch_hash !== payload.traffic_probe_epoch_hash || !fresh(payload.traffic_probe_unix,nowMs,390) ||
+      payload.epoch_hash !== payload.traffic_probe_epoch_hash || !fresh(payload.traffic_probe_unix,nowMs,VPN_PROBE_TTL_MS/1000) ||
       (payload.traffic_probe_unix as number) > payload.updated_unix) return invalid('probe_unverified');
   return {...evidence,assurance:'verified_ipv4'};
 }

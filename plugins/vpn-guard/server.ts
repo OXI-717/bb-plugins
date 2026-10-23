@@ -1,3 +1,4 @@
+import {readRemoteEvidence} from './remote-evidence.js';
 import {randomUUID} from 'node:crypto';
 import {automationStatusSchema,type AutomationStatus} from './automation-contract.js';
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
@@ -129,9 +130,9 @@ export default async function plugin(bb: BbPluginApi) {
     tail=run.then(()=>undefined,()=>undefined);
     return run;
   }
+  const readHost=(hostId:string)=>readRemoteEvidence(timeoutMs=>host.call('readState',null,{hostId,timeoutMs,signal:lifetime.signal}),rpc=>{if(!disposed)bb.log.warn(`VPN Guard host status RPC failed: ${rpc.category} (${rpc.elapsedMs}ms)`);});
   async function vpn(hostId:string):Promise<VpnState> {
-    try {const result=await host.call('readState',null,{hostId,timeoutMs:1500});return result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state;}
-    catch {return 'unknown';}
+    const result=await readHost(hostId);return result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state;
   }
   const directHost = (hostId:string) => config.hostIds.includes(hostId) && config.directHostIds.includes(hostId);
   async function networkState(hostId:string):Promise<VpnState> {
@@ -151,12 +152,12 @@ export default async function plugin(bb: BbPluginApi) {
     catch {listed=[];}
     const selected=new Set(config.hostIds);
     const hosts=await Promise.all(listed.map(async h=>{
-      let result:Awaited<ReturnType<typeof host.call<'readState'>>>|undefined;
-      if(selected.has(h.id)&&!directHost(h.id))try{result=await host.call('readState',null,{hostId:h.id,timeoutMs:1500});}catch{}
-      return {id:h.id,name:h.name,selected:selected.has(h.id),available:!directHost(h.id)||h.status==='connected',networkMode:directHost(h.id)?'direct' as const:'vpn-required' as const,evidence:result?.evidence??null,
+      let result:Awaited<ReturnType<typeof readHost>>|undefined;
+      if(selected.has(h.id)&&!directHost(h.id))result=await readHost(h.id);
+      return {id:h.id,name:h.name,selected:selected.has(h.id),available:!directHost(h.id)||h.status==='connected',networkMode:directHost(h.id)?'direct' as const:'vpn-required' as const,evidence:result?.evidence??null,rpc:result?.rpc??null,
         vpn:selected.has(h.id)&&!directHost(h.id)?(!result?'unknown':result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state):null};
     }));
-    for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,networkMode:directHost(id)?'direct' as const:'vpn-required' as const,vpn:'unknown',evidence:null});
+    for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,networkMode:directHost(id)?'direct' as const:'vpn-required' as const,vpn:'unknown',evidence:null,rpc:null});
     let pool:{linked:boolean|null,vpnPolicyVersion:2|null,error:string|null}={linked:null,vpnPolicyVersion:null,error:null};
     try {const raw=await poolPolicy();pool={linked:raw.vpnGuardEnabled,vpnPolicyVersion:raw.vpnPolicyVersion,error:null};}catch{pool.error='Pooler linkage unavailable';}
     return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,directHostIds:config.directHostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,automationHostId:config.automationHostId,
