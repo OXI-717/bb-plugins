@@ -1,6 +1,7 @@
 import {z} from 'zod';
 import type {VpnEvidence,VpnState} from './vpn-evidence.js';
-import {VPN_FILE_TTL_MS,VPN_PROBE_TTL_MS} from './vpn-evidence.js';
+const VPN_FILE_TTL_MS=90_000;
+const VPN_PROBE_TTL_MS=390_000;
 
 export const rpcDiagnosticSchema=z.object({category:z.enum(['ok','timeout','host_unavailable','cancelled','rpc_error']),elapsedMs:z.number().int().nonnegative()});
 type Diagnostic=z.infer<typeof rpcDiagnosticSchema>;
