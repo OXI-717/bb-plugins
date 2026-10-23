@@ -1,4 +1,4 @@
-import {createGuardNetworkCheck} from "./guard-network.js";
+import {createGuardNetworkCheck,bindGuardNetworkDecision,hostGuardDecisionSchema} from "./guard-network.js";
 import {z} from "zod";
 import { describeTransportError } from "./transport-diagnostics.js";
 import { registerNetworkRetry } from "./network-retry.js";
@@ -36,7 +36,8 @@ import {
 import { PoolOperations } from "./operations.js";
 import { registerUsageSource } from "./usage-source.js";
 import { accountPoolRpcContract, createRpcHandlers } from "./rpc.js";
-import { openAccountBrowser } from "./browser-profiles.js";
+import { openAccountBrowser, listBrowserProfiles } from "./browser-profiles.js";
+import {createBrowserRouter,browserHostContract} from "./browser-host.js";
 import { ClaudeOAuthLogin } from "./oauth-login.js";
 import { CodexDeviceLogin } from "./codex-device-login.js";
 import {
@@ -106,6 +107,7 @@ export function createAccountPoolPlugin(
       get: () => currentSettings,
       set: async (input) => {
         const update = accountPoolConfigSetInputSchema.parse(input);
+        if(update.browserHostId && !(await bb.sdk.hosts.list()).some(h=>h.id===update.browserHostId))throw Error('Account browser host must be enrolled.');
         const next = accountPoolConfigSchema.parse({
           ...currentSettings,
           ...update,
@@ -158,7 +160,10 @@ export function createAccountPoolPlugin(
       guardCheck:createGuardNetworkCheck(async (provider,signal)=>{
         const hostId=(await bb.sdk.system.config({signal})).primaryHostId;
         if(!hostId) throw new Error("Pool server machine unknown");
-        return bb.sdk.plugins.callRpc({pluginId:"vpn-guard",method:"networkDecision",input:{hostId,provider},outputSchema:z.unknown(),signal});
+        const decision=await bb.sdk.plugins.callRpc({pluginId:"vpn-guard",method:"networkDecisionV2",input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal});
+        // Rebind after I/O: migration during the RPC cannot grant another host's egress.
+        if((await bb.sdk.system.config({signal})).primaryHostId!==hostId)throw Error('Pool server machine changed');
+        return bindGuardNetworkDecision(decision,hostId);
       }),
       now,
       refreshUrl: options.refreshUrl,
@@ -249,6 +254,16 @@ export function createAccountPoolPlugin(
         "Add and enable a Claude or Codex account with `bb pool account add`.",
       );
     }
+    const browserHost=bb.hosts.experimental_client({contract:browserHostContract});
+    const browser=createBrowserRouter({
+      getHostId:()=>config.get().browserHostId,
+      listHosts:()=>bb.sdk.hosts.list(),accounts:()=>operations.list(),
+      callHost:(method,input,hostId)=>method==='open'
+        ? browserHost.call('open',browserHostContract.open.input.parse(input),{hostId,timeoutMs:60000})
+        : browserHost.call('list',browserHostContract.list.input.parse(input),{hostId,timeoutMs:10000}),
+      localOpen:async(query,url)=>openAccountBrowser({accounts:await operations.list(),query,url,dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId,vpnStatusFile:config.get().vpnStatusFile}),
+      localList:async()=>listBrowserProfiles({accounts:await operations.list(),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
+    });
     bb.rpc.register(
       accountPoolRpcContract,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
@@ -279,15 +294,11 @@ export function createAccountPoolPlugin(
       }, async () => (await bb.sdk.projects.list({ includePersonal: true })).map(project => ({ id: project.id, name: project.name })), async ({ accountId, url }) => {
         const inventory = await operations.list();
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
-        await openAccountBrowser({
-          accounts: inventory, query: accountId, url,
-          dataDir: bb.server.experimental_dataDir, pluginId: bb.pluginId,
-          vpnStatusFile: config.get().vpnStatusFile,
-        });
+        await browser.open(accountId,url);
         return { opened: true };
       }),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients);
+    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser);
     registerUsageSource(bb, hub);
     const proxiedHealth = async (provider: PoolProvider) =>
       (await operations.isRoutingEnabled(provider)) &&

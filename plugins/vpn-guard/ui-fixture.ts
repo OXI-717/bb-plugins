@@ -3,9 +3,9 @@ import type { statusSchema } from './contract.js';
 
 export function guardFixture(): z.infer<typeof statusSchema> {
   return {
-    mode:'enforce',manualBlock:false,serverHostId:'demo-server',hostIds:['demo-server'],
+    mode:'enforce',directHostIds:[],manualBlock:false,serverHostId:'demo-server',hostIds:['demo-server'],
     suspendNativePluginsGlobally:false,
-    coordinateAutomations:false,automationControllerPath:null,
+    coordinateAutomations:false,automationControllerPath:null,automationHostId:null,
     hosts:[{id:'demo-server',name:'Demo machine',selected:true,available:true,vpn:'connected',evidence:{state:'connected',assurance:'verified_ipv4',reason:'ok',updatedAt:Date.now(),probeAt:Date.now()}}],
     protectedProviders:['codex','claude-code','cursor','devin'],
     ownedDisabledPlugins:[],ambiguousPluginChanges:[],stoppedThreadIds:[],events:[],limitations:[],

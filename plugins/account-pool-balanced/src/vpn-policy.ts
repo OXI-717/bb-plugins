@@ -60,7 +60,7 @@ export function createVpnPolicy(
   settings: () => AccountPoolConfig,
   now: () => number,
   injectedPayload?: (nowMs:number) => Promise<unknown>,
-  guardCheck?: (provider:PoolProvider)=>Promise<void>,
+  guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>,
 ) {
   const evidence=async():Promise<VpnEvidence>=>{
     try {
@@ -75,7 +75,7 @@ export function createVpnPolicy(
     async assert(provider: PoolProvider) {
       if(settings().vpnGuardEnabled && requiresGuardCheck(provider)) {
         if(!guardCheck) throw new GuardRequiredError(provider,true);
-        await guardCheck(provider);
+        if(await guardCheck(provider)==='direct')return;
       }
       if (!settings().vpnOnlyProviders.some(value => value === provider)) return;
       const current=await evidence();

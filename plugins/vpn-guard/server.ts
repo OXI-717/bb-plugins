@@ -27,7 +27,7 @@ const LIMITATIONS = [
   'VPN Guard is BB admission control, not a packet firewall.',
 ];
 type Configuration = z.infer<typeof configurationSchema>;
-const initialConfiguration: Configuration = {mode:'observe',manualBlock:false,hostIds:[],suspendNativePluginsGlobally:false,coordinateAutomations:false,automationControllerPath:null};
+const initialConfiguration: Configuration = {mode:'observe',manualBlock:false,directHostIds:[],hostIds:[],suspendNativePluginsGlobally:false,coordinateAutomations:false,automationControllerPath:null,automationHostId:null};
 
 export default async function plugin(bb: BbPluginApi) {
   const storedInstance=await bb.storage.kv.get<string>('protection-instance-v1');
@@ -105,6 +105,7 @@ export default async function plugin(bb: BbPluginApi) {
   const loaded=configurationSchema.safeParse(await bb.storage.kv.get<unknown>(CONFIG));
   let config:Configuration=loaded.success ? loaded.data : initialConfiguration;
   if ((config.mode==='enforce' || config.manualBlock) && config.hostIds.length===0) config={...config,mode:'observe',manualBlock:false};
+  if(config.suspendNativePluginsGlobally || config.directHostIds.some(id=>!config.hostIds.includes(id)))config={...config,directHostIds:[]};
   if(loaded.success)await bb.storage.kv.set(CONFIG,config);
   const storedOwned=z.array(z.string()).safeParse(await bb.storage.kv.get<unknown>(JOURNAL));
   const storedPending=z.array(z.string()).safeParse(await bb.storage.kv.get<unknown>(PENDING));
@@ -132,6 +133,12 @@ export default async function plugin(bb: BbPluginApi) {
     try {const result=await host.call('readState',null,{hostId,timeoutMs:1500});return result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state;}
     catch {return 'unknown';}
   }
+  const directHost = (hostId:string) => config.hostIds.includes(hostId) && config.directHostIds.includes(hostId);
+  async function networkState(hostId:string):Promise<VpnState> {
+    if(!directHost(hostId)) return vpn(hostId);
+    try {return (await bb.sdk.hosts.list()).some(h=>h.id===hostId&&h.status==='connected')?'connected':'unknown';}
+    catch {return 'unknown';}
+  }
   const poolPolicySchema=z.object({vpnGuardEnabled:z.boolean(),vpnPolicyVersion:z.literal(2),vpnOnlyProviders:z.array(z.string())});
   async function poolPolicy() {
     return poolPolicySchema.parse(await bb.sdk.plugins.callRpc({pluginId:'account-pool-balanced',method:'config.get',input:null,outputSchema:poolPolicySchema,signal:AbortSignal.timeout(1000)}));
@@ -145,14 +152,14 @@ export default async function plugin(bb: BbPluginApi) {
     const selected=new Set(config.hostIds);
     const hosts=await Promise.all(listed.map(async h=>{
       let result:Awaited<ReturnType<typeof host.call<'readState'>>>|undefined;
-      if(selected.has(h.id))try{result=await host.call('readState',null,{hostId:h.id,timeoutMs:1500});}catch{}
-      return {id:h.id,name:h.name,selected:selected.has(h.id),available:true,evidence:result?.evidence??null,
-        vpn:selected.has(h.id)?(!result?'unknown':result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state):null};
+      if(selected.has(h.id)&&!directHost(h.id))try{result=await host.call('readState',null,{hostId:h.id,timeoutMs:1500});}catch{}
+      return {id:h.id,name:h.name,selected:selected.has(h.id),available:!directHost(h.id)||h.status==='connected',networkMode:directHost(h.id)?'direct' as const:'vpn-required' as const,evidence:result?.evidence??null,
+        vpn:selected.has(h.id)&&!directHost(h.id)?(!result?'unknown':result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state):null};
     }));
-    for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,vpn:'unknown',evidence:null});
+    for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,networkMode:directHost(id)?'direct' as const:'vpn-required' as const,vpn:'unknown',evidence:null});
     let pool:{linked:boolean|null,vpnPolicyVersion:2|null,error:string|null}={linked:null,vpnPolicyVersion:null,error:null};
     try {const raw=await poolPolicy();pool={linked:raw.vpnGuardEnabled,vpnPolicyVersion:raw.vpnPolicyVersion,error:null};}catch{pool.error='Pooler linkage unavailable';}
-    return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,
+    return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,directHostIds:config.directHostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,automationHostId:config.automationHostId,
       hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],stopHistory:[...stopHistory],events:journal.snapshot(),limitations:LIMITATIONS,pool,automations:{status:automationStatus,error:automationError,held:automationBinding!==null||bindingCorrupt,needsReconcile:automationDesired===null,busy:automationBusy||automationTask!==null,lastAttemptAt:lastAutomationAttempt,lastSuccessAt:lastAutomationSuccess,retryAt:automationRetryAt}};
   }
   async function saveConfig(next:Configuration) {
@@ -192,7 +199,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function assertNativeRecovery(automatic:boolean) {
     if(config.manualBlock) throw new Error("Release the manual block before restoring native plugins.");
-    if((automatic&&config.hostIds.length===0)||(await Promise.all(config.hostIds.map(vpn))).some(state=>state!=='connected')) throw new Error('Selected machines must be connected before restoring native plugins.');
+    if((automatic&&config.hostIds.length===0)||(await Promise.all(config.hostIds.map(networkState))).some(state=>state!=='connected')) throw new Error('Selected machines must be connected before restoring native plugins.');
   }
   async function restoreOwned(automatic=false) {
     await assertNativeRecovery(automatic);
@@ -286,7 +293,7 @@ export default async function plugin(bb: BbPluginApi) {
     const report=await controller('status',binding);
     if(automatic&&(report.holds.length>0||report.legacyBlocked||!report.recoveryPending))return;
     if(!report.restoreRevision)throw Error('Automation recovery snapshot unavailable; retry required');
-    if(await vpn(binding.hostId)!=='connected')throw Error('Release protection blocks and verify VPN before resuming');
+    if(await networkState(binding.hostId)!=='connected')throw Error('Release protection blocks and verify VPN before resuming');
     const restored=await controller('resume',binding,true,report.restoreRevision,automatic);
     if(restored.errors.length||restored.blocked||restored.recoveryPending)throw Error('Automation recovery is incomplete; inspect controller status');
     event({kind:'automation_restored',hostId:binding.hostId});
@@ -294,12 +301,13 @@ export default async function plugin(bb: BbPluginApi) {
   async function coordinate(snapshot:Awaited<ReturnType<typeof status>>) {
     assertAutomationCurrent();
     if(bindingCorrupt)throw Error('Automation ownership journal is malformed; manual review required');
-    const server=snapshot.hosts.find(h=>h.id===snapshot.serverHostId);
-    const wants=config.coordinateAutomations&&!!server?.selected&&(config.manualBlock||(config.mode==='enforce'&&server.vpn!=='connected'));
+    const controllerHostId=snapshot.automationHostId??snapshot.serverHostId;
+    const server=snapshot.hosts.find(h=>h.id===controllerHostId);
+    const wants=config.coordinateAutomations&&!!server?.selected&&(config.manualBlock||(config.mode==='enforce'&&!(server.networkMode==='direct'?server.available:server.vpn==='connected')));
     try {
       if(wants) {
-        if(!snapshot.serverHostId||!config.automationControllerPath)throw Error('Automation controller and server host must be configured');
-        const binding={hostId:snapshot.serverHostId,executable:config.automationControllerPath};
+        if(!controllerHostId||!config.automationControllerPath)throw Error('Automation controller host and executable must be configured');
+        const binding={hostId:controllerHostId,executable:config.automationControllerPath};
         if(automationBinding&&(automationBinding.hostId!==binding.hostId||automationBinding.executable!==binding.executable))throw Error('Release the previous controller hold before changing its binding');
         const newlyHeld=automationBinding===null;
         if(!automationBinding){await bb.storage.kv.set('automation-hold-binding-v1',binding);automationBinding=binding;}
@@ -316,10 +324,10 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.storage.kv.set('automation-hold-binding-v1',null);automationBinding=null;
         assertAutomationCurrent();event({kind:'automation_release',hostId:releasedHost});
         if(report.errors.length)automationError='Automation recovery is incomplete; inspect controller status';
-      } else if(config.coordinateAutomations&&snapshot.serverHostId&&config.automationControllerPath) {
-        await controller('status',{hostId:snapshot.serverHostId,executable:config.automationControllerPath});
+      } else if(config.coordinateAutomations&&controllerHostId&&config.automationControllerPath) {
+        await controller('status',{hostId:controllerHostId,executable:config.automationControllerPath});
       }
-      if(!wants&&!automationBinding&&config.coordinateAutomations&&!config.manualBlock&&server?.selected&&server.vpn==='connected'&&config.automationControllerPath&&automationStatus?.recoveryPending) {
+      if(!wants&&!automationBinding&&config.coordinateAutomations&&!config.manualBlock&&server?.selected&&(server.networkMode==='direct'?server.available:server.vpn==='connected')&&config.automationControllerPath&&automationStatus?.recoveryPending) {
         await resumeAutomations({hostId:server.id,executable:config.automationControllerPath},true);
       }
       assertAutomationCurrent();automationDesired=wants;lastCoordinatedVersion=automationPolicyVersion;
@@ -327,14 +335,14 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function reconcile() {
     const snapshot=await status();
-    const states=new Map(snapshot.hosts.filter(h=>h.selected).map(h=>[h.id,h.vpn??'unknown'] as const));
+    const states=new Map(snapshot.hosts.filter(h=>h.selected).map(h=>[h.id,h.networkMode==='direct'?(h.available?'connected':'unknown'):h.vpn??'unknown'] as const));
     const failures:Error[]=[];
-    for(const observation of snapshot.hosts.filter(h=>h.selected)) {
+    for(const observation of snapshot.hosts.filter(h=>h.selected&&h.networkMode!=='direct')) {
       const reason=observation.vpn==='connected'?undefined:!observation.available?'host_catalog_unavailable':!observation.evidence?'host_rpc_failed':stopReasonSchema.safeParse(observation.evidence.reason).success?stopReasonSchema.parse(observation.evidence.reason):'invalid_evidence';
       const key=`${observation.vpn}:${reason??'ok'}`;
       if(observedVpn.get(observation.id)!==key){automationPolicyVersion++;automationRetryAt=null;observedVpn.set(observation.id,key);event({kind:observation.vpn==='connected'?'vpn_connected':'vpn_blocked',hostId:observation.id,reason});}
     }
-    for(const id of observedVpn.keys())if(!config.hostIds.includes(id))observedVpn.delete(id);
+    for(const id of observedVpn.keys())if(!config.hostIds.includes(id)||directHost(id))observedVpn.delete(id);
     const vpnUnavailable=states.size===0||[...states.values()].some(state=>state!=='connected');
     const blocking=config.manualBlock||(config.mode==='enforce'&&vpnUnavailable);
     if(config.suspendNativePluginsGlobally&&blocking) {
@@ -363,6 +371,8 @@ export default async function plugin(bb: BbPluginApi) {
     if(failures.length) throw new AggregateError(failures,`VPN Guard reconcile failed: ${failures.map(error=>error.message).join('; ')}`);
   }
   async function update(next:Configuration) {
+    if(next.directHostIds.length&&next.suspendNativePluginsGlobally)throw Error('Direct hosts require host-scoped protection; global native suspension would block unrelated machines.');
+    if(next.directHostIds.some(id=>!next.hostIds.includes(id)))throw Error('Direct host must be selected.');
     if((next.mode==='enforce' || next.manualBlock) && next.hostIds.length===0) throw new Error('Select at least one machine before enforcement.');
     await saveConfig(next);
     await reconcile();
@@ -370,11 +380,27 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function setHosts(hostIds:string[]) {
     const unique=[...new Set(hostIds)];
+    if(config.coordinateAutomations&&config.automationHostId&&!unique.includes(config.automationHostId))throw Error('Disconnect the automation controller before removing its host');
     if(unique.some(id=>!config.hostIds.includes(id))) {
       const available=new Set((await bb.sdk.hosts.list()).map(h=>h.id));
       if(unique.some(id=>!available.has(id) && !config.hostIds.includes(id))) throw new Error('A newly selected machine is not enrolled.');
     }
-    return update({...config,hostIds:unique});
+    return update({...config,hostIds:unique,directHostIds:config.directHostIds.filter(id=>unique.includes(id))});
+  }
+  async function setAutomationHost(hostId:string|null) {
+    if(hostId===config.automationHostId)return status();
+    if(automationBinding||automationBusy||automationTask)throw Error('Release the controller hold and wait until it is not busy before changing its host');
+    const resolved=hostId??(await bb.sdk.system.config()).primaryHostId;
+    const enrolled=await bb.sdk.hosts.list();
+    if(!resolved||!config.hostIds.includes(resolved)||!enrolled.some(h=>h.id===resolved))throw Error('Automation host must be selected and enrolled');
+    automationStatus=null;automationError=null;
+    return update({...config,automationHostId:hostId});
+  }
+  async function setDirectHosts(hostIds:string[]) {
+    const unique=[...new Set(hostIds)];
+    const enrolled=new Set((await bb.sdk.hosts.list()).map(h=>h.id));
+    if(unique.some(id=>!config.hostIds.includes(id)||!enrolled.has(id)))throw Error('Direct host must be selected and enrolled.');
+    return update({...config,directHostIds:unique});
   }
   async function acknowledgeAmbiguous(pluginId:string,reviewed:boolean) {
     if(!reviewed) throw new Error('Review the plugin state before acknowledging this journal entry.');
@@ -404,18 +430,23 @@ export default async function plugin(bb: BbPluginApi) {
       let available=false;
       try {available=(await bb.sdk.hosts.list()).some(h=>h.id===hostId);}
       catch { /* unavailable host catalog fails closed */ }
-      const state=available?await vpn(hostId):'unknown';
+      const state=available?await networkState(hostId):'unknown';
       if(version!==policyVersion) continue;
       return state==='connected'?{action:'proceed'}:{action:'wait',reason:`VPN Guard: ${state} on selected host`};
     }
   });
-  async function networkDecision(hostId:string,provider:string) {
+  async function networkDecision(hostId:string,provider:string,versioned=false) {
     while(true) {
       const version=policyVersion;
-      const decision=(allowed:boolean,reason:'manual_block'|'vpn_unavailable'|'outside_scope'|'observe'|'connected'|'restore_required')=>({schema:'bb-vpn-guard/network-decision/1' as const,allowed,reason});
+      const decision=(allowed:boolean,reason:'manual_block'|'vpn_unavailable'|'outside_scope'|'observe'|'connected'|'restore_required'|'direct')=>versioned?({schema:'bb-vpn-guard/network-decision/2' as const,hostId,allowed,reason}):({schema:'bb-vpn-guard/network-decision/1' as const,allowed:reason==='direct'?false:allowed,reason:reason==='direct'?'vpn_unavailable' as const:reason});
       if(owned.has(nativePluginFor(provider)) || pending.has(nativePluginFor(provider))) return decision(false,'restore_required');
       if(!config.hostIds.includes(hostId)) return decision(true,'outside_scope');
       if(config.manualBlock) return decision(false,'manual_block');
+      if(directHost(hostId)) {
+        const ready=await networkState(hostId);
+        if(version!==policyVersion)continue;
+        return ready==='connected'?decision(true,'direct'):decision(false,'vpn_unavailable');
+      }
       if(config.mode==='observe') return decision(true,'observe');
       {
         try {
@@ -425,7 +456,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       let available=false;
       try {available=(await bb.sdk.hosts.list()).some(h=>h.id===hostId);} catch {}
-      const state=available?await vpn(hostId):'unknown';
+      const state=available?await networkState(hostId):'unknown';
       if(version!==policyVersion) continue;
       return state==='connected'?decision(true,'connected'):decision(false,'vpn_unavailable');
     }
@@ -464,7 +495,7 @@ export default async function plugin(bb: BbPluginApi) {
     allowed:async(hostId,threadId,at)=>{
       const proof=stopProofs.find(value=>value.threadId===threadId&&value.at===at);
       return !!proof&&!disposed&&!config.manualBlock&&config.hostIds.includes(hostId)&&
-        !owned.has(nativePluginFor(proof.providerId))&&!pending.has(nativePluginFor(proof.providerId))&&await vpn(hostId)==='connected';
+        !owned.has(nativePluginFor(proof.providerId))&&!pending.has(nativePluginFor(proof.providerId))&&await networkState(hostId)==='connected';
     },
     resume:async(threadId,at)=>{await resumeThread(threadId,at,true);},
     warn:()=>bb.log.warn('Automatic continuation could not be confirmed. Open the stopped thread to check.'),
@@ -502,7 +533,7 @@ export default async function plugin(bb: BbPluginApi) {
       if(automatic&&!proof)throw Error('The stopped turn cannot be verified. Open the thread to continue.');
       const record=assertCurrent();
       const initial=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(initial);await assertRequest();assertCurrent();
-      if(await vpn(record.hostId)!=='connected')throw Error('Verified VPN is required before resuming.');
+      if(await networkState(record.hostId)!=='connected')throw Error('Verified VPN is required before resuming.');
       assertCurrent();
       // Only claim writes serialize with each other; slow reads/sends never own the protection lane.
       const claim=resumeClaimTail.then(async()=>{
@@ -512,7 +543,7 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.storage.kv.set('thread-resume-claims-v1',next);resumeClaims=next;
       });
       resumeClaimTail=claim.then(()=>undefined,()=>undefined);await claim;claimAcquired=true;assertCurrent();
-      if(await vpn(record.hostId)!=='connected')throw Error('Verified VPN is required before resuming.');
+      if(await networkState(record.hostId)!=='connected')throw Error('Verified VPN is required before resuming.');
       assertCurrent();
       await assertRequest();assertCurrent();
       const current=await bb.sdk.threads.get({threadId});assertCurrent();assertThread(current);
@@ -539,18 +570,20 @@ export default async function plugin(bb: BbPluginApi) {
   bb.rpc.register(rpcContract,{
     resumeThread:({threadId,stoppedAt})=>resumeThread(threadId,stoppedAt),
     automationIdentity:()=>({instanceId}),
+    setAutomationHost:({hostId})=>serial(()=>setAutomationHost(hostId)),
     setAutomationCoordination:({enabled,executable})=>serial(async()=>{
       if(enabled&&(!executable||!executable.startsWith('/')))throw Error('An absolute automation controller path is required');
-      if(enabled){const primary=(await bb.sdk.system.config()).primaryHostId;if(!primary||!config.hostIds.includes(primary))throw Error('Select the BB server host before connecting automation protection');}
+      if(enabled){const selected=config.automationHostId??(await bb.sdk.system.config()).primaryHostId;if(!selected||!config.hostIds.includes(selected))throw Error('Select the automation controller host before connecting protection');}
       if((automationBinding||automationBusy||automationTask)&&executable!==config.automationControllerPath)throw Error('Release the controller hold before changing the executable');
       return update({...config,coordinateAutomations:enabled,automationControllerPath:executable});
     }),
     automationAction:({action})=>{const requestedRevision=automationPolicyVersion;return automationSerial(async()=>{
       if(requestedRevision!==automationPolicyVersion)throw new AutomationPolicyChanged();
       const snapshot=await status();assertAutomationCurrent();
-      if(!config.coordinateAutomations||!snapshot.serverHostId||!config.automationControllerPath)throw Error('Automation controller is not configured');
-      if(action==='resume'&&(config.manualBlock||automationBinding||snapshot.hosts.some(h=>h.selected&&h.vpn!=='connected')))throw Error('Release protection blocks and verify VPN before resuming');
-      const binding={hostId:snapshot.serverHostId,executable:config.automationControllerPath};
+      const controllerHostId=snapshot.automationHostId??snapshot.serverHostId;
+      if(!config.coordinateAutomations||!controllerHostId||!config.automationControllerPath)throw Error('Automation controller is not configured');
+      if(action==='resume'&&(config.manualBlock||automationBinding||snapshot.hosts.some(h=>h.selected&&(h.networkMode==='direct'?!h.available:h.vpn!=='connected'))))throw Error('Release protection blocks and verify VPN before resuming');
+      const binding={hostId:controllerHostId,executable:config.automationControllerPath};
       if(action==='resume')await resumeAutomations(binding,false);
       else {
         const report=await controller(action,binding);
@@ -558,7 +591,9 @@ export default async function plugin(bb: BbPluginApi) {
       }
       requestCoordination(true);return status();
     });},
-    networkDecision:({hostId,provider})=>networkDecision(hostId,provider),
+    networkDecision:async({hostId,provider})=>{const d=await networkDecision(hostId,provider);if(d.schema!=='bb-vpn-guard/network-decision/1')throw Error('Invalid decision version');return d;},
+    networkDecisionV2:async({hostId,provider})=>{const d=await networkDecision(hostId,provider,true);if(d.schema!=='bb-vpn-guard/network-decision/2')throw Error('Invalid decision version');return d;},
+    setDirectHosts:({hostIds})=>serial(()=>setDirectHosts(hostIds)),
     status:()=>status(),
     setManualBlock:({blocked})=>serial(()=>update({...config,manualBlock:blocked})),
     setMode:({mode})=>serial(()=>update({...config,mode})),
@@ -577,6 +612,8 @@ export default async function plugin(bb: BbPluginApi) {
       {name:'unblock',summary:'Release manual block and retain current mode',usage:'bb vpn-guard unblock'},
       {name:'status',summary:'Show scope, VPN decisions and actions',usage:'bb vpn-guard status [--json]'},
       {name:'hosts',summary:'Select protected machines',usage:'bb vpn-guard hosts <host-id>... | none'},
+      {name:'automation-host',summary:'Pin the automation controller to a selected enrolled host',usage:'bb vpn-guard automation-host <host-id> | server'},
+      {name:'direct-hosts',summary:'Explicitly allow direct egress on selected enrolled hosts',usage:'bb vpn-guard direct-hosts <host-id>... | none'},
       {name:'enforce',summary:'Enforce on selected machines',usage:'bb vpn-guard enforce'},
       {name:'observe',summary:'Return to observation',usage:'bb vpn-guard observe'},
       {name:'global-suspend',summary:'Opt in to global native plugin suspension',usage:'bb vpn-guard global-suspend on --ack-global | off'},
@@ -594,11 +631,15 @@ export default async function plugin(bb: BbPluginApi) {
         else if(command==='hosts' && args.length>0) {
           const hostIds=args.length===1 && args[0]==='none'?[]:args;
           result=await serial(()=>setHosts(hostIds));
+        } else if(command==='automation-host' && args.length===1) {
+          result=await serial(()=>setAutomationHost(args[0]==='server'?null:args[0]));
+        } else if(command==='direct-hosts' && args.length>0) {
+          result=await serial(()=>setDirectHosts(args.length===1&&args[0]==='none'?[]:args));
         } else if(command==='global-suspend' && ((args.length===2 && args[0]==='on' && args[1]==='--ack-global')||(args.length===1 && args[0]==='off'))) {
           result=await serial(()=>update({...config,suspendNativePluginsGlobally:args[0]==='on'}));
         } else if(command==='restore-owned' && args.length===0) result=await serial(async()=>{await restoreOwned();await bb.experimental_hooks.recheck('message.dispatch');recheckDirty=false;return status();});
         else if(command==='acknowledge-ambiguous' && args.length===2 && args[1]==='--reviewed') result=await serial(()=>acknowledgeAmbiguous(args[0],true));
-        else return {exitCode:1,stderr:'Usage: bb vpn-guard status|hosts|block|unblock|enforce|observe|global-suspend|restore-owned|acknowledge-ambiguous'};
+        else return {exitCode:1,stderr:'Usage: bb vpn-guard status|hosts|direct-hosts|automation-host|block|unblock|enforce|observe|global-suspend|restore-owned|acknowledge-ambiguous'};
         return {exitCode:0,stdout:JSON.stringify(result)};
       } catch(error) {return {exitCode:1,stderr:String(error)};}
     },

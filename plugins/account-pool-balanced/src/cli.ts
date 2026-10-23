@@ -25,6 +25,7 @@ import {
   type PoolStatusReport,
 } from "./contracts.js";
 import type { PoolOperations } from "./operations.js";
+import type {createBrowserRouter} from "./browser-host.js";
 import { listBrowserProfiles, openAccountBrowser } from "./browser-profiles.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
@@ -60,7 +61,7 @@ const HELP = [
   "  bb pool status [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|cursor|devin> [--off]",
   "  bb pool config",
-  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|vpnGuardEnabled> <value>",
+  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
   "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>]",
   "  bb pool client revoke <name>",
@@ -232,6 +233,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `vpnGuardEnabled: ${config.vpnGuardEnabled}`,
     `vpnOnlyProviders: ${config.vpnOnlyProviders.join(",") || "none"}`,
     `vpnStatusFile: ${config.vpnStatusFile ?? "default local guard file"}`,
+    `browserHostId: ${config.browserHostId ?? "local"}`,
     `switchThreshold: ${config.switchThreshold}`,
     `routingStrategy: ${config.routingStrategy}`,
     `reserveDrainHours: ${config.reserveDrainHours}`,
@@ -298,6 +300,7 @@ function parseConfigUpdate(
   }
   if (key === "vpnGuardEnabled" && ["true","false"].includes(value)) return accountPoolConfigSetInputSchema.parse({vpnGuardEnabled:value==="true"});
   if (key === "vpnOnlyProviders") return accountPoolConfigSetInputSchema.parse({ vpnOnlyProviders: value === "none" ? [] : value.split(",") });
+  if (key === "browserHostId") return accountPoolConfigSetInputSchema.parse({browserHostId:value === "local" ? null : value});
   if (key === "vpnStatusFile") return accountPoolConfigSetInputSchema.parse({ vpnStatusFile: value === "default" ? null : value });
   if (key === "restDays") {
     return accountPoolConfigSetInputSchema.parse({
@@ -308,7 +311,7 @@ function parseConfigUpdate(
     });
   }
   throw new Error(
-    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, or vpnGuardEnabled.",
+    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, or vpnGuardEnabled.",
   );
 }
 
@@ -323,6 +326,7 @@ export function registerPoolCli(
   codexLogin: CodexDeviceLogin,
   config: AccountPoolConfigController,
   externalClients?: ExternalClients,
+  browser?: ReturnType<typeof createBrowserRouter>,
 ): void {
   bb.cli.register({
     name: "pool",
@@ -406,7 +410,7 @@ export function registerPoolCli(
         name: "config-set",
         summary: "Update one Account Pooler routing configuration value",
         usage:
-          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|vpnGuardEnabled> <value>",
+          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
       },
       {
         name: "token-rotate",
@@ -667,7 +671,8 @@ export function registerPoolCli(
         }
         if (argv[0] === "browser" && argv[1] === "list") {
           const flags = parseFlags(argv.slice(2), ["json"], []);
-          const profiles = await listBrowserProfiles({
+          if(config.get().browserHostId && !browser)throw Error('Remote browser host transport is unavailable.');
+          const profiles = browser ? await browser.list() : await listBrowserProfiles({
             accounts: await operations.list(),
             dataDir: bb.server.experimental_dataDir,
             pluginId: bb.pluginId,
@@ -688,6 +693,11 @@ export function registerPoolCli(
           const query = argv[2];
           if (query === undefined || query.startsWith("--")) throw new Error(HELP);
           const flags = parseFlags(argv.slice(3), [], ["url"]);
+          if(config.get().browserHostId){
+            if(!browser)throw Error('Remote browser host transport is unavailable.');
+            await browser.open(query,flags.values.get("url"));
+            return {exitCode:0,stdout:'Opened account browser on the selected Mac.\n'};
+          }
           const result = await openAccountBrowser({
             accounts: await operations.list(),
             query,

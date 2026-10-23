@@ -14,6 +14,7 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   restDays: [0, 6],
   vpnOnlyProviders: ["codex", "claude", "cursor", "devin"] as Array<"codex" | "claude" | "cursor" | "devin">,
   vpnStatusFile: null as string | null,
+  browserHostId: null as string | null,
   vpnGuardEnabled: false,
   vpnPolicyVersion:2 as const,
 };
@@ -94,6 +95,7 @@ export const accountPoolConfigSchema = z
     restDays: restDaysSchema.default(DEFAULT_ACCOUNT_POOL_CONFIG.restDays),
     vpnOnlyProviders: z.array(z.enum(["codex", "claude", "cursor", "devin"])).max(4).refine(v => new Set(v).size === v.length).default(DEFAULT_ACCOUNT_POOL_CONFIG.vpnOnlyProviders),
     vpnStatusFile: z.string().min(1).nullable().default(null),
+    browserHostId: z.string().min(1).max(160).nullable().default(null),
     vpnGuardEnabled: z.boolean().default(false),
     vpnPolicyVersion:z.literal(2).default(2),
   })
@@ -116,6 +118,7 @@ export const accountPoolConfigSetInputSchema = z
     restDays: restDaysSchema.optional(),
     vpnOnlyProviders: z.array(z.enum(["codex", "claude", "cursor", "devin"])).max(4).refine(v => new Set(v).size === v.length).optional(),
     vpnStatusFile: z.string().min(1).nullable().optional(),
+    browserHostId: z.string().min(1).max(160).nullable().optional(),
     vpnGuardEnabled: z.boolean().optional(),
   })
   .strict();

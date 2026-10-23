@@ -106,7 +106,7 @@ interface HubOptions {
   hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
-  guardCheck?: (provider:PoolProvider)=>Promise<void>;
+  guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;
   adapters: ReadonlyMap<PoolProvider, ProviderAdapter>;
   fetch: typeof fetch;
   fetchIpv4?:typeof fetch;
@@ -1477,7 +1477,7 @@ export function createHub(options: {
   hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
-  guardCheck?: (provider:PoolProvider)=>Promise<void>;
+  guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;
   fetch?: typeof fetch;
   fetchIpv4?:typeof fetch;
   now?: () => number;

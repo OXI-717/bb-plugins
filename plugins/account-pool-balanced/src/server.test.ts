@@ -266,12 +266,14 @@ async function createFixture(args: {
   apiKey?: string;
   priority?: number;
   beforePlugin?: (host: Fixture["host"]) => void;
+  callBrowserHost?: (request: {hostId:string;method:string;input:unknown})=>Promise<unknown>;
 }): Promise<Fixture> {
   const dataDir = await mkdtemp(path.join(tmpdir(), "bb-account-pool-"));
   const host = createFakePluginHost({
     pluginId: "account-pool",
     dataDir,
     sdk: sdkStubs(),
+    ...(args.callBrowserHost ? {experimental_callHostRpc:args.callBrowserHost} : {}),
   });
   await host.bb.storage.kv.set("config", {
     anthropicUpstreamBaseUrl: args.upstreamUrl,
@@ -7522,7 +7524,7 @@ describe('VPN Guard linked network policy',()=>{
       maxActive=Math.max(maxActive,++active);
       try {
         await new Promise(resolve=>setTimeout(resolve,25));
-        return {schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'};
+        return {schema:'bb-vpn-guard/network-decision/2',hostId:'pool-host',allowed:false,reason:'manual_block'};
       } finally {active--;}
     });
     fixture.host.harness.sdk.stub('plugins.callRpc',call);
@@ -7546,7 +7548,7 @@ describe('VPN Guard linked network policy',()=>{
       expect(args.signal).toBeInstanceOf(AbortSignal);
       await new Promise(resolve=>setTimeout(resolve,1200));
       expect(args.signal?.aborted).toBe(false);
-      return {schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'connected'};
+      return {schema:'bb-vpn-guard/network-decision/2',hostId:'pool-host',allowed:true,reason:'connected'};
     });
     await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
     const allowed=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
@@ -7561,7 +7563,7 @@ describe('VPN Guard linked network policy',()=>{
     let blocked=true;
     const call=vi.fn(async(args:{input?:unknown})=>{
       expect(args.input).toMatchObject({hostId:'pool-host'});
-      return {schema:'bb-vpn-guard/network-decision/1',allowed:!blocked,reason:blocked?'manual_block':'observe'};
+      return {schema:'bb-vpn-guard/network-decision/2',hostId:'pool-host',allowed:!blocked,reason:blocked?'manual_block':'observe'};
     });
     fixture.host.harness.sdk.stub('plugins.callRpc',call);
     await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true,vpnOnlyProviders:[]});
@@ -7593,7 +7595,7 @@ it('blocks Guard-linked OAuth quotas and login without corrupting account eligib
    })},
  });
  fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
- fixture.host.harness.sdk.stub('plugins.callRpc',async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}));
+ fixture.host.harness.sdk.stub('plugins.callRpc',async()=>({schema:'bb-vpn-guard/network-decision/2',hostId:'pool-host',allowed:false,reason:'manual_block'}));
  await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});outbound.mockClear();
  for(const method of ['account.refreshUsage','provider-usage.v1.getResource'] as const) {
    const input=method==='account.refreshUsage'?{accountId:fixture.account.id}:{resourceId:fixture.account.id,refresh:true};
@@ -7607,7 +7609,7 @@ it('cancels a retained linked protected stream through the actual policy service
  let blocked=false;
  const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:async()=>new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('first'));}}))}});
  fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
- fixture.host.harness.sdk.stub('plugins.callRpc',async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:!blocked,reason:blocked?'manual_block':'observe'}));
+ fixture.host.harness.sdk.stub('plugins.callRpc',async()=>({schema:'bb-vpn-guard/network-decision/2',hostId:'pool-host',allowed:!blocked,reason:blocked?'manual_block':'observe'}));
  await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
  const service=fixture.host.harness.behavior.runService('network-policy');
  try {
@@ -7622,9 +7624,26 @@ it('cancels a retained linked protected stream through the actual policy service
 it.each(['devin','opencode-go'] as const)('refuses linked %s before any provider call on manual block',async provider=>{
  const outbound=vi.fn(async()=>Response.json({}));const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider,options:{fetch:outbound}});
  fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
- fixture.host.harness.sdk.stub('plugins.callRpc',async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}));
+ fixture.host.harness.sdk.stub('plugins.callRpc',async()=>({schema:'bb-vpn-guard/network-decision/2',hostId:'pool-host',allowed:false,reason:'manual_block'}));
  await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});outbound.mockClear();
  const route=provider==='devin'?'/devin/exa.seat_management_pb.SeatManagementService/GetUserStatus':'/opencode-go/v1/chat/completions';
  const response=await fixture.host.harness.behavior.fetchHttp('POST',route,{headers:authHeaders(fixture.key),body:'{}'});
  expect(response.status).toBe(503);expect(response.headers.get('x-bb-pool-error')).toBe('VPN_GUARD_BLOCKED');expect(outbound).not.toHaveBeenCalled();
+});
+
+it('routes browser panel and CLI to the selected Mac with no server browser fallback',async()=>{
+ const local=vi.spyOn(accountBrowser,'openAccountBrowser').mockRejectedValue(Error('must not launch locally'));
+ const remote=vi.fn(async()=>({opened:true}));
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'kimi',callBrowserHost:remote});
+ fixture.host.harness.sdk.stub('hosts.list',async()=>[{id:'mac-browser',status:'connected'}]);
+ await fixture.host.harness.behavior.callRpc('config.set',{browserHostId:'mac-browser'});
+ expect(await fixture.host.harness.behavior.callRpc('browser.open',{accountId:fixture.account.id})).toEqual({opened:true});
+ expect((await fixture.host.harness.behavior.runCli(['browser','open',fixture.account.id])).exitCode).toBe(0);
+ expect(remote).toHaveBeenCalledTimes(2);expect(local).not.toHaveBeenCalled();
+ for(const [request] of remote.mock.calls as unknown as [{hostId:string,input:{accounts:unknown[]}}][]){
+  expect(request.hostId).toBe('mac-browser');expect(Object.keys(request.input.accounts[0] as object).sort()).toEqual(['email','id','label','provider']);
+ }
+ fixture.host.harness.sdk.stub('hosts.list',async()=>[]);
+ await expect(fixture.host.harness.behavior.callRpc('browser.open',{accountId:fixture.account.id})).rejects.toThrow('unavailable');
+ expect(remote).toHaveBeenCalledTimes(2);expect(local).not.toHaveBeenCalled();
 });

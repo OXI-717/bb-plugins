@@ -240,3 +240,12 @@ it('offers Continue again for a new stop of the same thread',async()=>{
  const resume=await slot.findByRole('button',{name:'Продолжить'}) as HTMLButtonElement;expect(resume.disabled).toBe(false);fireEvent.click(resume);
  await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'resumeThread',input:{threadId:'demo-repeat',stoppedAt:2000}}));
 });
+
+it.each([{available:true,manual:false,disabled:false},{available:false,manual:false,disabled:true},{available:true,manual:true,disabled:true}])('handles direct host readiness without VPN proof: %j',async({available,manual,disabled})=>{
+ const status=guardFixture();status.coordinateAutomations=true;status.manualBlock=manual;status.directHostIds=status.hostIds;
+ status.hosts=status.hosts.map(h=>({...h,networkMode:'direct',vpn:null,evidence:null,available}));
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,automationAction:()=>status}});
+ const resume=await slot.findByRole('button',{name:'Возобновить'});
+ expect((resume as HTMLButtonElement).disabled).toBe(disabled);
+ if(available)expect((await slot.findAllByText('Прямое подключение')).length).toBeGreaterThan(0);
+});

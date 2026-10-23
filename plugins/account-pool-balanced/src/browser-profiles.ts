@@ -18,7 +18,7 @@ import { homedir, platform as currentPlatform, tmpdir } from "node:os";
 import path from "node:path";
 import { promisify, isDeepStrictEqual } from "node:util";
 import { Agent, request as httpRequest } from "undici";
-import type { AccountSummary } from "./contracts.js";
+import type { BrowserAccount } from "./browser-host.js";
 import { readVpnEvidence } from "./vpn-policy.js";
 import type { VpnEvidence } from "./vpn-evidence.js";
 
@@ -118,9 +118,9 @@ async function withProfileStore<T>(root: string, action: () => Promise<T>): Prom
 
 /** Match one account by exact id, then email, then label (case-insensitive). */
 export function resolveAccount(
-  accounts: readonly AccountSummary[],
+  accounts: readonly BrowserAccount[],
   query: string,
-): AccountSummary {
+): BrowserAccount {
   const needle = query.trim();
   if (needle === "") throw new Error("Account query must not be empty.");
   const byId = accounts.filter((account) => account.id === needle);
@@ -199,7 +199,7 @@ export function heliumDataRoot(
 }
 
 /** Human-readable native profile name: "<Provider> · <email-or-label>". */
-export function profileNameFor(account: AccountSummary): string {
+export function profileNameFor(account: BrowserAccount): string {
   const title = PROVIDER_TITLE[account.provider] ?? account.provider;
   return `${title} · ${account.email ?? account.label}`;
 }
@@ -368,14 +368,14 @@ export async function syncLocalStateProfiles(
 
 /** Create the account's native Helium profile on first use; idempotent. */
 export async function ensureProfile(
-  account: AccountSummary,
+  account: BrowserAccount,
   options: EnsureProfileOptions,
 ): Promise<RegistryEntry> {
   return withProfileStore(options.heliumRoot, () => ensureProfileLocked(account, options));
 }
 
 async function ensureProfileLocked(
-  account: AccountSummary,
+  account: BrowserAccount,
   options: EnsureProfileOptions,
 ): Promise<RegistryEntry> {
   const registry = await readRegistry(options.registryFile);
@@ -514,7 +514,7 @@ async function migrateToNative(options: EnsureProfileOptions, assertClosed: () =
 }
 
 export interface OpenAccountBrowserOptions {
-  accounts: readonly AccountSummary[];
+  accounts: readonly BrowserAccount[];
   query: string;
   url?: string | undefined;
   dataDir: string;
@@ -652,7 +652,7 @@ function isolatedRoot(heliumRoot: string, directory: string): string {
   return path.join(heliumRoot, "Pool Accounts", directory);
 }
 
-function browserResult(account: AccountSummary, entry: RegistryEntry, root: string, timezone: string | null, url: string, guarded: boolean): OpenAccountBrowserResult {
+function browserResult(account: BrowserAccount, entry: RegistryEntry, root: string, timezone: string | null, url: string, guarded: boolean): OpenAccountBrowserResult {
   return {
     accountId: account.id,
     provider: account.provider,
@@ -680,7 +680,7 @@ export interface BrowserProfileInfo {
 
 /** Registry view: every pool account and the state of its Helium profile. */
 export async function listBrowserProfiles(options: {
-  accounts: readonly AccountSummary[];
+  accounts: readonly BrowserAccount[];
   dataDir: string;
   pluginId: string;
   heliumRoot?: string | undefined;
