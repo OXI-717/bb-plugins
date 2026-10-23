@@ -145,6 +145,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     vpnGuardEnabled: false,
     vpnPolicyVersion:2,
     vpnStatusFile: null,
+    browserHostId: null,
     ...overrides,
   };
 }

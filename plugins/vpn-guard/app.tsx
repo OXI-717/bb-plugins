@@ -10,6 +10,7 @@ import './app.css';
 const sharedStatusReads=new WeakMap<object,ReturnType<typeof createStatusReads>>();
 
 type Status = StandardSchemaV1InferOutput<(typeof rpcContract)['status']['output']>;
+function isHostReady(host:Status['hosts'][number]){return host.available&&(host.networkMode==='direct'||host.vpn==='connected');}
 function initialLanguage():Language {
   try {return localStorage.getItem('vpn-guard-language')==='en'?'en':'ru';} catch {return 'ru';}
 }
@@ -63,7 +64,7 @@ export function GuardPage() {
   }
   const ready=!!status&&!busy&&statusFresh;
   const selectedHosts=status?.hosts.filter(host=>host.selected)??[];
-  const canRestore=ready&&!status.manualBlock&&selectedHosts.every(host=>host.available&&host.vpn==='connected');
+  const canRestore=ready&&!status.manualBlock&&selectedHosts.every(isHostReady);
   const needsNativeRecovery=!!status&&(status.ownedDisabledPlugins.length>0||status.ambiguousPluginChanges.length>0);
   return <main className="vpn-guard" lang={language}>
     <header className="vg-header"><h1>{t.title}</h1><div className="vg-languages" role="group" aria-label={t.language}>
@@ -88,13 +89,13 @@ export function GuardPage() {
         <div><dt>{t.automations}</dt><dd>{!statusFresh?t.unknown:status?.automations.busy?(status.automations.needsReconcile?t.coordinating:t.checking):!status?.coordinateAutomations&&!status?.automations.held&&!status?.automations.needsReconcile?t.notLinked:status?.automations.error||status?.automations.status?.activeRuns.length?t.partial:status?.automations.needsReconcile&&status?.coordinateAutomations?t.coordinating:!status?.coordinateAutomations?t.notLinked:!status.automations.status?t.unknown:status.automations.status.blocked?t.paused:t.available}</dd></div>
         <div><dt>{t.nativeState}</dt><dd>{!statusFresh?t.unknown:needsNativeRecovery?t.pendingRecovery:t.noNativeRecovery}</dd></div>
       </dl>
-      <ul className="vg-machines vg-current-machines">{selectedHosts.map(host=><li key={host.id}><span>{host.name}</span><span className={statusFresh&&host.vpn==='connected'?'vg-help':'vg-error'}>{t[statusFresh?host.vpn??'unknown':'unknown']}</span></li>)}</ul>
+      <ul className="vg-machines vg-current-machines">{selectedHosts.map(host=><li key={host.id}><span>{host.name}</span><span className={statusFresh&&isHostReady(host)?'vg-help':'vg-error'}>{statusFresh&&host.networkMode==='direct'?(host.available?t.direct:t.unavailable):t[statusFresh?host.vpn??'unknown':'unknown']}</span></li>)}</ul>
       {statusFresh&&!selectedHosts.length&&<p className="vg-help">{t.noMachines}</p>}
     </section>
     <details className="vg-section" onToggle={event=>{if(event.target===event.currentTarget)setHistoryOpen(event.currentTarget.open);}}><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:'—'}</summary>
       <p className="vg-help">{t.stoppedHelp}</p>
       {statusFresh&&!status?.stoppedThreadIds.length&&<p className="vg-help">{t.noStopHistory}</p>}
-      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language} stopHistory={status.stopHistory} canResume={(hostId,providerId)=>{const native=providerId==='codex'?'provider-codex':providerId==='claude'||providerId==='claude-code'?'provider-claude-code':'';return ready&&!status.manualBlock&&status.hosts.some(host=>host.id===hostId&&host.selected&&host.available&&host.vpn==='connected')&&!status.ownedDisabledPlugins.includes(native)&&!status.ambiguousPluginChanges.includes(native);}}/> }
+      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language} stopHistory={status.stopHistory} canResume={(hostId,providerId)=>{const native=providerId==='codex'?'provider-codex':providerId==='claude'||providerId==='claude-code'?'provider-claude-code':'';return ready&&!status.manualBlock&&status.hosts.some(host=>host.id===hostId&&host.selected&&isHostReady(host))&&!status.ownedDisabledPlugins.includes(native)&&!status.ambiguousPluginChanges.includes(native);}}/> }
     </details>
     <details className="vg-section" open={status?.automations.status?.recoveryPending||!!status?.automations.error}>
       <summary>{t.automations}</summary>
@@ -109,7 +110,7 @@ export function GuardPage() {
       {!!status?.automations.status?.activeRuns.length&&<details><summary>{t.activeRun}: {status.automations.status.activeRuns.length}</summary><pre className="vg-error-detail">{status.automations.status.activeRuns.join("\n")}</pre></details>}
       <div className="vg-actions">
         <button disabled={!ready||automationActionBusy||status.automations.busy||!status.coordinateAutomations} onClick={()=>void automationChange('pause')}>{t.pauseAutomations}</button>
-        <button disabled={!ready||automationActionBusy||status.automations.busy||!status.coordinateAutomations||status.manualBlock||status.automations.held||status.hosts.some(h=>h.selected&&h.vpn!=='connected')} onClick={()=>void automationChange('resume')}>{t.resumeAutomations}</button>
+        <button disabled={!ready||automationActionBusy||status.automations.busy||!status.coordinateAutomations||status.manualBlock||status.automations.held||status.hosts.some(h=>h.selected&&!isHostReady(h))} onClick={()=>void automationChange('resume')}>{t.resumeAutomations}</button>
       </div>
       <p className="vg-help">{t.restoreAutomationsHelp}</p>
       {!!status?.automations.status?.pendingRestore.length&&<details><summary>{t.restoreInventory}</summary>{status.automations.status.pendingRestore.map(r=><p className="vg-help" key={r.projectId+':'+r.id}>{r.name}</p>)}</details>}
@@ -122,10 +123,10 @@ export function GuardPage() {
     </details>
     <details className="vg-section"><summary>{t.machineSettings}</summary><p className="vg-help">{t.machinesHelp}</p>
       <ul className="vg-machines">{status?.hosts.map(h=><li key={h.id}><label className="vg-check"><input type="checkbox" checked={h.selected} disabled={!ready||(!h.available&&!h.selected)} onChange={e=>void selectHost(h.id,e.target.checked)}/><span>{h.name}</span></label>
-        <span className="vg-help">{!statusFresh?t.unknown:h.selected?t[h.vpn??'unknown']:t.outside}{statusFresh&&h.evidence?` · ${h.evidence.assurance==='verified_ipv4'?t.verifiedIpv4:t.unverifiedVpn}`:''}{statusFresh&&!h.available?` · ${t.unavailable}`:''}</span></li>)}</ul>
+        <span className="vg-help">{!statusFresh?t.unknown:h.selected?(h.networkMode==='direct'?t.direct:t[h.vpn??'unknown']):t.outside}{statusFresh&&h.networkMode!=='direct'&&h.evidence?` · ${h.evidence.assurance==='verified_ipv4'?t.verifiedIpv4:t.unverifiedVpn}`:''}{statusFresh&&!h.available?` · ${t.unavailable}`:''}</span></li>)}</ul>
     </details>
     <details className="vg-section" open={needsNativeRecovery}><summary>{t.native}</summary><p className="vg-help">{t.nativeScope}</p>
-      <label className="vg-check"><input type="checkbox" checked={status?.suspendNativePluginsGlobally??false} disabled={!ready} onChange={e=>void change(()=>rpc.call('setGlobalSuspension',{enabled:e.target.checked,acknowledgeGlobalImpact:e.target.checked}))}/><span>{t.suspend}</span></label>
+      <label className="vg-check"><input type="checkbox" checked={status?.suspendNativePluginsGlobally??false} disabled={!ready||!!status?.directHostIds.length} onChange={e=>void change(()=>rpc.call('setGlobalSuspension',{enabled:e.target.checked,acknowledgeGlobalImpact:e.target.checked}))}/><span>{t.suspend}</span></label>
       <p className="vg-help">{t.owned}: {status?.ownedDisabledPlugins.join(', ')||t.none}</p>
       <p className="vg-help">{t.policyOnly}</p>
       {needsNativeRecovery&&<><p className="vg-help">{t.restoreHelp}</p>
