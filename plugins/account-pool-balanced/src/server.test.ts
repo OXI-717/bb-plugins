@@ -473,6 +473,7 @@ describe("Account Pool config schema", () => {
       restDays: [0, 6],
       vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
       vpnStatusFile: null,
+      browserHostId: null,
       vpnGuardEnabled: false,
       vpnPolicyVersion:2,
     });
@@ -549,6 +550,7 @@ describe("Account Pool plugin", () => {
       restDays: [0, 6],
       vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
       vpnStatusFile: null,
+      browserHostId: null,
       vpnGuardEnabled: false,
       vpnPolicyVersion:2,
     });
