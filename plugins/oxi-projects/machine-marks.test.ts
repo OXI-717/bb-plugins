@@ -1,15 +1,15 @@
 import {describe,expect,it} from 'vitest';
-import {machineMarksConfigSchema,parseMachineMarksConfig,resolveMachineMark} from './machine-marks';
+import {machineMarksConfigSchema,parseMachineMarksConfig,resolveMachineMark,machineMarkStyle} from './machine-marks';
 
 const config={enabled:true,hosts:{host_local:{kind:'local' as const},host_primary:{kind:'primary' as const},host_custom:{kind:'other' as const,icon:'terminal' as const}}};
 describe('machine marks',()=>{
  it('uses stable host identities, not names, cwd or the BB server',()=>{
-  expect(resolveMachineMark({id:'host_local',name:'Renamed'},config)).toEqual({icon:'💻',label:'Локальный компьютер · Renamed'});
-  expect(resolveMachineMark({id:'host_primary',name:'Main'},config)?.icon).toBe('🖥️');
-  expect(resolveMachineMark({id:'host_new',name:'Renamed'},config)?.icon).toBe('☁️');
+  expect(resolveMachineMark({id:'host_local',name:'Renamed'},config)).toEqual({kind:'local',icon:'laptop',label:'Локальный компьютер · Renamed'});
+  expect(resolveMachineMark({id:'host_primary',name:'Main'},config)?.icon).toBe('server');
+  expect(resolveMachineMark({id:'host_new',name:'Renamed'},config)?.icon).toBe('cloud');
  });
  it('offers an explicit palette and updates with host renames',()=>{
-  expect(resolveMachineMark({id:'host_custom',name:'Other'},config)).toEqual({icon:'⌨️',label:'Другой сервер · Other'});
+  expect(resolveMachineMark({id:'host_custom',name:'Other'},config)).toEqual({kind:'other',icon:'terminal',label:'Другая машина · Other'});
  });
  it('does not misclassify an unassigned environment as local',()=>{
   expect(resolveMachineMark(null,config)).toBeNull();
@@ -24,5 +24,11 @@ describe('machine marks',()=>{
  });
  it('keeps hostile host labels as plain bounded text',()=>{
   expect(resolveMachineMark({id:'host_local',name:'<img src=x onerror=alert(1)>'},config)?.label).toContain('<img');
+ });
+ it('can show a remote Mac as a laptop with a distinct muted color',()=>{
+  const remote=resolveMachineMark({id:'host_remote_mac',name:'Remote Mac'},{...config,hosts:{...config.hosts,host_remote_mac:{kind:'other',icon:'laptop'}}});
+  expect(remote?.icon).toBe('laptop');expect(remote?.kind).toBe('other');
+  expect(machineMarkStyle('local').color).not.toBe(machineMarkStyle('other').color);
+  expect(machineMarkStyle('other').backgroundColor).toBe('transparent');
  });
 });

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-oxi-projects",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Project tasks, repositories and agent sessions inside BB, with optional integrations.",
   "type": "module",

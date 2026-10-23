@@ -11,14 +11,14 @@ it('adds exactly one independent mark without editing model, status, title or li
  const r=row();const store=createMachineMarkStore();const dispose=mountMachineMarks(document,store);
  store.set([{id:'thr_a',host:{id:'host_mac',name:'Mac'}}],config);await tick();
  expect(r.querySelectorAll('[data-oxi-machine-mark]')).toHaveLength(1);
- expect(r.querySelector('[data-oxi-machine-mark]')?.textContent).toBe('💻');
+ expect(r.querySelector('[data-oxi-machine-mark] svg')?.getAttribute('data-machine-glyph')).toBe('laptop');
  expect((r.querySelector('[data-oxi-machine-mark]') as HTMLElement).style.pointerEvents).toBe('auto');
  expect(r.querySelector('[data-provider-icon]')?.textContent).toBe('model');
  expect(r.querySelector('.bb-thread-title')?.textContent).toBe('Original title');
  expect(r.querySelector('[data-status]')?.textContent).toBe('working');
  expect(r.querySelector('a')?.getAttribute('href')).toBe('/threads/thr_a');
  store.set([{id:'thr_a',host:{id:'host_main',name:'Main'}}],config);await tick();
- expect(r.querySelector('[data-oxi-machine-mark]')?.textContent).toBe('🖥️');
+ expect(r.querySelector('[data-oxi-machine-mark] svg')?.getAttribute('data-machine-glyph')).toBe('server');
  dispose();expect(document.querySelector('[data-oxi-machine-mark]')).toBeNull();
 });
 it('handles added/recycled rows, renamed hosts and deleted/missing environments',async()=>{
@@ -27,7 +27,7 @@ it('handles added/recycled rows, renamed hosts and deleted/missing environments'
  store.set([{id:'thr_a',host:{id:'host_main',name:'Renamed'}}],config);await tick();
  expect(r.querySelector('button')?.getAttribute('aria-label')).toContain('Renamed');
  r.querySelector('a')!.setAttribute('data-sidebar-thread-id','thr_b');await tick();expect(r.querySelector('button')).toBeNull();
- store.set([{id:'thr_b',host:{id:'host_other',name:'Remote'}}],config);await tick();expect(r.querySelector('button')?.textContent).toBe('☁️');
+ store.set([{id:'thr_b',host:{id:'host_other',name:'Remote'}}],config);await tick();expect(r.querySelector('svg')?.getAttribute('data-machine-glyph')).toBe('cloud');
  store.set([{id:'thr_b',host:null}],config);await tick();expect(r.querySelector('button')).toBeNull();
  dispose();
 });
@@ -44,5 +44,19 @@ it('skips unsupported layouts and removes its mark while the title is being edit
  const r=row();const store=createMachineMarkStore();const dispose=mountMachineMarks(document,store);
  store.set([{id:'thr_a',host:{id:'host_mac',name:'Mac'}}],config);await tick();
  r.querySelector('.bb-thread-title')!.replaceWith(document.createElement('input'));await tick();expect(r.querySelector('button')).toBeNull();
+ dispose();
+});
+it('separates the title and colors the glyph itself when a thread moves machines',async()=>{
+ const r=row();const store=createMachineMarkStore();const dispose=mountMachineMarks(document,store);
+ store.set([{id:'thr_a',host:{id:'host_mac',name:'Mac'}}],config);await tick();
+ const button=r.querySelector<HTMLButtonElement>('button')!;
+ expect(button.style.marginInlineEnd).toBe('6px');
+ expect(button.style.backgroundColor).toBe('transparent');
+ expect(button.style.boxShadow).toBe('');
+ const local=button.style.color;expect(local).not.toBe('');
+ store.set([{id:'thr_a',host:{id:'host_main',name:'Main'}}],config);await tick();
+ expect(button.style.color).not.toBe(local);
+ expect(button.querySelector('svg')?.getAttribute('stroke')).toBe('currentColor');
+ expect(r.querySelector('.bb-thread-title')?.textContent).toBe('Original title');
  dispose();
 });
