@@ -1,3 +1,4 @@
+import {rpcDiagnosticSchema} from './remote-evidence.js';
 import { defineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import {automationInputSchema,automationStatusSchema} from './automation-contract.js';
@@ -33,7 +34,7 @@ export const statusSchema = z.object({
   automationHostId:z.string().min(1).max(160).nullable().default(null),
   hosts: z.array(z.object({
     id:z.string(), name:z.string(), selected:z.boolean(), available:z.boolean(), networkMode:z.enum(['direct','vpn-required']).optional(),
-    vpn:z.enum(['connected','disconnected','unknown']).nullable(),evidence:evidenceSchema.nullable().optional(),
+    vpn:z.enum(['connected','disconnected','unknown']).nullable(),evidence:evidenceSchema.nullable().optional(),rpc:rpcDiagnosticSchema.nullable().optional(),
   })),
   protectedProviders: z.array(z.string()),
   ownedDisabledPlugins: z.array(z.string()),

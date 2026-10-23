@@ -98,3 +98,11 @@ Timed-out file reads fail closed but their timeout result is discarded so the ne
 Continue uses a separate per-thread in-flight fence and a separate durable-claim write queue, so stalled reads or sends cannot hold the protection/configuration lane. It revalidates stop ownership, policy generation, disposal and thread state after asynchronous VPN/claim work, immediately before normal submission. BB exposes no atomic compare-and-send API: a thread update in the final gap cannot be ruled out. Normal start/admission still handles busy threads and current protection.
 
 Automatic recovery uses ordinary BB admission and preserves manual blocks and newer user activity. See [recovery policy / правила продолжения](../../../docs/pool-errors.md).
+
+## Remote host status
+
+The server reads VPN evidence from the selected machine through the host RPC. Each read allows a 10-second host worker deadline; BB adds its own transport allowance. RPC failure still produces an unknown state and denies protected work. There is no last-known-connected cache or consecutive-failure exemption.
+
+The response is checked again on arrival: the status file must remain at most 90 seconds old and its verified probe at most 390 seconds old, with no future timestamps. These limits also apply when the server and protected machine are different hosts.
+
+`bb vpn-guard status --json` includes `hosts[].rpc` for selected VPN hosts: a safe category (`ok`, `timeout`, `host_unavailable`, `cancelled`, `rpc_error`) and elapsed milliseconds. The category describes the RPC, not VPN health. Failure logs contain the category and elapsed time, never the exception payload. Direct hosts do not need VPN evidence.
