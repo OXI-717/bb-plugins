@@ -179,6 +179,7 @@ describe("QuotaStore", () => {
       );
     database.exec(familyMigration);
     database.exec(windowMigration);
+    for (const sql of QUOTA_MIGRATIONS.slice(3)) database.exec(sql);
     const quotas = new QuotaStore(database);
 
     const migrated = quotas.get("11111111-1111-4111-8111-111111111111");

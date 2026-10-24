@@ -68,7 +68,7 @@ function resetAt(headers: Headers, prefix: string, now: number): number | null {
 function windowMinutesFromSeconds(
   seconds: number | null | undefined,
 ): number | null {
-  if (seconds === null || seconds === undefined || !Number.isFinite(seconds))
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || !Number.isInteger(seconds) || seconds % 60 !== 0)
     return null;
   const minutes = Math.round(seconds / 60);
   return minutes > 0 ? minutes : null;
@@ -150,12 +150,34 @@ function withoutClaudeSlots(previous: AccountQuota): AccountQuota {
   };
 }
 
+// Routing keeps its legacy normalization; budget evidence must reject lossy inputs.
+function invalidBudgetHeaders(headers: Headers): boolean {
+  return (["primary", "secondary"] as const).some(slot => {
+    const prefix = `x-codex-${slot}`;
+    return ["used-percent", "window-minutes", "reset-at", "reset-after-seconds"].some(field => {
+      const raw = headers.get(`${prefix}-${field}`);
+      if (raw === null) return false;
+      const value = Number(raw);
+      if (!raw.trim() || !Number.isFinite(value)) return true;
+      if (field === "used-percent") return value < 0 || value > 100;
+      if (field === "window-minutes") return value <= 0 || !Number.isInteger(value);
+      return value < 0;
+    });
+  });
+}
+
 function codexQuotaFromHeaders(
   accountId: string,
   headers: Headers,
   previous: AccountQuota,
   now: number,
 ): AccountQuota {
+  const contradiction = (["primary", "secondary"] as const).some(slot => {
+    const raw = headers.get(`x-codex-${slot}-window-minutes`);
+    return raw !== null && Number(raw) !== previousWindow(previous, slot)?.windowMinutes;
+  });
+  if (previous.codexUsageEvidence && (invalidBudgetHeaders(headers) || contradiction))
+    previous = { ...previous, codexUsageEvidence: undefined };
   const priorPrimary = previousWindow(previous, "primary");
   const priorSecondary = previousWindow(previous, "secondary");
   const primary = windowFromHeaders(headers, "primary", priorPrimary, now);
@@ -166,10 +188,17 @@ function codexQuotaFromHeaders(
     now,
   );
   if (primary === priorPrimary && secondary === priorSecondary) return previous;
+  // A changed slot layout contradicts the older complete usage response.
+  // Partial headers must not reuse that response to assert a missing duration.
+  const layoutUnchanged = [primary, secondary].every((window, index) => {
+    const prior = index === 0 ? priorPrimary : priorSecondary;
+    return window === null ? prior === null : prior !== null && window.windowMinutes === prior.windowMinutes;
+  });
   return {
     ...withoutClaudeSlots(previous),
     accountId,
     limitWindows: orderedWindows([primary, secondary]),
+    codexUsageEvidence: layoutUnchanged ? previous.codexUsageEvidence : undefined,
     observedAt: now,
     heldUntil: null,
   };
@@ -177,7 +206,7 @@ function codexQuotaFromHeaders(
 
 const usageWindowSchema = z
   .object({
-    used_percent: z.number(),
+    used_percent: z.number().min(0).max(100),
     reset_at: z.number().nullish(),
     reset_after_seconds: z.number().nullish(),
     limit_window_seconds: z.number().nullish(),
@@ -188,6 +217,8 @@ const usageResponseSchema = z
   .object({
     rate_limit: z
       .object({
+        allowed: z.boolean().nullish(),
+        limit_reached: z.boolean().nullish(),
         primary_window: usageWindowSchema.nullish(),
         secondary_window: usageWindowSchema.nullish(),
       })
@@ -267,6 +298,13 @@ export function codexQuotaFromUsage(
       ),
     ]),
     observedAt: now,
+    codexUsageEvidence: {
+      source: "usage", observedAt: now,
+      allowed: parsed.data.rate_limit.allowed ?? null,
+      limitReached: parsed.data.rate_limit.limit_reached ?? null,
+      primary: parsed.data.rate_limit.primary_window === null ? "absent" : parsed.data.rate_limit.primary_window === undefined ? "unknown" : "present",
+      secondary: parsed.data.rate_limit.secondary_window === null ? "absent" : parsed.data.rate_limit.secondary_window === undefined ? "unknown" : "present",
+    },
   };
 }
 

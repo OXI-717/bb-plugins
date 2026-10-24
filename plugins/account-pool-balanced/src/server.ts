@@ -592,6 +592,9 @@ export function createAccountPoolPlugin(
         if (timer !== null) clearTimeout(timer);
       }
     });
+    bb.http.route("GET", "/budget/codex", async context => hub.codexBudget(
+      context.req.raw, await routing.isProviderEnabled("codex"), threadId => routing.isBypassed(threadId),
+    ), { auth: "none" });
     bb.http.route(
       "POST",
       "/v1/messages",
