@@ -199,6 +199,14 @@ export const limitWindowSchema = z
 
 export type LimitWindow = z.infer<typeof limitWindowSchema>;
 
+/** A usage response is distinct from partial inference headers. Missing is never absent. */
+export const codexUsageEvidenceSchema = z.object({
+  source: z.literal("usage"), observedAt: z.number().int().nonnegative(),
+  allowed: z.boolean().nullable(), limitReached: z.boolean().nullable(),
+  primary: z.enum(["present", "absent", "unknown"]),
+  secondary: z.enum(["present", "absent", "unknown"]),
+}).strict();
+
 export const resetCreditsSchema = z.object({
   availableCount: z.number().int().nonnegative(),
   credits: z.array(z.object({
@@ -304,6 +312,7 @@ const quotaFieldsShape = {
   representativeClaim: z.string().nullable(),
   familyWeekly: familyWeeklySchema,
   limitWindows: z.array(limitWindowSchema),
+  codexUsageEvidence: codexUsageEvidenceSchema.optional(),
   observedAt: z.number().int().nullable(),
   heldUntil: z.number().int().nullable(),
   error: z.string().nullable(),

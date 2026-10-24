@@ -1,3 +1,4 @@
+import { codexBudgetQuota, CODEX_BUDGET_MAX_AGE_MS } from './codex-budget.js';
 import { NetworkFlights } from "./network-flights.js";
 import { observeUpstreamFetch } from "./transport-diagnostics.js";
 import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
@@ -905,6 +906,59 @@ export class AccountPoolHub {
     }
   }
 
+  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number) {
+    const settings = this.options.getSettings();
+    const threshold = settings.switchThreshold;
+    const workWeek = { restDays: settings.restDays, offsetMinutes: -new Date(now).getTimezoneOffset() };
+    const scopedEntries = (
+      accounts
+        .filter(account => projectTier(account, projectId) !== null)
+        .map(account => ({ ...account, role: projectRole(account, projectId) }))
+        .filter((account) => account.provider === provider && account.enabled && (account.drainOnce || scheduleAllows(account.policy, now)))
+        .map((account) => ({
+          account,
+          quota: this.options.quotas.get(account.id),
+        }))
+        .filter(({ quota }) => quota.error === null)
+        .filter(({ account, quota }) => !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
+    );
+    const available = scopedEntries.flatMap(entry => gateMembership(
+      [entry], now, settings.reserveDrainHours * 3600000, workWeek,
+    ));
+    const eligible = available.filter(
+      ({ account, quota }) => !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
+    );
+    return { available, eligible };
+  }
+
+  /** Read-only, project-bound evidence. No selection, quota refresh, credential read or model request. */
+  async codexBudget(request: Request, routingEnabled: boolean, bypassed: (threadId: string) => Promise<boolean>): Promise<Response> {
+    const token = this.requestToken(request);
+    const context = await this.options.hubTokens.authenticateContext?.(token);
+    const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
+    if (!context) return reply({ error: 'Invalid pool token.' }, 401);
+    if (!context.projectId) return reply({ error: 'A project-bound pool client is required.' }, 403);
+    const expected = new URL(request.url).searchParams.get('projectId');
+    if (expected !== null && expected !== context.projectId) return reply({ error: 'Pool project binding mismatch.' }, 403);
+    const now = this.options.now();
+    let networkAllowed = true;
+    try { await this.assertNetworkAllowed('codex'); } catch { networkAllowed = false; }
+    const threadBypassed = context.threadId ? await bypassed(context.threadId) : false;
+    const routeReady = this.accepting && routingEnabled && networkAllowed && !threadBypassed;
+    const accounts = (await this.options.accounts.list()).filter(a => a.provider === 'codex' && projectTier(a, context.projectId) !== null);
+    const eligible = new Set(this.eligibleEntries('codex', context.projectId, accounts, 'other', now).eligible.map(({ account }) => account.id));
+    return reply({
+      schema: 'bb-account-pool/codex-budget/1', observedAt: now, maxAgeMs: CODEX_BUDGET_MAX_AGE_MS,
+      projectId: context.projectId,
+      route: { provider: 'codex', path: '/v1/responses', accepting: this.accepting, routingEnabled, networkAllowed, threadBypassed, ready: routeReady },
+      accounts: accounts.map(account => {
+        const quota = this.options.quotas.get(account.id);
+        const budget = codexBudgetQuota(quota, now);
+        return { accountId: account.id, eligible: routeReady && eligible.has(account.id), ...budget, heldUntil: quota.heldUntil, budgetReady: budget.budgetReady && (quota.heldUntil === null || quota.heldUntil <= now) };
+      }),
+    });
+  }
+
   private async select(
     provider: PoolProvider,
     candidateIds: ReadonlySet<string>,
@@ -929,24 +983,7 @@ export class AccountPoolHub {
       restDays: settings.restDays,
       offsetMinutes: -new Date(now).getTimezoneOffset(),
     };
-    const scopedEntries = (
-      accounts
-        .filter(account => projectTier(account, projectId) !== null)
-        .map(account => ({ ...account, role: projectRole(account, projectId) }))
-        .filter((account) => account.provider === provider && account.enabled && (account.drainOnce || scheduleAllows(account.policy, now)))
-        .map((account) => ({
-          account,
-          quota: this.options.quotas.get(account.id),
-        }))
-        .filter(({ quota }) => quota.error === null)
-        .filter(({ account, quota }) => !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
-    );
-    const available = scopedEntries.flatMap(entry => gateMembership(
-      [entry], now, settings.reserveDrainHours * 3600000, workWeek,
-    ));
-    const eligible = available.filter(
-      ({ account, quota }) => !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
-    );
+    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now);
     const unattempted = eligible.filter(
       ({ account }) =>
         candidateIds.has(account.id) && !attempted.has(account.id),
