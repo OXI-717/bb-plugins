@@ -449,6 +449,16 @@ export class HubTokenStore {
     return (await this.authenticateContext(presented))?.hostId ?? null;
   }
 
+  /** Inspect only already-initialized state; never load, prune or update usage. */
+  async inspectContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string } | null> {
+    if (presented === null || this.initialization === null) return null;
+    await this.initialization;
+    const key = this.tokenIndex.get(this.tokenDigest(presented));
+    const token = key === undefined ? null : this.tokens.get(key) ?? null;
+    if (token === null || !matchesStoredToken(token, presented, this.now())) return null;
+    return { hostId: token.machineHostId ?? token.hostId, projectId: token.projectId ?? null, ...(token.threadId ? { threadId: token.threadId } : {}) };
+  }
+
   async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string } | null> {
     if (presented === null) return null;
     await this.initialize();

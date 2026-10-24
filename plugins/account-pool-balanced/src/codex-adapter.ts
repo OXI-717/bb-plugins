@@ -150,12 +150,34 @@ function withoutClaudeSlots(previous: AccountQuota): AccountQuota {
   };
 }
 
+// Routing keeps its legacy normalization; budget evidence must reject lossy inputs.
+function invalidBudgetHeaders(headers: Headers): boolean {
+  return (["primary", "secondary"] as const).some(slot => {
+    const prefix = `x-codex-${slot}`;
+    return ["used-percent", "window-minutes", "reset-at", "reset-after-seconds"].some(field => {
+      const raw = headers.get(`${prefix}-${field}`);
+      if (raw === null) return false;
+      const value = Number(raw);
+      if (!raw.trim() || !Number.isFinite(value)) return true;
+      if (field === "used-percent") return value < 0 || value > 100;
+      if (field === "window-minutes") return value <= 0 || !Number.isInteger(value);
+      return value < 0;
+    });
+  });
+}
+
 function codexQuotaFromHeaders(
   accountId: string,
   headers: Headers,
   previous: AccountQuota,
   now: number,
 ): AccountQuota {
+  const contradiction = (["primary", "secondary"] as const).some(slot => {
+    const raw = headers.get(`x-codex-${slot}-window-minutes`);
+    return raw !== null && Number(raw) !== previousWindow(previous, slot)?.windowMinutes;
+  });
+  if (previous.codexUsageEvidence && (invalidBudgetHeaders(headers) || contradiction))
+    previous = { ...previous, codexUsageEvidence: undefined };
   const priorPrimary = previousWindow(previous, "primary");
   const priorSecondary = previousWindow(previous, "secondary");
   const primary = windowFromHeaders(headers, "primary", priorPrimary, now);

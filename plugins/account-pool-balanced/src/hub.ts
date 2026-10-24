@@ -104,7 +104,7 @@ interface HubOptions {
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
   maxAffinityBindings: number;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;
@@ -934,7 +934,7 @@ export class AccountPoolHub {
   /** Read-only, project-bound evidence. No selection, quota refresh, credential read or model request. */
   async codexBudget(request: Request, routingEnabled: boolean, bypassed: (threadId: string) => Promise<boolean>): Promise<Response> {
     const token = this.requestToken(request);
-    const context = await this.options.hubTokens.authenticateContext?.(token);
+    const context = await this.options.hubTokens.inspectContext?.(token);
     const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
     if (!context) return reply({ error: 'Invalid pool token.' }, 401);
     if (!context.projectId) return reply({ error: 'A project-bound pool client is required.' }, 403);
@@ -1511,7 +1511,7 @@ export function createHub(options: {
   accounts: AccountStore;
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;

@@ -17,8 +17,9 @@ export class ExternalClients {
   private id(name: string) { return `external_${z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).parse(name)}`; }
 }
 
-export function combinedTokens(hosts: HubTokenStore, clients: HubTokenStore): Pick<HubTokenStore, "authenticate" | "authenticateContext" | "list" | "projectForToken"> {
+export function combinedTokens(hosts: HubTokenStore, clients: HubTokenStore): Pick<HubTokenStore, "authenticate" | "authenticateContext" | "inspectContext" | "list" | "projectForToken"> {
   return {
+    async inspectContext(token) { return await hosts.inspectContext(token) ?? await clients.inspectContext(token); },
     async authenticateContext(token) { return await hosts.authenticateContext(token) ?? await clients.authenticateContext(token); },
     async authenticate(token) { return await hosts.authenticate(token) ?? await clients.authenticate(token); },
     async projectForToken(token) { return await hosts.projectForToken(token) ?? await clients.projectForToken(token); },

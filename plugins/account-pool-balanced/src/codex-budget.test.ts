@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
 import { codexQuotaFromUsage, createCodexAdapter } from './codex-adapter.js';
 import { codexBudgetQuota, CODEX_BUDGET_MAX_AGE_MS } from './codex-budget.js';
-import { AccountStore, HubTokenStore, QuotaStore, QUOTA_MIGRATIONS } from './store.js';
+import { AccountStore, QuotaStore, QUOTA_MIGRATIONS } from './store.js';
 import { createAccountPoolPlugin } from './server.js';
 
 const id = '11111111-1111-4111-8111-111111111111';
@@ -65,11 +65,12 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 it('authenticates the project-bound route and scopes real router eligibility without upstream calls or account mutations', async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'budget-route-'));
   cleanup.push(() => fs.rm(dataDir, { recursive: true, force: true }));
+  let clock = now;
   const upstream = vi.fn<typeof fetch>(async () => { throw new Error('Unexpected upstream call'); });
   const host = createFakePluginHost({ pluginId: 'account-pool-balanced', dataDir, sdk: { hosts: { list: async () => [{ id: 'fixture-host', name: 'Fixture' }] }, system: { providerStates: async () => ({ providers: [] }) } } });
   cleanup.push(() => host.harness.lifecycle.dispose());
   await host.bb.storage.kv.set('config', { vpnOnlyProviders: [], vpnPolicyVersion: 2 });
-  await createAccountPoolPlugin({ fetch: upstream, fetchIpv4: upstream, now: () => now })(host.bb);
+  await createAccountPoolPlugin({ fetch: upstream, fetchIpv4: upstream, now: () => clock })(host.bb);
   const service = host.harness.behavior.runService('hub');
   cleanup.push(async () => { service.controller.abort(); await service.done; });
   await new Promise(resolve => setImmediate(resolve));
@@ -85,6 +86,8 @@ it('authenticates the project-bound route and scopes real router eligibility wit
   };
   const token = await resolveToken('project-one');
   const unbound = await resolveToken(null);
+  const snapshot = async () => Object.fromEntries(await Promise.all((await fs.readdir(secretDir)).filter(name => name.endsWith('.json')).map(async name => [name, await fs.readFile(path.join(secretDir, name), 'utf8')])));
+  const authState = await snapshot();
   const read = (key = token, query = '') => host.harness.behavior.fetchHttp('GET', '/budget/codex' + query, { headers: { authorization: `Bearer ${key}` } });
   expect((await read('invalid')).status).toBe(401);
   expect((await read(unbound)).status).toBe(403);
@@ -95,6 +98,9 @@ it('authenticates the project-bound route and scopes real router eligibility wit
   expect(body).toMatchObject({ schema: 'bb-account-pool/codex-budget/1', projectId: 'project-one', route: { ready: true }, accounts: [{ accountId: first.id, eligible: true, budgetReady: true }] });
   expect(JSON.stringify(body)).not.toContain(foreign.id); expect(JSON.stringify(body)).not.toContain(token);
   expect(await accounts.list()).toEqual(inventory);
+  clock += 60_001; await read();
+  expect(await snapshot()).toEqual(authState);
+  clock = now;
   await host.harness.behavior.callRpc('routing.set', { provider: 'codex', enabled: false });
   expect(await (await read()).json()).toMatchObject({ route: { ready: false }, accounts: [{ eligible: false }] });
   await host.harness.behavior.callRpc('routing.set', { provider: 'codex', enabled: true });
@@ -123,4 +129,21 @@ it('invalidates absence proof when newer headers change the slot layout', () => 
   expect(codexBudgetQuota(changed, now + 1)).toMatchObject({ budgetReady: false, windows: { weekly: { state: 'unknown' } } });
   const stable = adapter.quotaFromHeaders(id, new Headers({ 'x-codex-primary-used-percent': '25', 'x-codex-primary-window-minutes': '10080' }), prior, 'other', now + 1);
   expect(stable.codexUsageEvidence).toEqual(prior.codexUsageEvidence);
+});
+
+it.each([
+  { 'x-codex-primary-used-percent': '-5' },
+  { 'x-codex-primary-used-percent': '' },
+  { 'x-codex-primary-used-percent': '101' },
+  { 'x-codex-primary-used-percent': 'NaN' },
+  { 'x-codex-primary-window-minutes': '10080.4', 'x-codex-primary-used-percent': '10' },
+  { 'x-codex-primary-window-minutes': '300' },
+  { 'x-codex-secondary-window-minutes': '300' },
+])('refuses budget authorization after malformed or duration-only contradicting headers %j', fields => {
+  const adapter = createCodexAdapter({ refreshUrl: 'https://auth.example/token', usageUrl: 'https://usage.example/usage' });
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(fields)) if (value !== undefined) headers.set(key, value);
+  const observed = adapter.quotaFromHeaders(id, headers, quota(complete()), 'other', now + 1);
+  expect(observed.codexUsageEvidence).toBeUndefined();
+  expect(codexBudgetQuota(observed, now + 1).budgetReady).toBe(false);
 });
