@@ -213,6 +213,47 @@ class SessionPauseTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 verify_hold(bad,'owner-a',now=0)
 
+    def test_queue_arriving_between_snapshot_and_stop_does_not_skip_active_turn(self):
+        self.pause.acquire_hold()
+        original = self.pause.show
+        calls = 0
+        def queue_before_stop(thread_id):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.bb('thread', 'tell', thread_id, 'synthetic new user work')
+            return original(thread_id)
+        self.pause.show = queue_before_stop
+        self.pause.stop()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'idle')
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'stopped')
+        self.assertEqual(self.bb.threads['thread-a']['queuedMessageCount'], 1)
+        self.pause.resume()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'queued-work-preserved')
+        self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 1)
+        self.pause.release_hold()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
+
+    def test_held_queue_timestamp_change_still_stops_same_execution(self):
+        self.pause.acquire_hold()
+        original = self.pause.show
+        calls = 0
+        def queue_before_stop(thread_id):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.bb('thread', 'tell', thread_id, 'synthetic new user work')
+                self.bb.threads[thread_id]['updatedAt'] += 1
+            return original(thread_id)
+        self.pause.show = queue_before_stop
+        self.pause.stop()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'idle')
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'stopped')
+        self.pause.resume()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'queued-work-preserved')
+        self.pause.release_hold()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
+
 
 class MaintenanceIntegrationTests(unittest.TestCase):
     def test_update_failure_still_continues_stopped_sessions(self):

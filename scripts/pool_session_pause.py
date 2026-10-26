@@ -102,7 +102,15 @@ class SessionPause:
         self.save()
         for entry in self.state['sessions']:
             thread_id = entry['before']['id']
-            if self.show(thread_id) != entry['before']:
+            current = self.show(thread_id)
+            ignored = {'queuedMessageCount'}
+            if self.state.get('admission') == 'held':
+                verify_hold(self.bb('pool-maintenance', 'status'), self.state['operationId'])
+                # Held messages may touch bookkeeping, but cannot admit a new turn.
+                # Actual execution identity/status must still match the snapshot.
+                ignored.add('updatedAt')
+            execution = lambda value: {k: v for k, v in value.items() if k not in ignored}
+            if execution(current) != execution(entry['before']):
                 entry['action'] = 'changed-before-stop'
                 self.save()
                 continue
