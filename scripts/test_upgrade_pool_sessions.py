@@ -23,6 +23,10 @@ class FakeBB:
         self.fail_stop = False
         self.ambiguous_send = False
 
+    def running(self):
+        return [{"id": t["id"], "hostId": None} for t in self.threads.values()
+                if t["status"] in ("active", "starting")]
+
     def __call__(self, *args):
         self.calls.append(args)
         if args[:2] == ('thread', 'list'):
@@ -49,7 +53,7 @@ class SessionPauseTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / 'sessions.json'
         self.bb = FakeBB()
-        self.pause = SessionPause(self.path, self.bb, lambda _: None)
+        self.pause = SessionPause(self.path, self.bb, lambda _: None, running=self.bb.running)
 
     def test_only_active_sessions_resume_with_sticky_provider_and_private_metadata(self):
         self.pause.stop()
@@ -79,7 +83,7 @@ class SessionPauseTests(unittest.TestCase):
 
     def test_crash_after_stop_recovers_once(self):
         self.pause.stop()
-        recovered = SessionPause(self.path, self.bb, lambda _: None)
+        recovered = SessionPause(self.path, self.bb, lambda _: None, running=self.bb.running)
         recovered.recover()
         recovered.recover()
         self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 1)
@@ -90,7 +94,7 @@ class SessionPauseTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.pause.resume()
         with self.assertRaises(RuntimeError):
-            SessionPause(self.path, self.bb, lambda _: None).recover()
+            SessionPause(self.path, self.bb, lambda _: None, running=self.bb.running).recover()
         self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 1)
 
     def test_failed_stop_never_blindly_continues(self):
@@ -125,6 +129,39 @@ class SessionPauseTests(unittest.TestCase):
             self.pause.stop()
         self.assertFalse(any(c[1] == 'stop' for c in self.bb.calls))
 
+    def test_changed_execution_identity_during_stop_never_continues(self):
+        original = self.pause.bb
+        def mutate(*args):
+            result = original(*args)
+            if args[1] == 'stop':
+                self.bb.threads[args[2]].update(environmentId='env-owner', providerId='provider-owner')
+            return result
+        self.pause.bb = mutate
+        self.pause.stop()
+        self.pause.resume()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'changed-during-stop')
+        self.assertFalse(any(c[1] == 'tell' for c in self.bb.calls))
+
+    def test_bounded_cli_listing_cannot_omit_hidden_running_session(self):
+        self.bb.threads['thread-b'].update(status='active', visibility='hidden')
+        original = self.pause.bb
+        def truncated_list(*args):
+            if args[:2] == ('thread', 'list'):
+                return [self.bb.threads['thread-a']]
+            return original(*args)
+        self.pause.bb = truncated_list
+        self.pause.stop()
+        self.pause.resume()
+        self.assertEqual(len([c for c in self.bb.calls if c[1] == 'stop']), 2)
+
+    def test_complete_inventory_failure_stops_nothing(self):
+        def unavailable():
+            raise RuntimeError('running API unavailable')
+        self.pause.running = unavailable
+        with self.assertRaises(RuntimeError):
+            self.pause.stop()
+        self.assertFalse(any(c[1] == 'stop' for c in self.bb.calls))
+
 
 class MaintenanceIntegrationTests(unittest.TestCase):
     def test_update_failure_still_continues_stopped_sessions(self):
@@ -143,7 +180,7 @@ class MaintenanceIntegrationTests(unittest.TestCase):
                     return 'PREFLIGHT_PASS'
                 self.assertEqual(fake.threads['thread-a']['status'], 'idle')
                 raise RuntimeError('synthetic update failure')
-            with patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', side_effect=perform), patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with patch('pool_session_pause.running_threads', fake.running), patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', side_effect=perform), patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(upgrade.main(), 1)
             self.assertEqual(calls, [True, False])
             self.assertEqual(fake.threads['thread-a']['status'], 'active')
@@ -156,7 +193,7 @@ class MaintenanceIntegrationTests(unittest.TestCase):
             fake = FakeBB()
             def bb(*args):
                 return {'dataDir': directory} if args == ('status',) else fake(*args)
-            with patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', side_effect=RuntimeError('preflight failed')), patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with patch('pool_session_pause.running_threads', fake.running), patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', side_effect=RuntimeError('preflight failed')), patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(upgrade.main(), 1)
             self.assertFalse(any(c[1] == 'stop' for c in fake.calls))
 

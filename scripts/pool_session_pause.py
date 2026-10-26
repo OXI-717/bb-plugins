@@ -4,15 +4,36 @@ import os
 from pathlib import Path
 import time
 import uuid
+import urllib.parse
+import urllib.request
+
+
+def running_threads():
+    """Public SDK threads.listRunning endpoint: unpaginated, includes hidden work."""
+    base = os.environ.get('BB_SERVER_URL', 'http://127.0.0.1:38886')
+    parsed = urllib.parse.urlsplit(base)
+    if (parsed.scheme != 'http' or parsed.hostname not in ('localhost', '127.0.0.1', '::1')
+            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.path not in ('', '/')):
+        raise ValueError('Session maintenance requires a local BB server connection')
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(base.rstrip('/') + '/api/v1/threads/running', timeout=30) as response:
+        rows = json.load(response)
+    if (not isinstance(rows, list) or any(not isinstance(row, dict)
+            or not isinstance(row.get('id'), str) or not row['id'] for row in rows)
+            or len({row['id'] for row in rows}) != len(rows)):
+        raise ValueError('Invalid complete running-session inventory')
+    return rows
 
 
 class SessionPause:
-    def __init__(self, path, bb, say, *, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, path, bb, say, *, clock=time.monotonic, sleep=time.sleep, running=None):
         self.path = Path(path)
         self.bb = bb
         self.say = say
         self.clock = clock
         self.sleep = sleep
+        self.running = running or running_threads
         self.state = {'schemaVersion': 1, 'operationId': str(uuid.uuid4()),
                       'phase': 'snapshot', 'sessions': []}
 
@@ -40,9 +61,9 @@ class SessionPause:
         return self.identity(self.bb('thread', 'show', thread_id)['thread'])
 
     def stop(self):
-        threads = self.bb('thread', 'list', '--include-hidden')
-        if not isinstance(threads, list):
-            raise ValueError('Invalid thread inventory')
+        # The CLI thread list is paginated; never use it as a complete inventory.
+        rows = self.running()
+        threads = [self.show(row['id']) for row in rows]
         for thread in threads:
             if thread.get('status') in ('active', 'starting') and not thread.get('archivedAt'):
                 snapshot = self.identity(thread)
@@ -68,6 +89,11 @@ class SessionPause:
             deadline = self.clock() + 60
             while True:
                 stopped = self.show(thread_id)
+                if any(stopped[key] != entry['before'][key] for key in
+                       ('id', 'projectId', 'environmentId', 'providerId')):
+                    entry['action'] = 'changed-during-stop'
+                    self.save()
+                    break
                 if stopped['status'] == 'idle':
                     entry['stopped'] = stopped
                     entry['action'] = 'stopped'

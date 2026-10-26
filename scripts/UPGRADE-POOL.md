@@ -10,7 +10,7 @@ bash scripts/upgrade-pool.sh
 ```
 
 Requirements: `bb`, `git`, Python 3.9+ and a local BB connection. The entrypoint
-supports system Bash 3.2 on macOS. Keep both script files together; do not pipe
+supports system Bash 3.2 on macOS. Keep the shell entrypoint and its Python modules together; do not pipe
 only the shell file into Bash. State is located using `bb status --json`.
 
 The script verifies the installed source and the latest compatible immutable
@@ -36,7 +36,7 @@ After five minutes, interruption of all remaining pool requests is offered; only
 `yes` or `да` entered on the terminal within a minute confirms it. No answer or
 no terminal means continue waiting up to fifteen minutes, then cancel. Last-used
 hosts and active BB thread IDs are hints, not exact request ownership. Threads
-are not stopped separately.
+are not stopped separately in the default idle-only mode.
 
 Before update, a private directory under BB's backups contains an online SQLite
 backup, copied secrets, account/routing inventory, configuration and previous
@@ -85,7 +85,10 @@ to each unchanged session it successfully stopped, without model/provider overri
 An interrupted tool may have already performed an external action; continuation is
 not a transaction rollback or instruction replay guarantee.
 
-Release and local-server preflight run before any session is stopped. A private,
+Release and local-server preflight run before any session is stopped. The complete
+unpaginated public `threads.listRunning` API (`GET /api/v1/threads/running`)
+includes hidden sessions; the bounded CLI thread list is not used for selection.
+Unavailable or malformed inventory fails before any stop. A private,
 atomically persisted `sessions.json` records intent and outcome for each command.
 The existing upgrade lock, verified backup, immutable release pin, settings checks,
 and post-update verification still apply. Forced pool interruption is disabled.
@@ -99,7 +102,8 @@ If the executor crashes, restart the continuation step explicitly using
 `bash scripts/upgrade-pool.sh --resume-sessions /path/to/upgrade/sessions.json`.
 This command shares the upgrade lock, verifies the receipt belongs to this server's
 backup directory, and never updates the pool. It continues only sessions still idle
-with exactly the post-stop metadata. Owner edits, changed sessions and already
+with exactly the post-stop metadata and unchanged project, environment and provider
+identity throughout the stop transition. Owner edits, changed sessions and already
 completed continuations are skipped. A command whose outcome is uncertain is marked
 for inspection rather than repeated, preventing duplicate continuation messages.
 There is no automatic recovery while the executor is dead, no watchdog or daemon,
