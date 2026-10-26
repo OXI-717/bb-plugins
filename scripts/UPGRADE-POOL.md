@@ -68,3 +68,46 @@ a numeric tag marked prerelease in GitHub), the updater stops. It cannot safely
 fall back to an older release: BB resolves Git tags independently and has no
 version-selection option. Publish the intended immutable stable release or resolve
 the source/tag issue before retrying; the updater does not change remote tags.
+
+## Stop sessions, update, continue
+
+`bash scripts/upgrade-pool.sh --pause-sessions --version X.Y.Z` is an explicit
+maintenance operation affecting **all active or starting BB sessions across all
+projects and connected hosts**, including the session that starts maintenance.
+It does not change concurrency limits, routing, accounts, or models. Run it in a
+separate BB terminal, not an agent-owned shell: stopping that agent must not kill
+the maintenance executor. Previously idle sessions are never started.
+
+BB currently exposes stop and follow-up, rather than a transparent active-process
+pause. This mode interrupts current turns and releases their runtimes, retaining
+thread history and provider settings. Once maintenance ends, it sends a continuation
+to each unchanged session it successfully stopped, without model/provider overrides.
+An interrupted tool may have already performed an external action; continuation is
+not a transaction rollback or instruction replay guarantee.
+
+Release and local-server preflight run before any session is stopped. A private,
+atomically persisted `sessions.json` records intent and outcome for each command.
+The existing upgrade lock, verified backup, immutable release pin, settings checks,
+and post-update verification still apply. Forced pool interruption is disabled.
+After stopping sessions, the idle wait is bounded to 90 seconds. New sessions,
+external clients and continuations are not blocked and can still cause a safe abort.
+On ordinary failure or cancellation, continuation is attempted for stopped sessions.
+An update failure does not imply the pool is healthy; inspect the existing recovery
+receipt when post-update checks fail.
+
+If the executor crashes, restart the continuation step explicitly using
+`bash scripts/upgrade-pool.sh --resume-sessions /path/to/upgrade/sessions.json`.
+This command shares the upgrade lock, verifies the receipt belongs to this server's
+backup directory, and never updates the pool. It continues only sessions still idle
+with exactly the post-stop metadata. Owner edits, changed sessions and already
+completed continuations are skipped. A command whose outcome is uncertain is marked
+for inspection rather than repeated, preventing duplicate continuation messages.
+There is no automatic recovery while the executor is dead, no watchdog or daemon,
+and no promise of recovery after SIGKILL without this explicit step.
+
+BB does not expose an atomic compare-and-stop/send operation: another actor can
+change a session between metadata validation and the command. Coordinate a single
+maintenance window and avoid manual session operations during it. This mode is an
+explicit all-session interruption, not an admission barrier or a way to pause only
+provably pool-owned requests. Receipts contain identifiers and timestamps only;
+titles, prompts, request bodies and credentials are not copied.

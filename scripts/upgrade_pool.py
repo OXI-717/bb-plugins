@@ -152,12 +152,12 @@ def confirm_interrupt():
     return False
 
 
-def wait_idle(say, prompt_now=False, *, offer_interrupt=True):
+def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=900):
     start = time.monotonic()
     next_report = start
     stable = 0
     asked = False
-    while time.monotonic() - start < 900:
+    while time.monotonic() - start < deadline_seconds:
         pool = bb('pool', 'status')
         count = pool['inFlight']
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
@@ -168,7 +168,7 @@ def wait_idle(say, prompt_now=False, *, offer_interrupt=True):
             return False
         now = time.monotonic()
         if now >= next_report:
-            say(f'Idle wait: {int(now - start)} / 900 seconds')
+            say(f'Idle wait: {int(now - start)} / {deadline_seconds} seconds')
             report_pool(pool, say)
             next_report = now + 60
         if offer_interrupt and count and not asked and (prompt_now or now - start >= 300):
@@ -225,7 +225,9 @@ def perform(args, data, output, say):
     if args.check:
         say('Preflight passed; no update performed.')
         return 'PREFLIGHT_PASS'
-    forced = wait_idle(say, args.interrupt_now)
+    paused = getattr(args, 'pause_sessions', False)
+    forced = wait_idle(say, args.interrupt_now, offer_interrupt=not paused,
+                       deadline_seconds=90 if paused else 900)
     before = bb('pool', 'status')
     config = bb('plugin', 'config', PLUGIN)['values']
     if not before['accepting'] or (before['inFlight'] and not forced):
@@ -266,13 +268,19 @@ def main():
     parser.add_argument('--wait-idle', action='store_true', help='Wait for three idle checks without updating anything')
     parser.add_argument('--version', help='Require this to be the latest compatible release; not a downgrade selector')
     parser.add_argument('--interrupt-now', action='store_true', help='Offer the interactive interruption prompt immediately')
+    parser.add_argument('--pause-sessions', action='store_true', help='Stop active sessions on ALL hosts, update, then continue the same sessions; history retained, current turns interrupted')
+    parser.add_argument('--resume-sessions', help='Recover session continuation from a previous private operation receipt; never updates the pool')
     parser.add_argument('--sandbox', action='store_true', help='Exercise the full workflow on temporary synthetic state; no live BB or network')
     args = parser.parse_args()
     if args.sandbox:
-        if args.version or args.check or args.interrupt_now or args.wait_idle:
+        if args.version or args.check or args.interrupt_now or args.wait_idle or args.pause_sessions or args.resume_sessions:
             parser.error('--sandbox cannot be combined with live-operation options')
         from upgrade_pool_sandbox import sandbox
         return sandbox(sys.modules[__name__])
+    if args.pause_sessions and (args.check or args.wait_idle or args.interrupt_now or args.resume_sessions):
+        parser.error('--pause-sessions cannot combine with check, wait, force or recovery options')
+    if args.resume_sessions and (args.version or args.check or args.wait_idle or args.interrupt_now):
+        parser.error('--resume-sessions is a recovery-only operation')
     if args.wait_idle and (args.version or args.check or args.interrupt_now):
         parser.error('--wait-idle cannot be combined with update or interruption options')
     os.umask(0o077)
@@ -304,7 +312,29 @@ def main():
                     log.write(message + '\n')
                     log.flush()
                 try:
-                    if args.wait_idle:
+                    if args.resume_sessions:
+                        from pool_session_pause import SessionPause
+                        receipt = Path(args.resume_sessions).resolve()
+                        if receipt.parent.parent != backups or receipt.name != 'sessions.json':
+                            raise UpgradeError('Recovery receipt must belong to this server upgrade backups')
+                        SessionPause(receipt, bb, say).recover()
+                        result = 'SESSIONS_RECOVERED'
+                    elif args.pause_sessions:
+                        from pool_session_pause import SessionPause
+                        # Verify release and server before interrupting any session.
+                        preflight = argparse.Namespace(**vars(args))
+                        preflight.check = True
+                        checked = perform(preflight, data, output, say)
+                        if checked == 'ALREADY_CURRENT':
+                            result = checked
+                        else:
+                            pause = SessionPause(output / 'sessions.json', bb, say)
+                            try:
+                                pause.stop()
+                                result = perform(args, data, output, say)
+                            finally:
+                                pause.resume()
+                    elif args.wait_idle:
                         wait_idle(say, offer_interrupt=False)
                         result = 'IDLE_PASS'
                     else:
