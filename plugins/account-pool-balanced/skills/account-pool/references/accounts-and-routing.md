@@ -84,3 +84,9 @@ one provider. Include disabled accounts too. Reordering changes the next failove
 sequence without moving the current account. `bb pool account priority <id> <n>`
 sets an individual priority; the same operations are available through the
 `account.reorder` and `account.setPriority` plugin RPCs.
+
+For private, bounded attribution of natural forwarding requests and hold causes,
+use `bb pool observations --json` (0.4.35+). See
+[request observations](../../../docs/request-observations.md) for coverage,
+identity provenance, retained-event rate counts and privacy/retention limits.
+The command does not refresh quotas or make provider requests.
