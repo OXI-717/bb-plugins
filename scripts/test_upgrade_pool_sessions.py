@@ -1,6 +1,7 @@
 import copy
 import contextlib
 import io
+import time
 from unittest.mock import patch
 import upgrade_pool as upgrade
 import json
@@ -20,6 +21,7 @@ class FakeBB:
                              providerId='provider-b', updatedAt=1, status='idle'),
         }
         self.calls = []
+        self.lease = None
         self.fail_stop = False
         self.ambiguous_send = False
 
@@ -29,6 +31,15 @@ class FakeBB:
 
     def __call__(self, *args):
         self.calls.append(args)
+        if args[0] == 'pool-maintenance':
+            if args[1] == 'acquire':
+                self.lease = {'owner': args[3], 'expiresAt': time.time()*1000+1_800_000}
+            if args[1] == 'release':
+                self.lease = None
+                for t in self.threads.values():
+                    if t.get('queuedMessageCount', 0):
+                        t.update(status='active', queuedMessageCount=0)
+            return {'schemaVersion': 1, 'scope': 'all-hosts-all-projects', 'lease': self.lease}
         if args[:2] == ('thread', 'list'):
             return copy.deepcopy(list(self.threads.values()))
         thread = self.threads[args[2]]
@@ -39,7 +50,10 @@ class FakeBB:
                 raise RuntimeError('command failed')
             thread.update(status='idle', updatedAt=2)
         elif args[1] == 'tell':
-            thread.update(status='active', updatedAt=3)
+            if self.lease:
+                thread['queuedMessageCount'] = thread.get('queuedMessageCount', 0) + 1
+            else:
+                thread.update(status='active', updatedAt=3)
             if self.ambiguous_send:
                 raise TimeoutError()
         else:
@@ -174,6 +188,90 @@ class SessionPauseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.pause.stop()
         self.assertFalse(any(c[1] == 'stop' for c in self.bb.calls))
+
+    def test_new_messages_stay_queued_until_owned_hold_is_released(self):
+        self.pause.acquire_hold()
+        self.pause.stop()
+        self.bb('thread', 'tell', 'thread-b', 'synthetic queued user message')
+        self.pause.resume()
+        self.assertTrue(all(t['status'] == 'idle' for t in self.bb.threads.values()))
+        self.pause.release_hold()
+        self.assertTrue(all(t['status'] == 'active' for t in self.bb.threads.values()))
+
+    def test_previous_receipt_without_queue_field_resumes_unchanged_session(self):
+        self.pause.stop()
+        entry = self.pause.state['sessions'][0]
+        entry['before'].pop('queuedMessageCount')
+        entry['stopped'].pop('queuedMessageCount')
+        self.pause.save()
+        self.pause.recover()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'resumed')
+
+    def test_previous_receipt_still_detects_new_queue_after_stop(self):
+        self.pause.stop()
+        entry = self.pause.state['sessions'][0]
+        entry['stopped'].pop('queuedMessageCount')
+        self.bb.threads['thread-a']['queuedMessageCount'] = 1
+        self.pause.save()
+        self.pause.recover()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'changed-after-stop')
+        self.assertFalse(any(c[1] == 'tell' for c in self.bb.calls))
+
+    def test_preexisting_queued_work_gets_no_redundant_continuation(self):
+        self.bb.threads['thread-a']['queuedMessageCount'] = 1
+        self.pause.stop()
+        self.pause.resume()
+        self.assertFalse(any(c[1] == 'tell' for c in self.bb.calls))
+
+    def test_foreign_or_short_hold_refuses_update(self):
+        from pool_session_pause import verify_hold
+        good = {'schemaVersion':1,'scope':'all-hosts-all-projects','lease':{'owner':'owner-a','expiresAt':1_800_000}}
+        verify_hold(good,'owner-a',now=0)
+        for owner, expires in [('owner-b',1_800_000),('owner-a',100),('owner-a',float('nan'))]:
+            bad = {**good,'lease':{'owner':owner,'expiresAt':expires}}
+            with self.assertRaises(RuntimeError):
+                verify_hold(bad,'owner-a',now=0)
+
+    def test_queue_arriving_between_snapshot_and_stop_does_not_skip_active_turn(self):
+        self.pause.acquire_hold()
+        original = self.pause.show
+        calls = 0
+        def queue_before_stop(thread_id):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.bb('thread', 'tell', thread_id, 'synthetic new user work')
+            return original(thread_id)
+        self.pause.show = queue_before_stop
+        self.pause.stop()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'idle')
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'stopped')
+        self.assertEqual(self.bb.threads['thread-a']['queuedMessageCount'], 1)
+        self.pause.resume()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'queued-work-preserved')
+        self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 1)
+        self.pause.release_hold()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
+
+    def test_held_queue_timestamp_change_still_stops_same_execution(self):
+        self.pause.acquire_hold()
+        original = self.pause.show
+        calls = 0
+        def queue_before_stop(thread_id):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.bb('thread', 'tell', thread_id, 'synthetic new user work')
+                self.bb.threads[thread_id]['updatedAt'] += 1
+            return original(thread_id)
+        self.pause.show = queue_before_stop
+        self.pause.stop()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'idle')
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'stopped')
+        self.pause.resume()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'queued-work-preserved')
+        self.pause.release_hold()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
 
 
 class MaintenanceIntegrationTests(unittest.TestCase):

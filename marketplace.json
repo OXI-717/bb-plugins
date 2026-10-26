@@ -176,6 +176,30 @@
           "tagPrefix": "federation-pilot/"
         }
       }
+    },
+    {
+      "id": "pool-maintenance",
+      "icon": {
+        "url": "./icons/pool-maintenance.svg"
+      },
+      "displayName": "Pool Maintenance",
+      "description": "Queues sessions during bounded pool maintenance without changing limits.",
+      "author": {
+        "name": "OXI",
+        "github": "OXI-717"
+      },
+      "tags": [
+        "maintenance",
+        "sessions"
+      ],
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/pool-maintenance",
+          "range": "^0.1.0",
+          "tagPrefix": "pool-maintenance/"
+        }
+      }
     }
   ]
 }

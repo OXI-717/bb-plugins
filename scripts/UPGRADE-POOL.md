@@ -71,47 +71,41 @@ the source/tag issue before retrying; the updater does not change remote tags.
 
 ## Stop sessions, update, continue
 
-`bash scripts/upgrade-pool.sh --pause-sessions --version X.Y.Z` is an explicit
-maintenance operation affecting **all active or starting BB sessions across all
-projects and connected hosts**, including the session that starts maintenance.
-It does not change concurrency limits, routing, accounts, or models. Run it in a
-separate BB terminal, not an agent-owned shell: stopping that agent must not kill
-the maintenance executor. Previously idle sessions are never started.
+Install the accepted `pool-maintenance` release separately from the pool. This
+independent plugin holds the session queue while the pool itself is reloaded.
+Use `bash scripts/upgrade-pool.sh --pause-sessions --version X.Y.Z` from a separate
+BB machine terminal. Stopping the initiating session must not kill the executor.
 
-BB currently exposes stop and follow-up, rather than a transparent active-process
-pause. This mode interrupts current turns and releases their runtimes, retaining
-thread history and provider settings. Once maintenance ends, it sends a continuation
-to each unchanged session it successfully stopped, without model/provider overrides.
-An interrupted tool may have already performed an external action; continuation is
-not a transaction rollback or instruction replay guarantee.
+After release/server preflight, acquire an exclusive 30-minute hold on new BB
+dispatches across **all projects and hosts**, then snapshot active/starting
+sessions through the unpaginated public threads.listRunning API. Stop current
+turns with history/provider settings retained. The hook queues starts, follow-ups,
+steers and retries, instead of rejecting them. Queue cards and sidebar clocks
+show the reason. No concurrency limits change.
 
-Release and local-server preflight run before any session is stopped. The complete
-unpaginated public `threads.listRunning` API (`GET /api/v1/threads/running`)
-includes hidden sessions; the bounded CLI thread list is not used for selection.
-Unavailable or malformed inventory fails before any stop. A private,
-atomically persisted `sessions.json` records intent and outcome for each command.
-The existing upgrade lock, verified backup, immutable release pin, settings checks,
-and post-update verification still apply. Forced pool interruption is disabled.
-After stopping sessions, the idle wait is bounded to 90 seconds. New sessions,
-external clients and continuations are not blocked and can still cause a safe abort.
-On ordinary failure or cancellation, continuation is attempted for stopped sessions.
-An update failure does not imply the pool is healthy; inspect the existing recovery
-receipt when post-update checks fail.
+The existing upgrade lock, verified backup, immutable release/source verification,
+settings and post-update checks remain mandatory. Forced pool interruption stays
+disabled; drain is bounded to 90 seconds. Before wait, backup and update, the owned
+hold must have 15 minutes remaining. Missing/foreign/expiring hold refuses update.
+External HTTP clients are outside the BB queue and can still cause a guarded abort.
+Do not unload this plugin during an operation: core may clear orphaned waits.
 
-If the executor crashes, restart the continuation step explicitly using
-`bash scripts/upgrade-pool.sh --resume-sessions /path/to/upgrade/sessions.json`.
-This command shares the upgrade lock, verifies the receipt belongs to this server's
-backup directory, and never updates the pool. It continues only sessions still idle
-with exactly the post-stop metadata and unchanged project, environment and provider
-identity throughout the stop transition. Owner edits, changed sessions and already
-completed continuations are skipped. A command whose outcome is uncertain is marked
-for inspection rather than repeated, preventing duplicate continuation messages.
-There is no automatic recovery while the executor is dead, no watchdog or daemon,
-and no promise of recovery after SIGKILL without this explicit step.
+On success or ordinary failure, queue continuations for unchanged stopped sessions
+without provider/model overrides, then release the owned hold and recheck the queue.
+Previously idle sessions do not start unless they have real queued user work.
+Already queued user work is preserved without adding a redundant continuation.
+An ended operation does not imply a successful update; read the result separately.
 
-BB does not expose an atomic compare-and-stop/send operation: another actor can
-change a session between metadata validation and the command. Coordinate a single
-maintenance window and avoid manual session operations during it. This mode is an
-explicit all-session interruption, not an admission barrier or a way to pause only
-provably pool-owned requests. Receipts contain identifiers and timestamps only;
-titles, prompts, request bodies and credentials are not copied.
+BB stop interrupts the turn rather than freezing a process. An interrupted tool
+may already have performed an external action. Native BB has no atomic compare-
+and-stop/send, so use one coordinated window and avoid manual session changes.
+Observed identity changes are skipped, not overwritten.
+
+Private atomic/fsynced sessions.json records ownership and command intent/outcome.
+After executor death use `--resume-sessions /path/to/upgrade/sessions.json` with
+the accepted updater. Recovery shares the upgrade lock, continues only unchanged
+sessions, never blindly repeats uncertain sends, and releases only its own hold.
+Queued messages carry the finite deadline; core re-attempts after expiry without
+a daemon, cron or watchdog. Stopped sessions without queued work need explicit
+recovery. Lease state survives plugin restart and expiry is checked at startup.
+No recovery is promised while BB is not running. No prompts or credentials in receipts.

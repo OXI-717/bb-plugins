@@ -208,6 +208,12 @@ def backup_state(data, destination, pool, source, info, config):
         'keep BB stopped and use the saved source metadata with BB support. No destructive reinstall is automated.\n')
 
 
+def verify_pause(args):
+    if getattr(args, 'pause_sessions', False):
+        from pool_session_pause import verify_hold
+        verify_hold(bb('pool-maintenance', 'status'), args.maintenance_owner)
+
+
 def perform(args, data, output, say):
     info = installed()
     source = source_info()
@@ -225,6 +231,7 @@ def perform(args, data, output, say):
     if args.check:
         say('Preflight passed; no update performed.')
         return 'PREFLIGHT_PASS'
+    verify_pause(args)
     paused = getattr(args, 'pause_sessions', False)
     forced = wait_idle(say, args.interrupt_now, offer_interrupt=not paused,
                        deadline_seconds=90 if paused else 900)
@@ -232,6 +239,7 @@ def perform(args, data, output, say):
     config = bb('plugin', 'config', PLUGIN)['values']
     if not before['accepting'] or (before['inFlight'] and not forced):
         raise UpgradeError('Pool state changed; retry after requests finish')
+    verify_pause(args)
     backup_state(data, output / 'backup', before, source, info, config)
     say('Verified backup created.')
     # Fail closed if a new release or a source/settings change appeared while waiting.
@@ -242,6 +250,7 @@ def perform(args, data, output, say):
         raise UpgradeError('Account settings changed during backup; retry')
     if latest['inFlight'] and not forced:
         raise UpgradeError('New requests arrived during backup; retry')
+    verify_pause(args)
     say(f'Updating to {target} using BB plugin update.')
     run('bb', 'plugin', 'update', PLUGIN, '--yes', timeout=600)
     after_info = installed()
@@ -330,10 +339,15 @@ def main():
                         else:
                             pause = SessionPause(output / 'sessions.json', bb, say)
                             try:
+                                pause.acquire_hold()
+                                args.maintenance_owner = pause.state['operationId']
                                 pause.stop()
                                 result = perform(args, data, output, say)
                             finally:
-                                pause.resume()
+                                try:
+                                    pause.resume()
+                                finally:
+                                    pause.release_hold()
                     elif args.wait_idle:
                         wait_idle(say, offer_interrupt=False)
                         result = 'IDLE_PASS'
