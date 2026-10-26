@@ -1,0 +1,79 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, expect, it, vi } from 'vitest';
+import { MAX_BYTES, MAX_ROWS, TTL_MS, RequestJournal, newTrace } from './request-journal.js';
+const cleanups:Array<()=>Promise<void>>=[];
+afterEach(async()=>{vi.restoreAllMocks();for(const cleanup of cleanups.splice(0).reverse())await cleanup();});
+async function fixture(){
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'request-metadata-'));
+ let now=1900000000000;const file=path.join(dir,'metadata','recent.json'),journal=new RequestJournal(file,()=>now);
+ await journal.initialize();cleanups.push(async()=>{await journal.close();await fs.rm(dir,{recursive:true,force:true});});
+ const trace=newTrace('codex','external-client-synthetic','proj_abcdef1234','thr_abcdef1234','gpt-6-astra','other');
+ const event=(fields:object={})=>({...trace,at:now,attempt:0,event:'request',accountId:null,status:null,durationMs:null,inFlight:0,accountInFlight:0,retryAfterMs:null,retryAfterSupplied:null,quotaEvidence:null,holdSource:null,heldUntil:null,outcome:null,failover:null,errorClass:null,...fields});
+ return {dir,file,journal,event,setNow:(v:number)=>{now=v;},now};
+}
+it('removes unrecognized fields and refuses arbitrary model/identity strings',async()=>{
+ const f=await fixture();f.journal.record(f.event({prompt:'private synthetic prompt',authorization:'secret synthetic header'}));
+ f.journal.record(f.event({model:'private-synthetic-model'}));
+ const rows=f.journal.snapshot().rows;
+ expect(rows).toHaveLength(1);expect(JSON.stringify(rows)).not.toMatch(/private|secret|external-client/);
+ const unknown=newTrace('codex','external-client-synthetic','private-project','private-thread','private-model','other');
+ expect(unknown).toMatchObject({projectId:null,threadId:null,model:null});
+ expect(unknown.clientHash).toBe(f.event().clientHash);
+});
+it('counts logical requests, attempts and three origins separately',async()=>{
+ const f=await fixture();
+ for(const fields of [{},{event:'attempt',attempt:1},{event:'upstream',attempt:1,status:429},{event:'attempt',attempt:2},{event:'upstream',attempt:2,status:200},{event:'local-held',status:429},{event:'hold',holdSource:'upstream403',status:403}]) f.journal.record(f.event(fields));
+ expect(f.journal.snapshot().minutes).toEqual([{at:Math.floor(f.now/60000)*60000,logicalRequests:1,attempts:2,upstream429:1,localHeld429:1,upstream403Holds:1}]);
+});
+it('caps rows and ages out metadata, with honest retained-only coverage',async()=>{
+ const f=await fixture();for(let i=0;i<MAX_ROWS+7;i++)f.journal.record(f.event());
+ expect(f.journal.snapshot()).toMatchObject({coverage:'retained-events-only',truncated:true,evictedSinceStart:7});
+ expect(f.journal.snapshot().rows).toHaveLength(MAX_ROWS);
+ await f.journal.flush();expect((await fs.stat(f.file)).size).toBeLessThan(MAX_BYTES);
+ f.setNow(f.now+TTL_MS+1);expect(f.journal.snapshot().rows).toEqual([]);await f.journal.flush();
+ expect(JSON.parse(await fs.readFile(f.file,'utf8')).rows).toEqual([]);
+});
+it('persists private sanitized snapshots and restores a bounded valid snapshot',async()=>{
+ const f=await fixture();f.journal.record(f.event());await f.journal.flush();
+ expect((await fs.stat(f.file)).mode&0o777).toBe(0o600);expect((await fs.stat(path.dirname(f.file))).mode&0o777).toBe(0o700);
+ const restored=new RequestJournal(f.file,()=>f.now);await restored.initialize();expect(restored.snapshot().rows).toHaveLength(1);await restored.close();
+});
+it('does no storage I/O in record and stays bounded while a write is blocked',async()=>{
+ const f=await fixture();let unblock!:()=>void;
+ const write=vi.spyOn(fs,'writeFile').mockImplementationOnce(()=>new Promise<void>(resolve=>{unblock=resolve;}));
+ f.journal.record(f.event());expect(write).not.toHaveBeenCalled();
+ const flush=f.journal.flush();expect(write).toHaveBeenCalledTimes(1);
+ for(let i=0;i<MAX_ROWS+1;i++)f.journal.record(f.event());
+ expect(f.journal.snapshot().rows).toHaveLength(MAX_ROWS);expect(write).toHaveBeenCalledTimes(1);
+ unblock();await flush;write.mockRestore();
+});
+it('isolates write failures and refuses corrupt or oversized persisted metadata',async()=>{
+ const f=await fixture();f.journal.record(f.event());
+ const spy=vi.spyOn(fs,'writeFile').mockRejectedValueOnce(new Error('private synthetic failure'));
+ await expect(f.journal.flush()).resolves.toBeUndefined();
+ expect(f.journal.snapshot().storageFailuresSinceStart).toBe(1);expect(JSON.stringify(f.journal.snapshot())).not.toContain('private synthetic');spy.mockRestore();
+ await fs.writeFile(f.file,'x'.repeat(MAX_BYTES+1));const restored=new RequestJournal(f.file,()=>f.now);await restored.initialize();
+ expect(restored.snapshot().rows).toEqual([]);expect(restored.snapshot().storageFailuresSinceStart).toBe(1);await restored.close();
+});
+
+it('removes an abandoned temporary snapshot on startup without natural traffic',async()=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'request-orphan-'));
+ const file=path.join(dir,'recent.json');
+ await fs.writeFile(file+'.tmp',JSON.stringify({rows:[{at:1,privateSynthetic:'old metadata'}]}),{mode:0o600});
+ const journal=new RequestJournal(file,()=>1900000000000);await journal.initialize();
+ try {
+  expect(journal.snapshot().rows).toEqual([]);await journal.flush();
+  await expect(fs.stat(file+'.tmp')).rejects.toMatchObject({code:'ENOENT'});
+ } finally {await journal.close();await fs.rm(dir,{recursive:true,force:true});}
+});
+it('removes a temporary snapshot after rename failure and isolates cleanup failure',async()=>{
+ const f=await fixture();f.journal.record(f.event());
+ const rename=vi.spyOn(fs,'rename').mockRejectedValueOnce(new Error('synthetic rename failure'));
+ await f.journal.flush();await expect(fs.stat(f.file+'.tmp')).rejects.toMatchObject({code:'ENOENT'});
+ expect(f.journal.snapshot().storageFailuresSinceStart).toBe(1);rename.mockRestore();
+ const remove=vi.spyOn(fs,'rm').mockRejectedValueOnce(new Error('synthetic cleanup failure'));
+ const restored=new RequestJournal(f.file,()=>f.now);await expect(restored.initialize()).resolves.toBeUndefined();
+ expect(restored.snapshot().storageFailuresSinceStart).toBe(1);await restored.close();remove.mockRestore();
+});

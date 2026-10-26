@@ -86,6 +86,7 @@ export function createClaudeAdapter(options: {
     parseRequest(body) {
       const parsed = parseRequestBody(body);
       return {
+        model: parsed.model,
         family: parsed.family,
         affinityId: parsed.affinityId,
         parentAffinityId: parsed.parentAffinityId,

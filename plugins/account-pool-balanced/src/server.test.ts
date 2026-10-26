@@ -7649,3 +7649,80 @@ it('routes browser panel and CLI to the selected Mac with no server browser fall
  await expect(fixture.host.harness.behavior.callRpc('browser.open',{accountId:fixture.account.id})).rejects.toThrow('unavailable');
  expect(remote).toHaveBeenCalledTimes(2);expect(local).not.toHaveBeenCalled();
 });
+
+describe('bounded request metadata observations',()=>{
+  async function records(fixture:Fixture){
+    const reply=await fixture.host.harness.behavior.runCli(['observations','--json']);
+    expect(reply.exitCode).toBe(0);
+    return JSON.parse(reply.stdout) as {rows:Array<import('./request-journal.js').Observation>;minutes:Array<{logicalRequests:number;attempts:number;upstream429:number;localHeld429:number}>};
+  }
+  it('attributes upstream429 with supplied delay without leaking body or headers',async()=>{
+    const outbound=vi.fn().mockResolvedValue(new Response('synthetic private response',{status:429,headers:{'retry-after':'60','x-private':'synthetic-private'}}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:JSON.stringify({model:'claude-opus-4-6',messages:[{role:'user',content:'synthetic private prompt'}]})});
+    expect(response.status).toBe(429);await response.text();
+    const result=await records(fixture);
+    expect(result.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({event:'upstream',status:429,retryAfterMs:60000,retryAfterSupplied:true,quotaEvidence:false}),
+      expect.objectContaining({event:'hold',holdSource:'upstream429',heldUntil:expect.any(Number)}),
+    ]));
+    expect(result.minutes[0]).toMatchObject({logicalRequests:1,attempts:1,upstream429:1,localHeld429:0});
+    expect(JSON.stringify(result)).not.toMatch(/private|authorization|messages|sk-account/);
+  });
+  it('distinguishes a local held429 from an upstream429 and preserves one logical ID per request',async()=>{
+    const outbound=vi.fn().mockImplementation(async()=>Response.json({}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    const body=JSON.stringify({model:'claude-opus-4-6',metadata:{user_id:'user_session_11111111-1111-4111-8111-111111111111'}});
+    const first=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body});await first.text();
+    fixture.host.bb.storage.database().prepare('UPDATE account_quota SET held_until=? WHERE account_id=?').run(Date.now()+60000,fixture.account.id);
+    const second=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body});expect(second.status).toBe(429);await second.text();
+    const r=await records(fixture);
+    expect(outbound).toHaveBeenCalledTimes(1);
+    expect(r.rows.filter(e=>e.event==='local-held')).toEqual([expect.objectContaining({status:429,holdSource:'existing-hold',attempt:0})]);
+    expect(new Set(r.rows.filter(e=>e.event==='request').map(e=>e.requestId)).size).toBe(2);
+    expect(r.minutes[0]).toMatchObject({logicalRequests:2,attempts:1,upstream429:0,localHeld429:1});
+  });
+  it('records recoverable upstream403 holds with a different causal source',async()=>{
+    const outbound=vi.fn().mockResolvedValue(new Response('<html>synthetic block</html>',{status:403,headers:{'content-type':'text/html'}}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});await response.text();
+    expect((await records(fixture)).rows).toEqual(expect.arrayContaining([expect.objectContaining({event:'hold',status:403,holdSource:'upstream403',heldUntil:expect.any(Number)})]));
+  });
+  it('records actual token-bound identifiers, not inbound guessed thread IDs',async()=>{
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockImplementation(async()=>Response.json({}))}});
+    const env=await fixture.host.harness.behavior.resolveProviderEnv('claude-code',{hostId:'host-one',projectId:'proj_abcdef1234',threadId:'thr_abcdef1234'});
+    const key=env.find(e=>e.name==='ANTHROPIC_AUTH_TOKEN')!.value as string;
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(key),'thread-id':'thr_forged1234'},body:JSON.stringify({model:'private-model',metadata:{user_id:'private-user'}})});await response.text();
+    expect((await records(fixture)).rows.every(e=>e.projectId==='proj_abcdef1234'&&e.threadId==='thr_abcdef1234'&&e.model===null)).toBe(true);
+  });
+  it('counts failover attempts separately and reports final account outcome',async()=>{
+    const outbound=vi.fn().mockResolvedValueOnce(new Response('synthetic fail',{status:500})).mockResolvedValueOnce(Response.json({}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    await fixture.host.harness.behavior.callRpc('account.add',{provider:'claude',source:{kind:'api-key',apiKey:'synthetic-second-key'},label:null,priority:200});
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});expect(response.status).toBe(200);await response.text();
+    const r=await records(fixture);expect(r.minutes[0]).toMatchObject({logicalRequests:1,attempts:2});
+    expect(r.rows.filter(e=>e.event==='attempt').map(e=>e.attempt)).toEqual([1,2]);
+    expect(r.rows).toContainEqual(expect.objectContaining({event:'result',outcome:'failed-over',status:200}));
+  });
+  it.each(['complete','cancel','error'] as const)('records stream %s once',async(kind)=>{
+    let streamController!:ReadableStreamDefaultController<Uint8Array>;
+    const stream=new ReadableStream<Uint8Array>({start(c){streamController=c;c.enqueue(new TextEncoder().encode('data: {}\n\n'));}});
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockResolvedValue(new Response(stream,{headers:{'content-type':'text/event-stream'}}))}});
+    const abort=new AbortController();
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}',signal:abort.signal});
+    const reader=response.body!.getReader();await reader.read();
+    if(kind==='complete'){streamController.close();await reader.read();}
+    if(kind==='cancel'){await reader.cancel();abort.abort();}
+    if(kind==='error'){streamController.error(new Error('synthetic private error'));await reader.read();}
+    const rows=(await records(fixture)).rows.filter(e=>e.event==='stream-end');
+    expect(rows).toHaveLength(1);expect(rows[0]!.outcome).toBe(kind==='cancel'?'canceled':kind);
+    expect(JSON.stringify(rows)).not.toContain('private error');
+  });
+  it('does not fail forwarding when the telemetry recorder throws',async()=>{
+    const {RequestJournal}=await import('./request-journal.js');
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockImplementation(async()=>Response.json({ok:true}))}});
+    vi.spyOn(RequestJournal.prototype,'record').mockImplementation(()=>{throw Error('synthetic journal failure');});
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
+    expect(response.status).toBe(200);expect(await response.json()).toEqual({ok:true});
+  });
+});

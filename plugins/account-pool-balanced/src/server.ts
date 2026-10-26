@@ -1,3 +1,4 @@
+import { RequestJournal } from "./request-journal.js";
 import {createGuardNetworkCheck,bindGuardNetworkDecision,hostGuardDecisionSchema} from "./guard-network.js";
 import {z} from "zod";
 import { describeTransportError } from "./transport-diagnostics.js";
@@ -145,6 +146,9 @@ export function createAccountPoolPlugin(
     const db = bb.storage.database();
     bb.storage.migrate(db, QUOTA_MIGRATIONS);
     const quotas = new QuotaStore(db);
+    const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
+    await journal.initialize();
+    bb.onDispose(()=>journal.close());
     const transport =
       options.fetch === undefined ? createUpstreamTransport() : null;
     const upstreamFetch = options.fetch ?? transport?.fetch;
@@ -152,6 +156,7 @@ export function createAccountPoolPlugin(
       route: hubBasePath(bb.pluginId),
       accounts,
       quotas,
+      journal,
       affinity: new PoolAffinityStore(db),
       hubTokens: combinedTokens(hubTokens, externalClients.tokens),
       getSettings: () => currentSettings,
