@@ -57,6 +57,10 @@ The legacy single-server fields remain readable for existing pilot installations
 
 Remote project names include their configured label. Thread rows show the standard Network icon, neutral while connected and red while offline. Open and send messages in the ordinary chat. Permission responses use the original remote interaction API.
 
+Remote machine names carry a globe and their remote server label/ID in native selectors. Machine settings show separate **Machines on remote BB servers** groups, without local machine management controls. **Permissions on remote server: Full Access** describes execution permissions on that remote machine, not a grant to primary. Remote machine detail links return to these read-only groups. No machine records, provider IDs or host types are fabricated. Host mutations are refused by both the client transport and backend policy.
+
+Machine grouping uses the content-script DOM seam (`data-machine-row` and exact settings links), because this BB version has no machine-row extension slot. It is version-sensitive like the transport; verify the machine page and disable cleanup after upgrades.
+
 For a new thread, select the remote project **and its remote environment or machine**. BB's initial machine and unscoped model list still come from primary; the plugin rejects a mixed local/remote creation instead of guessing. Selecting a remote environment loads that server's execution options. No new provider is introduced.
 
 The ordinary `bb thread` CLI and agents' BB tools still address their own BB installation. A remote agent cannot read a primary thread just because its ID was mentioned. Mentions are forwarded as message content, not expanded into private conversation history.
@@ -80,6 +84,10 @@ Not federated: uploads/attachments, file APIs and previews, terminals, other plu
 This bridge uses the primary installation's existing trust boundary. Any primary client with access to the plugin endpoint gets the configured project permissions. It does not provide a scoped token for an autonomous agent, distinguish employees, or isolate malicious users sharing the same BB installation. A separate read-only/send-only consumer needs its own narrow authenticated API before deployment. Do not expose the bridge as an unauthenticated internet proxy.
 
 Normal disposal closes owned sockets, timers and SSH children. Abrupt host-worker termination may leave an SSH child until the operating system or an administrator cleans it up.
+
+The bridge creates an outbound SSH local forward, not remote machine enrollment. This does not establish independent network isolation: existing network routes, firewall rules and externally exposed BB endpoints remain the operator's responsibility. SDK local authentication is a browser Origin/JSON guard, not a scoped credential for arbitrary network clients.
+
+Archived or deep-linked threads absent from sidebar-bootstrap must be revalidated after inventory refresh; live updates can pause until their next read. Ownership records in plugin storage are not currently pruned.
 
 ## Development
 

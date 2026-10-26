@@ -21,6 +21,7 @@
 // No React internals are used. Cache refresh relies on bb's own `changed`
 // handling and reconnect wave.
 
+import {remoteMachineName, mountRemoteMachines} from './machine-presentation.mjs';
 export const ID_RE = /^(thr|proj|env|host)_[a-z0-9]+$/u;
 export const PERSONAL = "proj_personal";
 const OWNER_KEYS = new Set([
@@ -58,6 +59,8 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   const rowStatusIds = new Set();
   const outerSockets = new Set();
   const inner = new WeakSet();
+  const remoteMachines=new Map();
+  let machineView=null;
   const state = {
     remoteState: "connecting",
     servers: peers,
@@ -87,6 +90,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
       for(const socket of outerSockets)socket._restorePrimaryId(id);
       if(rowStatusIds.delete(id)&&setRowStatus)try{setRowStatus(id,null);}catch{}
       log("primary-owner-restored",{id});
+      remoteMachines.delete(id);machineView?.refresh();
     }
   };
   // Structured walk: only owner-bearing keys, never free text in timelines.
@@ -112,7 +116,14 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     if(["/api/v1/threads","/api/v1/hosts","/api/v1/environments"].includes(route)) { (Array.isArray(value)?value:[value]).forEach(entity);return; }
     if(/^\/api\/v1\/(threads\/thr_|projects\/proj_|hosts\/host_|environments\/env_)[a-z0-9]+$/.test(route))entity(value);
   }
-  const learnRemote = (path,json,peer) => learnResponse(path,json,id=>addRemote(id,peer));
+  const learnRemote = (path,json,peer) => {
+    learnResponse(path,json,id=>addRemote(id,peer));
+    const route=path.split('?')[0];
+    if(route==='/api/v1/hosts' || /^\/api\/v1\/hosts\/host_[a-z0-9]+$/.test(route)){
+      for(const host of Array.isArray(json)?json:[json])if(host && /^host_[a-z0-9]+$/.test(host.id) && owners.get(host.id)===peer && !conflicts.has(host.id))remoteMachines.set(host.id,{host,serverId:peer.serverId,label:peer.label,peer});
+      machineView?.refresh();
+    }
+  };
   const learnPrimary = (path,json) => learnResponse(path,json,addPrimary);
 
   // ---------- row status ----------
@@ -131,6 +142,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     state.remoteState = peers.every(p=>p.state==="open")?"open":peers.some(p=>p.state==="offline")?"offline":"connecting";
     log("remote-state", { state: s });
     for (const id of peer.ids) if (id.startsWith("thr_")) applyRowStatus(id);
+    machineView?.refresh();
   }
 
   // ---------- HTTP ----------
@@ -156,7 +168,10 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     // Learn new ids BEFORE bb sees the response: a just-created thread is
     // opened by the very next request and must already be remote-owned.
     if (r.headers.get("content-type")?.includes("application/json")) {
-      try { if(r.ok)learnRemote(path,await r.clone().json(),peer); } catch { /* non-JSON error body */ }
+      try { if(r.ok){
+        const data=await r.clone().json();learnRemote(path,data,peer);
+        if(/^\/api\/v1\/hosts\/host_[a-z0-9]+$/.test(path.split('?')[0]))return json({...data,name:remoteMachineName(data,peer)},r.status);
+      } } catch { /* non-JSON error body */ }
     }
     return r;
   }
@@ -203,12 +218,12 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
       try{const r=await viaBridge(peer,"GET",path);if(!r.ok)throw Error(`remote ${r.status}`);const b=await r.json();peer.lists.set(path,b);return b;}
       catch(e){log("merge-remote-failed",{serverId:peer.serverId,path,error:String(e)});setRemoteState(peer,"offline");return peer.lists.get(path)??null;}
     })]);
-    if(!aResp.ok)return aResp;
+    if(!aResp.ok || state.disposed)return aResp;
     const a=await aResp.json();learnPrimary(path,a);
     results.forEach((b,n)=>{if(b)learnRemote(path,b,peers[n]);});state.counters.merged++;
     const extra=results.flatMap((b,n)=>{
       const rows=isBootstrap?b?.projects:b;
-      return (Array.isArray(rows)?rows:[]).filter(r=>r?.id!==PERSONAL&&!conflicts.has(r?.id)&&owners.get(r?.id)===peers[n]).map(r=>isBootstrap||url.pathname==="/api/v1/projects"?relabel(r,peers[n]):r);
+      return (Array.isArray(rows)?rows:[]).filter(r=>r?.id!==PERSONAL&&!conflicts.has(r?.id)&&owners.get(r?.id)===peers[n]).map(r=>isBootstrap||url.pathname==="/api/v1/projects"?relabel(r,peers[n]):url.pathname==='/api/v1/hosts'?{...r,name:remoteMachineName(r,peers[n])}:r);
     });
     return json(isBootstrap?{...a,projects:[...(a.projects??[]),...extra]}:[...(Array.isArray(a)?a:[]),...extra]);
   }
@@ -294,6 +309,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
       }
       return null;
     }
+    if(!READ_METHODS.has(method) && /^\/api\/v1\/hosts\/host_/.test(url.pathname))throw new FederationError('federation_machine_management',403,'Manage this machine on its remote BB server.');
     if (url.pathname.startsWith("/api/v1/system/") && !SYSTEM_SELECTOR_ROUTES.has(url.pathname)) {
       throw new FederationError("federation_system_unsupported", 409, `${url.pathname} is not federated for "${label}".`);
     }
@@ -369,7 +385,8 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
       });
       r.addEventListener("close",()=>{if(c.ws!==r)return;c.ws=null;c.ready=false;if(this._closed)return;setRemoteState(c.peer,"offline");state.needsCatchUp=true;const delay=Math.min(RETRY_MAX_MS,RETRY_MIN_MS*2**c.attempt++);c.timer=win.setTimeout(()=>{c.timer=null;this._openRemote(c);},delay);});
     }
-    _catchUp(peer){for(const id of peer.ids)if(id.startsWith("thr_")&&isRemote(id))this._refreshThread(id);this._emitJson({type:"changed",entity:"project",id:peer.projectId,changes:["threads-changed","project-updated"]});}
+    _catchUp(peer){for(const id of peer.ids)if(isRemote(id)){if(id.startsWith("thr_"))this._refreshThread(id);if(id.startsWith("host_"))this._refreshHost(id);}this._emitJson({type:"changed",entity:"project",id:peer.projectId,changes:["threads-changed","project-updated"]});}
+    _refreshHost(id){this._emitJson({type:'changed',entity:'host',id,changes:['host-connected']});}
     _refreshThread(id){this._emitJson({type:"changed",entity:"thread",id,changes:["events-appended","interactions-changed","status-changed","queue-changed"]});}
     _restorePrimaryId(id){
       for(const [key,raw]of this._allSubs){const t=JSON.parse(raw).target;if((t.threadId??t.projectId??t.environmentId??t.hostId)!==id)continue;
@@ -381,6 +398,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
       const c=this._channels.get(peer);if(!c)return;
       for(const [key,raw]of this._allSubs){const target=JSON.parse(raw).target;if((target.threadId??target.projectId??target.environmentId??target.hostId)!==id||c.subs.has(key))continue;c.subs.set(key,raw);if(this._primary.readyState===1)this._primary.send(JSON.stringify({type:"unsubscribe",target}));if(c.ws?.readyState===1)c.ws.send(raw);}
       if(notify&&c.ready&&id.startsWith("thr_"))this._refreshThread(id);
+      if(notify&&c.ready&&id.startsWith('host_'))this._refreshHost(id);
     }
     send(data){
       let m;try{m=JSON.parse(data);}catch{this._primary.send(data);return;}
@@ -417,6 +435,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   win.fetch = federatedFetch;
   Native.prototype.send = patchedSend;
   win.WebSocket = FederatedSocket;
+  machineView=mountRemoteMachines(win,()=>[...remoteMachines.values()].filter(m=>owners.get(m.host.id)===m.peer&&!conflicts.has(m.host.id)).map(({peer,...m})=>({...m,state:peer.state})));
 
   // bb pings on its own every 25 s while visible; an `online` signal makes the
   // native manager probe now (a ping is a send), so capture is prompt. Bounded,
@@ -434,20 +453,23 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
 
   function dispose() {
     if (state.disposed) return;
-    // 1. let bb drop remote rows through its ordinary change handling
+    // Restore HTTP BEFORE invalidating: BB may immediately refetch cached lists.
+    // Otherwise that refetch merges remote rows back into the native cache.
+    state.disposed = true;
+    if (win.fetch === federatedFetch) win.fetch = nativeFetch;
+    if (Native.prototype.send === patchedSend) Native.prototype.send = nativeSend;
+    if (win.WebSocket === FederatedSocket) win.WebSocket = Native;
+    // Let bb drop remote rows through its ordinary change handling.
     for (const s of outerSockets) {
       for(const peer of peers)s._emitJson({ type: "changed", entity: "project", id: peer.projectId, changes: ["threads-changed", "project-updated"] });
       for (const id of remoteIds) if (id.startsWith("thr_")) s._emitJson({ type: "changed", entity: "thread", id, changes: ["status-changed"] });
+      for (const id of remoteIds) if (id.startsWith('host_')) s._refreshHost(id);
     }
-    state.disposed = true;
+    machineView?.dispose();remoteMachines.clear();
     if (nudgeTimer !== null) { win.clearTimeout(nudgeTimer); nudgeTimer = null; }
     // 2. clear our row decorations
     if (setRowStatus) for (const id of rowStatusIds) { try { setRowStatus(id, null); } catch { /* host may already be gone */ } }
     rowStatusIds.clear();
-    // 3. restore globals only if still ours
-    if (win.fetch === federatedFetch) win.fetch = nativeFetch;
-    if (Native.prototype.send === patchedSend) Native.prototype.send = nativeSend;
-    if (win.WebSocket === FederatedSocket) win.WebSocket = Native;
     // 4. close wrappers: bb reconnects natively and refetches (reconnect wave)
     for (const s of [...outerSockets]) s.close(4000, "federation-dispose");
     log("disposed", {});
