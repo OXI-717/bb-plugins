@@ -30,6 +30,10 @@
     {
       "name": "federation-pilot",
       "source": "./plugins/federation-pilot"
+    },
+    {
+      "name": "pool-maintenance",
+      "source": "./plugins/pool-maintenance"
     }
   ]
 }

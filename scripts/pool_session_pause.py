@@ -1,5 +1,6 @@
 """Durable stop/update/continue orchestration through supported BB commands."""
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -57,10 +58,32 @@ class SessionPause:
         keys = ('id', 'projectId', 'environmentId', 'providerId', 'updatedAt', 'status')
         if any(key not in thread for key in keys):
             raise ValueError('Incomplete session metadata; nothing stopped')
-        return {key: thread[key] for key in keys}
+        result = {key: thread[key] for key in keys}
+        result['queuedMessageCount'] = thread.get('queuedMessageCount', 0)
+        return result
 
     def show(self, thread_id):
         return self.identity(self.bb('thread', 'show', thread_id)['thread'])
+
+    def acquire_hold(self):
+        self.state['admission'] = 'acquire-intent'
+        self.save()
+        value = self.bb('pool-maintenance', 'acquire', '--owner', self.state['operationId'])
+        verify_hold(value, self.state['operationId'])
+        self.state['admission'] = 'held'
+        self.save()
+
+    def release_hold(self):
+        if 'admission' not in self.state:
+            return
+        value = self.bb('pool-maintenance', 'status')
+        lease = value.get('lease')
+        if lease is not None and lease.get('owner') == self.state['operationId']:
+            self.bb('pool-maintenance', 'release', '--owner', self.state['operationId'])
+            self.state['admission'] = 'released'
+        else:
+            self.state['admission'] = 'not-owned-or-expired'
+        self.save()
 
     def stop(self):
         # The CLI thread list is paginated; never use it as a complete inventory.
@@ -122,10 +145,14 @@ class SessionPause:
                     entry['action'] = 'changed-after-stop'
                     self.save()
                     continue
+                if entry['stopped'].get('queuedMessageCount', 0):
+                    entry['action'] = 'queued-work-preserved'
+                    self.save()
+                    continue
                 entry['action'] = 'resume-intent'
                 self.save()
                 self.bb('thread', 'tell', entry['before']['id'],
-                        'Please continue the interrupted task. The pool maintenance operation has ended.')
+                        'Please continue the interrupted task.')
                 entry['action'] = 'resumed'
                 self.save()
             except Exception:
@@ -141,4 +168,18 @@ class SessionPause:
         self.state = json.loads(self.path.read_text())
         if self.state.get('schemaVersion') != 1 or not isinstance(self.state.get('sessions'), list):
             raise ValueError('Unsupported session operation receipt')
-        self.resume()
+        try:
+            self.resume()
+        finally:
+            self.release_hold()
+
+
+def verify_hold(value, owner, now=None):
+    now = time.time() * 1000 if now is None else now
+    lease = value.get('lease') if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or value.get('schemaVersion') != 1 or value.get('scope') != 'all-hosts-all-projects'
+            or not isinstance(lease, dict) or lease.get('owner') != owner
+            or type(lease.get('expiresAt')) not in (int, float)
+            or not math.isfinite(lease['expiresAt'])
+            or lease['expiresAt'] - now < 900_000):
+        raise RuntimeError('Maintenance dispatch pause is missing, foreign or expiring; update refused')
