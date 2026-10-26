@@ -1,6 +1,6 @@
 # Experimental bridge contract
 
-All paths below are beneath `/api/v1/plugins/federation-pilot/http` on the **primary** BB. SDK `local` authentication uses the BB browser request guard: an Origin is checked when supplied, with JSON content type required for mutations. This is not authentication of arbitrary non-browser network clients; secure the primary server's network exposure separately. This is an internal client seam, not a scoped agent API. No standalone CLI commands or agent tools are registered.
+All paths below are beneath `/api/v1/plugins/federation-pilot/http` on the **primary** BB. SDK `local` authentication uses the BB browser request guard: an Origin is checked when supplied, with JSON content type required for mutations. This is not authentication of arbitrary non-browser network clients; secure the primary server's network exposure separately. This HTTP bridge is an internal client seam, not a scoped external agent API. Version 0.2.1 separately registers the opt-in native CLI/tools documented in [agent reading](AGENT-READ.md); they do not expose an arbitrary HTTP proxy.
 
 | Endpoint | Meaning |
 | --- | --- |
