@@ -162,6 +162,19 @@ class SessionPauseTests(unittest.TestCase):
             self.pause.stop()
         self.assertFalse(any(c[1] == 'stop' for c in self.bb.calls))
 
+    def test_explicit_null_environment_is_valid_and_preserved(self):
+        self.bb.threads['thread-a']['environmentId'] = None
+        self.pause.stop()
+        self.pause.resume()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'resumed')
+        self.assertIsNone(self.pause.state['sessions'][0]['stopped']['environmentId'])
+
+    def test_missing_environment_field_refuses_before_any_stop(self):
+        self.bb.threads['thread-a'].pop('environmentId')
+        with self.assertRaises(ValueError):
+            self.pause.stop()
+        self.assertFalse(any(c[1] == 'stop' for c in self.bb.calls))
+
 
 class MaintenanceIntegrationTests(unittest.TestCase):
     def test_update_failure_still_continues_stopped_sessions(self):

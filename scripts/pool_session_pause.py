@@ -54,8 +54,10 @@ class SessionPause:
 
     @staticmethod
     def identity(thread):
-        return {key: thread.get(key) for key in
-                ('id', 'projectId', 'environmentId', 'providerId', 'updatedAt', 'status')}
+        keys = ('id', 'projectId', 'environmentId', 'providerId', 'updatedAt', 'status')
+        if any(key not in thread for key in keys):
+            raise ValueError('Incomplete session metadata; nothing stopped')
+        return {key: thread[key] for key in keys}
 
     def show(self, thread_id):
         return self.identity(self.bb('thread', 'show', thread_id)['thread'])
@@ -68,7 +70,7 @@ class SessionPause:
             if thread.get('status') in ('active', 'starting') and not thread.get('archivedAt'):
                 snapshot = self.identity(thread)
                 if not all(snapshot.get(key) is not None for key in
-                           ('id', 'projectId', 'environmentId', 'providerId', 'updatedAt')):
+                           ('id', 'projectId', 'providerId', 'updatedAt')):
                     raise ValueError('Incomplete active session metadata; nothing stopped')
                 self.state['sessions'].append({'before': snapshot, 'action': 'pending'})
         self.save()
