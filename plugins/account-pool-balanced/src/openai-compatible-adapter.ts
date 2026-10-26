@@ -107,6 +107,7 @@ export function createOpenAiCompatibleAdapter(
     parseRequest(body) {
       const parsed = parseRequestBody(body);
       return {
+        model: parsed.model,
         family: modelFamily(null),
         affinityId: parsed.affinityId,
         parentAffinityId: parsed.parentAffinityId,

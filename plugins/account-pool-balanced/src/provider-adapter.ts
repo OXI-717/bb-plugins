@@ -104,6 +104,7 @@ export interface ProviderAdapter {
     body: Uint8Array,
     headers: Headers,
   ): {
+    model?: string | null;
     family: ModelFamily;
     affinityId: string | null;
     parentAffinityId: string | null;

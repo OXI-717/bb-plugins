@@ -21,6 +21,7 @@ const SESSION_COMPONENT =
   /(?:^|_)session_([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/iu;
 
 export interface ParsedRequestBody {
+  model?: string | null;
   family: ModelFamily;
   affinityId: string | null;
   parentAffinityId: string | null;
@@ -101,6 +102,7 @@ export function parseRequestBody(body: Uint8Array): ParsedRequestBody {
     const user =
       userId === undefined || userId === null ? null : parseUserId(userId);
     return {
+      model: request.model ?? null,
       family: modelFamily(request.model ?? null),
       affinityId:
         user?.sessionId === undefined || user.sessionId === null
@@ -182,6 +184,7 @@ export function parseCodexRequestBody(
           .map(affinityIdentifier)
           .find((value) => value !== null && value !== sessionId) ?? null);
   return {
+    model: typeof request?.model === "string" ? request.model : null,
     family: "other",
     affinityId:
       sessionId !== null

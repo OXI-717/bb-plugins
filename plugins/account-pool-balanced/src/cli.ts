@@ -59,6 +59,7 @@ const HELP = [
   "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor|devin> <id>...",
   "  bb pool account refresh <id>",
   "  bb pool status [--json]",
+  "  bb pool observations [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|cursor|devin> [--off]",
   "  bb pool config",
   "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
@@ -391,6 +392,7 @@ export function registerPoolCli(
         summary: "Refresh one account's observed usage",
         usage: "bb pool account refresh <id>",
       },
+      { name:"observations", summary:"Inspect bounded request metadata and retained-event minute counts", usage:"bb pool observations [--json]" },
       {
         name: "status",
         summary: "Show hub, machine token, routing, and account status",
@@ -738,6 +740,10 @@ export function registerPoolCli(
             exitCode: 0,
             stdout: `${argv[1] === "enable" ? "Enabled" : "Disabled"} ${id}.\n`,
           };
+        }
+        if (argv[0] === "observations") {
+          parseFlags(argv.slice(1), ['json'], []);
+          return {exitCode:0,stdout:json(operations.observations())};
         }
         if (argv[0] === "status") {
           const flags = parseFlags(argv.slice(1), ["json"], []);

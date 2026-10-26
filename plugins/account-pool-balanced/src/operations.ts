@@ -281,6 +281,8 @@ export class PoolOperations {
     return this.routing.isProviderEnabled(provider);
   }
 
+  observations() { return this.hub.observations(); }
+
   async status(): Promise<PoolStatus> {
     const hosts = await this.listHosts();
     await this.hubTokens.prune(hosts.map((host) => host.id));
