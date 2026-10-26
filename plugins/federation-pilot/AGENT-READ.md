@@ -8,6 +8,10 @@ An operator must enable the plugin, federation and the selected connection, then
 
 This is an installation-level capability, not employee authentication or an external scoped token. All primary-side agents/CLI callers allowed to use the plugin share the opted-in project scope. Do not give a less-trusted consumer broad primary BB access just to use it. No primary credentials are forwarded; SSH uses the existing bridge identity. Network isolation remains a separate operator responsibility.
 
+`allowAgentReads` gates only these CLI commands and tools. An agent with shell or direct HTTP access to primary can already use the browser bridge independently of that flag. Set `allowWrites: false` on the connection for a read-only consumer: this is the bridge's actual mutation gate, including `/proxy`. It still does not sandbox the agent's other tools or network access.
+
+Remote events can contain prompt injection. Treating them as data is an agent behavior rule, not enforced isolation. If browser writes remain enabled, an agent with direct bridge access could be induced to send primary data upstream outside this read interface. Do not interpret the absence of automatic reverse routing as proof that a powerful primary-side agent cannot disclose data. A less-trusted consumer needs separate execution isolation and authentication; that is outside this plugin capability.
+
 Every list supplies `serverId` and `projectId`; every read also supplies `threadId`. Discovery only returns opted-in connection labels, IDs and permissions, not SSH addresses or machine IDs. A server ID denotes configured connection identity, not an account. `proj_personal` and implicit/current-tab destinations are refused.
 
 ## CLI
