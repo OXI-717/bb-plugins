@@ -57,3 +57,23 @@ it('isolates write failures and refuses corrupt or oversized persisted metadata'
  await fs.writeFile(f.file,'x'.repeat(MAX_BYTES+1));const restored=new RequestJournal(f.file,()=>f.now);await restored.initialize();
  expect(restored.snapshot().rows).toEqual([]);expect(restored.snapshot().storageFailuresSinceStart).toBe(1);await restored.close();
 });
+
+it('removes an abandoned temporary snapshot on startup without natural traffic',async()=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'request-orphan-'));
+ const file=path.join(dir,'recent.json');
+ await fs.writeFile(file+'.tmp',JSON.stringify({rows:[{at:1,privateSynthetic:'old metadata'}]}),{mode:0o600});
+ const journal=new RequestJournal(file,()=>1900000000000);await journal.initialize();
+ try {
+  expect(journal.snapshot().rows).toEqual([]);await journal.flush();
+  await expect(fs.stat(file+'.tmp')).rejects.toMatchObject({code:'ENOENT'});
+ } finally {await journal.close();await fs.rm(dir,{recursive:true,force:true});}
+});
+it('removes a temporary snapshot after rename failure and isolates cleanup failure',async()=>{
+ const f=await fixture();f.journal.record(f.event());
+ const rename=vi.spyOn(fs,'rename').mockRejectedValueOnce(new Error('synthetic rename failure'));
+ await f.journal.flush();await expect(fs.stat(f.file+'.tmp')).rejects.toMatchObject({code:'ENOENT'});
+ expect(f.journal.snapshot().storageFailuresSinceStart).toBe(1);rename.mockRestore();
+ const remove=vi.spyOn(fs,'rm').mockRejectedValueOnce(new Error('synthetic cleanup failure'));
+ const restored=new RequestJournal(f.file,()=>f.now);await expect(restored.initialize()).resolves.toBeUndefined();
+ expect(restored.snapshot().storageFailuresSinceStart).toBe(1);await restored.close();remove.mockRestore();
+});

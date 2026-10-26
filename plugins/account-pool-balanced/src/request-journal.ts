@@ -36,6 +36,7 @@ export class RequestJournal {
   try {
    await fs.mkdir(path.dirname(this.file),{recursive:true,mode:0o700});
    await fs.chmod(path.dirname(this.file),0o700);
+   await fs.rm(this.file+'.tmp',{force:true}).catch(()=>{this.failures++;});
    const stat=await fs.stat(this.file).catch(()=>null);
    if(stat!==null){
     if(stat.size>MAX_BYTES)throw Error('oversized journal');
@@ -80,7 +81,7 @@ export class RequestJournal {
   this.writing=(async()=>{try{
    const text=JSON.stringify({rows:this.rows});if(Buffer.byteLength(text)>MAX_BYTES)throw Error('oversized journal');
    await fs.writeFile(this.file+'.tmp',text,{mode:0o600});await fs.chmod(this.file+'.tmp',0o600);await fs.rename(this.file+'.tmp',this.file);
-  }catch{this.failures++;}})();
+  }catch{this.failures++;await fs.rm(this.file+'.tmp',{force:true}).catch(()=>{this.failures++;});}})();
   try{await this.writing;}finally{this.writing=null;}
  }
  async close():Promise<void>{this.closed=true;if(this.timer!==null)clearTimeout(this.timer);await this.writing;await this.flush();}
