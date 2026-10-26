@@ -5,15 +5,17 @@ import plugin from '../server.ts';
 function harness(store=new Map()){
  const remotes=[{serverId:'alpha',label:'Alpha',projectId:'proj_alpha',bridgeHostId:'host_bridge',sshTarget:'remote-alpha',remotePort:38886,allowWrites:true},{serverId:'beta',label:'Beta',projectId:'proj_beta',bridgeHostId:'host_bridge',sshTarget:'remote-beta',remotePort:38886,allowWrites:true}];
  const config={enabled:true,servers:JSON.stringify(remotes)};
- const calls=[],routes=new Map(),signals=new Map(),sockets=new Map();let dispose;
+ const calls=[],routes=new Map(),signals=new Map(),sockets=new Map(),tools=new Map();let dispose,cli;
  const primaryIds=new Set(),primaryErrors=new Map(),remoteIds={alpha:new Set(['proj_alpha','thr_alpha','env_alpha']),beta:new Set(['proj_beta','thr_beta'])};
  const failures=new Map(),moved=new Set();let generation=0;
  const get=async args=>{const id=Object.values(args)[0];if(primaryErrors.has(id))throw primaryErrors.get(id);if(primaryIds.has(id))return {id};throw Object.assign(Error('not found'),{status:404});};
- const bb={storage:{kv:{get:async key=>store.get(key),set:async(key,value)=>{store.set(key,value)}}},settings:{define:()=>({get:async()=>config})},sdk:Object.fromEntries(['threads','projects','hosts','environments'].map(k=>[k,{get}])),log:{warn:()=>{}},onDispose:fn=>dispose=fn,
+ const bb={cli:{register:value=>cli=value},agents:{registerTool:value=>tools.set(value.name,value),configure:()=>{}},storage:{kv:{get:async key=>store.get(key),set:async(key,value)=>{store.set(key,value)}}},settings:{define:()=>({get:async()=>config})},sdk:Object.fromEntries(['threads','projects','hosts','environments'].map(k=>[k,{get}])),log:{warn:()=>{}},onDispose:fn=>dispose=fn,
   hosts:{experimental_client:()=>({experimental_onSignal:(k,fn)=>signals.set(k,fn),experimental_onWorkerExit:()=>{},call:async(method,input)=>{
    calls.push({method,...input});if(method!=='request')return {ok:true,id:input.id};const peer=input.sshTarget.split('-')[1];
    if(failures.has(peer))throw Error(failures.get(peer));let result,status=200;
    if(input.path==='/api/v1/sidebar-bootstrap')result={projects:[{id:`proj_${peer}`,name:peer,threads:moved.has(`thr_${peer}`)?[]:[{id:`thr_${peer}`,projectId:`proj_${peer}`,title:`generation ${generation}`}]}]};
+   else if(input.method==='GET'&&input.path.startsWith('/api/v1/threads?'))result=[{id:`thr_${peer}`,projectId:`proj_${peer}`,title:'Saved thread'}];
+   else if(input.method==='GET'&&input.path.includes('/events?'))result=[{threadId:`thr_${peer}`,seq:1,type:'user.message',data:{text:'Saved message'}}];
    else if(input.method==='POST'&&input.path==='/api/v1/threads'){result={id:`thr_new${peer}`,projectId:`proj_${peer}`};remoteIds[peer].add(result.id);}
    else if(input.method==='POST'){result={ok:true};}
    else {const id=input.path.split('/').at(-1);if(remoteIds[peer].has(id))result={id,projectId:moved.has(id)?"proj_outside":`proj_${peer}`};else {status=404;result={error:'not found'};}}
@@ -23,7 +25,7 @@ function harness(store=new Map()){
  async function request(path,body,method='POST'){
   return routes.get(`${method} ${path}`)({req:{json:async()=>body},json:(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}})});
  }
- return {config,calls,moved,primaryIds,primaryErrors,remoteIds,failures,signals,sockets,remotes,request,dispose:()=>dispose(),next:()=>generation++};
+ return {config,calls,moved,primaryIds,primaryErrors,remoteIds,failures,signals,sockets,remotes,request,tools,cli,dispose:()=>dispose(),next:()=>generation++};
 }
 const send=(id='thr_alpha')=>({serverId:'alpha',method:'POST',path:`/api/v1/threads/${id}/send`,body:'{"input":"private text"}'});
 
@@ -82,5 +84,20 @@ test('thread moved outside configured project loses authorization after fresh in
   assert.equal((await h.request('/proxy',{serverId:'alpha',method:'GET',path:'/api/v1/sidebar-bootstrap',body:null})).status,200);
   h.calls.length=0;const response=await h.request('/proxy',send());
   assert.equal(response.status,503);assert.ok(!h.calls.some(c=>c.body),'moved thread never receives the send body');
+ }finally{await h.dispose();}
+});
+
+test('registered agent CLI and tools use explicit read permission and GETs only',async()=>{
+ const h=harness(),ctx={signal:new AbortController().signal,threadId:'thr_local',projectId:'proj_local'};
+ try{
+  const tool=h.tools.get('federation_read_thread');assert.ok(tool);assert.equal(h.tools.has('federation_send'),false);
+  assert.equal((await tool.execute({serverId:'alpha',projectId:'proj_alpha',threadId:'thr_alpha'},ctx)).isError,true);assert.equal(h.calls.length,0);
+  h.remotes[0].allowAgentReads=true;h.remotes[0].allowWrites=false;h.config.servers=JSON.stringify(h.remotes);
+  const result=JSON.parse(await tool.execute({serverId:'alpha',projectId:'proj_alpha',threadId:'thr_alpha'},ctx));assert.equal(result.source.serverId,'alpha');assert.equal(result.events[0].data.text,'Saved message');
+  const cli=await h.cli.run(['list','--server-id','alpha','--project-id','proj_alpha','--json'],ctx);assert.equal(cli.exitCode,0);assert.equal(JSON.parse(cli.stdout).threads[0].id,'thr_alpha');
+  const read=await h.cli.run(['read','--server-id','alpha','--project-id','proj_alpha','--thread-id','thr_alpha','--json'],ctx);assert.equal(read.exitCode,0);assert.equal(JSON.parse(read.stdout).events[0].seq,1);
+  const invalid=await h.cli.run(['read','--server-id','alpha','--project-id','proj_alpha','--thread-id','thr_alpha','--limit','101'],ctx);assert.notEqual(invalid.exitCode,0);
+  assert.ok(h.calls.every(c=>c.method==='GET'&&c.body===null));
+  h.calls.length=0;h.primaryIds.add('thr_alpha');assert.equal((await tool.execute({serverId:'alpha',projectId:'proj_alpha',threadId:'thr_alpha'},ctx)).isError,true);assert.ok(!h.calls.some(c=>c.path.includes('/events')));
  }finally{await h.dispose();}
 });

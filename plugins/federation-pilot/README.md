@@ -9,7 +9,7 @@ This is an **experimental client transport**, tested against BB 0.46.0/0.46.1 an
 On the primary BB installation:
 
 ```sh
-bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.2.0 --subdirectory plugins/federation-pilot --tag-prefix federation-pilot/
+bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.2.1 --subdirectory plugins/federation-pilot --tag-prefix federation-pilot/
 ```
 
 Or add the `oxi-public` marketplace and install `federation-pilot@oxi-public`. The plugin starts disabled. Configure it on the primary server; no plugin installation on the remote BB is needed.
@@ -27,7 +27,8 @@ Open the plugin settings. `servers` is a JSON array, with one independently sele
     "bridgeHostId": "host_bridge",
     "sshTarget": "bb-alpha",
     "remotePort": 38886,
-    "allowWrites": false
+    "allowWrites": false,
+    "allowAgentReads": false
   },
   {
     "serverId": "beta",
@@ -36,7 +37,8 @@ Open the plugin settings. `servers` is a JSON array, with one independently sele
     "bridgeHostId": "host_bridge",
     "sshTarget": "bb-beta",
     "remotePort": 38886,
-    "allowWrites": false
+    "allowWrites": false,
+    "allowAgentReads": false
   }
 ]
 ```
@@ -47,6 +49,8 @@ Open the plugin settings. `servers` is a JSON array, with one independently sele
 - `sshTarget` is an SSH host alias or `user@host`. Configure any custom SSH port in the alias. SSH keys and credentials remain on the bridge machine; the plugin does not collect them.
 - `remotePort` is the remote BB HTTP port on loopback. Verify it for that installation.
 - `allowWrites` defaults to false. Turning it on allows supported thread mutations, **including deletion, archive, retry and context changes**. It is not a send-only permission.
+- `allowAgentReads` defaults to false independently of `allowWrites`. Opting in permits primary-side plugin CLI/tools to list and read this remote project. It does not grant send rights or authenticate individual employees. See [agent reading](AGENT-READ.md).
+- This flag gates only the new commands/tools; an agent with shell or direct HTTP access can use the existing browser bridge. For a read-only consumer set `allowWrites: false`, which blocks bridge mutations. Untrusted remote text must not become instructions to use other tools; this plugin does not sandbox a primary-side agent.
 - Set an entry's `enabled` to false to remove it; set the plugin's top-level `enabled` to true to activate configured entries. Open tabs notice settings changes within about five seconds and reconnect.
 
 Use a dedicated SSH profile without `LocalForward`, `RemoteForward`, `DynamicForward`, `ForwardAgent` or `Tunnel`. The plugin checks `ssh -G`, rejects implicit forwarding, and disables agent/X11/tun forwarding and local commands. It creates only a loopback `ssh -L` tunnel to remote loopback. Host-key verification is not disabled; establish and verify trust on the bridge machine beforehand. Noninteractive SSH must work in the BB host daemon's environment, which may differ from your terminal's SSH agent.
@@ -63,7 +67,7 @@ Machine grouping uses the content-script DOM seam (`data-machine-row` and exact 
 
 For a new thread, select the remote project **and its remote environment or machine**. BB's initial machine and unscoped model list still come from primary; the plugin rejects a mixed local/remote creation instead of guessing. Selecting a remote environment loads that server's execution options. No new provider is introduced.
 
-The ordinary `bb thread` CLI and agents' BB tools still address their own BB installation. A remote agent cannot read a primary thread just because its ID was mentioned. Mentions are forwarded as message content, not expanded into private conversation history.
+The ordinary `bb thread` CLI and core agents' BB tools still address their own BB installation. The separate `bb federation` CLI and `federation_*` plugin tools provide explicit, opt-in remote list/read access. A remote agent cannot read a primary thread just because its ID was mentioned. Mentions are forwarded as message content, not expanded into private conversation history.
 
 ## Ownership and failure behavior
 
@@ -81,7 +85,7 @@ Supported: one project per configured connection, native thread history and mess
 
 Not federated: uploads/attachments, file APIs and previews, terminals, other plugins' actions, global search/count/running/attention, new-machine creation, local sections for remote threads, or per-user remote authentication. Mobile clients, version-mismatched servers beyond the tested pair, and plugins installed only on remote are not verified. Request bodies must be JSON (3 MiB maximum); responses are bounded to 4 MiB.
 
-This bridge uses the primary installation's existing trust boundary. Any primary client with access to the plugin endpoint gets the configured project permissions. It does not provide a scoped token for an autonomous agent, distinguish employees, or isolate malicious users sharing the same BB installation. A separate read-only/send-only consumer needs its own narrow authenticated API before deployment. Do not expose the bridge as an unauthenticated internet proxy.
+This bridge uses the primary installation's existing trust boundary. Any primary client with access to the plugin endpoint gets the configured project permissions. It does not provide a scoped token for an autonomous agent, distinguish employees, or isolate malicious users sharing the same BB installation. The plugin CLI/tools offer opt-in list/read within this same installation trust boundary. They are not scoped credentials for an external or less-trusted consumer; such a consumer needs a separate authenticated API. No send-only capability is provided. Do not expose the bridge as an unauthenticated internet proxy.
 
 Normal disposal closes owned sockets, timers and SSH children. Abrupt host-worker termination may leave an SSH child until the operating system or an administrator cleans it up.
 
