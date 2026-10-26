@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['account-pool-balanced/v*', 'automation-catalog/v*', 'vpn-guard/v*', 'oxi-projects/v*', 'model-connections/v*', 'auto-archive/v*']
+    tags: ['account-pool-balanced/v*', 'automation-catalog/v*', 'vpn-guard/v*', 'oxi-projects/v*', 'model-connections/v*', 'auto-archive/v*', 'federation-pilot/v*']
   pull_request:
   workflow_dispatch:
 
@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        plugin: [account-pool-balanced, automation-catalog, vpn-guard, oxi-projects, model-connections]
+        plugin: [account-pool-balanced, automation-catalog, vpn-guard, oxi-projects, model-connections, federation-pilot]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: ${{ matrix.plugin == 'oxi-projects' && '24' || '22' }}
+          node-version: ${{ (matrix.plugin == 'oxi-projects' || matrix.plugin == 'federation-pilot') && '24' || '22' }}
           cache: npm
           cache-dependency-path: plugins/${{ matrix.plugin }}/package-lock.json
       - name: Check publication manifests
@@ -67,13 +67,13 @@ jobs:
         working-directory: plugins/automation-catalog/scripts
         run: python3 -m unittest test_catalog_collect test_catalog_history test_catalog_sync
       - name: Build with the published BB CLI
-        if: matrix.plugin != 'vpn-guard' && matrix.plugin != 'oxi-projects' && matrix.plugin != 'model-connections'
+        if: matrix.plugin != 'vpn-guard' && matrix.plugin != 'oxi-projects' && matrix.plugin != 'model-connections' && matrix.plugin != 'federation-pilot'
         working-directory: plugins/${{ matrix.plugin }}
         run: npm exec --yes --package=bb-app@${{ matrix.plugin == 'account-pool-balanced' && '0.46.1' || '0.43.3' }} -- bb plugin build .
       - name: Build plugins requiring BB 0.46
-        if: matrix.plugin == 'vpn-guard' || matrix.plugin == 'oxi-projects' || matrix.plugin == 'model-connections'
+        if: matrix.plugin == 'vpn-guard' || matrix.plugin == 'oxi-projects' || matrix.plugin == 'model-connections' || matrix.plugin == 'federation-pilot'
         working-directory: plugins/${{ matrix.plugin }}
-        run: npm exec --yes --package=bb-app@${{ matrix.plugin == 'model-connections' && '0.46.1' || '0.46.0' }} -- bb plugin build .
+        run: npm exec --yes --package=bb-app@${{ (matrix.plugin == 'model-connections' || matrix.plugin == 'federation-pilot') && '0.46.1' || '0.46.0' }} -- bb plugin build .
       - name: Ensure checks leave tracked files clean
         run: git diff --exit-code
 
