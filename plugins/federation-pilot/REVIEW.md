@@ -23,3 +23,11 @@ Remaining product limits are explicit in README: no files/uploads/terminals, no 
 The prior transport/ownership review passed. The machine-presentation delta is subject to a separate exact-revision review before release; broader native multi-server support is not claimed.
 
 The machine UI probe uses the same isolated native browser: two separately labelled remote groups, no machine management controls, remote permission labels, remote detail links redirected to read-only groups, and host mutation refused with 403. Disabling removes groups and remote cached rows. A cold host-list invalidation and disposal-order regression were found in that probe and fixed.
+
+## Agent reading candidate 0.2.1
+
+This delta adds a separate default-off `allowAgentReads` setting and native CLI/tools for discovery, scoped lists and saved event pages. It adds no send, creation, provider start or external credentials. Reading checks ownership and fresh project membership, including a second membership check before returning events. Configuration revocation is checked across awaited operations.
+
+The focused plugin suite has 50 tests plus 17 policy assertions; typecheck and plugin build pass. The SDK-backed CLI parser and actual registered server tools are exercised with synthetic upstream responses. BB 0.46.1 source confirms the saved-event GET handler and its camel-case cursor parameters. Tests cover default denial, explicit scope, primary/neighbor collisions, moved threads, revocation, connection changes, cancellation, outages, output bounds and pagination without silent skipped events. Source tests do not launch models or operate a production bridge.
+
+Independent adversarial delta review passed with two documentation clarifications: the read flag gates only these commands/tools, and untrusted remote content can influence a primary agent that retains broader tools. The README and agent contract now explain both boundaries and require bridge writes off for a read-only consumer. They do not claim an agent sandbox or external authorization boundary. Release acceptance remains pending. Actual remote read acceptance requires a separately coordinated installation and permission change; no production capability has been enabled by source tests.

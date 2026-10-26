@@ -4,6 +4,7 @@ import {hostContract,hostSignals,requestSchema} from './contract.ts';
 import {classifyRequest,routingIds,type Inventory} from './policy.ts';
 import {parseServers,publicServer,type RemoteConfig} from './configuration.ts';
 import {assertExclusive,entityPath,PrimaryCollisionError} from './ownership.ts';
+import {createAgentReads,registerAgentReads} from './agent-read.ts';
 
 export default function plugin(bb:BbPluginApi){
  const settings=bb.settings.define({
@@ -16,6 +17,7 @@ export default function plugin(bb:BbPluginApi){
   sshTarget:{type:'string',label:'Legacy SSH target',default:''},
   remotePort:{type:'number',label:'Legacy remote API port',default:38886},
   allowWrites:{type:'boolean',label:'Legacy remote writes',default:false},
+  allowAgentReads:{type:'boolean',label:'Legacy agent list/read permission',default:false},
  });
  const host=bb.hosts.experimental_client({contract:hostContract,experimental_signals:hostSignals});
  type Snapshot={key:string,at:number,inventory:Inventory,project:any};
@@ -91,6 +93,7 @@ export default function plugin(bb:BbPluginApi){
    if(id.startsWith('env_')&&!i.environments.has(id)){const e=await json(c,entityPath(id));if(e.id!==id||e.projectId!==c.projectId)throw Error('Environment outside configured project');i.environments.add(id);if(e.hostId)i.hosts.add(e.hostId);}
   }
  }
+ registerAgentReads(bb,createAgentReads({configurations,exclusive,get:json}));
  bb.http.route('GET','/config',async ctx=>{try{const c=await configurations();return ctx.json({enabled:c.enabled,servers:c.servers.map(publicServer)});}catch{return ctx.json({enabled:false,servers:[],error:'Invalid server settings'},400);}});
  bb.http.route('GET','/diagnostics',ctx=>ctx.json({failures}));
  bb.http.route('GET','/check',async ctx=>{
