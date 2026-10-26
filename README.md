@@ -124,3 +124,7 @@ See [checks, waiting, backups and recovery](scripts/UPGRADE-POOL.md).
 A fork of Shane Logsdon's MIT Auto Archive with a 14-day default, whole-tree
 activity, protected threads, dirty-workspace guards and manual handoff pruning.
 Starts in preview mode. See [Auto Archive setup](plugins/auto-archive/README.md).
+
+## BB Federation (experimental)
+
+[BB Federation](plugins/federation-pilot/README.md) displays projects from independent BB servers in the ordinary thread tree, using configured SSH bridges. Native chats, thread creation and permission responses stay on their owning server. Read-only by default; tested with BB 0.46.0/0.46.1. Files and terminals are not federated.

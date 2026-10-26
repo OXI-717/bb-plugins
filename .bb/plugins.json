@@ -26,6 +26,10 @@
     {
       "name": "auto-archive",
       "source": "./plugins/auto-archive"
+    },
+    {
+      "name": "federation-pilot",
+      "source": "./plugins/federation-pilot"
     }
   ]
 }
