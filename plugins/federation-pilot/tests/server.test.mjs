@@ -7,23 +7,23 @@ function harness(store=new Map()){
  const config={enabled:true,servers:JSON.stringify(remotes)};
  const calls=[],routes=new Map(),signals=new Map(),sockets=new Map();let dispose;
  const primaryIds=new Set(),primaryErrors=new Map(),remoteIds={alpha:new Set(['proj_alpha','thr_alpha','env_alpha']),beta:new Set(['proj_beta','thr_beta'])};
- const failures=new Map();let generation=0;
+ const failures=new Map(),moved=new Set();let generation=0;
  const get=async args=>{const id=Object.values(args)[0];if(primaryErrors.has(id))throw primaryErrors.get(id);if(primaryIds.has(id))return {id};throw Object.assign(Error('not found'),{status:404});};
  const bb={storage:{kv:{get:async key=>store.get(key),set:async(key,value)=>{store.set(key,value)}}},settings:{define:()=>({get:async()=>config})},sdk:Object.fromEntries(['threads','projects','hosts','environments'].map(k=>[k,{get}])),log:{warn:()=>{}},onDispose:fn=>dispose=fn,
   hosts:{experimental_client:()=>({experimental_onSignal:(k,fn)=>signals.set(k,fn),experimental_onWorkerExit:()=>{},call:async(method,input)=>{
    calls.push({method,...input});if(method!=='request')return {ok:true,id:input.id};const peer=input.sshTarget.split('-')[1];
    if(failures.has(peer))throw Error(failures.get(peer));let result,status=200;
-   if(input.path==='/api/v1/sidebar-bootstrap')result={projects:[{id:`proj_${peer}`,name:peer,threads:[{id:`thr_${peer}`,projectId:`proj_${peer}`,title:`generation ${generation}`}]}]};
+   if(input.path==='/api/v1/sidebar-bootstrap')result={projects:[{id:`proj_${peer}`,name:peer,threads:moved.has(`thr_${peer}`)?[]:[{id:`thr_${peer}`,projectId:`proj_${peer}`,title:`generation ${generation}`}]}]};
    else if(input.method==='POST'&&input.path==='/api/v1/threads'){result={id:`thr_new${peer}`,projectId:`proj_${peer}`};remoteIds[peer].add(result.id);}
    else if(input.method==='POST'){result={ok:true};}
-   else {const id=input.path.split('/').at(-1);if(remoteIds[peer].has(id))result={id,projectId:`proj_${peer}`};else {status=404;result={error:'not found'};}}
+   else {const id=input.path.split('/').at(-1);if(remoteIds[peer].has(id))result={id,projectId:moved.has(id)?"proj_outside":`proj_${peer}`};else {status=404;result={error:'not found'};}}
    return {status,bodyBase64:Buffer.from(JSON.stringify(result)).toString('base64'),contentType:'application/json'};
   }})},http:{route:(m,p,fn)=>routes.set(`${m} ${p}`,fn),experimental_websocket:(p,fn)=>sockets.set(p,fn)}};
  plugin(bb);
  async function request(path,body,method='POST'){
   return routes.get(`${method} ${path}`)({req:{json:async()=>body},json:(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}})});
  }
- return {config,calls,primaryIds,primaryErrors,remoteIds,failures,signals,sockets,remotes,request,dispose:()=>dispose(),next:()=>generation++};
+ return {config,calls,moved,primaryIds,primaryErrors,remoteIds,failures,signals,sockets,remotes,request,dispose:()=>dispose(),next:()=>generation++};
 }
 const send=(id='thr_alpha')=>({serverId:'alpha',method:'POST',path:`/api/v1/threads/${id}/send`,body:'{"input":"private text"}'});
 
@@ -73,4 +73,14 @@ test('verified owners survive restart and label/write settings without contactin
   second.remotes[0].allowWrites=false;second.config.servers=JSON.stringify(second.remotes);second.calls.length=0;
   assert.equal((await second.request('/proxy',send())).status,403);assert.ok(!second.calls.some(c=>c.sshTarget==='remote-beta'));
  }finally{await second.dispose();}
+});
+
+test('thread moved outside configured project loses authorization after fresh inventory',async()=>{
+ const h=harness();try{
+  assert.equal((await h.request('/proxy',send())).status,200);
+  h.moved.add('thr_alpha');
+  assert.equal((await h.request('/proxy',{serverId:'alpha',method:'GET',path:'/api/v1/sidebar-bootstrap',body:null})).status,200);
+  h.calls.length=0;const response=await h.request('/proxy',send());
+  assert.equal(response.status,503);assert.ok(!h.calls.some(c=>c.body),'moved thread never receives the send body');
+ }finally{await h.dispose();}
 });

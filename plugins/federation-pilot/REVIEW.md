@@ -14,7 +14,7 @@ Review date: 2026-10-26. Scope: frontend routing and lifecycle, backend HTTP/Web
 
 ## Validation boundaries
 
-39 focused tests plus 17 policy assertions pass. Eight WebSocketManager integration checks pass. Focused tests cover routing, creation, permissions, poisoning attempts, primary precedence, multi-remote conflicts, offline recovery, actual server-handler policy with simulated SDK/host calls, persistent ownership, SSH preflight and lifecycle. TypeScript and the published BB plugin build are checked. An opt-in probe exercises BB's actual WebSocketManager and partysocket without a network.
+40 focused tests plus 17 policy assertions pass. Eight WebSocketManager integration checks pass. Focused tests cover routing, creation, permissions, poisoning attempts, primary precedence, multi-remote conflicts, offline recovery, actual server-handler policy with simulated SDK/host calls, persistent ownership, SSH preflight and lifecycle. Fresh inventory drops authorization for threads that disappeared; moved or archived threads must pass project membership verification again. This regression failed before the fix and passes with no forwarded body after it. TypeScript and the published BB plugin build are checked. An opt-in probe exercises BB's actual WebSocketManager and partysocket without a network.
 
 A live browser probe runs BB 0.46.1 with the production frontend and backend policy, using two synthetic loopback HTTP/WebSocket peers through a test host adapter. It verifies native rows for both remotes, original chat history, a native send, a native approval response, and creation through the ordinary reuse-environment composer. The host adapter deliberately avoids real SSH and models. This is not a live two-SSH-server or mobile acceptance test.
 

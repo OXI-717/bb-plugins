@@ -78,7 +78,7 @@ export default function plugin(bb:BbPluginApi){
    }
    const sources=[];for(const source of project.sources??[])if(!source.hostId||!await isPrimaryForInventory(source.hostId))sources.push(source);
    project={...project,threads,sources};
-   const i:Inventory={projectId:c.projectId,threads:new Set(cached?.key===key?cached.inventory.threads:[]),hosts:new Set(),environments:new Set()};
+   const i:Inventory={projectId:c.projectId,threads:new Set(),hosts:new Set(),environments:new Set()};
    for(const source of project.sources??[])if(source.hostId)i.hosts.add(source.hostId);
    for(const t of project.threads??[]){i.threads.add(t.id);if(t.environmentId)i.environments.add(t.environmentId);if(t.environmentHostId)i.hosts.add(t.environmentHostId);}
    const result={key,at:Date.now(),inventory:i,project};caches.set(c.serverId,result);return result;
