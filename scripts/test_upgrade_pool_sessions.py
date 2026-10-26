@@ -198,6 +198,25 @@ class SessionPauseTests(unittest.TestCase):
         self.pause.release_hold()
         self.assertTrue(all(t['status'] == 'active' for t in self.bb.threads.values()))
 
+    def test_previous_receipt_without_queue_field_resumes_unchanged_session(self):
+        self.pause.stop()
+        entry = self.pause.state['sessions'][0]
+        entry['before'].pop('queuedMessageCount')
+        entry['stopped'].pop('queuedMessageCount')
+        self.pause.save()
+        self.pause.recover()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'resumed')
+
+    def test_previous_receipt_still_detects_new_queue_after_stop(self):
+        self.pause.stop()
+        entry = self.pause.state['sessions'][0]
+        entry['stopped'].pop('queuedMessageCount')
+        self.bb.threads['thread-a']['queuedMessageCount'] = 1
+        self.pause.save()
+        self.pause.recover()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'changed-after-stop')
+        self.assertFalse(any(c[1] == 'tell' for c in self.bb.calls))
+
     def test_preexisting_queued_work_gets_no_redundant_continuation(self):
         self.bb.threads['thread-a']['queuedMessageCount'] = 1
         self.pause.stop()

@@ -149,7 +149,7 @@ class SessionPause:
             if entry['action'] != 'stopped':
                 continue
             try:
-                if self.show(entry['before']['id']) != entry['stopped']:
+                if self.show(entry['before']['id']) != self.identity(entry['stopped']):
                     entry['action'] = 'changed-after-stop'
                     self.save()
                     continue
