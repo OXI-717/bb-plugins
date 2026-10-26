@@ -151,6 +151,31 @@
           "tagPrefix": "auto-archive/"
         }
       }
+    },
+    {
+      "id": "federation-pilot",
+      "displayName": "BB Federation (experimental)",
+      "description": "Independent BB servers in one native thread tree. Experimental SSH bridge.",
+      "author": {
+        "name": "OXI",
+        "github": "OXI-717"
+      },
+      "tags": [
+        "threads",
+        "servers",
+        "experimental"
+      ],
+      "icon": {
+        "url": "./icons/federation-pilot.svg"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/federation-pilot",
+          "range": "^0.2.0",
+          "tagPrefix": "federation-pilot/"
+        }
+      }
     }
   ]
 }
