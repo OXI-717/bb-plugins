@@ -649,27 +649,27 @@ it('does not delay an enforcement stop behind optional recovery history reads',a
 });
 
 
-it('admits NeuralDeep through the existing scoped policy without exempting it',async()=>{
+it.each(['neuraldeep','agy'])('admits %s through the existing scoped policy without exempting it',async(providerUnderTest)=>{
  const {fake,states}=await setup();
  let members=['codex','claude','cursor','devin'];
  fake.harness.sdk.stub('plugins.callRpc',async()=>({vpnGuardEnabled:true,vpnPolicyVersion:2,vpnOnlyProviders:members}) as never);
  states.set('host-a','connected');
  await select(fake,['host-a']);await mode(fake,'enforce');
  const decision=(provider:string,hostId='host-a')=>fake.harness.behavior.callRpc('networkDecisionV2',{hostId,provider});
- expect(await decision('neuraldeep')).toMatchObject({allowed:false,reason:'vpn_unavailable'});
- members=[...members,'neuraldeep'];
- for(const provider of ['codex','claude','cursor','devin','opencode-go','neuraldeep']){
+ expect(await decision(providerUnderTest)).toMatchObject({allowed:false,reason:'vpn_unavailable'});
+ members=[...members,'neuraldeep','agy'];
+ for(const provider of ['codex','claude','cursor','devin','opencode-go','neuraldeep','agy']){
    expect(await decision(provider)).toMatchObject({allowed:true,reason:'connected'});
  }
  await expect(decision('synthetic-unknown-provider')).rejects.toThrow('validation');
- expect(await decision('neuraldeep','host-b')).toMatchObject({allowed:true,reason:'outside_scope'});
+ expect(await decision(providerUnderTest,'host-b')).toMatchObject({allowed:true,reason:'outside_scope'});
  await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
- expect(await decision('neuraldeep')).toMatchObject({allowed:false,reason:'manual_block'});
+ expect(await decision(providerUnderTest)).toMatchObject({allowed:false,reason:'manual_block'});
  expect(await decision('codex')).toMatchObject({allowed:false,reason:'manual_block'});
  await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
  states.set('host-a','disconnected');
- expect(await decision('neuraldeep')).toMatchObject({allowed:false,reason:'vpn_unavailable'});
+ expect(await decision(providerUnderTest)).toMatchObject({allowed:false,reason:'vpn_unavailable'});
  states.set('host-a','unknown');
- expect(await decision('neuraldeep')).toMatchObject({allowed:false,reason:'vpn_unavailable'});
+ expect(await decision(providerUnderTest)).toMatchObject({allowed:false,reason:'vpn_unavailable'});
  await fake.harness.lifecycle.dispose();
 });

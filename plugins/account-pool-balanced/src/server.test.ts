@@ -6548,6 +6548,7 @@ describe("Account Pool plugin", () => {
       zai: true,
       "opencode-go": true,
       neuraldeep: true,
+      agy: true,
       cursor: true,
       devin: true,
     });
@@ -7131,6 +7132,7 @@ describe("sequential pool recovery", () => {
       zai: null,
       "opencode-go": null,
       neuraldeep: null,
+      agy: null,
       cursor: null,
       devin: null,
     });
@@ -7600,9 +7602,9 @@ describe('VPN Guard linked network policy',()=>{
     fixture.host.harness.sdk.stub('plugins.callRpc',call);
     await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
     const status=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));
-    expect(maxActive).toBe(6);
-    expect(call).toHaveBeenCalledTimes(6);
-    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin','opencode-go','neuraldeep']);
+    expect(maxActive).toBe(7);
+    expect(call).toHaveBeenCalledTimes(7);
+    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin','opencode-go','neuraldeep','agy']);
     expect(outbound).not.toHaveBeenCalled();
   });
   it('shares one deadline across server lookup and a slow successful Guard RPC',async()=>{

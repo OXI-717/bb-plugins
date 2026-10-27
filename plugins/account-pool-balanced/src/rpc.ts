@@ -1,3 +1,4 @@
+import type {AgyOAuthLogin} from "./agy-oauth-login.js";
 import { defineRpcContract, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -140,6 +141,9 @@ export const accountPoolRpcContract = defineRpcContract({
     input: loginCompleteInputSchema,
     output: accountSchema,
   },
+  "agyLogin.start": {input:z.null(),output:z.object({sessionId:z.string().min(1).max(128),authorizeUrl:z.string().url(),expiresAt:z.number().int().positive()}).strict()},
+  "agyLogin.complete": {input:z.object({sessionId:z.string().min(1).max(128),pasted:z.string().trim().min(1).max(16384)}).strict(),output:accountSchema},
+  "agyLogin.cancel": {input:z.object({sessionId:z.string().min(1).max(128)}).strict(),output:z.object({cancelled:z.literal(true)}).strict()},
   "codexLogin.start": {
     input: z.null(),
     output: codexLoginStartSchema,
@@ -178,6 +182,7 @@ export function createRpcHandlers(
   threadAccount: (threadId: string) => Promise<ThreadAccountStatus> = async () => ({ state: "unobserved", account: null, lastUsedAt: null }),
   projectsList: () => Promise<Array<{ id: string; name: string }>> = async () => [],
   openBrowser: (input: BrowserOpenInput) => Promise<{ opened: true }> = async () => { throw new Error("Account browser unavailable"); },
+  agyLogin?: AgyOAuthLogin,
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
     "browser.open": input => openBrowser(input),
@@ -231,6 +236,9 @@ export function createRpcHandlers(
       return login.start(accountId);
     },
     "login.complete": (input) => login.complete(input),
+    "agyLogin.start":()=>{if(!agyLogin)throw Error('Antigravity login unavailable');return agyLogin.start();},
+    "agyLogin.complete":async({sessionId,pasted})=>{if(!agyLogin)throw Error('Antigravity login unavailable');return operations.addAgyOAuth(await agyLogin.complete(sessionId,pasted));},
+    "agyLogin.cancel":({sessionId})=>{if(!agyLogin)throw Error('Antigravity login unavailable');agyLogin.cancel(sessionId);return {cancelled:true};},
     "codexLogin.start": () => codexLogin.start(),
     "codexLogin.poll": (input) => codexLogin.poll(input),
     "codexLogin.cancel": (input) => ({

@@ -56,11 +56,11 @@ const HELP = [
   '  bb pool account projects <id> <JSON|off>',
   "  bb pool account cap <id> <early> <late>",
   "  bb pool account cap <id> off",
-  "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|cursor|devin> <id>...",
+  "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> <id>...",
   "  bb pool account refresh <id>",
   "  bb pool status [--json]",
   "  bb pool observations [--json]",
-  "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|cursor|devin> [--off]",
+  "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> [--off]",
   "  bb pool config",
   "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
@@ -387,7 +387,7 @@ export function registerPoolCli(
       {
         name: "account-reorder",
         summary: "Set the complete failover order for one provider",
-        usage: "bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|cursor|devin> <id>...",
+        usage: "bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> <id>...",
       },
       {
         name: "account-refresh",
@@ -403,7 +403,7 @@ export function registerPoolCli(
       {
         name: "routing",
         summary: "Enable or disable pooled routing for one provider",
-        usage: "bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|cursor|devin> [--off]",
+        usage: "bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> [--off]",
       },
       {
         name: "config",
@@ -538,6 +538,9 @@ export function registerPoolCli(
             throw new Error(
               "Choose exactly one of --login, --import, --api-key-stdin, or --api-key <key>.",
             );
+          if (flags.values.get("provider") === "agy") {
+            throw new Error("Use Antigravity login in the Pooler UI; local login/import and API keys are not supported.");
+          }
           if (loginRequested) {
             const provider = flags.values.get("provider");
             if (provider !== "claude" && provider !== "codex") {

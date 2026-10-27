@@ -102,7 +102,7 @@ function status(
     kimi: null,
     zai: null,
     "opencode-go": null,
-    neuraldeep: null,
+    neuraldeep: null, agy: null,
     cursor: null,
     devin: null,
   },
@@ -123,7 +123,7 @@ function status(
       kimi: true,
       zai: true,
       "opencode-go": true,
-    neuraldeep: true,
+    neuraldeep: true, agy: true,
       cursor: true,
       devin: true,
     },
@@ -341,7 +341,7 @@ describe("Account Pool settings", () => {
     window.localStorage.setItem(STATUS_CACHE_KEY, '{"accounts":"nope"}');
     const live = deferred<PoolStatus>();
     const slot = render([], { "status.get": () => live.promise });
-    expect(slot.getAllByText("Загрузка…")).toHaveLength(8);
+    expect(slot.getAllByText("Загрузка…")).toHaveLength(9);
     live.resolve(status());
     expect(await slot.findByText("person@example.com")).toBeTruthy();
   });
@@ -502,10 +502,22 @@ describe("Account Pool settings", () => {
     ).toContain("ABCD-1234");
   });
 
+  it("offers Antigravity Google login without paid key or local credential import",async()=>{
+    const slot=render([],{'agyLogin.cancel':()=>({cancelled:true}),'agyLogin.start':()=>({sessionId:'synthetic-session',authorizeUrl:'https://accounts.google.com/o/oauth2/v2/auth',expiresAt:Date.now()+600000})});
+    const buttons=await slot.findAllByRole('button',{name:'Добавить аккаунт'});
+    fireEvent.pointerDown(buttons[4]!);
+    fireEvent.click(await slot.findByText('Вход в Antigravity',{selector:'span.block'}));
+    expect(await slot.findByLabelText('Код или адрес после входа в Google')).toBeTruthy();
+    expect(slot.queryByText('Добавить API-ключ…')).toBeNull();
+    expect(slot.queryByText('Импорт с этой машины')).toBeNull();
+    fireEvent.click(slot.getByRole('button',{name:'Закрыть'}));
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'agyLogin.cancel',input:{sessionId:'synthetic-session'}}));
+  });
+
   it("adds a Devin PAT from its card without offering Codex login", async () => {
     const slot = render([], { "account.add": () => account({ provider: "devin" }) });
     const addButtons = await slot.findAllByRole("button", { name: "Добавить аккаунт" });
-    fireEvent.pointerDown(addButtons[7]!);
+    fireEvent.pointerDown(addButtons[8]!);
     expect(slot.queryByText("Вход в Codex", { selector: "span.block" })).toBeNull();
     fireEvent.click(await slot.findByText("Добавить PAT…"));
     const dialog = await slot.findByRole("dialog", { name: "Добавить PAT Devin" });
@@ -587,7 +599,7 @@ describe("Account Pool settings", () => {
           kimi: null,
           zai: null,
           "opencode-go": null,
-    neuraldeep: null,
+    neuraldeep: null, agy: null,
           cursor: null,
           devin: null,
         }),
@@ -595,7 +607,7 @@ describe("Account Pool settings", () => {
     expect(
       await slot.findByRole("region", { name: "Выбранные аккаунты" }),
     ).toBeTruthy();
-    expect(within(slot.getByRole("region", { name: "Выбранные аккаунты" })).getAllByText("Не выбран")).toHaveLength(7);
+    expect(within(slot.getByRole("region", { name: "Выбранные аккаунты" })).getAllByText("Не выбран")).toHaveLength(8);
     expect(slot.getAllByText("Текущий")).toHaveLength(1);
     expect(slot.getAllByText("Резерв")).toHaveLength(1);
     expect(slot.getByText("потолок сейчас 39% (15%→98%)")).toBeTruthy();
@@ -605,7 +617,7 @@ describe("Account Pool settings", () => {
     const named = account({ label: "Synthetic Display Name", email: "identity@example.com" });
     const slot = render([named], {
       "status.get": () => status([named], { claude: named.id, codex: null, kimi: null, zai: null, "opencode-go": null,
-    neuraldeep: null, cursor: null, devin: null }),
+    neuraldeep: null, agy: null, cursor: null, devin: null }),
     });
     const overview = await slot.findByRole("region", { name: "Выбранные аккаунты" });
     expect(within(overview).getByText("identity@example.com")).toBeTruthy();

@@ -103,6 +103,7 @@ export interface ProviderAdapter {
   parseRequest(
     body: Uint8Array,
     headers: Headers,
+    request?: Request,
   ): {
     model?: string | null;
     family: ModelFamily;
@@ -111,6 +112,8 @@ export interface ProviderAdapter {
     forAccount: (account: Account, secret: AccountSecret) => Uint8Array;
   };
   upstreamUrl(request: Request, settings: AccountPoolConfig): URL;
+  upstreamMethod?(request:Request):string;
+  transformResponse?(request:Request,response:Response,signal:AbortSignal):Response;
   guardRequest?(request: Request, body: Uint8Array): Response | null;
   requestHeaders(
     inbound: Headers,

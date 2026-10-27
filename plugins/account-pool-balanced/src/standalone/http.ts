@@ -1,3 +1,4 @@
+import {agyRoute} from "../agy-wire.js";
 import { createServer, type IncomingMessage } from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -57,11 +58,12 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
       const cursorExchange = cursorPath === CURSOR_EXCHANGE_PATH;
       const cursorGateway = cursorPath === "rpc";
       const cursorRoute = cursorExchange || cursorGateway || (cursorPath !== null && isCursorRpcPath(cursorPath));
-      const provider = cursorRoute ? "cursor" : routes.get(url.pathname);
+      const agy=agyRoute(url);
+      const provider = agy ? 'agy' : cursorRoute ? "cursor" : routes.get(url.pathname);
       const devinCreate = url.pathname === "/agents/devin/sessions" && req.method === "POST";
       const devinSession = /^\/agents\/devin\/sessions\/([A-Za-z0-9_-]{1,160})(\/messages)?$/.exec(url.pathname);
       const devinRoute = devinSession && (devinSession[2] ? req.method === "POST" : req.method === "GET" || req.method === "DELETE");
-      const modelMethod = cursorRoute && req.method === "GET" && !cursorExchange ? "GET" : url.pathname.endsWith("/v1/models") ? "GET" : "POST";
+      const modelMethod = agy ? (agy.kind==='models'?'GET':'POST') : cursorRoute && req.method === "GET" && !cursorExchange ? "GET" : url.pathname.endsWith("/v1/models") ? "GET" : "POST";
       if ((!provider || req.method !== modelMethod) && !devinCreate && !devinRoute) { fail(404, "Unknown pool route."); return; }
       const headers = new Headers();
       for (const [key, value] of Object.entries(req.headers)) {

@@ -92,7 +92,7 @@ type DialogState =
       kind: "account" | "priority" | "role" | "cap" | "remove";
       accountId: string;
     }
-  | { kind: "claude-login" | "codex-login" }
+  | { kind: "claude-login" | "codex-login" | "agy-login" }
   | { kind: "api-key"; provider: PoolProvider }
   | null;
 
@@ -127,6 +127,11 @@ const PROVIDERS: Array<{
     title: "Z.ai Coding Plan",
     description:
       "Треды opencode с подпиской z.ai идут через эти ключи: на машине остаётся только токен хаба.",
+  },
+  {
+    id: "agy",
+    title: "Antigravity",
+    description: "Вход в Google хранится на сервере пула; машины получают только токен пула.",
   },
   {
     id: "neuraldeep",
@@ -728,19 +733,19 @@ function AddAccountMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
-        {(provider === "claude" || provider === "codex") ? <DropdownMenuItem
+        {(provider === "claude" || provider === "codex" || provider === "agy") ? <DropdownMenuItem
           className="items-start py-2"
           onSelect={() => onChoose("login")}
         >
           <Icon name="UserRound" className="mt-0.5" />
           <span>
             <span className="block">
-              Вход в {provider === "claude" ? "Claude" : "Codex"}
+              Вход в {provider === "claude" ? "Claude" : provider === "agy" ? "Antigravity" : "Codex"}
             </span>
             <span className="block text-xs text-muted-foreground">
               {provider === "claude"
                 ? "Откроет claude.ai, код вставите обратно"
-                : "Откроет ChatGPT с кодом устройства"}
+                : provider === "agy" ? "Вход в Google, код вставите обратно" : "Откроет ChatGPT с кодом устройства"}
             </span>
           </span>
         </DropdownMenuItem> : null}
@@ -757,7 +762,7 @@ function AddAccountMenu({
             </span>
           </span>
         </DropdownMenuItem> : null}
-        {provider !== "codex" ? (
+        {provider !== "codex" && provider !== "agy" ? (
           <>
             {provider === "claude" ? <DropdownMenuSeparator /> : null}
             <DropdownMenuItem
@@ -1081,6 +1086,7 @@ function AccountPoolSettings() {
   const [codexStep, setCodexStep] = useState<CodexDeviceLoginStart | null>(
     null,
   );
+  const [agyStep,setAgyStep]=useState<{sessionId:string;authorizeUrl:string;expiresAt:number}|null>(null);
   const [loginDone, setLoginDone] = useState<string | null>(null);
   const [reauthorizeAccountId, setReauthorizeAccountId] = useState<string | null>(null);
   const [pastedCode, setPastedCode] = useState("");
@@ -1270,12 +1276,18 @@ function AccountPoolSettings() {
       setCodexStep(await rpc.call("codexLogin.start", null));
     });
   }
+  async function startAgy():Promise<void>{
+    if(agyStep)void rpc.call('agyLogin.cancel',{sessionId:agyStep.sessionId}).catch(()=>undefined);
+    setAgyStep(null);setPastedCode('');setLoginDone(null);setDialog({kind:'agy-login'});
+    await run('agy-login',async()=>setAgyStep(await rpc.call('agyLogin.start',null)));
+  }
   async function chooseAdd(
     provider: PoolProvider,
     choice: "login" | "import" | "api-key",
   ): Promise<void> {
     if (choice === "login") {
-      if (provider === "claude") await startClaude();
+      if (provider === "agy") await startAgy();
+      else if (provider === "claude") await startClaude();
       else await startCodex();
       return;
     }
@@ -1394,6 +1406,8 @@ function AccountPoolSettings() {
     if (dialog?.kind === "account" && policyUnsaved) return;
     if (dialog?.kind === "codex-login" && codexStep !== null)
       void rpc.call("codexLogin.cancel", { sessionId: codexStep.sessionId });
+    if(dialog?.kind==="agy-login"&&agyStep)void rpc.call("agyLogin.cancel",{sessionId:agyStep.sessionId}).catch(()=>undefined);
+    setAgyStep(null);setPastedCode("");
     if (dialog?.kind === "api-key") setApiKey("");
     setDialog(null);
     setBrowserError(null);
@@ -1533,10 +1547,10 @@ function AccountPoolSettings() {
                     })
                   }
                 />
-                {["codex", "claude", "cursor", "devin", "neuraldeep"].includes(provider.id) && <label className="flex items-center gap-1 text-xs">
+                {["codex", "claude", "cursor", "devin", "neuraldeep", "agy"].includes(provider.id) && <label className="flex items-center gap-1 text-xs">
                   <input type="checkbox" aria-label={`Только через VPN ${provider.title}`} checked={config?.vpnOnlyProviders?.some(value => value === provider.id) ?? true} disabled={config === null || pending !== null}
                     onChange={e => void saveRouting({ vpnOnlyProviders: e.target.checked
-                      ? [...(config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id), provider.id as "codex" | "claude" | "cursor" | "devin" | "neuraldeep"]
+                      ? [...(config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id), provider.id as "codex" | "claude" | "cursor" | "devin" | "neuraldeep" | "agy"]
                       : (config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id) })} />Только VPN
                 </label>}
                 <AddAccountMenu
@@ -2162,6 +2176,20 @@ function AccountPoolSettings() {
             </p>
           </DialogFrame>
         ) : null}
+        {dialog?.kind==='agy-login'?<DialogFrame title="Вход в Antigravity" footer={loginDone?<Button onClick={closeDialog}>Готово</Button>:<Button disabled={!agyStep||!pastedCode.trim()||pending!==null} onClick={()=>void run('agy-complete',async()=>{
+          if(!agyStep)return;
+          const added=await rpc.call('agyLogin.complete',{sessionId:agyStep.sessionId,pasted:pastedCode});
+          setPastedCode('');setAgyStep(null);setLoginDone(added.label);
+        })}>Завершить</Button>}>
+          {loginDone?<p>Аккаунт добавлен: {loginDone}</p>:<>
+            <p>Авторизуйте личную подписку Antigravity в Google. Вход сохранится на сервере пула.</p>
+            <p>После подтверждения браузер перейдёт на локальный адрес и может показать ошибку соединения. Скопируйте адрес целиком сюда. Можно также вставить выданный код.</p>
+            <Button variant="outline" disabled={!agyStep||pending!==null} onClick={()=>agyStep&&navigate.openUrl(agyStep.authorizeUrl)}>Открыть Google</Button>
+            <Input aria-label="Код или адрес после входа в Google" value={pastedCode} autoComplete="off" spellCheck={false} type="password" onChange={e=>setPastedCode(e.target.value)}/>
+            <p>Вход действует 10 минут. Нужна уже активированная личная подписка Antigravity; корпоративный вход не поддерживается.</p>
+          </>}
+          {error?<p role="alert">{error}</p>:null}
+        </DialogFrame>:null}
         {dialog?.kind === "claude-login" ? (
           <LoginDialog
             provider="claude"
