@@ -83,6 +83,10 @@ const DEFAULT_CURSOR_EXCHANGE_URL =
 const DEFAULT_CURSOR_USAGE_URL =
   "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 const DEFAULT_USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1_000;
+// Strict ZAI proof expires after five minutes; collect with headroom for latency
+// and manual refreshes between scheduler passes. Other provider due times stay intact.
+const USAGE_SCHEDULER_TICK_MS = 60 * 1_000;
+const ZAI_USAGE_REFRESH_INTERVAL_MS = 2 * 60 * 1_000;
 const MAX_INLINE_HOLD_MS = 20_000;
 const MAX_REFRESH_BACKOFF_MS = 60_000;
 const MAX_REFRESH_BACKOFFS = 1_024;
@@ -233,7 +237,7 @@ export class AccountPoolHub {
       if (signal.aborted) stop();
       while (!signal.aborted) {
         await this.refreshUsage();
-        await waitForDelay(DEFAULT_USAGE_REFRESH_INTERVAL_MS, signal);
+        await waitForDelay(USAGE_SCHEDULER_TICK_MS, signal);
       }
     } finally {
       signal.removeEventListener("abort", stop);
@@ -368,7 +372,7 @@ export class AccountPoolHub {
     if (
       !force &&
       last !== undefined &&
-      now - last < DEFAULT_USAGE_REFRESH_INTERVAL_MS
+      now - last < (account.provider === "zai" ? ZAI_USAGE_REFRESH_INTERVAL_MS : DEFAULT_USAGE_REFRESH_INTERVAL_MS)
     )
       return;
     const running = this.usageRefreshes.get(account.id);
