@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
 import { providerSchema } from './contracts.js';
+import { codexQuotaObservationSchema } from './codex-quota-observation.js';
 export const MAX_ROWS=2048, TTL_MS=86400000, MAX_BYTES=2*1024*1024;
 const number=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
 const binding=(prefix:string)=>z.string().regex(new RegExp(`^${prefix}_[a-z0-9]{6,32}$`)).nullable();
@@ -17,6 +18,7 @@ export const observationSchema=z.object({
  outcome:z.enum(['returned','error','canceled','complete','failed-over']).nullable(),
  failover:z.enum(['none','succeeded','failed']).nullable(),
  errorClass:z.enum(['upstream429','local-held','upstream403-hold','stream-error','request-error','canceled']).nullable(),
+ codexQuota:codexQuotaObservationSchema.optional(),
 }).strip();
 export type Observation=z.infer<typeof observationSchema>;
 export type Trace=Pick<Observation,'requestId'|'provider'|'clientHash'|'projectId'|'threadId'|'model'|'modelFamily'>;
