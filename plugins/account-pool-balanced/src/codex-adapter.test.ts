@@ -351,7 +351,7 @@ describe("requestHeaders", () => {
         codexAccountId: "chatgpt-account",
         subscriptionType: null,
         rateLimitTier: null,
-        enabled: true,
+        enabled: true, autopilotAllowed: false,
         priority: 0,
         createdAt: 0,
         lastUsedAt: null,

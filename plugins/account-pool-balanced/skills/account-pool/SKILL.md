@@ -30,3 +30,9 @@ network recovery, see [VPN policy](../../docs/vpn-policy.md). Protected
 providers deny every upstream operation when the server VPN state is unknown.
 
 Pooler0.4.14+: `bb pool config set vpnGuardEnabled true` включает fail-closed связь с Guard0.1.2+ на машине сервера пула. Настройка также доступна в UI. Удаление Guard не открывает трафик связанного пула; удаление/отключение этой связи явно снимает дополнительный барьер. Китайские провайдеры независимы.
+
+For a purpose-bound automation client, add `--project <project-id> --purpose autopilot`
+to the existing client issuance command. Only explicitly opted-in accounts are
+selectable; project policies and quota guards still apply. Existing credentials
+remain legacy. A client name or request header cannot supply the trusted purpose.
+Do not choose or enable accounts without the operator's policy instruction.

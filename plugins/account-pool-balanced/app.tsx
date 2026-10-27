@@ -1862,6 +1862,12 @@ function AccountPoolSettings() {
             key={selectedAccount.id}
             onPolicyUnsavedChange={setPolicyUnsaved}
             loadProjects={() => rpc.call("projects.list", null)}
+            saveAutopilot={async (allowed, expectedAllowed) => {
+              try {
+                const result = await rpc.call("account.setAutopilotAllowed", {accountId:selectedAccount.id,allowed,expectedAllowed});
+                if (!result.account) throw Error("Account removed");
+              } finally { await refresh(); }
+            }}
             saveProjects={async (projects, expectedProjects) => {
               let result;
               try { result = await rpc.call("account.setProjects", { accountId: selectedAccount.id, projects, expectedProjects }); }
@@ -2218,6 +2224,7 @@ function AccountDialog({
   saveEmail,
   savePolicy,
   saveProjects,
+  saveAutopilot,
   loadProjects,
   onPolicyUnsavedChange,
   refreshError,
@@ -2234,6 +2241,7 @@ function AccountDialog({
   browserPending: boolean;
   browserNotice: string | null;
   saveEmail:(email:string|null,expectedEmail:string|null)=>Promise<void>;
+  saveAutopilot: (allowed:boolean, expectedAllowed:boolean) => Promise<void>;
   saveProjects: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
   loadProjects: () => Promise<Array<{ id: string; name: string }>>;
   savePolicy: (policy: AccountPolicy) => Promise<void>;
@@ -2247,6 +2255,8 @@ function AccountDialog({
   pending: boolean;
   reauthorize: () => void;
 }) {
+  const [autopilotPending, setAutopilotPending] = useState(false);
+  const [autopilotError, setAutopilotError] = useState<string|null>(null);
   const [browserUrl, setBrowserUrl] = useState("");
   const [showBrowserUrl, setShowBrowserUrl] = useState(false);
   const [emailUnsaved,setEmailUnsaved]=useState(false);
@@ -2350,6 +2360,21 @@ function AccountDialog({
         {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
       </div>
       {account.kind==='api-key'&&<AccountEmailForm email={account.email} save={saveEmail} onUnsavedChange={setEmailUnsaved}/> }
+      <section className="pool-settings-section">
+        <label className="pool-settings-toggle">
+          <input type="checkbox" checked={account.autopilotAllowed} disabled={pending || autopilotPending}
+            onChange={async event => {
+              const allowed = event.target.checked;
+              setAutopilotPending(true); setAutopilotError(null);
+              try { await saveAutopilot(allowed, account.autopilotAllowed); }
+              catch { setAutopilotError("Не удалось сохранить разрешение. Обновите данные и повторите."); }
+              finally { setAutopilotPending(false); }
+            }} />
+          Разрешить автопилоту
+        </label>
+        <p className="pool-settings-help">Для клиентов с назначением «автопилот». Ограничения проектов и квот сохраняются; ручная работа не меняется.</p>
+        {autopilotError && <p role="alert">{autopilotError}</p>}
+      </section>
       <AccountProjectsForm account={account} loadProjects={loadProjects} save={saveProjects} onUnsavedChange={setProjectsUnsaved} />
       <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
       <section className="pool-settings-section">

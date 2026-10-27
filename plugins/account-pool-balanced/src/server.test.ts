@@ -27,7 +27,7 @@ import type {
   ImportedClaudeCredentials,
   ImportedCodexCredentials,
 } from "./credentials.js";
-import { AccountStore, HubTokenStore } from "./store.js";
+import { AccountStore, HubTokenStore, QuotaStore } from "./store.js";
 import {
   createAccountPoolPlugin as createAccountPoolPluginImpl,
   helloResponse,
@@ -7724,5 +7724,154 @@ describe('bounded request metadata observations',()=>{
     vi.spyOn(RequestJournal.prototype,'record').mockImplementation(()=>{throw Error('synthetic journal failure');});
     const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:'{}'});
     expect(response.status).toBe(200);expect(await response.json()).toEqual({ok:true});
+  });
+});
+
+describe('trusted automation account admission', () => {
+  async function issued(fixture:Fixture, name='worker') {
+    const output=path.join(fixture.dataDir, `${name}.token`);
+    const result=await fixture.host.harness.behavior.runCli(['client','add',name,'--output',output,'--project','project-one','--purpose','autopilot']);
+    expect(result.exitCode).toBe(0);
+    return (await fs.readFile(output,'utf8')).trim();
+  }
+  async function allow(fixture:Fixture, allowed=true, expectedAllowed=false, accountId=fixture.account.id) {
+    return fixture.host.harness.behavior.callRpc('account.setAutopilotAllowed',{accountId,allowed,expectedAllowed});
+  }
+  const routes = {
+    claude:['/v1/messages','/v1/messages/count_tokens'],
+    codex:['/v1/responses','/v1/images/generations','/v1/images/edits','/v1/alpha/search','/v1/models'],
+    kimi:['/kimi/v1/messages','/kimi/v1/messages/count_tokens'],
+    zai:['/zai/v1/chat/completions','/zai/v1/responses','/zai/v1/models'],
+    'opencode-go':['/opencode-go/v1/chat/completions','/opencode-go/v1/responses','/opencode-go/v1/models'],
+    cursor:CURSOR_PROXIED_PATHS.filter(p=>p!=='auth/exchange_user_api_key').map(p=>`/cursor/${p}`),
+    devin:DEVIN_PROXIED_PATHS.map(p=>`/devin/${p}`),
+  };
+  it.each(['claude','codex','kimi','zai','opencode-go','cursor','devin'] as const)('enforces opt-in on reachable %s routes and retains ordinary requests',async provider=>{
+    const outbound=vi.fn(async()=>Response.json({accessToken:'synthetic-minted',refreshToken:'synthetic-renewal'}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider,source:provider==='codex'?'import':undefined,options:{fetch:outbound,importCodexCredentials:async()=>({accessToken:'synthetic',refreshToken:'refresh',idToken:null,accountId:'fixture',email:'fixture@example.com',expiresAt:Date.now()+3600000})}});
+    const token=await issued(fixture);
+    const request=async(key:string,route:string)=>{
+      const bytes=new TextEncoder().encode(key);
+      const metadata=Uint8Array.of(0x1a,bytes.length,...bytes);
+      const proto=Buffer.from(Uint8Array.of(0x0a,metadata.length,...metadata));
+      return fixture.host.harness.behavior.fetchHttp(route==='/v1/models'?'GET':'POST',route,{headers:{...authHeaders(key),authorization:`${provider==='devin'?'Basic':'Bearer'} ${key}`,'x-api-key':key,'content-type':provider==='devin'?'application/proto':'application/json'},...(route==='/v1/models'?{}:{body:provider==='devin'?proto:'{}'})});
+    };
+    // Drain/project role cannot turn an explicit purpose denial into an admission.
+    await fixture.host.harness.behavior.callRpc('account.setDrainOnce',{accountId:fixture.account.id,enabled:true});
+    outbound.mockClear();
+    for(const route of routes[provider]) {
+      const response=await request(token,route);
+      if(provider==='opencode-go' && route.endsWith('/responses')) {expect(response.status).toBe(400);await response.text();continue;}
+      expect(response.status,route).toBe(403);
+      expect(response.headers.get('x-bb-pool-error')).toBe('POOL_ACCOUNT_POLICY');
+      await response.text();
+    }
+    expect(outbound).not.toHaveBeenCalled();
+    const ordinary=await request(fixture.key,routes[provider][0]!);await ordinary.text();
+    expect(outbound).toHaveBeenCalled();
+    outbound.mockClear();
+    await allow(fixture);
+    const permitted=await request(token,routes[provider][0]!);await permitted.text();
+    expect(outbound).toHaveBeenCalled();
+    expect(permitted.headers.get('x-bb-pool-error')).not.toBe('POOL_ACCOUNT_POLICY');
+    await allow(fixture,false,true);
+    outbound.mockClear();
+    const deniedAgain=await request(token,routes[provider][0]!);await deniedAgain.text();
+    expect(deniedAgain.status).toBe(403);expect(outbound).not.toHaveBeenCalled();
+  });
+
+  it.each(['project','disabled','schedule','cap'] as const)('keeps existing %s restrictions on an opted-in account',async restriction=>{
+    const outbound=vi.fn(async()=>Response.json({}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    await allow(fixture);const token=await issued(fixture);
+    const rpc=fixture.host.harness.behavior.callRpc;
+    if(restriction==='project') await rpc('account.setProjects',{accountId:fixture.account.id,projects:{onlySelected:true,rules:[{projectId:'foreign',role:'primary'}]}});
+    if(restriction==='disabled') await rpc('account.disable',{id:fixture.account.id});
+    if(restriction==='schedule') await rpc('account.setPolicy',{accountId:fixture.account.id,policy:{enabled:true,schedule:{timeZone:'UTC',intervals:[]}}});
+    if(restriction==='cap') {
+      const quotas=new QuotaStore(fixture.host.bb.storage.database());
+      quotas.put({...quotas.get(fixture.account.id),sevenDayUtilization:0.8,sevenDayResetAt:Date.now()+86400000});
+      await rpc('account.setCap',{accountId:fixture.account.id,cap:{early:0.1,late:0.1}});
+    }
+    outbound.mockClear();
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(token),body:'{}'});
+    expect(response.ok).toBe(false);await response.text();expect(outbound).not.toHaveBeenCalled();
+  });
+
+  it('does not infer purpose from name/header and enforces strict permission CAS',async()=>{
+    const outbound=vi.fn(async()=>Response.json({}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    const file=path.join(fixture.dataDir,'legacy.token');
+    expect((await fixture.host.harness.behavior.runCli(['client','add','autopilot','--project','project-one','--output',file])).exitCode).toBe(0);
+    const token=(await fs.readFile(file,'utf8')).trim();outbound.mockClear();
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(token),'x-bb-pool-purpose':'autopilot'},body:'{}'});await response.text();
+    expect(outbound).toHaveBeenCalled();
+    await allow(fixture);
+    await expect(allow(fixture,false,false)).rejects.toThrow('permission changed');
+    await expect(fixture.host.harness.behavior.callRpc('account.setAutopilotAllowed',{accountId:fixture.account.id,allowed:true,expectedAllowed:true,unexpected:true})).rejects.toThrow();
+  });
+
+  it('retains purpose through Cursor local exchange and guards the dynamic RPC route',async()=>{
+    const outbound=vi.fn(async()=>Response.json({accessToken:'synthetic',refreshToken:'synthetic'}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{fetch:outbound}});
+    const token=await issued(fixture);outbound.mockClear();
+    const exchange=await fixture.host.harness.behavior.fetchHttp('POST','/cursor/auth/exchange_user_api_key',{headers:authHeaders(token),body:'{}'});
+    expect(await exchange.json()).toEqual({accessToken:token,refreshToken:token});
+    for(const method of ['GET','POST'] as const){
+      const response=await fixture.host.harness.behavior.fetchHttp(method,'/cursor/rpc',{headers:{...authHeaders(token),'x-bb-cursor-rpc-path':'agent.v1.AgentService/Run'},...(method==='POST'?{body:'{}'}:{})});
+      expect(response.status).toBe(403);await response.text();
+    }
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
+  it('rechecks opt-out on failover and never falls back to an ordinary account',async()=>{
+    let fixture:Fixture;
+    let calls=0;
+    const outbound=vi.fn(async()=>{
+      calls++;
+      if(calls===1){await allow(fixture,false,true);return Response.json({error:'synthetic'},{status:401});}
+      return Response.json({});
+    });
+    fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    await addApiAccount(fixture,'ordinary-only',200);
+    await allow(fixture);
+    const token=await issued(fixture);
+    outbound.mockClear();calls=0;
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(token),body:'{}'});await response.text();
+    expect(calls).toBe(1);
+  });
+
+  it('rechecks purpose before a real OAuth authentication retry',async()=>{
+    let fixture:Fixture;
+    let modelCalls=0;
+    const clock=Date.now();
+    const fetcher:typeof fetch=async(input)=>{
+      if(String(input).endsWith('/oauth/token')) return Response.json({access_token:'renewed',refresh_token:'renewal',expires_in:3600});
+      modelCalls++;
+      await allow(fixture,false,true);
+      return Response.json({error:'synthetic'},{status:401});
+    };
+    fixture=await createOAuthRequestFixture('codex',fetcher,()=>clock);
+    await allow(fixture);
+    const token=await issued(fixture);
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/responses',{headers:authHeaders(token),body:'{}'});
+    await response.text();expect(modelCalls).toBe(1);
+  });
+
+  it('isolates same-session affinity and includes purpose in conservative budget evidence',async()=>{
+    const upstreamKeys:string[]=[];
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:async(_input,init)=>{upstreamKeys.push(new Headers(init?.headers).get('x-api-key')!);return Response.json({id:'synthetic-response'});}}});
+    const second=await addApiAccount(fixture,'automation-only',200);
+    await allow(fixture,true,false,second.id);
+    const token=await issued(fixture);
+    const body=JSON.stringify({model:'claude-opus-4-6',metadata:{user_id:JSON.stringify({session_id:'shared-session'})},messages:[]});
+    const request=async(key:string)=>{const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(key),body});await response.text();return response;};
+    await request(fixture.key);await request(token);await request(fixture.key);
+    expect(upstreamKeys).toEqual(['sk-account','automation-only','sk-account']);
+    // Budget exists only for Codex; a trusted caller is attested even with no Codex account.
+    const evidence=await (await fixture.host.harness.behavior.fetchHttp('GET','/budget/codex',{headers:authHeaders(token)})).json();
+    expect(evidence.purpose).toBe('autopilot');expect(evidence.accounts).toEqual([]);
+    const legacy=await (await fixture.host.harness.behavior.fetchHttp('GET','/budget/codex',{headers:authHeaders(fixture.key)})).json();
+    expect(legacy).not.toHaveProperty('purpose');
   });
 });

@@ -263,6 +263,7 @@ export const accountSchema = z
     subscriptionType: z.string().nullable(),
     rateLimitTier: z.string().nullable(),
     enabled: z.boolean(),
+    autopilotAllowed: z.boolean().default(false),
     priority: z.number().int(),
     createdAt: z.number().int().nonnegative(),
     lastUsedAt: z.number().int().nonnegative().nullable().default(null),

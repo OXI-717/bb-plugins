@@ -78,6 +78,10 @@ export const accountPoolRpcContract = defineRpcContract({
     input: z.object({ accountId: z.string().uuid(), projects: accountProjectsSchema, expectedProjects: accountProjectsSchema.nullable().optional() }).strict(),
     output: z.object({ account: accountSchema.nullable() }).strict(),
   },
+  "account.setAutopilotAllowed": {
+    input: z.object({accountId:z.string().uuid(),allowed:z.boolean(),expectedAllowed:z.boolean()}).strict(),
+    output: z.object({account:accountSchema.nullable()}).strict(),
+  },
   "account.setPolicy": {
     input: z.object({ accountId: z.string().uuid(), policy: accountPolicySchema }).strict(),
     output: z.object({ account: accountSchema.nullable() }).strict(),
@@ -191,6 +195,7 @@ export function createRpcHandlers(
     "account.disable": async ({ id }) => ({
       account: await operations.disable(id),
     }),
+    "account.setAutopilotAllowed": async ({accountId,allowed,expectedAllowed}) => ({account:await operations.setAutopilotAllowed(accountId,allowed,expectedAllowed)}),
     "account.setPolicy": async ({ accountId, policy }) => ({
       account: await operations.setPolicy(accountId, policy),
     }),
