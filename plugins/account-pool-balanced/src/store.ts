@@ -165,6 +165,13 @@ export class AccountStore {
     return this.update(id, (account) => ({ ...account, cap }));
   }
 
+  /** Run synchronous admission/dispatch against a snapshot protected from metadata writes.
+   * Wrap the result so a returned network promise does not retain the mutation lock.
+   */
+  async withSnapshot<T>(action: (accounts: Account[]) => T): Promise<{value:T}> {
+    return this.serialized(async () => ({value: action(await this.list())}));
+  }
+
   async setAutopilotAllowed(id: string, allowed: boolean, expectedAllowed: boolean): Promise<Account | null> {
     z.boolean().parse(allowed);
     z.boolean().parse(expectedAllowed);

@@ -11,7 +11,7 @@ export class NetworkFlights {
       }
     }
   }
-  async fetch(provider:PoolProvider,input:RequestInfo|URL,init?:RequestInit,drainable=false):Promise<Response> {
+  async fetch(provider:PoolProvider,input:RequestInfo|URL,init?:RequestInit,drainable=false,admit?: (send:()=>Promise<Response>)=>Promise<Response>):Promise<Response> {
     await this.check(provider);
     const owner=new AbortController();
     const signal=AbortSignal.any([owner.signal,...(drainable?[]:[this.stop()]),...(init?.signal?[init.signal]:[]),...(input instanceof Request?[input.signal]:[])]);
@@ -30,7 +30,8 @@ export class NetworkFlights {
     signal.addEventListener('abort',abort,{once:true});
     let response:Response|undefined;
     try {
-      response=await this.selectFetch(provider,drainable)(input,{...init,signal});
+      const send=()=>{signal.throwIfAborted();return this.selectFetch(provider,drainable)(input,{...init,signal});};
+      response=await (admit?admit(send):send());
       signal.throwIfAborted();
       await this.check(provider);
       signal.throwIfAborted();

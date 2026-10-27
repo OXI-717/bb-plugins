@@ -168,6 +168,8 @@ interface FailureSummary {
 
 class UpstreamConnectionError extends Error {}
 
+class ClientPolicyDenied extends Error {}
+
 export class AccountPoolHub {
   private accepting = false;
   private stopped = new AbortController();
@@ -677,6 +679,7 @@ export class AccountPoolHub {
               secret,
               adapter,
               trace, attempt,
+              purpose ? {purpose,projectId,family} : undefined,
             );
           } catch (error) {
             if (pacing !== null) {
@@ -684,6 +687,10 @@ export class AccountPoolHub {
               pacing = null;
             }
             signal.throwIfAborted();
+            if (error instanceof ClientPolicyDenied) {
+              failure = {status:403,message:"No enabled account is allowed for this client purpose.",headers:{"x-bb-pool-error":"POOL_ACCOUNT_POLICY"}};
+              break;
+            }
             if (!(error instanceof UpstreamConnectionError)) throw error;
             failure = {
               status: 502,
@@ -1331,6 +1338,7 @@ export class AccountPoolHub {
     secret: AccountSecret,
     adapter: ProviderAdapter,
     trace: Trace, attempt: number,
+    admission?: {purpose:"autopilot";projectId:string|null;family:ModelFamily},
   ): Promise<UpstreamResult> {
     const controller = new AbortController();
     const abortFromRequest = () => controller.abort(request.signal.reason);
@@ -1366,9 +1374,17 @@ export class AccountPoolHub {
             ? {}
             : { body: upstreamBody }),
           signal: controller.signal,
-        },true)
+        },true, admission ? async send => {
+          const started = await this.options.accounts.withSnapshot(accounts => {
+            const current = this.eligibleEntries(adapter.provider, admission.projectId,
+              accounts, admission.family, this.options.now(), admission.purpose).eligible;
+            if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
+            return send();
+          });
+          return started.value;
+        } : undefined)
         .catch((cause: unknown) => {
-          if (cause instanceof VpnRequiredError) throw cause;
+          if (cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied) throw cause;
           throw new UpstreamConnectionError("Upstream connection failed.", {
             cause,
           });
