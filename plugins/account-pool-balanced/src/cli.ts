@@ -64,7 +64,7 @@ const HELP = [
   "  bb pool config",
   "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
-  "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>]",
+  "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot]",
   "  bb pool client revoke <name>",
   "  bb pool bypass <thread-id> [--off]",
   "  bb pool browser open <id|email|label> [--url <url>]",
@@ -796,11 +796,13 @@ export function registerPoolCli(
         }
         if (argv[0] === "client" && externalClients) {
           if (argv[1] === "add" && argv[2]) {
-            const flags = parseFlags(argv.slice(3), [], ["output", "project"]);
+            const flags = parseFlags(argv.slice(3), [], ["output", "project", "purpose"]);
             const output = flags.values.get("output");
             if (!output) throw new Error("--output is required (path on the BB server).");
             const projectId = flags.values.get("project") ?? null;
-            await externalClients.add(argv[2], output, projectId);
+            const purpose = flags.values.get("purpose");
+            if (purpose !== undefined && purpose !== "autopilot") throw Error("Unsupported client purpose.");
+            await externalClients.add(argv[2], output, projectId, purpose);
             return { exitCode: 0, stdout: "External client token saved to private file on the BB server.\n" };
           }
           if (argv[1] === "revoke" && argv.length === 3) {

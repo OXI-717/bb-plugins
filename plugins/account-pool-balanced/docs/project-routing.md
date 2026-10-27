@@ -53,3 +53,24 @@ Devin Local CLI uses the same hub rules. A BB ACP launcher must run the current
 `OXI_DEVIN_POOL_URL` contributed by BB. If you installed a separate launcher copy,
 update that copy as well. The separate experimental Devin cloud-session API does
 not use these account routing rules.
+
+## Trusted automation purpose
+
+Account settings include **Разрешить автопилоту** (`autopilotAllowed`). The default
+is false, including records saved before this field existed. Reading old records
+does not rewrite storage. Saving uses compare-and-set: a changed permission must
+be refreshed rather than overwritten. Ordinary requests keep their existing rules.
+
+An operator-issued project-bound external credential can carry `purpose="autopilot"`.
+Only that stored authority activates the opt-in requirement; names and request
+headers cannot set it. Missing purpose is legacy routing, never proof of a human.
+The account opt-in is an additional condition, not a replacement for project,
+enabled, schedule, cap, reserve or quota rules. **Use until exhausted** retains its
+existing overrides but cannot bypass the purpose opt-in. Affinity and active
+selection namespaces are isolated by purpose. Policy is rechecked before retries;
+turning the permission off does not interrupt an already accepted upstream call.
+
+This restricts correctly issued automation clients; it cannot detect automation
+using legacy credentials. Clients opting into the purpose must never fall back to
+legacy credentials or direct provider access on refusal. No accounts are opted in
+automatically. Internal provider usage collection is not a general budget API.

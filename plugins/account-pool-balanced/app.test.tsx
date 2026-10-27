@@ -56,7 +56,7 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
     accountUuid: null,
     subscriptionType: "Max",
     rateLimitTier: "default_claude_max_5x",
-    enabled: true,
+    enabled: true, autopilotAllowed: false,
     priority: 100,
     createdAt: 1,
     lastUsedAt: 2,
@@ -169,6 +169,17 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it("saves the explicit account permission with compare-and-set and reports conflicts", async () => {
+    const slot=render([account()], {"account.setAutopilotAllowed":()=>{throw Error("permission changed");}});
+    fireEvent.click(await slot.findByRole("button", {name:"Открыть карточку: person@example.com"}));
+    const checkbox=slot.getByRole("checkbox",{name:"Разрешить автопилоту"}) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    fireEvent.click(checkbox);
+    await slot.findByText("Не удалось сохранить разрешение. Обновите данные и повторите.");
+    expect(slot.rpcCalls).toContainEqual({method:"account.setAutopilotAllowed",input:{accountId:account().id,allowed:true,expectedAllowed:false}});
+    expect(checkbox.checked).toBe(false);
+  });
+
   it("opens the selected account browser from its menu", async () => {
     const selected = account();
     const slot = render([selected], { "browser.open": () => ({ opened: true }) });

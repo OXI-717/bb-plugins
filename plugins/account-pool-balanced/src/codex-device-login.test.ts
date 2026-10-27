@@ -68,7 +68,7 @@ function summary(account: CodexDeviceAccount): AccountSummary {
     codexAccountId: account.accountId,
     subscriptionType: null,
     rateLimitTier: null,
-    enabled: true,
+    enabled: true, autopilotAllowed: false,
     priority: 100,
     createdAt: 1,
     lastUsedAt: null,

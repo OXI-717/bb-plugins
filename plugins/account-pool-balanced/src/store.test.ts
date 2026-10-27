@@ -80,6 +80,11 @@ describe("AccountStore", () => {
     ]);
     const legacy = (await store.list())[0]!;
     expect(legacy.drainOnce ?? false).toBe(false);
+    expect(legacy.autopilotAllowed).toBe(false);
+    expect((await host.bb.storage.kv.get<Array<Record<string,unknown>>>("accounts:v1"))![0]).not.toHaveProperty("autopilotAllowed");
+    await store.setAutopilotAllowed(legacy.id,true,false);
+    await expect(store.setAutopilotAllowed(legacy.id,false,false)).rejects.toThrow('permission changed');
+    expect((await store.get(legacy.id))?.autopilotAllowed).toBe(true);
     const first = (await store.setDrainOnce(legacy.id, true))!;
     const reloaded = new AccountStore(host.bb.storage.kv, path.join(dataDir, "secrets"));
     expect((await reloaded.get(legacy.id))?.drainOnce).toBe(true);
@@ -116,7 +121,7 @@ describe("AccountStore", () => {
       accountUuid: null,
       subscriptionType: null,
       rateLimitTier: null,
-      enabled: true,
+      enabled: true, autopilotAllowed: false,
       priority: 100,
     });
 

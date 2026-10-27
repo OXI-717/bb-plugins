@@ -12,7 +12,7 @@ bb pool client add orca --output /secure/client.token
 
 The output file is created on the **BB server**, exclusively with mode 0600. Transfer it privately to the client machine. It contains only a pool credential, never a provider login. The base URL is `https://YOUR_BB_SERVER/api/v1/plugins/account-pool-balanced/http`. Verify the BB server is reachable from the client; this command does not expose ports or configure TLS. External credentials survive BB host inventory pruning. Revoke with `bb pool client revoke orca`; subsequent requests are rejected immediately. Already accepted requests can finish.
 
-Pool credentials are for trusted clients belonging to the operator. They allow use of every configured model account; this is not a tenant billing or per-client spending isolation system. Use a separate pool for untrusted tenants.
+Pool credentials are for trusted clients belonging to the operator. Their server-side project and purpose binding, account policies and quota rules determine access; this is not a tenant billing or per-client spending isolation system. Use a separate pool for untrusted tenants.
 
 ## Standalone setup
 
@@ -165,3 +165,23 @@ Contracts: [create](https://docs.devin.ai/api-reference/v3/sessions/post-organiz
 ## Validation boundary
 
 Tests cover loopback HTTP forwarding and streaming, durable standalone accounts/tokens, BB client issuance and revocation, Devin session binding, client isolation, ACU limits and non-retry behavior with synthetic upstreams. Real Claude and Codex generation from Orca terminals has been verified against the BB-hosted pool using an existing machine token. Opus 5.5 with `[1m]` accepted a synthetic request exceeding 500K input tokens. Dedicated external-client issuance/revocation and standalone forwarding use synthetic upstreams in integration tests. Real Devin execution and forced live quota exhaustion/failover have not been tested. Automated tests do not import production accounts or reload a live pool.
+
+## Purpose-bound automation clients
+
+The BB-hosted CLI supports an explicit trusted purpose:
+
+```sh
+bb pool client add worker --output NEW_PRIVATE_TOKEN_FILE --project PROJECT_ID --purpose autopilot
+```
+
+The project is mandatory for this purpose. Only accounts explicitly permitted in
+the existing account settings are selectable, in addition to normal project/policy
+rules. Client name is not an authority signal. Reissuing a name under a different
+project or purpose refuses; revoke it and issue a new identity explicitly. Rotation
+and previous-token grace retain the original authority. Existing clients remain
+legacy and do not silently acquire this purpose. The standalone administrative CLI
+has no purpose issuance flag in this release; no support is implied by its name.
+
+The Cursor local exchange returns the same pool credential, without a provider
+request or wider authority. All subsequent Cursor forwarding uses normal purpose
+admission. No provider credential is returned by the local exchange.

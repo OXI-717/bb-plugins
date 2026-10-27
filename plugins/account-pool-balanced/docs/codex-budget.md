@@ -64,3 +64,18 @@ future request. Keep the ordinary budget guard and error handling at launch.
 
 Existing global status eligibility, direct OAuth and legacy proxy interfaces retain
 their meaning. This endpoint does not turn global availability into project proof.
+
+## Issued-client purpose attestation
+
+For an authenticated project-bound credential issued with `purpose="autopilot"`,
+version 1 additionally returns root `purpose: "autopilot"`. Ordinary credentials
+retain their original response shape. The same account membership helper serves
+inference and this endpoint: accounts without `autopilotAllowed` cannot be eligible,
+even with drain or prior affinity. Project-visible denied accounts may be listed
+with `eligible=false`; they cannot authorize a budget. Every actually eligible
+account still has to satisfy the consumer's original conservative checks.
+
+A purpose-opted consumer must require this exact attestation and reject an absent
+or different purpose, while retaining project/schema/route/freshness/window/floor
+checks. Legacy consumers can ignore this additive field. This is neither a selected
+account reservation nor a new quota API for other providers.
