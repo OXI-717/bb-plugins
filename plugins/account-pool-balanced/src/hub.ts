@@ -1,4 +1,5 @@
 import {createAgyAdapter} from "./agy-adapter.js";
+import { observeCodexQuotaHeaders } from './codex-quota-observation.js';
 import { RequestJournal, newTrace, type Trace, type Observation } from "./request-journal.js";
 import { codexBudgetQuota, CODEX_BUDGET_MAX_AGE_MS } from './codex-budget.js';
 import { NetworkFlights } from "./network-flights.js";
@@ -711,18 +712,21 @@ export class AccountPoolHub {
             signal.throwIfAborted();
           }
           const { response } = upstream;
-          this.observe(trace,{event:'upstream',attempt,accountId:selected.account.id,status:response.status,durationMs:Math.max(0,this.options.now()-attemptStartedAt),
-            retryAfterMs:response.status===429?retryAfterMilliseconds(response.headers.get('retry-after'),this.options.now()):null,
-            retryAfterSupplied:response.status===429?response.headers.has('retry-after'):null,
-            quotaEvidence:response.status===429?adapter.isQuotaRejection(response.headers):null,errorClass:response.status===429?'upstream429':null});
+          const previousQuota = this.options.quotas.get(selected.account.id);
+          const quotaObservedAt = this.options.now();
           const observed = adapter.quotaFromHeaders(
             selected.account.id,
             response.headers,
-            this.options.quotas.get(selected.account.id),
+            previousQuota,
             family,
-            this.options.now(),
+            quotaObservedAt,
           );
           this.options.quotas.put(observed);
+          this.observe(trace,{event:'upstream',attempt,accountId:selected.account.id,status:response.status,durationMs:Math.max(0,this.options.now()-attemptStartedAt),
+            retryAfterMs:response.status===429?retryAfterMilliseconds(response.headers.get('retry-after'),this.options.now()):null,
+            retryAfterSupplied:response.status===429?response.headers.has('retry-after'):null,
+            quotaEvidence:response.status===429?adapter.isQuotaRejection(response.headers):null,errorClass:response.status===429?'upstream429':null,
+            ...(adapter.provider === 'codex' ? {codexQuota:observeCodexQuotaHeaders(response.headers, previousQuota, observed, quotaObservedAt)} : {})});
           await this.settleDrain(selected.account, response.status === 429 && adapter.isQuotaRejection(response.headers));
           if (pacing !== null && !response.ok) {
             this.releasePacing(selected.account.id, pacing);

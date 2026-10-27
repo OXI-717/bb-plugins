@@ -3,6 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { MAX_BYTES, MAX_ROWS, TTL_MS, RequestJournal, newTrace } from './request-journal.js';
+import { observeCodexQuotaHeaders } from './codex-quota-observation.js';
+import { codexQuotaFromUsage, createCodexAdapter } from './codex-adapter.js';
+import { EMPTY_FAMILY_WEEKLY } from './contracts.js';
 const cleanups:Array<()=>Promise<void>>=[];
 afterEach(async()=>{vi.restoreAllMocks();for(const cleanup of cleanups.splice(0).reverse())await cleanup();});
 async function fixture(){
@@ -21,6 +24,38 @@ it('removes unrecognized fields and refuses arbitrary model/identity strings',as
  const unknown=newTrace('codex','external-client-synthetic','private-project','private-thread','private-model','other');
  expect(unknown).toMatchObject({projectId:null,threadId:null,model:null});
  expect(unknown.clientHash).toBe(f.event().clientHash);
+});
+it('records only fixed typed quota fields and actual before/after evidence without retaining private text',async()=>{
+ const f=await fixture(),id='11111111-1111-4111-8111-111111111111';
+ const previous=codexQuotaFromUsage(id,{rate_limit:{allowed:true,limit_reached:false,
+  primary_window:{used_percent:20,limit_window_seconds:604800,reset_at:(f.now+86400000)/1000},secondary_window:null}},
+  {accountId:id,fiveHourUtilization:null,fiveHourResetAt:null,fiveHourStatus:null,sevenDayUtilization:null,sevenDayResetAt:null,sevenDayStatus:null,representativeClaim:null,familyWeekly:EMPTY_FAMILY_WEEKLY,limitWindows:[],observedAt:null,heldUntil:null,error:null},f.now)!;
+ const adapter=createCodexAdapter({refreshUrl:'https://auth.example/token',usageUrl:'https://usage.example/usage'});
+ const headers=new Headers({'authorization':'private synthetic authorization','set-cookie':'private synthetic cookie','x-unlisted':'private synthetic header',
+  'x-codex-primary-used-percent':'21','x-codex-primary-window-minutes':'10080','x-codex-primary-reset-at':String((f.now+86400000)/1000),
+  'x-codex-primary-reset-after-seconds':'private synthetic invalid','x-codex-primary-over-limit':'FALSE',
+  'x-codex-secondary-used-percent':'','x-codex-secondary-window-minutes':'0','x-codex-secondary-over-limit':'private synthetic invalid'});
+ const next=adapter.quotaFromHeaders(id,headers,previous,'other',f.now+1);
+ const diagnostic=observeCodexQuotaHeaders(headers,previous,next,f.now+1)!;
+ expect(diagnostic).toEqual({primary:[21,10080,(f.now+86400000)/1000,'invalid',false],secondary:['empty',0,'missing','missing','invalid'],
+  priorUsage:{observedAt:f.now,ageMs:1,primary:'present',secondary:'absent',allowed:true,limitReached:false},priorDurations:[10080,null],evidencePreserved:false});
+ f.journal.record(f.event({event:'upstream',accountId:id,codexQuota:{...diagnostic,authorization:'private synthetic extra'}}));
+ expect(f.journal.snapshot().rows[0].codexQuota).toEqual(diagnostic);
+ expect(JSON.stringify(f.journal.snapshot())).not.toMatch(/private|authorization|cookie|x-unlisted/);
+ const neutral=new Headers({'x-codex-primary-used-percent':'21'});
+ const retained=adapter.quotaFromHeaders(id,neutral,previous,'other',f.now+1);
+ expect(observeCodexQuotaHeaders(neutral,previous,retained,f.now+1)?.evidencePreserved).toBe(true);
+ expect(observeCodexQuotaHeaders(neutral,next,next,f.now+2)?.priorUsage).toBeNull();
+ const get=vi.spyOn(headers,'get').mockImplementation(()=>{throw Error('private synthetic accessor');});
+ expect(observeCodexQuotaHeaders(headers,previous,next,f.now+1)).toBeUndefined();get.mockRestore();
+ // The largest fixed diagnostic still fits the unchanged byte cap at full row retention.
+ const large={...diagnostic,primary:[-Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER,true],
+  secondary:[-Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER,false],
+  priorUsage:{...diagnostic.priorUsage!,observedAt:Number.MAX_SAFE_INTEGER,ageMs:-Number.MAX_SAFE_INTEGER},priorDurations:[Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER]};
+ const row=f.event({event:'upstream',accountId:id,codexQuota:large,projectId:'proj_'+ 'a'.repeat(32),threadId:'thr_'+ 'a'.repeat(32),model:'claude-sonnet-4-6'});
+ for(let i=0;i<MAX_ROWS;i++)f.journal.record(row);
+ await f.journal.flush();expect((await fs.stat(f.file)).size).toBeLessThan(MAX_BYTES);
+ expect(f.journal.snapshot().storageFailuresSinceStart).toBe(0);
 });
 it('counts logical requests, attempts and three origins separately',async()=>{
  const f=await fixture();

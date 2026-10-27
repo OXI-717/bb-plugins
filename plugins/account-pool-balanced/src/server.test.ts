@@ -28,6 +28,7 @@ import type {
   ImportedCodexCredentials,
 } from "./credentials.js";
 import { AccountStore, HubTokenStore, QuotaStore } from "./store.js";
+import { codexQuotaFromUsage } from './codex-adapter.js';
 import {
   createAccountPoolPlugin as createAccountPoolPluginImpl,
   helloResponse,
@@ -7726,6 +7727,28 @@ describe('bounded request metadata observations',()=>{
     expect(reply.exitCode).toBe(0);
     return JSON.parse(reply.stdout) as {rows:Array<import('./request-journal.js').Observation>;minutes:Array<{logicalRequests:number;attempts:number;upstream429:number;localHeld429:number}>};
   }
+  it('binds typed Codex quota evidence to the actual selected account and upstream event',async()=>{
+    const now=Date.now();
+    const outbound=vi.fn(async(input:RequestInfo|URL)=>String(input).includes('usage') ? Response.json({}) : new Response('synthetic private body',{headers:{
+      'x-codex-primary-used-percent':'21','x-codex-primary-window-minutes':'10080','x-codex-primary-reset-at':String((now+86400000)/1000),
+      'x-codex-secondary-window-minutes':'0','x-codex-secondary-used-percent':'0','x-codex-secondary-over-limit':'false',
+      'set-cookie':'synthetic private cookie','x-other':'synthetic private header'}}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'codex',source:'import',options:{fetch:outbound,
+      importCodexCredentials:async()=>({accessToken:'synthetic',refreshToken:'synthetic-refresh',idToken:null,accountId:'fixture-account',email:'fixture@example.com',expiresAt:now+3600000})}});
+    const quotas=new QuotaStore(fixture.host.bb.storage.database());
+    quotas.put(codexQuotaFromUsage(fixture.account.id,{rate_limit:{allowed:true,limit_reached:false,
+      primary_window:{used_percent:20,limit_window_seconds:604800,reset_at:(now+86400000)/1000},secondary_window:null}},quotas.get(fixture.account.id),now)!);
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/responses',{headers:authHeaders(fixture.key),body:JSON.stringify({model:'gpt-6-sol',input:'synthetic private prompt'})});
+    expect(response.status).toBe(200);expect(await response.text()).toBe('synthetic private body');
+    const result=await records(fixture),events=result.rows.filter(e=>e.event==='upstream');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({provider:'codex',accountId:fixture.account.id,attempt:1,status:200,codexQuota:{
+      primary:[21,10080,(now+86400000)/1000,'missing','missing'],secondary:[0,0,'missing','missing',false],
+      priorUsage:{observedAt:now,allowed:true,limitReached:false,primary:'present',secondary:'absent'},priorDurations:[10080,null],evidencePreserved:false}});
+    expect(JSON.stringify(result)).not.toMatch(/synthetic|cookie|authorization|refresh|fixture@example/);
+    expect(quotas.get(fixture.account.id).codexUsageEvidence).toBeUndefined();
+    expect(result.minutes[0]).toMatchObject({logicalRequests:1,attempts:1,upstream429:0});
+  });
   it('attributes upstream429 with supplied delay without leaking body or headers',async()=>{
     const outbound=vi.fn().mockResolvedValue(new Response('synthetic private response',{status:429,headers:{'retry-after':'60','x-private':'synthetic-private'}}));
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
