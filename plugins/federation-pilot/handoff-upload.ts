@@ -3,6 +3,13 @@ import {z} from 'zod';
 import {handoffUploadSchema} from './handoff-contract.ts';
 import {validateImage} from './image-format.ts';
 
+// Host RPC adds connection fields; they are routing metadata, not file data.
+// Remove exactly those two fields and still reject any unexpected payload key.
+export function handoffHostPayload(input:z.infer<typeof handoffUploadSchema>&{sshTarget:string,port:number}){
+ const {sshTarget,port,...payload}=input;
+ return handoffUploadSchema.parse(payload);
+}
+
 export function handoffBytes(raw:unknown){
  const input=handoffUploadSchema.parse(raw),bytes=Buffer.from(input.bytesBase64,'base64');
  if(bytes.toString('base64')!==input.bytesBase64||bytes.length!==input.sizeBytes||createHash('sha256').update(bytes).digest('hex')!==input.sha256)throw Error('Handoff file integrity mismatch');

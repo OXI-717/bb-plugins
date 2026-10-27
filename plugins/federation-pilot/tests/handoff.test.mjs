@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {createHandoffs} from '../handoff-service.ts';
-import {handoffBytes} from '../handoff-upload.ts';
+import {handoffBytes,handoffHostPayload,uploadHandoffFile} from '../handoff-upload.ts';
 import {handoffBeginSchema} from '../handoff-contract.ts';
 
 const bytes=Buffer.from('# Synthetic conversation\n');
@@ -10,6 +10,20 @@ const file={name:'conversation.md',mimeType:'text/markdown',sizeBytes:bytes.leng
 const target={serverId:'alpha',projectId:'proj_alpha',hostId:'host_alpha',environmentId:'env_alpha'};
 const begin={...target,providerId:'codex',model:'model-example',title:'Synthetic handoff',prompt:'Continue the attached synthetic example.',files:[file]};
 const reply=data=>({status:200,bodyBase64:Buffer.from(JSON.stringify(data)).toString('base64')});
+test('host RPC connection fields are removed before strict file validation and multipart upload',async()=>{
+ const rpcInput={...file,projectId:'proj_alpha',bytesBase64:bytes.toString('base64'),sshTarget:'remote-alpha',port:38886};
+ // Regression control: passing the complete host RPC input directly used to fail.
+ assert.throws(()=>handoffBytes(rpcInput),/Unrecognized keys/);
+ const payload=handoffHostPayload(rpcInput);assert.equal('sshTarget' in payload,false);assert.equal('port' in payload,false);
+ assert.throws(()=>handoffHostPayload({...rpcInput,path:'/send'}),/Unrecognized key/);
+ const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async(url,init)=>{
+  calls++;assert.equal(url,'http://127.0.0.1:39001/api/v1/projects/proj_alpha/attachments');assert.equal(init.method,'POST');assert.equal(init.redirect,'error');
+  const uploaded=init.body.get('file');assert.equal(uploaded.name,'conversation.md');assert.equal(uploaded.type,'text/markdown');assert.deepEqual(Buffer.from(await uploaded.arrayBuffer()),bytes);
+  return new Response(JSON.stringify({type:'localFile',sourceProjectId:'proj_alpha',path:'conversation-123-abc.md',name:file.name,mimeType:file.mimeType,sizeBytes:bytes.length}),{status:201,headers:{'content-type':'application/json'}});
+ };
+ try{const response=await uploadHandoffFile(39001,payload,new AbortController().signal);assert.equal(response.status,201);assert.equal(JSON.parse(Buffer.from(response.bodyBase64,'base64')).sourceProjectId,'proj_alpha');assert.equal(calls,1);}finally{globalThis.fetch=original;}
+});
 function harness(store=new Map()){
  const config={...target,label:'Alpha',sshTarget:'remote-alpha',remotePort:38886,bridgeHostId:'host_bridge',allowWrites:true,allowAgentReads:false,enabled:true};
  const env={id:target.environmentId,hostId:target.hostId,projectId:target.projectId,status:'ready',path:'/workspace/example'};
