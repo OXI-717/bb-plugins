@@ -46,8 +46,11 @@ Request time and ordinary inference headers do not renew their age. Actual gener
 quota-header changes invalidate the proof conservatively. A later malformed or
 partial successful usage payload clears prior proof. Existing normalized cache
 rows migrate as unknown, never as authoritative evidence: only a fresh valid
-collector response can authorize budgets. The existing collection schedule and
-account busy behavior remain unchanged. Persisted proof survives database reopen;
+collector response can authorize budgets. Since 0.4.44, the existing usage scheduler checks once per minute and ZAI
+collection becomes due two minutes after its last start. Other providers keep
+their five-minute due interval. Passes remain sequential and active usage calls
+coalesce; account busy refusal is unchanged. This leaves a freshness margin
+without extending proof validity; transport failures still cause admission refusal. Persisted proof survives database reopen;
 rollback uses the normal verified pre-upgrade database backup.
 
 ## Consumer obligations
