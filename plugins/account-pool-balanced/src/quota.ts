@@ -127,6 +127,9 @@ export function quotaFromHeaders(
     observedAt: observed ? now : previous.observedAt,
     heldUntil: previous.heldUntil,
     error: previous.error,
+    // Ordinary inference must not refresh source proof age. Any actual quota
+    // header update conservatively invalidates the older ZAI numeric snapshot.
+    ...(previous.zaiUsageEvidence ? {zaiUsageEvidence:observed?undefined:previous.zaiUsageEvidence} : {}),
   };
 }
 

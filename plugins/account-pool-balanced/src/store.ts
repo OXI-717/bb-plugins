@@ -758,6 +758,7 @@ const quotaRowSchema = z
     family_weekly_json: z.string(),
     limit_windows_json: z.string(),
     codex_usage_evidence_json: z.string().nullable().optional(),
+    zai_usage_evidence_json: z.string().nullable().optional(),
     observed_at: z.number().int().nullable(),
     held_until: z.number().int().nullable(),
     error: z.string().nullable(),
@@ -834,6 +835,7 @@ export class QuotaStore {
       familyWeekly: JSON.parse(row.family_weekly_json),
       limitWindows: JSON.parse(row.limit_windows_json),
       ...(row.codex_usage_evidence_json == null ? {} : { codexUsageEvidence: JSON.parse(row.codex_usage_evidence_json) }),
+      ...(row.zai_usage_evidence_json == null ? {} : { zaiUsageEvidence: JSON.parse(row.zai_usage_evidence_json) }),
       observedAt: row.observed_at,
       heldUntil: row.held_until,
       error: row.error,
@@ -848,8 +850,8 @@ export class QuotaStore {
           account_id, five_hour_utilization, five_hour_reset_at,
           five_hour_status, seven_day_utilization, seven_day_reset_at,
           seven_day_status, representative_claim, bucket_exhaustion_json,
-          family_weekly_json, limit_windows_json, observed_at, held_until, error, codex_usage_evidence_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?)
+          family_weekly_json, limit_windows_json, observed_at, held_until, error, codex_usage_evidence_json, zai_usage_evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(account_id) DO UPDATE SET
           five_hour_utilization = excluded.five_hour_utilization,
           five_hour_reset_at = excluded.five_hour_reset_at,
@@ -863,7 +865,8 @@ export class QuotaStore {
           observed_at = excluded.observed_at,
           held_until = excluded.held_until,
           error = excluded.error,
-          codex_usage_evidence_json = excluded.codex_usage_evidence_json`,
+          codex_usage_evidence_json = excluded.codex_usage_evidence_json,
+          zai_usage_evidence_json = excluded.zai_usage_evidence_json`,
       )
       .run(
         value.accountId,
@@ -880,6 +883,7 @@ export class QuotaStore {
         value.heldUntil,
         value.error,
         value.codexUsageEvidence === undefined ? null : JSON.stringify(value.codexUsageEvidence),
+        value.zaiUsageEvidence === undefined ? null : JSON.stringify(value.zaiUsageEvidence),
       );
   }
 
@@ -1039,4 +1043,5 @@ export const QUOTA_MIGRATIONS = [
     PRIMARY KEY(provider, project_id)
   )`,
   `ALTER TABLE account_quota ADD COLUMN codex_usage_evidence_json TEXT`,
+  `ALTER TABLE account_quota ADD COLUMN zai_usage_evidence_json TEXT`,
 ];

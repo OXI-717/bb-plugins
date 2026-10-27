@@ -1,5 +1,6 @@
 import {createAgyAdapter} from "./agy-adapter.js";
 import { observeCodexQuotaHeaders } from './codex-quota-observation.js';
+import { zaiBudgetQuota, ZAI_BUDGET_MAX_AGE_MS } from './zai-budget.js';
 import { RequestJournal, newTrace, type Trace, type Observation } from "./request-journal.js";
 import { codexBudgetQuota, CODEX_BUDGET_MAX_AGE_MS } from './codex-budget.js';
 import { NetworkFlights } from "./network-flights.js";
@@ -1022,6 +1023,34 @@ export class AccountPoolHub {
         return { accountId: account.id, eligible: routeReady && eligible.has(account.id), ...budget, heldUntil: quota.heldUntil, budgetReady: budget.budgetReady && (quota.heldUntil === null || quota.heldUntil <= now) };
       }),
     });
+  }
+
+  /** Cached ZAI proof using the same project/purpose admission as inference. */
+  async zaiBudget(request: Request, routingEnabled: boolean, bypassed: (threadId: string) => Promise<boolean>): Promise<Response> {
+    const reply = (body: unknown, status = 200) => Response.json(body, {status,headers:{'cache-control':'no-store'}});
+    try {
+    const context = await this.options.hubTokens.inspectContext?.(this.requestToken(request));
+    if (!context) return reply({error:'Invalid pool token.'},401);
+    if (!context.projectId) return reply({error:'A project-bound pool client is required.'},403);
+    const expected = new URL(request.url).searchParams.get('projectId');
+    if (expected !== null && expected !== context.projectId) return reply({error:'Pool project binding mismatch.'},403);
+    const now=this.options.now();
+    let networkAllowed=true;
+    try {await this.assertNetworkAllowed('zai');} catch {networkAllowed=false;}
+    const threadBypassed=context.threadId?await bypassed(context.threadId):false;
+    const routeReady=this.accepting && routingEnabled && networkAllowed && !threadBypassed;
+    const accounts=(await this.options.accounts.list()).filter(a=>a.provider==='zai' && projectTier(a,context.projectId)!==null);
+    const eligible=new Set(this.eligibleEntries('zai',context.projectId,accounts,'other',now,context.purpose).eligible.map(({account})=>account.id));
+    return reply({schema:'bb-account-pool/zai-budget/1',observedAt:now,maxAgeMs:ZAI_BUDGET_MAX_AGE_MS,projectId:context.projectId,
+      ...(context.purpose?{purpose:context.purpose}:{}),
+      route:{provider:'zai',path:'/zai/v1/chat/completions',accepting:this.accepting,routingEnabled,networkAllowed,threadBypassed,ready:routeReady},
+      accounts:accounts.map(account=>{
+        const quota=this.options.quotas.get(account.id),budget=zaiBudgetQuota(quota,now);
+        return {accountId:account.id,eligible:routeReady && eligible.has(account.id),heldUntil:quota.heldUntil,...budget,
+          budgetReady:budget.budgetReady && (quota.heldUntil===null || quota.heldUntil<=now)};
+      }),
+    });
+    } catch {return reply({error:'Pool budget evidence unavailable.'},503);}
   }
 
   private async select(

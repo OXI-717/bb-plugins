@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EMPTY_FAMILY_WEEKLY, type AccountQuota, type LimitWindow } from "./contracts.js";
 import { parseReset } from "./quota.js";
+import { zaiEvidenceFromUsages } from './zai-budget.js';
 
 const ZAI_FIVE_HOUR_UNIT = 3;
 const ZAI_WEEKLY_UNIT = 6;
@@ -101,7 +102,7 @@ export function zaiQuotaFromUsages(
     windows.find((row) => row.unit === unit) ?? null;
   const fiveHour = byUnit(ZAI_FIVE_HOUR_UNIT);
   const weekly = byUnit(ZAI_WEEKLY_UNIT);
-  return quota(accountId, previous, now, {
+  const normalized=quota(accountId, previous, now, {
     fiveHour: {
       utilization: fraction(fiveHour?.percentage),
       resetAt: parseReset(fiveHour?.nextResetTime ?? null),
@@ -111,6 +112,7 @@ export function zaiQuotaFromUsages(
       resetAt: parseReset(weekly?.nextResetTime ?? null),
     },
   });
+  return normalized === null ? null : {...normalized,zaiUsageEvidence:zaiEvidenceFromUsages(payload,now)};
 }
 
 export function opencodeGoQuotaFromUsages(
