@@ -9,7 +9,7 @@ This is an **experimental client transport**, tested against BB 0.46.0/0.46.1 an
 On the primary BB installation:
 
 ```sh
-bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.2.1 --subdirectory plugins/federation-pilot --tag-prefix federation-pilot/
+bb plugin install git:https://github.com/OXI-717/bb-plugins.git@^0.2.2 --subdirectory plugins/federation-pilot --tag-prefix federation-pilot/
 ```
 
 Or add the `oxi-public` marketplace and install `federation-pilot@oxi-public`. The plugin starts disabled. Configure it on the primary server; no plugin installation on the remote BB is needed.
@@ -69,6 +69,14 @@ For a new thread, select the remote project **and its remote environment or mach
 
 The ordinary `bb thread` CLI and core agents' BB tools still address their own BB installation. The separate `bb federation` CLI and `federation_*` plugin tools provide explicit, opt-in remote list/read access. A remote agent cannot read a primary thread just because its ID was mentioned. Mentions are forwarded as message content, not expanded into private conversation history.
 
+## Images
+
+Attach PNG, JPEG, GIF or WebP files up to **4 MiB each** in the ordinary remote-project composer. The bridge uploads only the selected bytes to that connection's configured project. It preserves the stored attachment reference, so images can load again from remote storage after refreshing the conversation; image links and the native lightbox use the same bounded route. Uploading requires `allowWrites`; viewing does not.
+
+The limit is lower than native BB's upload limit because the existing host RPC carries base64 inside a bounded JSON envelope. Larger files, SVG, HEIC, arbitrary files and host filesystem paths are refused explicitly. This does not add file browsing, cross-server handoff or access from a remote session to primary files. A failed or cancelled upload is never retried automatically; the remote may already have stored an unattached image.
+
+Image/link URL adaptation touches only exact same-origin BB project-attachment URLs. Like the machine presentation, it depends on native browser/BB behavior and must be checked after BB updates. The plugin restores its own attributes and property hooks when disabled; ordinary primary and external image URLs are unchanged.
+
 ## Ownership and failure behavior
 
 Primary objects always take precedence. Before forwarding a scoped request body, the server checks primary ownership through BB's SDK. Only an explicit 404 establishes absence. A new remote ownership assignment is also checked against the other configured servers. Verified assignments persist in plugin storage across reloads; labels and write permissions do not invalidate them. Changing connection identity requires revalidation.
@@ -81,9 +89,9 @@ A successful send HTTP response means BB accepted the request, not that the agen
 
 ## Scope and limits
 
-Supported: one project per configured connection, native thread history and messages, live changes, native interaction responses, thread creation with an existing remote environment/machine, and selectors for remote execution options.
+Supported: one project per configured connection, native thread history and messages, live changes, native interaction responses, thread creation with an existing remote environment/machine, selectors for remote execution options, and bounded raster image uploads with saved-image viewing.
 
-Not federated: uploads/attachments, file APIs and previews, terminals, other plugins' actions, global search/count/running/attention, new-machine creation, local sections for remote threads, or per-user remote authentication. Mobile clients, version-mismatched servers beyond the tested pair, and plugins installed only on remote are not verified. Request bodies must be JSON (3 MiB maximum); responses are bounded to 4 MiB.
+Not federated: arbitrary file uploads, host file APIs and previews, terminals, other plugins' actions, global search/count/running/attention, new-machine creation, local sections for remote threads, or per-user remote authentication. Mobile clients, version-mismatched servers beyond the tested pair, and plugins installed only on remote are not verified. General request bodies must be JSON (3 MiB maximum); responses are bounded to 4 MiB. The dedicated image route accepts a single multipart file, checked and encoded into its own bounded envelope.
 
 This bridge uses the primary installation's existing trust boundary. Any primary client with access to the plugin endpoint gets the configured project permissions. It does not provide a scoped token for an autonomous agent, distinguish employees, or isolate malicious users sharing the same BB installation. The plugin CLI/tools offer opt-in list/read within this same installation trust boundary. They are not scoped credentials for an external or less-trusted consumer; such a consumer needs a separate authenticated API. No send-only capability is provided. Do not expose the bridge as an unauthenticated internet proxy.
 
@@ -102,6 +110,6 @@ npm test
 bb plugin build .
 ```
 
-The tests use synthetic IDs and fake networks; they do not start models, use real SSH targets or change a BB installation. `tests/ws-manager.integration.mts` is an optional compatibility probe against BB's actual WebSocketManager: set `BB_CHECKOUT` to a BB 0.46.1 source checkout with dependencies installed and run it with that checkout's TypeScript runner. No private checkout path is built in.
+The tests use synthetic IDs and fake networks, plus a loopback multipart upload test; they do not start models, use real SSH targets or change a BB installation. `tests/ws-manager.integration.mts` is an optional compatibility probe against BB's actual WebSocketManager: set `BB_CHECKOUT` to a BB 0.46.1 source checkout with dependencies installed and run it with that checkout's TypeScript runner. No private checkout path is built in.
 
 See [the bridge contract](CONTRACT.md) and [review and validation](REVIEW.md). The public source in this directory is canonical. Runtime settings, logs, screenshots and real deployment evidence must remain outside this repository.

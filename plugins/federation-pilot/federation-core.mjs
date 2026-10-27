@@ -13,8 +13,8 @@
 //  - an id known on both servers is refused (cloned databases);
 //  - unscoped lists are merged; unscoped system APIs stay primary;
 //  - other plugins' RPC/HTTP calls carrying remote ids are refused;
-//  - writes to the remote require config.allowWrites; non-JSON bodies
-//    (multipart, blobs) to the remote are refused;
+//  - writes to the remote require config.allowWrites; only the bounded raster
+//    image route accepts multipart, other non-JSON bodies are refused;
 //  - only the exact core realtime URL is federated; other sockets pass through;
 //  - remote realtime frames are filtered: `changed` for remote-owned
 //    thread/project/environment/host ids only.
@@ -22,6 +22,8 @@
 // handling and reconnect wave.
 
 import {remoteMachineName, mountRemoteMachines} from './machine-presentation.mjs';
+import {mountImageUrls} from './image-presentation.mjs';
+import {IMAGE_MAX_BYTES, IMAGE_MIMES, ImageTransferError, isImagePath, validateImage} from './image-format.ts';
 export const ID_RE = /^(thr|proj|env|host)_[a-z0-9]+$/u;
 export const PERSONAL = "proj_personal";
 const OWNER_KEYS = new Set([
@@ -61,6 +63,8 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   const inner = new WeakSet();
   const remoteMachines=new Map();
   let machineView=null;
+  let imageView=null;
+  const imageRequests=new AbortController();
   const state = {
     remoteState: "connecting",
     servers: peers,
@@ -74,7 +78,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   const addRemote = (id, peer, notify = true) => {
     if (typeof id !== "string" || !ID_RE.test(id) || id === PERSONAL) return;
     if (primaryIds.has(id)) { log("remote-primary-claim-ignored",{id,serverId:peer.serverId});return; }
-    if (owners.has(id) && owners.get(id)!==peer) {conflicts.add(id);return;}
+    if (owners.has(id) && owners.get(id)!==peer) {conflicts.add(id);imageView?.refresh();return;}
     owners.set(id,peer);peer.ids.add(id);
     if (!remoteIds.has(id)) {
       remoteIds.add(id);
@@ -91,6 +95,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
       if(rowStatusIds.delete(id)&&setRowStatus)try{setRowStatus(id,null);}catch{}
       log("primary-owner-restored",{id});
       remoteMachines.delete(id);machineView?.refresh();
+      imageView?.refresh();
     }
   };
   // Structured walk: only owner-bearing keys, never free text in timelines.
@@ -149,6 +154,51 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   const nativeFetch = win.fetch;
   const json = (body, status = 200) => new win.Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const errorResponse = (code, status, message) => json({ error: { code, message } }, status);
+
+  function imageContentUrl(value) {
+    let url;
+    try {url=new URL(value,win.location.href);}catch{return null;}
+    if(url.origin!==win.location.origin)return null;
+    const match=/^\/api\/v1\/projects\/(proj_[a-z0-9]+)\/attachments\/content$/.exec(url.pathname);
+    if(!match)return null;
+    if(conflicts.has(match[1]))return 'about:blank#federation-id-conflict';
+    if(!isRemote(match[1]))return null;
+    const path=url.searchParams.get('path');
+    if([...url.searchParams.keys()].length!==1||!path||!isImagePath(path))return 'about:blank#federation-image-unsupported';
+    const peer=owners.get(match[1]);
+    return `${BRIDGE}/image-content?${new URLSearchParams({serverId:peer.serverId,projectId:match[1],path})}`;
+  }
+  async function imageFetch(url, options) {
+    let r;
+    try {
+      r=await nativeFetch.call(win,url,{...options,signal: options?.signal ? AbortSignal.any([imageRequests.signal,options.signal]) : imageRequests.signal});
+    } catch {
+      throw new FederationError('federation_image_unreachable',503,'Remote image transfer failed or was cancelled. It was not retried.');
+    }
+    const primaryOwner=r.headers.get('x-bb-federation-primary');
+    if(primaryOwner && ID_RE.test(primaryOwner))addPrimary(primaryOwner);
+    state.counters.remote++;
+    return r;
+  }
+  async function uploadImage(peer, req, init) {
+    requireWrites(peer,'POST');
+    const Form=win.FormData??globalThis.FormData;
+    let form;
+    if(init?.body instanceof Form)form=init.body;
+    else if(req && !init?.body && req.headers.get('content-type')?.startsWith('multipart/form-data'))form=await req.clone().formData();
+    else throw new FederationError('federation_image_invalid',400,'An image upload requires one multipart file.');
+    const fields=[...form.keys()],file=form.get('file');
+    if(fields.length!==1||fields[0]!=='file'||!file||typeof file==='string'||typeof file.arrayBuffer!=='function')throw new FederationError('federation_image_invalid',400,'Upload exactly one image file.');
+    if(file.size<1||file.size>IMAGE_MAX_BYTES)throw new FederationError('federation_image_too_large',413,'Remote images must be between 1 byte and 4 MiB.');
+    if(!IMAGE_MIMES.includes(file.type))throw new FederationError('federation_image_format',415,'Remote images support PNG, JPEG, GIF and WebP.');
+    const bytes=new Uint8Array(await file.arrayBuffer());validateImage(bytes,file.type);
+    if(state.disposed)throw new FederationError('federation_disabled',503,'Federation was disabled during image upload.');
+    // Ownership may change while reading a file; never send its bytes then.
+    if(ownerOf([peer.projectId])!==peer)throw new FederationError('federation_image_owner',409,'Image project ownership changed.');
+    let binary='';for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode(...bytes.subarray(i,i+32768));
+    return imageFetch(`${BRIDGE}/image-upload`,{method:'POST',headers:{'content-type':'application/json'},signal:init?.signal??req?.signal,
+      body:JSON.stringify({serverId:peer.serverId,projectId:peer.projectId,filename:file.name,mimeType:file.type,bytesBase64:(win.btoa??globalThis.btoa)(binary)})});
+  }
 
   async function viaBridge(peer, method, path, body) {
     let r;
@@ -309,6 +359,12 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
       }
       return null;
     }
+    if(method==='POST' && url.pathname===`/api/v1/projects/${owner.projectId}/attachments`)return uploadImage(owner,req,init);
+    if(method==='GET' && url.pathname===`/api/v1/projects/${owner.projectId}/attachments/content`){
+      const target=imageContentUrl(url.href);
+      if(!target||target.startsWith('about:'))throw new FederationError('federation_image_invalid',400,'Invalid remote image address.');
+      return imageFetch(target,{signal:init?.signal??req?.signal});
+    }
     if(!READ_METHODS.has(method) && /^\/api\/v1\/hosts\/host_/.test(url.pathname))throw new FederationError('federation_machine_management',403,'Manage this machine on its remote BB server.');
     if (url.pathname.startsWith("/api/v1/system/") && !SYSTEM_SELECTOR_ROUTES.has(url.pathname)) {
       throw new FederationError("federation_system_unsupported", 409, `${url.pathname} is not federated for "${label}".`);
@@ -328,11 +384,11 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     try {
       result = await route(input, init, ctx);
     } catch (e) {
-      if (e instanceof FederationError) {
+      if (e instanceof FederationError || e instanceof ImageTransferError) {
         state.counters.refused++;
         log("fetch-refused", { code: e.code, message: e.message });
 
-        return errorResponse(e.code, e.status, e.message);
+        return errorResponse(e.code ?? 'federation_image_error', e.status, e.message);
       }
       // An adapter bug must neither turn a remote request into a local one
       // nor break a local request: fail closed only when remote-addressed.
@@ -436,6 +492,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   Native.prototype.send = patchedSend;
   win.WebSocket = FederatedSocket;
   machineView=mountRemoteMachines(win,()=>[...remoteMachines.values()].filter(m=>owners.get(m.host.id)===m.peer&&!conflicts.has(m.host.id)).map(({peer,...m})=>({...m,state:peer.state})));
+  imageView=mountImageUrls(win,imageContentUrl);
 
   // bb pings on its own every 25 s while visible; an `online` signal makes the
   // native manager probe now (a ping is a send), so capture is prompt. Bounded,
@@ -456,6 +513,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     // Restore HTTP BEFORE invalidating: BB may immediately refetch cached lists.
     // Otherwise that refetch merges remote rows back into the native cache.
     state.disposed = true;
+    imageRequests.abort();imageView?.dispose();
     if (win.fetch === federatedFetch) win.fetch = nativeFetch;
     if (Native.prototype.send === patchedSend) Native.prototype.send = nativeSend;
     if (win.WebSocket === FederatedSocket) win.WebSocket = Native;

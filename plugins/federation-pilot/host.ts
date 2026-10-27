@@ -4,6 +4,7 @@ import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { promisify } from 'node:util';
 import { assertSafeSshConfig, SSH_OPTIONS } from './ssh-policy.ts';
 import { hostContract, hostSignals } from './contract.ts';
+import {uploadImage} from './image-upload.ts';
 
 // The SSH child belongs to this host worker. No shell, enrollment or agent runs.
 type Tunnel={child:ChildProcess|null,pending:Promise<number>};
@@ -62,6 +63,10 @@ export default experimental_defineHostEntry({
   contract:hostContract,
   experimental_signals:hostSignals,
   handlers:{
+    async imageUpload(input,context){
+      const port=await ensureTunnel(input.sshTarget,input.port);
+      return uploadImage(port,input,AbortSignal.any([context.signal,context.lifecycle.signal,AbortSignal.timeout(20000)]));
+    },
     async request(input,context){
       if(!validPath(input.path)) throw Error('Invalid upstream path');
       const port=await ensureTunnel(input.sshTarget,input.port);

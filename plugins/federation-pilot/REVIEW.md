@@ -1,4 +1,14 @@
-# Review and validation for 0.2.0
+# Review and validation
+
+## Raster attachments candidate 0.2.2
+
+This delta adds single-image uploads and persisted raster previews through the existing outgoing bridge. It leaves SSH, machine enrollment, thread send semantics and agent-read permissions unchanged. General file APIs, SVG and host filesystem paths remain unsupported.
+
+Focused tests cover native FormData and Request uploads, exact stored bytes, the 4 MiB boundary, cancellation/disposal, primary ownership changes while reading a file, active-content and MIME rejection, malformed envelopes, connection revocation, primary and neighboring ownership collisions, safe preview headers, URL/attribute restoration and a real loopback multipart request without forwarded credentials. A maximum-size regression reproduced V8 stack exhaustion in grouped base64 validation; the bounded linear validation replaces it.
+
+Independent review and live remote image acceptance are pending for this candidate. Unit tests and a successful build do not establish that the live remote model receives an image or that browser previews survive a refresh.
+
+## Original transport 0.2.0
 
 Review date: 2026-10-26. Scope: frontend routing and lifecycle, backend HTTP/WebSocket policy, host SSH transport, ownership boundaries, failure behavior, configuration and public packaging. Independent adversarial review was followed by targeted fixes and regression checks.
 

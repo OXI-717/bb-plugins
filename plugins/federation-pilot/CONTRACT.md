@@ -8,6 +8,8 @@ All paths below are beneath `/api/v1/plugins/federation-pilot/http` on the **pri
 | `GET /check` | Per-connection read-only inventory check; no model launch |
 | `GET /diagnostics` | Last 30 failures with server, method, path and error; no request bodies |
 | `POST /proxy` | Explicit destination and upstream request envelope |
+| `POST /image-upload` | Fixed image upload envelope; requires connection writes |
+| `GET /image-content?serverId=alpha&projectId=proj_alpha&path=image.png` | Bounded saved raster bytes, read-only; no arbitrary URL/path |
 | WebSocket `/remote-ws?serverId=alpha` | Subscriptions and filtered change notifications for that connection |
 
 Proxy example (all identifiers are synthetic):
@@ -30,3 +32,13 @@ Identity is `(primary installation, serverId, projectId, threadId)`. Do not infe
 A primary ownership collision returns 409 with a server-generated `x-bb-federation-primary` header so the browser can discard a tentative remote claim. Other unavailable/uncertain ownership checks fail closed. Remote response headers cannot inject this marker.
 
 Before adding an autonomous integration, define a separate authenticated interface with explicit capabilities such as `read:list`, `read:timeline`, `send`. The current bridge is not that interface. Keep primary-to-remote access one-way and do not copy conversations, share primary credentials with remotes, or enroll primary machines on remote servers.
+
+## Image route (0.2.2)
+
+`POST /image-upload` accepts exactly `{serverId, projectId, filename, mimeType, bytesBase64}`. PNG/JPEG/GIF/WebP signatures must match the declared type; the decoded file is limited to 4 MiB and the streaming JSON envelope is bounded before parsing. The bridge rechecks configuration and project ownership before and after the host call. It forwards only a newly constructed multipart `file` field to the fixed project attachment API, never primary headers, credentials or a host file path. The filename is sanitized and given the detected raster extension.
+
+Success returns the native `{type: "localImage", path, name, mimeType, sizeBytes}` metadata, with a single stored raster filename and matching type/size. No model is started by an upload. Sending that attachment in a chat is the existing, separately authorized send action.
+
+`GET /image-content` accepts exactly `serverId`, `projectId` and a single stored raster filename in `path`. Traversal, host paths and extra/duplicate parameters are rejected. Every read checks project ownership and current connection identity. The response has a validated raster content type, no-store, nosniff and a restrictive sandbox CSP. Upstream headers and redirects are not forwarded. This endpoint shares the existing installation trust boundary; it is not an external scoped credential or an agent-read permission.
+
+An upload can succeed remotely before a timeout, cancellation or configuration revocation is observed. There is no automatic retry or claim of exactly-once upload. Neither image endpoint enrolls machines, changes SSH forwarding, reads primary files or grants remote-to-primary execution.

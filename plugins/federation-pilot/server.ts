@@ -5,6 +5,7 @@ import {classifyRequest,routingIds,type Inventory} from './policy.ts';
 import {parseServers,publicServer,type RemoteConfig} from './configuration.ts';
 import {assertExclusive,entityPath,PrimaryCollisionError} from './ownership.ts';
 import {createAgentReads,registerAgentReads} from './agent-read.ts';
+import {registerImageRoutes} from './image-routes.ts';
 
 export default function plugin(bb:BbPluginApi){
  const settings=bb.settings.define({
@@ -94,6 +95,10 @@ export default function plugin(bb:BbPluginApi){
   }
  }
  registerAgentReads(bb,createAgentReads({configurations,exclusive,get:json}));
+ registerImageRoutes(bb,{selected,exclusive,
+  upload:(c,input)=>host.call('imageUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId}),
+  get:(c,path)=>upstream(c,'GET',path),
+ });
  bb.http.route('GET','/config',async ctx=>{try{const c=await configurations();return ctx.json({enabled:c.enabled,servers:c.servers.map(publicServer)});}catch{return ctx.json({enabled:false,servers:[],error:'Invalid server settings'},400);}});
  bb.http.route('GET','/diagnostics',ctx=>ctx.json({failures}));
  bb.http.route('GET','/check',async ctx=>{

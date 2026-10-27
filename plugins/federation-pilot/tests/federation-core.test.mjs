@@ -189,12 +189,12 @@ test("other plugins' RPC with remote ids is refused; without them it stays local
   assert.deepEqual(t.env.calls.map((c) => c.to), ["primary"]);
 });
 
-test("binary/multipart bodies to the remote are refused with 415", async () => {
+test("malformed attachment multipart is refused without sending", async () => {
   const t = setup();
   await boot(t);
   const fd = new FormData(); fd.append("f", new Blob(["x"]), "x.txt");
   const r = await t.fetch("/api/v1/projects/proj_remote01/attachments", { method: "POST", body: fd });
-  assert.equal(r.status, 415);
+  assert.equal(r.status, 400);
   assert.equal(t.env.bridgeCalls().filter((c) => c.method === "POST").length, 0);
 });
 
