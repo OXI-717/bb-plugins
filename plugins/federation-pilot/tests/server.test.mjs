@@ -11,7 +11,9 @@ function harness(store=new Map()){
  const get=async args=>{const id=Object.values(args)[0];if(primaryErrors.has(id))throw primaryErrors.get(id);if(primaryIds.has(id))return {id};throw Object.assign(Error('not found'),{status:404});};
  const bb={cli:{register:value=>cli=value},agents:{registerTool:value=>tools.set(value.name,value),configure:()=>{}},storage:{kv:{get:async key=>store.get(key),set:async(key,value)=>{store.set(key,value)}}},settings:{define:()=>({get:async()=>config})},sdk:Object.fromEntries(['threads','projects','hosts','environments'].map(k=>[k,{get}])),log:{warn:()=>{}},onDispose:fn=>dispose=fn,
   hosts:{experimental_client:()=>({experimental_onSignal:(k,fn)=>signals.set(k,fn),experimental_onWorkerExit:()=>{},call:async(method,input)=>{
-   calls.push({method,...input});if(method!=='request')return {ok:true,id:input.id};const peer=input.sshTarget.split('-')[1];
+   calls.push({method,...input});
+   if(method==='imageUpload')return {status:201,contentType:'application/json',bodyBase64:Buffer.from(JSON.stringify({type:'localImage',sourceProjectId:input.projectId,path:'image.png',name:'image.png',mimeType:input.mimeType,sizeBytes:Buffer.from(input.bytesBase64,'base64').length})).toString('base64')};
+   if(method!=='request')return {ok:true,id:input.id};const peer=input.sshTarget.split('-')[1];
    if(failures.has(peer))throw Error(failures.get(peer));let result,status=200;
    if(input.path==='/api/v1/sidebar-bootstrap')result={projects:[{id:`proj_${peer}`,name:peer,threads:moved.has(`thr_${peer}`)?[]:[{id:`thr_${peer}`,projectId:`proj_${peer}`,title:`generation ${generation}`}]}]};
    else if(input.method==='GET'&&input.path.startsWith('/api/v1/threads?'))result=[{id:`thr_${peer}`,projectId:`proj_${peer}`,title:'Saved thread'}];
@@ -23,11 +25,26 @@ function harness(store=new Map()){
   }})},http:{route:(m,p,fn)=>routes.set(`${m} ${p}`,fn),experimental_websocket:(p,fn)=>sockets.set(p,fn)}};
  plugin(bb);
  async function request(path,body,method='POST'){
-  return routes.get(`${method} ${path}`)({req:{json:async()=>body},json:(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}})});
+  const url=`http://primary.invalid${path}`;
+  return routes.get(`${method} ${path}`)({req:{json:async()=>body,url,raw:new Request(url,{method,...(method==='POST'?{body:JSON.stringify(body),headers:{'content-type':'application/json'}}:{})})},json:(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}})});
  }
  return {config,calls,moved,primaryIds,primaryErrors,remoteIds,failures,signals,sockets,remotes,request,tools,cli,dispose:()=>dispose(),next:()=>generation++};
 }
 const send=(id='thr_alpha')=>({serverId:'alpha',method:'POST',path:`/api/v1/threads/${id}/send`,body:'{"input":"private text"}'});
+
+test('registered image route uses the selected bridge and actual primary/neighbor ownership gates',async()=>{
+ const h=harness();
+ const bytes=Buffer.alloc(24);bytes.set([137,80,78,71,13,10,26,10]);
+ const input={serverId:'alpha',projectId:'proj_alpha',filename:'image.png',mimeType:'image/png',bytesBase64:bytes.toString('base64')};
+ try {
+  h.primaryIds.add('proj_alpha');assert.equal((await h.request('/image-upload',input)).status,409);
+  h.primaryIds.delete('proj_alpha');h.remoteIds.beta.add('proj_alpha');assert.equal((await h.request('/image-upload',input)).status,503);
+  h.remoteIds.beta.delete('proj_alpha');h.failures.set('beta','offline');assert.equal((await h.request('/image-upload',input)).status,503);
+  assert.equal(h.calls.filter(c=>c.method==='imageUpload').length,0);
+  h.failures.clear();assert.equal((await h.request('/image-upload',input)).status,201);
+  const uploads=h.calls.filter(c=>c.method==='imageUpload');assert.equal(uploads.length,1);assert.equal(uploads[0].sshTarget,'remote-alpha');assert.equal(uploads[0].projectId,'proj_alpha');
+ }finally{await h.dispose();}
+});
 
 test('actual server handler blocks primary collisions and SDK failure before transmitting body',async()=>{
  const h=harness();try{
