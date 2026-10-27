@@ -12,6 +12,7 @@ export const imageUploadSchema = z.object({
 }).strict();
 export const uploadedImageSchema = z.object({
   type: z.literal('localImage'), path: z.string().refine(isImagePath),
+  sourceProjectId: z.string().regex(/^proj_[a-z0-9]+$/).optional(),
   name: z.string().min(1).max(255), mimeType: z.enum(IMAGE_MIMES),
   sizeBytes: z.number().int().min(1).max(IMAGE_MAX_BYTES),
 }).strict();

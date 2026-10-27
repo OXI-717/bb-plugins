@@ -8,6 +8,8 @@ Focused tests cover native FormData and Request uploads, exact stored bytes, the
 
 Independent review and live remote image acceptance are pending for this candidate. Unit tests and a successful build do not establish that the live remote model receives an image or that browser previews survive a refresh.
 
+The first independent pass caught a native upload metadata mismatch: the installed BB 0.46.1 bundle includes `sourceProjectId`, while an earlier source checkout omitted it. The response schema now accepts and validates that field, normalizes older omissions to the fixed destination, and refuses a different project with 502. Tests use the installed bundle's response shape and cover the legacy and conflicting cases. The focused suite has 65 tests plus 17 policy assertions; typecheck and plugin build pass.
+
 ## Original transport 0.2.0
 
 Review date: 2026-10-26. Scope: frontend routing and lifecycle, backend HTTP/WebSocket policy, host SSH transport, ownership boundaries, failure behavior, configuration and public packaging. Independent adversarial review was followed by targeted fixes and regression checks.

@@ -15,7 +15,7 @@ import {imageUploadSchema} from '../contract.ts';
 // Synthetic 1x1 PNG, never a screenshot or production artifact.
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aKZkAAAAASUVORK5CYII=','base64');
 const upload={serverId:'alpha',projectId:'proj_remote01',filename:'pixel.png',mimeType:'image/png',bytesBase64:png.toString('base64')};
-const stored={type:'localImage',path:'pixel-123-abc.png',name:'pixel.png',mimeType:'image/png',sizeBytes:png.length};
+const stored={type:'localImage',sourceProjectId:'proj_remote01',path:'pixel-123-abc.png',name:'pixel.png',mimeType:'image/png',sizeBytes:png.length};
 const bridge='/api/v1/plugins/federation-pilot/http';
 const attachment='/api/v1/projects/proj_remote01/attachments';
 const form=()=>{const f=new FormData();f.set('file',new Blob([png],{type:'image/png'}),'pixel.png');return f;};
@@ -118,12 +118,20 @@ test('real federation DOM resolver touches only same-origin raster attachment UR
 });
 
 function routes() {
- const handlers=new Map(),calls=[];let c={serverId:'alpha',projectId:'proj_remote01',allowWrites:true},collision=false,afterUpload=null,reply={status:200,contentType:'image/png',bodyBase64:png.toString('base64')};
+ const handlers=new Map(),calls=[];let c={serverId:'alpha',projectId:'proj_remote01',allowWrites:true},collision=false,afterUpload=null,metadata=stored,reply={status:200,contentType:'image/png',bodyBase64:png.toString('base64')};
  const bb={http:{route:(m,p,fn)=>handlers.set(`${m} ${p}`,fn)}};
- registerImageRoutes(bb,{selected:async id=>{if(id!=='alpha'||!c)throw Error('disabled');return {...c};},exclusive:async(config,ids)=>{calls.push({check:ids});if(collision)throw new PrimaryCollisionError(ids[0]);},upload:async(config,input)=>{calls.push({upload:input});afterUpload?.();return {status:201,contentType:'application/json',bodyBase64:Buffer.from(JSON.stringify(stored)).toString('base64')};},get:async(config,path)=>{calls.push({get:path});return reply;}});
+ registerImageRoutes(bb,{selected:async id=>{if(id!=='alpha'||!c)throw Error('disabled');return {...c};},exclusive:async(config,ids)=>{calls.push({check:ids});if(collision)throw new PrimaryCollisionError(ids[0]);},upload:async(config,input)=>{calls.push({upload:input});afterUpload?.();return {status:201,contentType:'application/json',bodyBase64:Buffer.from(JSON.stringify(metadata)).toString('base64')};},get:async(config,path)=>{calls.push({get:path});return reply;}});
  async function request(method,path,body){const url=`http://primary.invalid${path}`;const req=new Request(url,{method,...(body?{body:JSON.stringify(body),headers:{'content-type':'application/json'}}:{})});return handlers.get(`${method} ${path.split('?')[0]}`)({req:{raw:req,url}});}
- return {request,calls,set config(x){c=x;},get config(){return c;},set collision(v){collision=v;},set afterUpload(v){afterUpload=v;},set reply(v){reply=v;}};
+ return {request,calls,set config(x){c=x;},get config(){return c;},set collision(v){collision=v;},set afterUpload(v){afterUpload=v;},set reply(v){reply=v;},set metadata(v){metadata=v;}};
 }
+test('native sourceProjectId is preserved, legacy omission normalized and foreign project refused',async()=>{
+ const h=routes();assert.deepEqual(await(await h.request('POST','/image-upload',upload)).json(),stored);
+ const {sourceProjectId,...legacy}=stored;h.metadata=legacy;
+ assert.deepEqual(await(await h.request('POST','/image-upload',upload)).json(),stored);
+ h.metadata={...stored,sourceProjectId:'proj_primary'};
+ assert.equal((await h.request('POST','/image-upload',upload)).status,502);
+ h.metadata={...stored,path:'../private.png'};assert.equal((await h.request('POST','/image-upload',upload)).status,502);
+});
 test('image route checks scoped project, writes and primary ownership before sending bytes',async()=>{
  const h=routes();
  assert.equal((await h.request('POST','/image-upload',upload)).status,201);assert.equal(h.calls.filter(c=>c.upload).length,1);

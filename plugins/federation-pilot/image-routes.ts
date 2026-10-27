@@ -64,9 +64,14 @@ export function registerImageRoutes(bb: BbPluginApi, deps: Dependencies) {
       const result = await deps.upload(c, input); // No retries: upload may already have succeeded.
       await authorize(serverId, input.projectId, true, c);
       if (result.status < 200 || result.status >= 300) throw new ImageTransferError(result.status >= 400 && result.status < 600 ? result.status : 502, `Remote image upload returned HTTP ${result.status}.`);
-      const data = uploadedImageSchema.parse(JSON.parse(Buffer.from(result.bodyBase64, 'base64').toString('utf8')));
+      let data: z.infer<typeof uploadedImageSchema>;
+      try { data = uploadedImageSchema.parse(JSON.parse(Buffer.from(result.bodyBase64, 'base64').toString('utf8'))); }
+      catch { throw new ImageTransferError(502, 'Remote image upload returned invalid metadata.'); }
+      if (data.sourceProjectId && data.sourceProjectId !== input.projectId) throw new ImageTransferError(502, 'Remote image upload returned a different source project.');
       if (data.sizeBytes !== bytes.length || data.mimeType !== input.mimeType) throw new ImageTransferError(502, 'Remote image upload metadata does not match the file.');
-      return Response.json(data, {status: 201, headers: {'cache-control': 'no-store'}});
+      // Older BB replies omit sourceProjectId; the fixed upload URL already
+      // establishes it. Never accept a conflicting remote-provided identity.
+      return Response.json({...data, sourceProjectId: input.projectId}, {status: 201, headers: {'cache-control': 'no-store'}});
     } catch (e) { return failure(e); }
   });
   bb.http.route('GET', '/image-content', async ctx => {

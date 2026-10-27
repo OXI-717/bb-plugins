@@ -12,7 +12,7 @@ function harness(store=new Map()){
  const bb={cli:{register:value=>cli=value},agents:{registerTool:value=>tools.set(value.name,value),configure:()=>{}},storage:{kv:{get:async key=>store.get(key),set:async(key,value)=>{store.set(key,value)}}},settings:{define:()=>({get:async()=>config})},sdk:Object.fromEntries(['threads','projects','hosts','environments'].map(k=>[k,{get}])),log:{warn:()=>{}},onDispose:fn=>dispose=fn,
   hosts:{experimental_client:()=>({experimental_onSignal:(k,fn)=>signals.set(k,fn),experimental_onWorkerExit:()=>{},call:async(method,input)=>{
    calls.push({method,...input});
-   if(method==='imageUpload')return {status:201,contentType:'application/json',bodyBase64:Buffer.from(JSON.stringify({type:'localImage',path:'image.png',name:'image.png',mimeType:input.mimeType,sizeBytes:Buffer.from(input.bytesBase64,'base64').length})).toString('base64')};
+   if(method==='imageUpload')return {status:201,contentType:'application/json',bodyBase64:Buffer.from(JSON.stringify({type:'localImage',sourceProjectId:input.projectId,path:'image.png',name:'image.png',mimeType:input.mimeType,sizeBytes:Buffer.from(input.bytesBase64,'base64').length})).toString('base64')};
    if(method!=='request')return {ok:true,id:input.id};const peer=input.sshTarget.split('-')[1];
    if(failures.has(peer))throw Error(failures.get(peer));let result,status=200;
    if(input.path==='/api/v1/sidebar-bootstrap')result={projects:[{id:`proj_${peer}`,name:peer,threads:moved.has(`thr_${peer}`)?[]:[{id:`thr_${peer}`,projectId:`proj_${peer}`,title:`generation ${generation}`}]}]};
