@@ -283,7 +283,7 @@ export class AccountPoolHub {
     const body = new Uint8Array(await request.arrayBuffer());
     const refusal = adapter.guardRequest?.(request, body);
     if (refusal !== null && refusal !== undefined) return refusal;
-    return this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null);
+    return this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null, "purpose" in context ? context.purpose : undefined);
   }
 
   threadObservation(provider:PoolProvider,hostId:string,threadId:string,projectId:string|null):AccountBinding|null {
@@ -524,6 +524,7 @@ export class AccountPoolHub {
     hostId: string,
     projectId: string | null,
     threadId: string | null = null,
+    purpose?: "autopilot",
   ): Promise<Response> {
     const signal = AbortSignal.any([request.signal, this.stopped.signal]);
     const attempted = new Set<string>();
@@ -539,7 +540,8 @@ export class AccountPoolHub {
       (account) => account.provider === adapter.provider,
     );
     const candidateIds = new Set(accounts.map((account) => account.id));
-    const affinityHost = projectId === null ? hostId : JSON.stringify([hostId, projectId]);
+    const legacyAffinityHost = projectId === null ? hostId : JSON.stringify([hostId, projectId]);
+    const affinityHost = purpose ? JSON.stringify([legacyAffinityHost, "purpose", purpose]) : legacyAffinityHost;
     const parsed = adapter.parseRequest(body, request.headers);
     const family = parsed.family;
     const trace = newTrace(adapter.provider, hostId, projectId, threadId, parsed.model, family);
@@ -575,6 +577,7 @@ export class AccountPoolHub {
           routing,
           projectId,
           signal,
+          purpose,
         );
         if (selected === null) break;
         lastAccount=selected.account.id;
@@ -656,6 +659,11 @@ export class AccountPoolHub {
         let paced = waited.has(selected.account.id);
         while (true) {
           signal.throwIfAborted();
+          if (purpose === "autopilot") {
+            const current = this.eligibleEntries(adapter.provider, projectId,
+              await this.options.accounts.list(), family, this.options.now(), purpose).eligible;
+            if (!current.some(entry => entry.account.id === selected.account.id)) break;
+          }
           let upstream: UpstreamResult;
           attempt++;
           distinctAccounts.add(selected.account.id);
@@ -825,7 +833,7 @@ export class AccountPoolHub {
       }
       signal.throwIfAborted();
       return result(failure === null
-        ? this.noEligibleResponse(accounts, family, adapter, projectId, request)
+        ? this.noEligibleResponse(accounts, family, adapter, projectId, request, purpose)
         : this.errorResponse(adapter, request,
             failure.status,
             failure.message,
@@ -944,12 +952,13 @@ export class AccountPoolHub {
     }
   }
 
-  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number) {
+  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number, purpose?: "autopilot") {
     const settings = this.options.getSettings();
     const threshold = settings.switchThreshold;
     const workWeek = { restDays: settings.restDays, offsetMinutes: -new Date(now).getTimezoneOffset() };
     const scopedEntries = (
       accounts
+        .filter(account => purpose !== "autopilot" || account.autopilotAllowed)
         .filter(account => projectTier(account, projectId) !== null)
         .map(account => ({ ...account, role: projectRole(account, projectId) }))
         .filter((account) => account.provider === provider && account.enabled && (account.drainOnce || scheduleAllows(account.policy, now)))
@@ -984,10 +993,11 @@ export class AccountPoolHub {
     const threadBypassed = context.threadId ? await bypassed(context.threadId) : false;
     const routeReady = this.accepting && routingEnabled && networkAllowed && !threadBypassed;
     const accounts = (await this.options.accounts.list()).filter(a => a.provider === 'codex' && projectTier(a, context.projectId) !== null);
-    const eligible = new Set(this.eligibleEntries('codex', context.projectId, accounts, 'other', now).eligible.map(({ account }) => account.id));
+    const eligible = new Set(this.eligibleEntries('codex', context.projectId, accounts, 'other', now, context.purpose).eligible.map(({ account }) => account.id));
     return reply({
       schema: 'bb-account-pool/codex-budget/1', observedAt: now, maxAgeMs: CODEX_BUDGET_MAX_AGE_MS,
       projectId: context.projectId,
+      ...(context.purpose ? {purpose:context.purpose} : {}),
       route: { provider: 'codex', path: '/v1/responses', accepting: this.accepting, routingEnabled, networkAllowed, threadBypassed, ready: routeReady },
       accounts: accounts.map(account => {
         const quota = this.options.quotas.get(account.id);
@@ -1008,6 +1018,7 @@ export class AccountPoolHub {
     routing: RoutingAttempt,
     projectId: string | null,
     signal: AbortSignal,
+    purpose?: "autopilot",
   ): Promise<SelectedAccount | null> {
     const accounts = (await this.routingAccounts()).sort(
       (left, right) => left.priority - right.priority,
@@ -1021,7 +1032,7 @@ export class AccountPoolHub {
       restDays: settings.restDays,
       offsetMinutes: -new Date(now).getTimezoneOffset(),
     };
-    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now);
+    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose);
     const unattempted = eligible.filter(
       ({ account }) =>
         candidateIds.has(account.id) && !attempted.has(account.id),
@@ -1051,7 +1062,8 @@ export class AccountPoolHub {
         );
       }
     }
-    const activeKey = projectId === null ? provider : `${provider}:${projectId}`;
+    const legacyActiveKey = projectId === null ? provider : `${provider}:${projectId}`;
+    const activeKey = purpose ? JSON.stringify([legacyActiveKey, "purpose", purpose]) : legacyActiveKey;
     let active = this.activeAccounts.get(activeKey);
     const activeAccount = eligible.find(
       ({ account }) => account.id === active?.accountId,
@@ -1154,8 +1166,10 @@ export class AccountPoolHub {
           this.affinityBindings.set(affinityKey, accepted);
         }
         if (advance && this.activeAccounts.get(activeKey) === active) {
-          if (projectId === null) this.options.affinity.putActiveAccount(provider, selected.account.id);
-          else this.options.affinity.putProjectActiveAccount(provider, projectId, selected.account.id);
+          if (purpose === undefined) {
+            if (projectId === null) this.options.affinity.putActiveAccount(provider, selected.account.id);
+            else this.options.affinity.putProjectActiveAccount(provider, projectId, selected.account.id);
+          }
           this.activeAccounts.set(activeKey, { accountId: selected.account.id });
         }
       },
@@ -1435,7 +1449,12 @@ export class AccountPoolHub {
     adapter: ProviderAdapter,
     projectId: string | null,
     request: Request,
+    purpose?: "autopilot",
   ): Response {
+    accounts = accounts.filter(account => purpose !== "autopilot" || account.autopilotAllowed);
+    if (purpose === "autopilot" && !accounts.some(account => account.enabled)) {
+      return this.errorResponse(adapter, request, 403, "No enabled account is allowed for this client purpose.", {"x-bb-pool-error":"POOL_ACCOUNT_POLICY"});
+    }
     const enabled = accounts.filter(account => account.enabled);
     accounts = accounts.filter(account => projectTier(account, projectId) !== null);
     if (enabled.length > 0 && !accounts.some(account => account.enabled)) {

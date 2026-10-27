@@ -98,6 +98,22 @@ it('authenticates the project-bound route and scopes real router eligibility wit
   expect(body).toMatchObject({ schema: 'bb-account-pool/codex-budget/1', projectId: 'project-one', route: { ready: true }, accounts: [{ accountId: first.id, eligible: true, budgetReady: true }] });
   expect(JSON.stringify(body)).not.toContain(foreign.id); expect(JSON.stringify(body)).not.toContain(token);
   expect(await accounts.list()).toEqual(inventory);
+  const clientFile=path.join(dataDir,'purpose.token');
+  const issued=await host.harness.behavior.runCli(['client','add','worker','--project','project-one','--purpose','autopilot','--output',clientFile]);
+  expect(issued.exitCode).toBe(0);
+  const purposeToken=(await fs.readFile(clientFile,'utf8')).trim();
+  const beforeOptIn=await (await read(purposeToken)).json();
+  expect(beforeOptIn).toMatchObject({purpose:'autopilot',accounts:[{accountId:first.id,eligible:false}]});
+  await host.harness.behavior.callRpc('account.setAutopilotAllowed',{accountId:first.id,allowed:true,expectedAllowed:false});
+  const purposeBody=await (await read(purposeToken)).json();
+  expect(purposeBody).toMatchObject({purpose:'autopilot',accounts:[{accountId:first.id,eligible:true,budgetReady:true}]});
+  expect(JSON.stringify(purposeBody)).not.toContain(foreign.id);
+  expect((await read(purposeToken,'?projectId=other-project')).status).toBe(403);
+  await host.harness.behavior.callRpc('account.setDrainOnce',{accountId:first.id,enabled:true});
+  await host.harness.behavior.callRpc('account.setAutopilotAllowed',{accountId:first.id,allowed:false,expectedAllowed:true});
+  expect(await (await read(purposeToken)).json()).toMatchObject({accounts:[{eligible:false}]});
+  await host.harness.behavior.callRpc('account.setDrainOnce',{accountId:first.id,enabled:false});
+
   clock += 60_001; await read();
   expect(await snapshot()).toEqual(authState);
   clock = now;

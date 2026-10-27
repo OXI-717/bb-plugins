@@ -5,10 +5,10 @@ import { HubTokenStore } from "./store.js";
 export class ExternalClients {
   readonly tokens: HubTokenStore;
   constructor(directory: string) { this.tokens = new HubTokenStore(directory); }
-  async add(name: string, outputFile: string, projectId: string | null = null) {
+  async add(name: string, outputFile: string, projectId: string | null = null, purpose?: "autopilot") {
     const id = this.id(name);
     const file = await fs.open(outputFile, "wx", 0o600);
-    try { await file.writeFile(`${await this.tokens.forProject(id, projectId)}\n`); }
+    try { await file.writeFile(`${await this.tokens.forIssuedClient(id, projectId, purpose)}\n`); }
     finally { await file.close(); }
   }
   async revoke(name: string) {

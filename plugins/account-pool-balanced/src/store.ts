@@ -42,11 +42,12 @@ const storedHubTokenSchema = z
     machineHostId: z.string().min(1).optional(),
     projectId: z.string().min(1).max(200).optional(),
     threadId: z.string().min(1).max(200).optional(),
+    purpose: z.literal("autopilot").optional(),
     mintedAt: z.number().int().nonnegative(),
     lastUsedAt: z.number().int().nonnegative().nullable(),
     previous: z.array(priorHubTokenSchema),
   })
-  .strict();
+  .strict().refine(value => value.purpose === undefined || value.projectId !== undefined, "Purpose requires a project binding");
 type StoredHubToken = z.infer<typeof storedHubTokenSchema>;
 
 const routedThreadSchema = z
@@ -85,8 +86,8 @@ export class AccountStore {
   async add(
     input: Omit<
       Account,
-      "id" | "createdAt" | "lastUsedAt" | "lastUsedHostId" | "role" | "cap"
-    >,
+      "id" | "createdAt" | "lastUsedAt" | "lastUsedHostId" | "role" | "cap" | "autopilotAllowed"
+    > & {autopilotAllowed?: boolean},
     secret: AccountSecret,
   ): Promise<Account> {
     return this.serialized(async () => {
@@ -162,6 +163,15 @@ export class AccountStore {
 
   async setCap(id: string, cap: Account["cap"]): Promise<Account | null> {
     return this.update(id, (account) => ({ ...account, cap }));
+  }
+
+  async setAutopilotAllowed(id: string, allowed: boolean, expectedAllowed: boolean): Promise<Account | null> {
+    z.boolean().parse(allowed);
+    z.boolean().parse(expectedAllowed);
+    return this.update(id, account => {
+      if (account.autopilotAllowed !== expectedAllowed) throw Error('Account permission changed; refresh before saving.');
+      return { ...account, autopilotAllowed: allowed };
+    });
   }
 
   async setEmail(id: string, email: string | null, expectedEmail?:string|null): Promise<Account | null> {
@@ -396,6 +406,27 @@ export class HubTokenStore {
     }, this.groupLocks);
   }
 
+  /** Operator-issued identity; neither the name nor request fields grant purpose. */
+  async forIssuedClient(hostId: string, projectId: string | null, purpose?: "autopilot"): Promise<string> {
+    if (purpose !== undefined) z.literal("autopilot").parse(purpose);
+    if (purpose === "autopilot" && projectId === null) throw Error('Autopilot clients require a project binding.');
+    if (projectId !== null) z.string().min(1).max(200).parse(projectId);
+    await this.initialize();
+    return this.serialized(hostId, () => this.serialized(hostId, async () => {
+      const all = this.readAll().filter(token => token.hostId === hostId || token.machineHostId === hostId);
+      // Older project credentials also have a base host record. That record is not their authority.
+      const scoped = all.filter(token => token.machineHostId === hostId);
+      const issued = scoped.length ? scoped : all;
+      if (issued.some(token => (token.projectId ?? null) !== projectId || token.purpose !== purpose)) {
+        throw Error('Client binding differs; revoke before issuing a new identity.');
+      }
+      if (issued.length) return issued[0]!.value;
+      const value = storedHubTokenSchema.parse({ ...this.create(hostId), ...(projectId === null ? {} : {projectId}), ...(purpose ? {purpose} : {}) });
+      await this.write(hostId, value);
+      return value.value;
+    }), this.groupLocks);
+  }
+
   async forThread(hostId: string, projectId: string | null, threadId: string): Promise<string> {
     const thread=z.string().min(1).max(200).parse(threadId);
     const key=`thread_scope_${createHash('sha256').update(JSON.stringify([hostId,projectId,thread])).digest('hex')}`;
@@ -433,7 +464,7 @@ export class HubTokenStore {
     return this.serialized(hostId, async () => {
       const current = this.read(hostId);
       const now = this.now();
-      const next = { ...this.create(hostId), ...(current?.machineHostId ? { machineHostId: current.machineHostId, projectId: current.projectId,threadId:current.threadId } : {}) };
+      const next = { ...this.create(hostId), ...(current ? {projectId:current.projectId,purpose:current.purpose} : {}), ...(current?.machineHostId ? { machineHostId: current.machineHostId, projectId: current.projectId,threadId:current.threadId } : {}) };
       if (current !== null) {
         next.previous = [
           { value: current.value, expiresAt: now + HUB_TOKEN_GRACE_MS },
@@ -450,16 +481,16 @@ export class HubTokenStore {
   }
 
   /** Inspect only already-initialized state; never load, prune or update usage. */
-  async inspectContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string } | null> {
+  async inspectContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot" } | null> {
     if (presented === null || this.initialization === null) return null;
     await this.initialization;
     const key = this.tokenIndex.get(this.tokenDigest(presented));
     const token = key === undefined ? null : this.tokens.get(key) ?? null;
     if (token === null || !matchesStoredToken(token, presented, this.now())) return null;
-    return { hostId: token.machineHostId ?? token.hostId, projectId: token.projectId ?? null, ...(token.threadId ? { threadId: token.threadId } : {}) };
+    return { hostId: token.machineHostId ?? token.hostId, projectId: token.projectId ?? null, ...(token.threadId ? { threadId: token.threadId } : {}), ...(token.purpose ? {purpose:token.purpose} : {}) };
   }
 
-  async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string } | null> {
+  async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot" } | null> {
     if (presented === null) return null;
     await this.initialize();
     const matchedHostId=this.tokenIndex.get(this.tokenDigest(presented));
@@ -486,7 +517,7 @@ export class HubTokenStore {
       } else {
         this.cacheToken(next);
       }
-      return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null,...(matched.threadId?{threadId:matched.threadId}:{}) };
+      return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null,...(matched.threadId?{threadId:matched.threadId}:{}),...(matched.purpose?{purpose:matched.purpose}:{}) };
     });
   }
 

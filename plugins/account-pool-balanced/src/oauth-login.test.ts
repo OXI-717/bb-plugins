@@ -62,7 +62,7 @@ function savedAccount(authenticated: ClaudeOAuthAccount): Account {
     accountUuid: authenticated.accountUuid,
     subscriptionType: authenticated.subscriptionType,
     rateLimitTier: authenticated.rateLimitTier,
-    enabled: true,
+    enabled: true, autopilotAllowed: false,
     priority: 100,
     createdAt: 1,
     lastUsedAt: null,
