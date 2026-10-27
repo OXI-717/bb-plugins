@@ -449,7 +449,8 @@ export class AccountPoolHub {
     const now = this.options.now();
     const vpnEvidence=await this.vpn.evidence();
     const vpnState=vpnEvidence.state;
-    const decisions=await Promise.all((["codex","claude","cursor","devin","opencode-go"] as const).map(async provider=>{
+    const providers = [...new Set<PoolProvider>(["codex","claude","cursor","devin","opencode-go",...providerSchema.options])];
+    const decisions=await Promise.all(providers.map(async provider=>{
       try {await this.assertNetworkAllowed(provider);return null;} catch {return provider;}
     }));
     const blockedProviders=decisions.filter((provider):provider is Exclude<typeof provider,null>=>provider!==null);

@@ -203,6 +203,9 @@ pool credential, not the provider key. The existing OpenCode route launcher must
 honor both overrides. Project restrictions, account permissions, schedules,
 reserve selection and quota-rejection holds still use ordinary pool admission.
 No machine-local NeuralDeep login or provider-key copy is needed on this path.
+On a selected non-direct host with VPN Guard enforcement, explicitly select
+NeuralDeep in the existing VPN-only setting. Otherwise Guard denies it. The
+setting is available in its provider card; this release preserves prior choices.
 This does not remove existing local keys or change a client's configuration.
 
 Only native Chat Completions and model discovery are registered; Responses is

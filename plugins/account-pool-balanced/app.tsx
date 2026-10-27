@@ -1533,10 +1533,10 @@ function AccountPoolSettings() {
                     })
                   }
                 />
-                {["codex", "claude", "cursor", "devin"].includes(provider.id) && <label className="flex items-center gap-1 text-xs">
+                {["codex", "claude", "cursor", "devin", "neuraldeep"].includes(provider.id) && <label className="flex items-center gap-1 text-xs">
                   <input type="checkbox" aria-label={`Только через VPN ${provider.title}`} checked={config?.vpnOnlyProviders?.some(value => value === provider.id) ?? true} disabled={config === null || pending !== null}
                     onChange={e => void saveRouting({ vpnOnlyProviders: e.target.checked
-                      ? [...(config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id), provider.id as "codex" | "claude" | "cursor" | "devin"]
+                      ? [...(config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id), provider.id as "codex" | "claude" | "cursor" | "devin" | "neuraldeep"]
                       : (config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id) })} />Только VPN
                 </label>}
                 <AddAccountMenu

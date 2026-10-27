@@ -7600,9 +7600,9 @@ describe('VPN Guard linked network policy',()=>{
     fixture.host.harness.sdk.stub('plugins.callRpc',call);
     await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
     const status=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));
-    expect(maxActive).toBe(5);
-    expect(call).toHaveBeenCalledTimes(5);
-    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin','opencode-go']);
+    expect(maxActive).toBe(6);
+    expect(call).toHaveBeenCalledTimes(6);
+    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin','opencode-go','neuraldeep']);
     expect(outbound).not.toHaveBeenCalled();
   });
   it('shares one deadline across server lookup and a slow successful Guard RPC',async()=>{
