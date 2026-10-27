@@ -113,3 +113,13 @@ A newly supplied duration, positive utilization, rejection, future reset or
 malformed header still refuses authorization. Malformed over-limit booleans and
 explicit over-limit rejection also invalidate the prior allowance. Budget schema,
 floors, project/purpose eligibility and all-eligible semantics are unchanged.
+
+A natural inference response can encode an absent slot with this exact neutral
+header combination: used-percent `0`, window-minutes `0`, empty reset-at,
+reset-after-seconds `0`, and no over-limit header. Version 0.4.42 ignores only
+those four fields when complete fresh unexpired usage already explicitly proves
+that same slot absent, with no prior window. The original usage timestamp is
+retained and the caller's headers remain intact for diagnostic observation.
+The sentinel alone never proves absence. Different/missing malformed fields,
+positive usage, actual duration, future reset, rejection or invalid fields in
+the other slot continue to invalidate evidence. No budget schema or policy changes.

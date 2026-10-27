@@ -230,3 +230,55 @@ it('uses absence proof rather than a raw zero sentinel when a neutral reset is a
   expect(observed.codexUsageEvidence).toEqual(prior.codexUsageEvidence);
   expect(codexBudgetQuota(observed,now+1)).toMatchObject({budgetReady:true,windows:{fiveHour:{state:'absent',source:'usage',observedAt:now}}});
 });
+
+function absentSentinel(slot = 'secondary') {
+  return new Headers({[`x-codex-${slot}-used-percent`]:'0', [`x-codex-${slot}-window-minutes`]:'0',
+    [`x-codex-${slot}-reset-at`]:'', [`x-codex-${slot}-reset-after-seconds`]:'0'});
+}
+
+it.each(['primary','secondary'] as const)('preserves fresh explicit %s absence across the captured zero/empty sentinel without changing raw headers or proof age', slot => {
+  const adapter=createCodexAdapter({refreshUrl:'https://auth.example/token',usageUrl:'https://usage.example/usage'});
+  const prior=quota(complete({primary_window:slot==='primary'?null:weekly(),secondary_window:slot==='secondary'?null:weekly()}));
+  const headers=absentSentinel(slot),present=slot==='primary'?'secondary':'primary';
+  headers.set(`x-codex-${present}-used-percent`,'47');headers.set(`x-codex-${present}-window-minutes`,'10080');
+  const raw=[...headers];
+  const observed=adapter.quotaFromHeaders(id,headers,prior,'other',now+42633);
+  expect([...headers]).toEqual(raw);
+  expect(observed.codexUsageEvidence).toBe(prior.codexUsageEvidence);
+  expect(observed.limitWindows).toHaveLength(1);
+  expect(codexBudgetQuota(observed,now+42633)).toMatchObject({budgetReady:true,windows:{fiveHour:{state:'absent',source:'usage',observedAt:now},weekly:{state:'present',remainingPercent:53}}});
+  expect(codexBudgetQuota(observed,now+CODEX_BUDGET_MAX_AGE_MS+1).budgetReady).toBe(false);
+});
+
+it.each(['missing','partial','stale','future','expired-reset','denied','limited','error','present'] as const)('the exact sentinel cannot manufacture absent evidence from %s quota', kind => {
+  const adapter=createCodexAdapter({refreshUrl:'https://auth.example/token',usageUrl:'https://usage.example/usage'});
+  const prior=quota(complete());
+  if(kind==='missing')delete prior.codexUsageEvidence;
+  if(kind==='partial')prior.codexUsageEvidence!.secondary='unknown';
+  if(kind==='stale')prior.codexUsageEvidence!.observedAt=now-CODEX_BUDGET_MAX_AGE_MS-1;
+  if(kind==='future')prior.codexUsageEvidence!.observedAt=now+1000;
+  if(kind==='expired-reset')prior.limitWindows[0]!.resetAt=now;
+  if(kind==='denied')prior.codexUsageEvidence!.allowed=false;
+  if(kind==='limited')prior.codexUsageEvidence!.limitReached=true;
+  if(kind==='error')prior.error='synthetic quota error';
+  if(kind==='present')prior.codexUsageEvidence!.secondary='present';
+  const observed=adapter.quotaFromHeaders(id,absentSentinel(),prior,'other',now+1);
+  expect(observed.codexUsageEvidence).toBeUndefined();
+  expect(codexBudgetQuota(observed,now+1).budgetReady).toBe(false);
+  expect(codexBudgetQuota(observed,now+1).windows.fiveHour.state).toBe('unknown');
+});
+
+it.each([
+  ['secondary-used-percent','0.0001'],['secondary-used-percent','-1'],['secondary-used-percent',''],
+  ['secondary-window-minutes','300'],['secondary-window-minutes','0.1'],['secondary-window-minutes',''],
+  ['secondary-reset-at',String((now+10000)/1000)],['secondary-reset-at','invalid'],
+  ['secondary-reset-after-seconds','1'],['secondary-reset-after-seconds','-1'],
+  ['secondary-over-limit','true'],['secondary-over-limit','invalid'],
+  ['primary-used-percent','-1'],['primary-window-minutes','300.5'],['primary-over-limit','true'],
+])('sentinel compatibility does not hide contradictory/malformed header %s=%s', (field,value) => {
+  const adapter=createCodexAdapter({refreshUrl:'https://auth.example/token',usageUrl:'https://usage.example/usage'});
+  const headers=absentSentinel();headers.set(`x-codex-${field}`,value);
+  const observed=adapter.quotaFromHeaders(id,headers,quota(complete()),'other',now+1);
+  expect(observed.codexUsageEvidence).toBeUndefined();
+  expect(codexBudgetQuota(observed,now+1).budgetReady).toBe(false);
+});
