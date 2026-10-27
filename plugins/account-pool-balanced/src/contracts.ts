@@ -6,6 +6,7 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
   zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
   opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+  neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
   cursorUpstreamBaseUrl: "https://api2.cursor.sh",
   devinUpstreamBaseUrl: "https://server.codeium.com",
   switchThreshold: 0.98,
@@ -77,6 +78,7 @@ export const accountPoolConfigSchema = z
     opencodeGoUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.opencodeGoUpstreamBaseUrl,
     ),
+    neuraldeepUpstreamBaseUrl: httpUrlSchema.default(DEFAULT_ACCOUNT_POOL_CONFIG.neuraldeepUpstreamBaseUrl),
     cursorUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.cursorUpstreamBaseUrl,
     ),
@@ -110,6 +112,7 @@ export const accountPoolConfigSetInputSchema = z
     kimiUpstreamBaseUrl: httpUrlSchema.optional(),
     zaiUpstreamBaseUrl: httpUrlSchema.optional(),
     opencodeGoUpstreamBaseUrl: httpUrlSchema.optional(),
+    neuraldeepUpstreamBaseUrl: httpUrlSchema.optional(),
     cursorUpstreamBaseUrl: httpUrlSchema.optional(),
     devinUpstreamBaseUrl: httpUrlSchema.optional(),
     switchThreshold: switchThresholdSchema.optional(),
@@ -138,6 +141,7 @@ export const providerSchema = z.enum([
   "kimi",
   "zai",
   "opencode-go",
+  "neuraldeep",
   "cursor",
   "devin",
 ]);
@@ -382,6 +386,7 @@ export const statusSchema = z
         kimi: z.string().uuid().nullable(),
         zai: z.string().uuid().nullable(),
         "opencode-go": z.string().uuid().nullable(),
+        neuraldeep: z.string().uuid().nullable(),
         cursor: z.string().uuid().nullable(),
         devin: z.string().uuid().nullable(),
       })
@@ -393,6 +398,7 @@ export const statusSchema = z
         kimi: z.boolean(),
         zai: z.boolean(),
         "opencode-go": z.boolean(),
+        neuraldeep: z.boolean(),
         cursor: z.boolean(),
         devin: z.boolean(),
       })

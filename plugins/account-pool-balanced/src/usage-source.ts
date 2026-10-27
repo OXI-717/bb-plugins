@@ -51,6 +51,7 @@ export const USAGE_PROVIDER_IDS: Record<PoolProvider, string> = {
   kimi: "acp-opencode-kimi",
   zai: "acp-opencode-zai",
   "opencode-go": "acp-opencode-go",
+  neuraldeep: "acp-opencode-neuraldeep",
   cursor: "acp-oxi-cursor",
   devin: "acp-devin",
 };
@@ -61,6 +62,7 @@ const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
   kimi: "Kimi For Coding",
   zai: "Z.ai Coding Plan",
   "opencode-go": "OpenCode Go",
+  neuraldeep: "NeuralDeep",
   cursor: "Cursor",
   devin: "Devin",
 };
@@ -68,7 +70,7 @@ const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
 // Devin's adapter has no quota collector. Do not advertise an unmeasurable
 // resource as a failed collection; the account remains available for routing.
 function reportsUsage(account: Pick<AccountSummary, "provider">): boolean {
-  return account.provider !== "devin";
+  return account.provider !== "devin" && account.provider !== "neuraldeep";
 }
 
 export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {

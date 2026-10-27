@@ -41,6 +41,7 @@ describe("pooled providers on the usage surface", () => {
       kimi: "acp-opencode-kimi",
       zai: "acp-opencode-zai",
       "opencode-go": "acp-opencode-go",
+      neuraldeep: "acp-opencode-neuraldeep",
       cursor: "acp-oxi-cursor",
       devin: "acp-devin",
     });

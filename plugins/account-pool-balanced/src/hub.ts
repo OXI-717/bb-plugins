@@ -30,6 +30,7 @@ import {
   createOpenAiCompatibleAdapter,
   guardOpencodeGoRequestBody,
   normalizeOpencodeGoUpstreamPathSuffix,
+  isChatCompletionsBody,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
@@ -494,6 +495,7 @@ export class AccountPoolHub {
         zai: activeFor("zai"),
         "opencode-go":
           activeFor("opencode-go"),
+        neuraldeep: activeFor("neuraldeep"),
         cursor: activeFor("cursor"),
         devin: activeFor("devin"),
       },
@@ -1663,6 +1665,20 @@ export function createHub(options: {
         normalizeUpstreamPathSuffix: normalizeOpencodeGoUpstreamPathSuffix,
         guardRequestBody: guardOpencodeGoRequestBody,
         parseUsages: opencodeGoQuotaFromUsages,
+      }),
+    ],
+    [
+      "neuraldeep",
+      createOpenAiCompatibleAdapter({
+        provider: "neuraldeep",
+        upstreamName: "NeuralDeep",
+        mountPrefix: "neuraldeep/",
+        upstreamBaseUrl: (settings) => settings.neuraldeepUpstreamBaseUrl,
+        usagesUrl: "https://api.neuraldeep.ru/v1/limits",
+        // RPM and model entitlements are not subscription-window percentages.
+        parseUsages: () => null,
+        guardRequestBody: (suffix, body) => suffix === "chat/completions" && !isChatCompletionsBody(body)
+          ? "NeuralDeep requires a Chat Completions messages array." : null,
       }),
     ],
     [

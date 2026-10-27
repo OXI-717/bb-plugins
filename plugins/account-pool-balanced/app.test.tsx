@@ -102,6 +102,7 @@ function status(
     kimi: null,
     zai: null,
     "opencode-go": null,
+    neuraldeep: null,
     cursor: null,
     devin: null,
   },
@@ -122,6 +123,7 @@ function status(
       kimi: true,
       zai: true,
       "opencode-go": true,
+    neuraldeep: true,
       cursor: true,
       devin: true,
     },
@@ -135,6 +137,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
     zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
     opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+    neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
     cursorUpstreamBaseUrl: "https://api2.cursor.sh",
     devinUpstreamBaseUrl: "https://server.codeium.com",
     switchThreshold: 0.98,
@@ -338,7 +341,7 @@ describe("Account Pool settings", () => {
     window.localStorage.setItem(STATUS_CACHE_KEY, '{"accounts":"nope"}');
     const live = deferred<PoolStatus>();
     const slot = render([], { "status.get": () => live.promise });
-    expect(slot.getAllByText("Загрузка…")).toHaveLength(7);
+    expect(slot.getAllByText("Загрузка…")).toHaveLength(8);
     live.resolve(status());
     expect(await slot.findByText("person@example.com")).toBeTruthy();
   });
@@ -502,7 +505,7 @@ describe("Account Pool settings", () => {
   it("adds a Devin PAT from its card without offering Codex login", async () => {
     const slot = render([], { "account.add": () => account({ provider: "devin" }) });
     const addButtons = await slot.findAllByRole("button", { name: "Добавить аккаунт" });
-    fireEvent.pointerDown(addButtons[6]!);
+    fireEvent.pointerDown(addButtons[7]!);
     expect(slot.queryByText("Вход в Codex", { selector: "span.block" })).toBeNull();
     fireEvent.click(await slot.findByText("Добавить PAT…"));
     const dialog = await slot.findByRole("dialog", { name: "Добавить PAT Devin" });
@@ -584,6 +587,7 @@ describe("Account Pool settings", () => {
           kimi: null,
           zai: null,
           "opencode-go": null,
+    neuraldeep: null,
           cursor: null,
           devin: null,
         }),
@@ -591,7 +595,7 @@ describe("Account Pool settings", () => {
     expect(
       await slot.findByRole("region", { name: "Выбранные аккаунты" }),
     ).toBeTruthy();
-    expect(within(slot.getByRole("region", { name: "Выбранные аккаунты" })).getAllByText("Не выбран")).toHaveLength(6);
+    expect(within(slot.getByRole("region", { name: "Выбранные аккаунты" })).getAllByText("Не выбран")).toHaveLength(7);
     expect(slot.getAllByText("Текущий")).toHaveLength(1);
     expect(slot.getAllByText("Резерв")).toHaveLength(1);
     expect(slot.getByText("потолок сейчас 39% (15%→98%)")).toBeTruthy();
@@ -600,7 +604,8 @@ describe("Account Pool settings", () => {
   it("uses email instead of display names in the overview, rows and account dialog", async () => {
     const named = account({ label: "Synthetic Display Name", email: "identity@example.com" });
     const slot = render([named], {
-      "status.get": () => status([named], { claude: named.id, codex: null, kimi: null, zai: null, "opencode-go": null, cursor: null, devin: null }),
+      "status.get": () => status([named], { claude: named.id, codex: null, kimi: null, zai: null, "opencode-go": null,
+    neuraldeep: null, cursor: null, devin: null }),
     });
     const overview = await slot.findByRole("region", { name: "Выбранные аккаунты" });
     expect(within(overview).getByText("identity@example.com")).toBeTruthy();

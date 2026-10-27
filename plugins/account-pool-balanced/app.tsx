@@ -129,6 +129,11 @@ const PROVIDERS: Array<{
       "Треды opencode с подпиской z.ai идут через эти ключи: на машине остаётся только токен хаба.",
   },
   {
+    id: "neuraldeep",
+    title: "NeuralDeep",
+    description: "Ключ хранится на сервере пула; машины получают только токен пула.",
+  },
+  {
     id: "opencode-go",
     title: "OpenCode Go",
     description:
@@ -176,6 +181,7 @@ function configDrafts(config: AccountPoolConfig): Record<ConfigField, string> {
     kimiUpstreamBaseUrl: config.kimiUpstreamBaseUrl,
     zaiUpstreamBaseUrl: config.zaiUpstreamBaseUrl,
     opencodeGoUpstreamBaseUrl: config.opencodeGoUpstreamBaseUrl,
+    neuraldeepUpstreamBaseUrl: config.neuraldeepUpstreamBaseUrl,
     cursorUpstreamBaseUrl: config.cursorUpstreamBaseUrl,
     devinUpstreamBaseUrl: config.devinUpstreamBaseUrl,
     switchThreshold: String(config.switchThreshold),
@@ -1036,6 +1042,7 @@ function AccountPoolSettings() {
     kimiUpstreamBaseUrl: "",
     zaiUpstreamBaseUrl: "",
     opencodeGoUpstreamBaseUrl: "",
+    neuraldeepUpstreamBaseUrl: "",
     cursorUpstreamBaseUrl: "",
     devinUpstreamBaseUrl: "",
     switchThreshold: "",
@@ -1048,6 +1055,7 @@ function AccountPoolSettings() {
     kimiUpstreamBaseUrl: null,
     zaiUpstreamBaseUrl: null,
     opencodeGoUpstreamBaseUrl: null,
+    neuraldeepUpstreamBaseUrl: null,
     cursorUpstreamBaseUrl: null,
     devinUpstreamBaseUrl: null,
     switchThreshold: null,

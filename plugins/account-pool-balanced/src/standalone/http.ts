@@ -9,6 +9,8 @@ import { CURSOR_RPC_PATH_HEADER, isCursorRpcPath } from "../cursor-rpc.js";
 import { VpnRequiredError } from "../vpn-policy.js";
 
 const routes = new Map<string, PoolProvider>([
+  ["/neuraldeep/v1/chat/completions", "neuraldeep"],
+  ["/neuraldeep/v1/models", "neuraldeep"],
   ["/v1/messages", "claude"], ["/v1/messages/count_tokens", "claude"],
   ["/v1/responses", "codex"], ["/v1/responses/compact", "codex"],
   ["/v1/models", "codex"], ["/v1/images/generations", "codex"], ["/v1/images/edits", "codex"], ["/v1/alpha/search", "codex"],
@@ -59,7 +61,7 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
       const devinCreate = url.pathname === "/agents/devin/sessions" && req.method === "POST";
       const devinSession = /^\/agents\/devin\/sessions\/([A-Za-z0-9_-]{1,160})(\/messages)?$/.exec(url.pathname);
       const devinRoute = devinSession && (devinSession[2] ? req.method === "POST" : req.method === "GET" || req.method === "DELETE");
-      const modelMethod = cursorRoute && req.method === "GET" && !cursorExchange ? "GET" : url.pathname === "/v1/models" ? "GET" : "POST";
+      const modelMethod = cursorRoute && req.method === "GET" && !cursorExchange ? "GET" : url.pathname.endsWith("/v1/models") ? "GET" : "POST";
       if ((!provider || req.method !== modelMethod) && !devinCreate && !devinRoute) { fail(404, "Unknown pool route."); return; }
       const headers = new Headers();
       for (const [key, value] of Object.entries(req.headers)) {

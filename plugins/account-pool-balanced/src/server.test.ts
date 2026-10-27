@@ -261,7 +261,7 @@ function testJwt(payload: object): string {
 async function createFixture(args: {
   upstreamUrl: string;
   options?: AccountPoolPluginOptions;
-  provider?: "claude" | "codex" | "kimi" | "zai" | "opencode-go" | "cursor" | "devin";
+  provider?: "claude" | "codex" | "kimi" | "zai" | "opencode-go" | "neuraldeep" | "cursor" | "devin";
   source?: "api-key" | "import";
   apiKey?: string;
   priority?: number;
@@ -281,6 +281,7 @@ async function createFixture(args: {
     kimiUpstreamBaseUrl: args.upstreamUrl,
     zaiUpstreamBaseUrl: args.upstreamUrl,
     opencodeGoUpstreamBaseUrl: args.upstreamUrl,
+    neuraldeepUpstreamBaseUrl: args.upstreamUrl,
     cursorUpstreamBaseUrl: args.upstreamUrl,
     devinUpstreamBaseUrl: args.upstreamUrl,
   });
@@ -337,6 +338,8 @@ async function createFixture(args: {
                 "OXI_ZAI_BASE_URL",
               )
             ).token
+          : args.provider === "neuraldeep"
+            ? (await resolveAcpEnv(host, "acp-opencode-neuraldeep", "NEURALDEEP_API_KEY", "OXI_NEURALDEEP_BASE_URL")).token
           : args.provider === "opencode-go"
             ? (
                 await resolveAcpEnv(
@@ -465,6 +468,7 @@ describe("Account Pool config schema", () => {
       kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+      neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
       devinUpstreamBaseUrl: "https://server.codeium.com",
       switchThreshold: 0.98,
@@ -542,6 +546,7 @@ describe("Account Pool plugin", () => {
       kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+      neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
       devinUpstreamBaseUrl: "https://server.codeium.com",
       switchThreshold: 0.75,
@@ -924,6 +929,67 @@ describe("Account Pool plugin", () => {
     expect(requests[0]?.headers.has("x-unrelated-header")).toBe(false);
     expect(requests[0]?.headers.has("x-bb-cursor-rpc-path")).toBe(false);
     expect(await requests[0]?.text()).toBe(body);
+  });
+
+  it("routes NeuralDeep with server credentials and preserves native Chat/SSE", async () => {
+    const requests: Request[] = [];
+    const fixture = await createFixture({upstreamUrl:"https://upstream.example/v1",provider:"neuraldeep",apiKey:"synthetic-neuraldeep-key",options:{fetch:async(input, init)=>{
+      const request = new Request(input, init);
+      requests.push(request);
+      if (new URL(request.url).pathname.endsWith("/limits")) return Response.json({});
+      return new Response('data: {"choices":[]}\n\ndata: [DONE]\n\n', {headers:{"content-type":"text/event-stream"}});
+    }}});
+    const body = JSON.stringify({model:"qwen3.6-unlim-xl",messages:[{role:"user",content:"synthetic"}],stream:true});
+    const response = await fixture.host.harness.behavior.fetchHttp("POST", "/neuraldeep/v1/chat/completions", {headers:authHeaders(fixture.key),body});
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(await response.text()).toContain("[DONE]");
+    const sent = requests.find(request=>new URL(request.url).pathname.endsWith("/chat/completions"))!;
+    expect(sent.url).toBe("https://upstream.example/v1/chat/completions");
+    expect(sent.headers.get("authorization")).toBe("Bearer synthetic-neuraldeep-key");
+    expect(fixture.key).not.toBe("synthetic-neuraldeep-key");
+    expect(await sent.text()).toBe(body);
+    const status = statusReportSchema.parse(JSON.parse((await fixture.host.harness.behavior.runCli(["status","--json"])).stdout));
+    const quota = status.accounts.find(account=>account.id===fixture.account.id)!;
+    expect(JSON.stringify(quota)).not.toContain("synthetic-neuraldeep-key");
+  });
+
+  it("keeps NeuralDeep project and issued-purpose admission ahead of upstream dispatch", async () => {
+    let calls = 0;
+    const fixture = await createFixture({upstreamUrl:"https://upstream.example/v1",provider:"neuraldeep",apiKey:"synthetic-neuraldeep-key",options:{fetch:async()=>{calls++;return Response.json({});}}});
+    const tokenFile = path.join(fixture.dataDir,"purpose-client.token");
+    const issued = await fixture.host.harness.behavior.runCli(["client","add","fixture-client","--project","fixture-project","--purpose","autopilot","--output",tokenFile]);
+    expect(issued.exitCode).toBe(0);
+    const token = (await fs.readFile(tokenFile,"utf8")).trim();
+    const before = calls;
+    const body = JSON.stringify({model:"qwen3.6-unlim-xl",messages:[]});
+    const denied = await fixture.host.harness.behavior.fetchHttp("POST","/neuraldeep/v1/chat/completions",{headers:authHeaders(token),body});
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get("x-bb-pool-error")).toBe("POOL_ACCOUNT_POLICY");
+    expect(calls).toBe(before);
+    // A client-supplied purpose label cannot elevate an invalid credential.
+    const foreign = await fixture.host.harness.behavior.fetchHttp("POST","/neuraldeep/v1/chat/completions",{headers:{...authHeaders("synthetic-invalid"),"x-purpose":"autopilot"},body});
+    expect(foreign.status).toBe(401);
+    expect(calls).toBe(before);
+    const unknown = statusReportSchema.parse(JSON.parse((await fixture.host.harness.behavior.runCli(["status","--json"])).stdout)).accounts.find(account=>account.id===fixture.account.id)!;
+    expect(unknown.fiveHourUtilization).toBeNull();
+    expect(unknown.sevenDayUtilization).toBeNull();
+  });
+
+  it("background Go usage rejection persists sanitized key expiry", async () => {
+    let expired = false;
+    const fixture = await createFixture({upstreamUrl:"https://upstream.example",provider:"opencode-go",apiKey:"synthetic-go-key",options:{fetch:async()=> expired
+      ? Response.json({error:{type:"authentication_error",code:"api_key_expired",message:"synthetic-private-value"}},{status:403})
+      : Response.json({}) }});
+    expired = true;
+    const result = await fixture.host.harness.behavior.runCli(["account","refresh",fixture.account.id]);
+    expect(result.exitCode).not.toBe(0);
+    const status = statusReportSchema.parse(JSON.parse((await fixture.host.harness.behavior.runCli(["status","--json"])).stdout));
+    const account = status.accounts.find(account=>account.id===fixture.account.id)!;
+    expect(account.status).toBe("error");
+    expect(account.error).toContain("API_KEY_EXPIRED");
+    expect(account.error).not.toContain("synthetic-private-value");
+    expect(account.eligible).toBe(false);
   });
 
   it.each([429,403])('labels a hold after HTTP %s without guessing its cause',async status=>{
@@ -6481,6 +6547,7 @@ describe("Account Pool plugin", () => {
       kimi: true,
       zai: true,
       "opencode-go": true,
+      neuraldeep: true,
       cursor: true,
       devin: true,
     });
@@ -7063,6 +7130,7 @@ describe("sequential pool recovery", () => {
       kimi: null,
       zai: null,
       "opencode-go": null,
+      neuraldeep: null,
       cursor: null,
       devin: null,
     });

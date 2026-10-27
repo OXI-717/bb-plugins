@@ -45,7 +45,7 @@ const HELP = [
   "  bb pool account login-poll --session <id>",
   "  printf '%s\\n' \"$CLAUDE_AUTH_CODE\" | bb pool account login-complete --session <id> --code-stdin",
   "  bb pool account add --provider claude --api-key-stdin [--label <text>] [--priority <n>]",
-  "  bb pool account add --provider <kimi|zai|opencode-go|cursor|devin> --api-key-stdin [--label <text>] [--priority <n>]",
+  "  bb pool account add --provider <kimi|zai|opencode-go|neuraldeep|cursor|devin> --api-key-stdin [--label <text>] [--priority <n>]",
   "  bb pool account add --provider claude --api-key <key> [--label <text>] [--priority <n>]  Unsafe: exposes the key in process arguments.",
   "  bb pool account list [--json]",
   "  bb pool account remove <id>",
@@ -56,13 +56,13 @@ const HELP = [
   '  bb pool account projects <id> <JSON|off>',
   "  bb pool account cap <id> <early> <late>",
   "  bb pool account cap <id> off",
-  "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor|devin> <id>...",
+  "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|cursor|devin> <id>...",
   "  bb pool account refresh <id>",
   "  bb pool status [--json]",
   "  bb pool observations [--json]",
-  "  bb pool routing <claude|codex|kimi|zai|opencode-go|cursor|devin> [--off]",
+  "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|cursor|devin> [--off]",
   "  bb pool config",
-  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
   "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot]",
   "  bb pool client revoke <name>",
@@ -229,6 +229,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `kimiUpstreamBaseUrl: ${config.kimiUpstreamBaseUrl}`,
     `zaiUpstreamBaseUrl: ${config.zaiUpstreamBaseUrl}`,
     `opencodeGoUpstreamBaseUrl: ${config.opencodeGoUpstreamBaseUrl}`,
+    `neuraldeepUpstreamBaseUrl: ${config.neuraldeepUpstreamBaseUrl}`,
     `cursorUpstreamBaseUrl: ${config.cursorUpstreamBaseUrl}`,
     `devinUpstreamBaseUrl: ${config.devinUpstreamBaseUrl}`,
     `vpnGuardEnabled: ${config.vpnGuardEnabled}`,
@@ -273,6 +274,7 @@ function parseConfigUpdate(
       zaiUpstreamBaseUrl: value,
     });
   }
+  if (key === "neuraldeepUpstreamBaseUrl") return accountPoolConfigSetInputSchema.parse({ neuraldeepUpstreamBaseUrl: value });
   if (key === "opencodeGoUpstreamBaseUrl") {
     return accountPoolConfigSetInputSchema.parse({
       opencodeGoUpstreamBaseUrl: value,
@@ -385,7 +387,7 @@ export function registerPoolCli(
       {
         name: "account-reorder",
         summary: "Set the complete failover order for one provider",
-        usage: "bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor|devin> <id>...",
+        usage: "bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|cursor|devin> <id>...",
       },
       {
         name: "account-refresh",
@@ -401,7 +403,7 @@ export function registerPoolCli(
       {
         name: "routing",
         summary: "Enable or disable pooled routing for one provider",
-        usage: "bb pool routing <claude|codex|kimi|zai|opencode-go|cursor|devin> [--off]",
+        usage: "bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|cursor|devin> [--off]",
       },
       {
         name: "config",
@@ -412,7 +414,7 @@ export function registerPoolCli(
         name: "config-set",
         summary: "Update one Account Pooler routing configuration value",
         usage:
-          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
       },
       {
         name: "token-rotate",

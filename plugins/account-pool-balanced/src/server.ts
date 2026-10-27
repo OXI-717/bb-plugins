@@ -231,7 +231,7 @@ export function createAccountPoolPlugin(
     const retryProviders:Readonly<Record<string,PoolProvider>>={
       codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor',
       'acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai',
-      'acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi',
+      'acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi',
       'acp-opencode-kimi-highspeed':'kimi',
     };
     await registerNetworkRetry(bb,async(threadId,providerId)=>{
@@ -273,7 +273,7 @@ export function createAccountPoolPlugin(
       accountPoolRpcContract,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
         const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
-        const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi'} as Record<string,PoolProvider>)[thread.providerId]??null;
+        const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi'} as Record<string,PoolProvider>)[thread.providerId]??null;
         const empty = { account: null, lastUsedAt: null };
         if (provider === null) return { state: "unsupported", ...empty };
         if (await routing.isBypassed(threadId) || !(await operations.isRoutingEnabled(provider)))
@@ -394,6 +394,13 @@ export function createAccountPoolPlugin(
         baseUrlEnv: "OXI_ZAI_BASE_URL",
       },
       {
+        provider: "neuraldeep",
+        mountPrefix: "neuraldeep/",
+        providerId: "acp-opencode-neuraldeep",
+        keyEnv: "NEURALDEEP_API_KEY",
+        baseUrlEnv: "OXI_NEURALDEEP_BASE_URL",
+      },
+      {
         provider: "opencode-go",
         mountPrefix: OPENCODE_GO_MOUNT_PREFIX,
         providerId: "acp-opencode-go",
@@ -498,9 +505,9 @@ export function createAccountPoolPlugin(
       );
     }
     for (const entry of openAiCompatibleRoutes) {
-      for (const route of ["chat/completions", "responses", "models"]) {
+      for (const route of (entry.provider === "neuraldeep" ? ["chat/completions", "models"] : ["chat/completions", "responses", "models"])) {
         bb.http.route(
-          "POST",
+          entry.provider === "neuraldeep" && route === "models" ? "GET" : "POST",
           `/${entry.mountPrefix}v1/${route}`,
           (context) => hub.handle(context.req.raw, entry.provider),
           { auth: "none" },
