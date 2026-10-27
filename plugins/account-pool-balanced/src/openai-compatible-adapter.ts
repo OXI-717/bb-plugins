@@ -1,4 +1,5 @@
 import { poolErrorResponse } from "./pool-errors.js";
+import { apiKeyFailure } from "./api-key-errors.js";
 import type {
   AccountPoolConfig,
   AccountQuota,
@@ -163,7 +164,8 @@ export function createOpenAiCompatibleAdapter(
         signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
       });
       if (!response.ok) {
-        await response.body?.cancel();
+        const failure = await apiKeyFailure(response);
+        if (failure) throw failure;
         return;
       }
       const quota = options.parseUsages(

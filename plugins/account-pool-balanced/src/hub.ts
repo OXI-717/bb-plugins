@@ -30,6 +30,7 @@ import {
   createOpenAiCompatibleAdapter,
   guardOpencodeGoRequestBody,
   normalizeOpencodeGoUpstreamPathSuffix,
+  isChatCompletionsBody,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
@@ -448,7 +449,8 @@ export class AccountPoolHub {
     const now = this.options.now();
     const vpnEvidence=await this.vpn.evidence();
     const vpnState=vpnEvidence.state;
-    const decisions=await Promise.all((["codex","claude","cursor","devin","opencode-go"] as const).map(async provider=>{
+    const providers = [...new Set<PoolProvider>(["codex","claude","cursor","devin","opencode-go",...providerSchema.options])];
+    const decisions=await Promise.all(providers.map(async provider=>{
       try {await this.assertNetworkAllowed(provider);return null;} catch {return provider;}
     }));
     const blockedProviders=decisions.filter((provider):provider is Exclude<typeof provider,null>=>provider!==null);
@@ -494,6 +496,7 @@ export class AccountPoolHub {
         zai: activeFor("zai"),
         "opencode-go":
           activeFor("opencode-go"),
+        neuraldeep: activeFor("neuraldeep"),
         cursor: activeFor("cursor"),
         devin: activeFor("devin"),
       },
@@ -1663,6 +1666,20 @@ export function createHub(options: {
         normalizeUpstreamPathSuffix: normalizeOpencodeGoUpstreamPathSuffix,
         guardRequestBody: guardOpencodeGoRequestBody,
         parseUsages: opencodeGoQuotaFromUsages,
+      }),
+    ],
+    [
+      "neuraldeep",
+      createOpenAiCompatibleAdapter({
+        provider: "neuraldeep",
+        upstreamName: "NeuralDeep",
+        mountPrefix: "neuraldeep/",
+        upstreamBaseUrl: (settings) => settings.neuraldeepUpstreamBaseUrl,
+        usagesUrl: "https://api.neuraldeep.ru/v1/limits",
+        // RPM and model entitlements are not subscription-window percentages.
+        parseUsages: () => null,
+        guardRequestBody: (suffix, body) => suffix === "chat/completions" && !isChatCompletionsBody(body)
+          ? "NeuralDeep requires a Chat Completions messages array." : null,
       }),
     ],
     [

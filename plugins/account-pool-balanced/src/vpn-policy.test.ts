@@ -81,3 +81,15 @@ it('forgets a timed-out result while bounding still-pending file operations',asy
   expect(opener).toHaveBeenCalledTimes(2);
  }finally{finish(handle);await vi.advanceTimersByTimeAsync(0);vi.useRealTimers();}
 });
+
+it('accepts explicit NeuralDeep VPN membership while preserving existing choices and verification', async () => {
+  const prior = accountPoolConfigSchema.parse({vpnGuardEnabled:true});
+  const changed = accountPoolConfigSetInputSchema.parse({vpnOnlyProviders:[...prior.vpnOnlyProviders,'neuraldeep']});
+  const settings = accountPoolConfigSchema.parse({...prior,...changed});
+  expect(prior.vpnOnlyProviders).toEqual(['codex','claude','cursor','devin']);
+  const guard = vi.fn(async () => undefined);
+  await createVpnPolicy(()=>settings,()=>now,async()=>payload,guard).assert('neuraldeep');
+  expect(guard).toHaveBeenCalledWith('neuraldeep');
+  await expect(createVpnPolicy(()=>settings,()=>now,async()=>null,guard).assert('neuraldeep')).rejects.toBeInstanceOf(VpnRequiredError);
+  await expect(createVpnPolicy(()=>settings,()=>now,async()=>payload,async()=>{throw Error('guard denied');}).assert('neuraldeep')).rejects.toThrow('guard denied');
+});

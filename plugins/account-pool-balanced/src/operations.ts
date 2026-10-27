@@ -294,12 +294,13 @@ export class PoolOperations {
     await this.hubTokens.prune(hosts.map((host) => host.id));
     const status = await this.hub.status();
     const hostNames = new Map(hosts.map((host) => [host.id, host.name]));
-    const [claude, codex, kimi, zai, opencodeGo, cursor, devin] = await Promise.all([
+    const [claude, codex, kimi, zai, opencodeGo, neuraldeep, cursor, devin] = await Promise.all([
       this.routing.isProviderEnabled("claude"),
       this.routing.isProviderEnabled("codex"),
       this.routing.isProviderEnabled("kimi"),
       this.routing.isProviderEnabled("zai"),
       this.routing.isProviderEnabled("opencode-go"),
+      this.routing.isProviderEnabled("neuraldeep"),
       this.routing.isProviderEnabled("cursor"),
       this.routing.isProviderEnabled("devin"),
     ]);
@@ -322,6 +323,7 @@ export class PoolOperations {
         kimi,
         zai,
         "opencode-go": opencodeGo,
+        neuraldeep,
         cursor,
         devin,
       },

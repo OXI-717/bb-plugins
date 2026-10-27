@@ -56,6 +56,7 @@ Standalone model paths:
 | Kimi | `POST /kimi/v1/messages`, `/kimi/v1/messages/count_tokens` |
 | Z.ai | `POST /zai/v1/chat/completions` |
 | OpenCode Go | `POST /opencode-go/v1/chat/completions` |
+| NeuralDeep | `POST /neuraldeep/v1/chat/completions`; `GET /neuraldeep/v1/models` |
 | Devin Local CLI | `POST /exa.*` Connect/protobuf RPCs (via the launcher below) |
 | Cursor CLI | `GET/POST /cursor/rpc` through `cursor-route`, or direct `/cursor/aiserver.vN.*` and `/cursor/agent.vN.*` RPC paths |
 
@@ -185,3 +186,38 @@ has no purpose issuance flag in this release; no support is implied by its name.
 The Cursor local exchange returns the same pool credential, without a provider
 request or wider authority. All subsequent Cursor forwarding uses normal purpose
 admission. No provider credential is returned by the local exchange.
+
+## NeuralDeep through the pool
+
+NeuralDeep uses the native OpenAI-compatible Chat Completions protocol. Store its
+provider API key once on the pool server, through the existing account dialog or
+API-key stdin command. Each client receives only its ordinary pool credential.
+For a BB-hosted pool, the base URL is the plugin HTTP root followed by
+`/neuraldeep/v1`; standalone uses the same suffix on its root. Send the pool
+credential as a Bearer token. The hub replaces it with the selected account key
+and preserves Chat Completions bodies, tools and streaming bytes.
+
+The BB provider `acp-opencode-neuraldeep` receives `OXI_NEURALDEEP_BASE_URL` and
+`NEURALDEEP_API_KEY` in its process environment; that key variable contains the
+pool credential, not the provider key. The existing OpenCode route launcher must
+honor both overrides. Project restrictions, account permissions, schedules,
+reserve selection and quota-rejection holds still use ordinary pool admission.
+No machine-local NeuralDeep login or provider-key copy is needed on this path.
+On a selected non-direct host with VPN Guard enforcement, explicitly select
+NeuralDeep in the existing VPN-only setting. Otherwise Guard denies it. The
+setting is available in its provider card; this release preserves prior choices.
+This does not remove existing local keys or change a client's configuration.
+
+Only native Chat Completions and model discovery are registered; Responses is
+not translated. Subscription-window budgets are unknown: `/limits` reports
+model entitlements and request capacity, which are not five-hour or weekly
+percentages. No general budget attestation is advertised. Provider error holds
+remain reactive, and unlimited-volume plans are not represented as 100% quota.
+See the [official protocol documentation](https://neuraldeep.ru/docs).
+
+Background usage checks now recognize explicit API-key expiry/revocation errors
+without retaining provider messages. A definitive HTTP 401 also requires key
+attention; an ambiguous 403, rate limit or server failure does not invalidate a
+key. Checks keep their existing interval and busy-account skip, so this is not
+instant expiration prediction or a new notification service. Expired API keys
+must be replaced at the provider; signing in again does not renew them.
