@@ -52,7 +52,9 @@ export function createAgyAdapter(onModels?:(ids:string[])=>Promise<void>):Provid
     }
     const value=await readAgyJson(response,signal);
     if(typeof value.access_token!=='string'||!value.access_token||typeof value.expires_in!=='number'||!Number.isSafeInteger(value.expires_in)||value.expires_in<1||value.expires_in>86400||('refresh_token' in value&&(typeof value.refresh_token!=='string'||!value.refresh_token)))throw Error('Malformed token response');
-    return {secret:{...current,accessToken:value.access_token,expiresAt:context.now()+value.expires_in*1000,...(typeof value.refresh_token==='string'?{refreshToken:value.refresh_token}:{})},refreshed:true};
+    const refreshed:AccountSecret={...current,accessToken:value.access_token,expiresAt:context.now()+value.expires_in*1000,...(typeof value.refresh_token==='string'?{refreshToken:value.refresh_token}:{})};
+    await context.accounts.writeSecret(context.account.id,refreshed);
+    return {secret:refreshed,refreshed:true};
    }catch(error){
     if(error instanceof VpnRequiredError||error instanceof AccountAuthorizationRequiredError||error instanceof TransientOAuthRefreshError)throw error;
     throw new TransientOAuthRefreshError('Antigravity authorization request failed or timed out.',0);

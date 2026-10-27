@@ -40,6 +40,10 @@ variables alone do **not** select that authentication mode. Deploy the compatibl
 repository-managed native launcher separately on every client host before
 turning on pooled AGY sessions. A plugin-only update cannot replace that launcher.
 Legacy sessions without pool contributions retain their existing native login.
+Pooled launchers currently support unmanaged Linux/macOS hosts: any native OS
+admin-policy file or uncertain metadata refuses startup rather than merging a
+higher-priority gateway URL with the pool credential. Modern and legacy gateway
+header overrides are removed. Managed gateway support is not implemented.
 
 External trusted clients use the same scoped pool credential as other pool
 routes. The native GenAI base is `B/agy`, where `B` is the plugin HTTP root.
