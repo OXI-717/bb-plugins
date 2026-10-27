@@ -313,6 +313,16 @@ export const accountSecretSchema = z.discriminatedUnion("kind", [
 
 export type AccountSecret = z.infer<typeof accountSecretSchema>;
 
+const zaiEvidenceWindowSchema = z.object({
+  usedPercent: z.number().finite().min(0).max(100),
+  resetAt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export const zaiUsageEvidenceSchema = z.object({
+  source: z.literal('usage'), observedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  fiveHour: zaiEvidenceWindowSchema, weekly: zaiEvidenceWindowSchema,
+}).strict();
+export type ZaiUsageEvidence = z.infer<typeof zaiUsageEvidenceSchema>;
+
 const quotaFieldsShape = {
   fiveHourUtilization: z.number().nullable(),
   fiveHourResetAt: z.number().int().nullable(),
@@ -324,6 +334,7 @@ const quotaFieldsShape = {
   familyWeekly: familyWeeklySchema,
   limitWindows: z.array(limitWindowSchema),
   codexUsageEvidence: codexUsageEvidenceSchema.optional(),
+  zaiUsageEvidence: zaiUsageEvidenceSchema.optional(),
   observedAt: z.number().int().nullable(),
   heldUntil: z.number().int().nullable(),
   error: z.string().nullable(),

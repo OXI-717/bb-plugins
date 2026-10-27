@@ -175,6 +175,9 @@ export function createOpenAiCompatibleAdapter(
         context.now(),
       );
       if (quota !== null) context.quotas.put(quota);
+      else if (options.provider === 'zai') context.quotas.put({
+        ...context.quotas.get(context.account.id), zaiUsageEvidence:undefined,
+      });
     },
     errorResponse(status, message, headers, request) {
       return poolErrorResponse(options.provider, status, message, headers, request);

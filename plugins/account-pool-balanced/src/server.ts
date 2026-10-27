@@ -635,6 +635,10 @@ export function createAccountPoolPlugin(
     bb.http.route("GET", "/budget/codex", async context => hub.codexBudget(
       context.req.raw, await routing.isProviderEnabled("codex"), threadId => routing.isBypassed(threadId),
     ), { auth: "none" });
+    bb.http.route("GET", "/budget/zai", async context => {
+      try {return await hub.zaiBudget(context.req.raw,await routing.isProviderEnabled('zai'),threadId=>routing.isBypassed(threadId));}
+      catch {return Response.json({error:'Pool budget evidence unavailable.'},{status:503,headers:{'cache-control':'no-store'}});}
+    }, {auth:'none'});
     bb.http.route(
       "POST",
       "/v1/messages",
