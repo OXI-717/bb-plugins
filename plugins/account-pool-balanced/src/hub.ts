@@ -357,7 +357,7 @@ export class AccountPoolHub {
   ): Promise<void> {
     await this.assertNetworkAllowed(account.provider);
     const adapter = this.adapter(account.provider);
-    if ((this.inFlightByAccount.get(account.id) ?? 0) > 0) {
+    if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) {
       if (force) throw new Error("Аккаунт занят запросом. Повторите обновление квот после его завершения.");
       return;
     }

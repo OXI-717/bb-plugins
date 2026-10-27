@@ -315,6 +315,7 @@ export function createCodexAdapter(options: {
 }): ProviderAdapter {
   return {
     provider: "codex",
+    refreshesUsageWhileBusy: true,
     upstreamName: "ChatGPT",
     async importAccount() {
       const imported = await (

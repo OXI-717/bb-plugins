@@ -7945,3 +7945,156 @@ describe('trusted automation account admission', () => {
     expect(legacy).not.toHaveProperty('purpose');
   });
 });
+
+
+describe("busy Codex usage collection", () => {
+  it.each(["complete", "missing-secondary", "malformed-duration"] as const)("shares one usage read during an open stream and validates %s evidence", async (shape) => {
+    let blockUsage = false;
+    let usageCalls = 0;
+    let releaseUsage: (() => void) | undefined;
+    const pendingUsage = new Promise<void>(resolve => { releaseUsage = resolve; });
+    const usagePayload = () => ({rate_limit: {allowed: true, limit_reached: false,
+      primary_window: {used_percent: 40, limit_window_seconds: shape === "malformed-duration" ? 604800.5 : 604800,
+        reset_at: Math.floor(Date.now()/1000)+86400}, ...(shape === "missing-secondary" ? {} : {secondary_window: null})}});
+    const fixture = await createFixture({upstreamUrl: "https://upstream.example", provider: "codex", source: "import",
+      options: {codexUsageUrl: EMPTY_USAGE_URL,
+        importCodexCredentials: async () => ({accessToken:"synthetic-access",refreshToken:"synthetic-refresh",idToken:null,
+          accountId:"synthetic-account",email:null,expiresAt:Date.now()+86400000}),
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          if (request.url === EMPTY_USAGE_URL) {
+            if (blockUsage) { usageCalls++; await pendingUsage; }
+            return Response.json(usagePayload());
+          }
+          return new Response(new ReadableStream<Uint8Array>({start(controller) {
+            controller.enqueue(new TextEncoder().encode("data: synthetic-open-stream\n\n"));
+          }}), {headers:{"content-type":"text/event-stream"}});
+        },
+      }});
+    const rpc=fixture.host.harness.behavior.callRpc;
+    await rpc("account.refreshUsage",{accountId:fixture.account.id});
+    const response=await fixture.host.harness.behavior.fetchHttp("POST","/v1/responses",{
+      headers:authHeaders(fixture.key),body:JSON.stringify({model:"synthetic-model",input:"synthetic",stream:true})});
+    expect(response.status).toBe(200);
+    try {
+      expect(statusSchema.parse(await rpc("status.get",null)).inFlight).toBe(1);
+      blockUsage=true;
+      const first=rpc("account.refreshUsage",{accountId:fixture.account.id});
+      await vi.waitFor(()=>expect(usageCalls).toBe(1));
+      const second=rpc("account.refreshUsage",{accountId:fixture.account.id});
+      await new Promise(resolve=>setImmediate(resolve));
+      expect(usageCalls).toBe(1);
+      releaseUsage!(); await Promise.all([first,second]);
+      expect(statusSchema.parse(await rpc("status.get",null)).inFlight).toBe(1);
+      const budget=await fixture.host.harness.behavior.fetchHttp("GET","/budget/codex?projectId=project-one",{headers:authHeaders(fixture.key)});
+      expect(budget.status).toBe(200);
+      const payload=await budget.json() as {accounts:Array<{budgetReady:boolean;windows:unknown}>};
+      if (shape === "complete") {
+        expect(payload.accounts[0]).toMatchObject({budgetReady:true,windows:{fiveHour:{state:"absent",remainingPercent:null},weekly:{state:"present",remainingPercent:60}}});
+      } else {
+        expect(payload.accounts[0]).toMatchObject({budgetReady:false});
+      }
+    } finally { releaseUsage!(); await response.body?.cancel(); }
+    await vi.waitFor(async()=>expect(statusSchema.parse(await rpc("status.get",null)).inFlight).toBe(0));
+  });
+
+  it("serializes a token refresh shared by busy usage and a new inference request", async () => {
+    let clock=Date.now();
+    let refreshCalls=0;
+    let releaseRefresh:(()=>void)|undefined;
+    const refreshing=new Promise<void>(resolve=>{releaseRefresh=resolve;});
+    const oldToken=testJwt({exp:Math.floor(clock/1000)+3600});
+    let newToken="";
+    const inferenceTokens:Array<string|null>=[];
+    const usageTokens:Array<string|null>=[];
+    const fixture=await createFixture({upstreamUrl:"https://upstream.example",provider:"codex",source:"import",options:{
+      now:()=>clock,codexUsageUrl:EMPTY_USAGE_URL,codexRefreshUrl:"https://refresh.example/token",
+      importCodexCredentials:async()=>({accessToken:oldToken,refreshToken:"synthetic-refresh",idToken:null,accountId:"synthetic-account",email:null,expiresAt:clock+3600000}),
+      fetch:async(input,init)=>{
+        const request=new Request(input,init);
+        if(request.url==="https://refresh.example/token"){
+          refreshCalls++;await refreshing;
+          newToken=testJwt({exp:Math.floor(clock/1000)+3600});
+          return Response.json({access_token:newToken,refresh_token:"synthetic-next-refresh"});
+        }
+        if(request.url===EMPTY_USAGE_URL){
+          usageTokens.push(request.headers.get("authorization"));
+          return Response.json({rate_limit:{allowed:true,limit_reached:false,primary_window:{used_percent:40,limit_window_seconds:604800,reset_at:Math.floor(clock/1000)+86400},secondary_window:null}});
+        }
+        inferenceTokens.push(request.headers.get("authorization"));
+        return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new TextEncoder().encode("data: synthetic\n\n"));}}),{headers:{"content-type":"text/event-stream"}});
+      }}});
+    const rpc=fixture.host.harness.behavior.callRpc;
+    await rpc("account.refreshUsage",{accountId:fixture.account.id});
+    const send=()=>fixture.host.harness.behavior.fetchHttp("POST","/v1/responses",{headers:authHeaders(fixture.key),body:JSON.stringify({model:"synthetic-model",input:"synthetic",stream:true})});
+    const first=await send();let second:Response|undefined;
+    try {
+      clock+=3590000;
+      const usage=rpc("account.refreshUsage",{accountId:fixture.account.id});
+      await vi.waitFor(()=>expect(refreshCalls).toBe(1));
+      const next=send();
+      await new Promise(resolve=>setImmediate(resolve));
+      expect(refreshCalls).toBe(1);
+      releaseRefresh!();await usage;second=await next;
+      expect(refreshCalls).toBe(1);
+      expect(inferenceTokens).toEqual([`Bearer ${oldToken}`,`Bearer ${newToken}`]);
+      expect(usageTokens.at(-1)).toBe(`Bearer ${newToken}`);
+      expect(statusSchema.parse(await rpc("status.get",null)).inFlight).toBe(2);
+    } finally {releaseRefresh!();await first.body?.cancel();await second?.body?.cancel();}
+  });
+
+  it.each([false,true])("handles usage401 with refresh rejection=%s without interrupting the stream", async (denyRefresh) => {
+    let rejectUsage=false;
+    let refreshCalls=0;
+    let usageAfterRejection=0;
+    const clock=Date.now();
+    const nextToken=testJwt({exp:Math.floor(clock/1000)+7200});
+    const fixture=await createFixture({upstreamUrl:"https://upstream.example",provider:"codex",source:"import",options:{
+      codexUsageUrl:EMPTY_USAGE_URL,codexRefreshUrl:"https://refresh.example/token",
+      importCodexCredentials:async()=>({accessToken:"synthetic-old",refreshToken:"synthetic-refresh",idToken:null,accountId:"synthetic-account",email:null,expiresAt:clock+3600000}),
+      fetch:async(input,init)=>{
+        const request=new Request(input,init);
+        if(request.url==="https://refresh.example/token"){
+          refreshCalls++;
+          return denyRefresh?Response.json({error:"invalid_grant"},{status:400}):Response.json({access_token:nextToken,refresh_token:"synthetic-next"});
+        }
+        if(request.url===EMPTY_USAGE_URL){
+          if(rejectUsage){
+            usageAfterRejection++;
+            if(request.headers.get("authorization")!==`Bearer ${nextToken}`)return new Response(null,{status:401});
+          }
+          return Response.json({rate_limit:{allowed:true,limit_reached:false,primary_window:{used_percent:40,limit_window_seconds:604800,reset_at:Math.floor(clock/1000)+86400},secondary_window:null}});
+        }
+        return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new TextEncoder().encode("data: synthetic\n\n"));}}),{headers:{"content-type":"text/event-stream"}});
+      }}});
+    const rpc=fixture.host.harness.behavior.callRpc;
+    await rpc("account.refreshUsage",{accountId:fixture.account.id});
+    const response=await fixture.host.harness.behavior.fetchHttp("POST","/v1/responses",{headers:authHeaders(fixture.key),body:JSON.stringify({model:"synthetic-model",input:"synthetic",stream:true})});
+    try {
+      rejectUsage=true;
+      const refresh=rpc("account.refreshUsage",{accountId:fixture.account.id});
+      if(denyRefresh)await expect(refresh).rejects.toThrow("invalid_grant");else await refresh;
+      expect(refreshCalls).toBe(1);
+      expect(usageAfterRejection).toBe(denyRefresh?1:2);
+      const status=statusSchema.parse(await rpc("status.get",null));
+      expect(status.inFlight).toBe(1);
+      expect(Boolean(status.accounts[0]?.error)).toBe(denyRefresh);
+    } finally {await response.body?.cancel();}
+  });
+
+  it("keeps other providers busy-protected while a stream is open", async () => {
+    let usageCalls=0;
+    const fixture=await createFixture({upstreamUrl:"https://upstream.example",source:"import",options:{
+      usageUrl:EMPTY_USAGE_URL,importCredentials:async()=>importedCredentials(),
+      fetch:async(input,init)=>{
+        if(new Request(input,init).url===EMPTY_USAGE_URL){usageCalls++;return Response.json({});}
+        return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new TextEncoder().encode("data: synthetic\n\n"));}}),{headers:{"content-type":"text/event-stream"}});
+      }}});
+    const response=await fixture.host.harness.behavior.fetchHttp("POST","/v1/messages",{headers:authHeaders(fixture.key),body:"{}"});
+    try {
+      const before=usageCalls;
+      await expect(fixture.host.harness.behavior.callRpc("account.refreshUsage",{accountId:fixture.account.id})).rejects.toThrow("Аккаунт занят");
+      expect(usageCalls).toBe(before);
+    } finally {await response.body?.cancel();}
+  });
+});
