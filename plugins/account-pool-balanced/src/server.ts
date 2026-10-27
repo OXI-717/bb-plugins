@@ -1,3 +1,4 @@
+import {AgyOAuthLogin,readNativeAgyConfig,type AgyAppConfig} from "./agy-oauth-login.js";
 import { RequestJournal } from "./request-journal.js";
 import {createGuardNetworkCheck,bindGuardNetworkDecision,hostGuardDecisionSchema} from "./guard-network.js";
 import {z} from "zod";
@@ -55,6 +56,7 @@ import {
 } from "./store.js";
 
 export interface AccountPoolPluginOptions {
+  agyAppConfig?:()=>Promise<AgyAppConfig>;
   fetch?: typeof fetch;
   fetchIpv4?:typeof fetch;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
@@ -152,7 +154,23 @@ export function createAccountPoolPlugin(
     const transport =
       options.fetch === undefined ? createUpstreamTransport() : null;
     const upstreamFetch = options.fetch ?? transport?.fetch;
+    // BB HTTP registrations are exact paths. Cache only validated model IDs,
+    // never credentials, and derive routes from authenticated provider catalogs.
+    const agyModels=new Set<string>();
+    const registerAgyModels=async(ids:string[])=>{
+      const safe=z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)).max(512).parse(ids);
+      const next=new Set([...agyModels,...safe]);
+      if(next.size>512)throw Error('Antigravity registered model limit reached');
+      for(const id of next){
+        if(agyModels.has(id))continue;
+        for(const action of ['generateContent','streamGenerateContent'])bb.http.route('POST',`/agy/v1beta/models/${id}:${action}`,context=>hub.handle(context.req.raw,'agy'),{auth:'none'});
+        agyModels.add(id);
+      }
+      await bb.storage.kv.set('agy-model-ids-v1',[...agyModels]);
+    };
+    await registerAgyModels((await bb.storage.kv.get<string[]>('agy-model-ids-v1'))??[]);
     const hub = createHub({
+      agyModels:registerAgyModels,
       route: hubBasePath(bb.pluginId),
       accounts,
       quotas,
@@ -231,7 +249,7 @@ export function createAccountPoolPlugin(
     const retryProviders:Readonly<Record<string,PoolProvider>>={
       codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor',
       'acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai',
-      'acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi',
+      'acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi',
       'acp-opencode-kimi-highspeed':'kimi',
     };
     await registerNetworkRetry(bb,async(threadId,providerId)=>{
@@ -248,6 +266,7 @@ export function createAccountPoolPlugin(
       profileUrl: options.oauthProfileUrl,
       addAccount: (authenticated, targetAccountId) => operations.addOAuth(authenticated, targetAccountId),
     });
+    const agyLogin=new AgyOAuthLogin({fetch:hub.outboundFetch("agy"),appConfig:options.agyAppConfig??readNativeAgyConfig,onModels:registerAgyModels,now});
     const codexLogin = new CodexDeviceLogin({
       fetch: hub.outboundFetch("codex"),
       now,
@@ -273,7 +292,7 @@ export function createAccountPoolPlugin(
       accountPoolRpcContract,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
         const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
-        const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi'} as Record<string,PoolProvider>)[thread.providerId]??null;
+        const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi'} as Record<string,PoolProvider>)[thread.providerId]??null;
         const empty = { account: null, lastUsedAt: null };
         if (provider === null) return { state: "unsupported", ...empty };
         if (await routing.isBypassed(threadId) || !(await operations.isRoutingEnabled(provider)))
@@ -301,7 +320,7 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }),
+      }, agyLogin),
     );
     registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser);
     registerUsageSource(bb, hub);
@@ -379,6 +398,14 @@ export function createAccountPoolPlugin(
     bb.providers.experimental_contributeEnvHealth("codex", () =>
       proxiedHealth("codex"),
     );
+    bb.http.route('GET','/agy/v1beta/models',context=>hub.handle(context.req.raw,'agy'),{auth:'none'});
+    bb.providers.experimental_contributeEnv('acp-agy',async context=>{
+      if(!(await operations.isRoutingEnabled('agy'))||await isThreadBypassed(context)||!(await operations.hasUsableEnabledAccount('agy')))return [];
+      const token=await scopedHubToken(context);
+      return [{name:'OXI_AGY_POOL_BASE_URL',value:{serverPath:`${hubBasePath(bb.pluginId)}/agy`},reason:'Native Antigravity gateway through Pooler'},
+        {name:'OXI_AGY_POOL_AUTH_TOKEN',value:token,reason:'Pool credential only; Google OAuth remains server-side'}];
+    });
+    bb.providers.experimental_contributeEnvHealth('acp-agy',()=>proxiedHealth('agy'));
     const openAiCompatibleRoutes: ReadonlyArray<{
       provider: PoolProvider;
       mountPrefix: string;
@@ -577,6 +604,7 @@ export function createAccountPoolPlugin(
       );
     }
     bb.onDispose(async () => {
+      agyLogin.dispose();
       codexLogin.dispose();
       let timer: ReturnType<typeof setTimeout> | null = null;
       try {

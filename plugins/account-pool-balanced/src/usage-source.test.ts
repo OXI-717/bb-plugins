@@ -38,6 +38,7 @@ describe("pooled providers on the usage surface", () => {
     expect(USAGE_PROVIDER_IDS).toEqual({
       claude: "claude-code",
       codex: "codex",
+      agy: "acp-agy",
       kimi: "acp-opencode-kimi",
       zai: "acp-opencode-zai",
       "opencode-go": "acp-opencode-go",

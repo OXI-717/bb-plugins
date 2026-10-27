@@ -1,3 +1,4 @@
+import {createAgyAdapter} from "./agy-adapter.js";
 import { RequestJournal, newTrace, type Trace, type Observation } from "./request-journal.js";
 import { codexBudgetQuota, CODEX_BUDGET_MAX_AGE_MS } from './codex-budget.js';
 import { NetworkFlights } from "./network-flights.js";
@@ -103,6 +104,7 @@ const DROPPED_RESPONSE_HEADERS = new Set([
 interface HubOptions {
   journal?: RequestJournal;
   route: string;
+  agyModels?:(ids:string[])=>Promise<void>;
   accounts: AccountStore;
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
@@ -497,6 +499,7 @@ export class AccountPoolHub {
         "opencode-go":
           activeFor("opencode-go"),
         neuraldeep: activeFor("neuraldeep"),
+        agy: activeFor("agy"),
         cursor: activeFor("cursor"),
         devin: activeFor("devin"),
       },
@@ -547,7 +550,7 @@ export class AccountPoolHub {
     const candidateIds = new Set(accounts.map((account) => account.id));
     const legacyAffinityHost = projectId === null ? hostId : JSON.stringify([hostId, projectId]);
     const affinityHost = purpose ? JSON.stringify([legacyAffinityHost, "purpose", purpose]) : legacyAffinityHost;
-    const parsed = adapter.parseRequest(body, request.headers);
+    const parsed = adapter.parseRequest(body, request.headers, request);
     const family = parsed.family;
     const trace = newTrace(adapter.provider, hostId, projectId, threadId, parsed.model, family);
     const startedAt = this.options.now();
@@ -1370,10 +1373,11 @@ export class AccountPoolHub {
       new Uint8Array(upstreamBody).set(body);
       const url = adapter.upstreamUrl(request, this.options.getSettings());
       const headers = adapter.requestHeaders(request.headers, account, secret);
+      const method=adapter.upstreamMethod?.(request)??request.method;
       const response = await this.networkFlights.fetch(account.provider,url, {
-          method: request.method,
+          method,
           headers,
-          ...(request.method === "GET" || request.method === "HEAD"
+          ...(method === "GET" || method === "HEAD"
             ? {}
             : { body: upstreamBody }),
           signal: controller.signal,
@@ -1393,7 +1397,12 @@ export class AccountPoolHub {
           });
         });
       upstreamStatus=response.status;
-      return { response, controller, release };
+      let forwarded=response;
+      if(response.ok&&adapter.transformResponse){
+        try{forwarded=adapter.transformResponse(request,response,controller.signal);}
+        catch{controller.abort();void response.body?.cancel().catch(()=>undefined);throw new UpstreamConnectionError('Invalid provider response');}
+      }
+      return { response:forwarded, controller, release };
     } catch (error) {
       release();
       throw error;
@@ -1590,6 +1599,7 @@ export class AccountPoolHub {
 
 export function createHub(options: {
   route: string;
+  agyModels?:(ids:string[])=>Promise<void>;
   accounts: AccountStore;
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
@@ -1619,6 +1629,7 @@ export function createHub(options: {
   journal?: RequestJournal;
 }): AccountPoolHub {
   const adapters: ReadonlyMap<PoolProvider, ProviderAdapter> = new Map([
+    ["agy",createAgyAdapter(options.agyModels)],
     [
       "claude",
       createClaudeAdapter({

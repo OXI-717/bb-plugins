@@ -56,6 +56,7 @@ Standalone model paths:
 | Kimi | `POST /kimi/v1/messages`, `/kimi/v1/messages/count_tokens` |
 | Z.ai | `POST /zai/v1/chat/completions` |
 | OpenCode Go | `POST /opencode-go/v1/chat/completions` |
+| Antigravity | `GET /agy/v1beta/models`; `POST /agy/v1beta/models/{catalog-model}:generateContent` or `:streamGenerateContent` |
 | NeuralDeep | `POST /neuraldeep/v1/chat/completions`; `GET /neuraldeep/v1/models` |
 | Devin Local CLI | `POST /exa.*` Connect/protobuf RPCs (via the launcher below) |
 | Cursor CLI | `GET/POST /cursor/rpc` through `cursor-route`, or direct `/cursor/aiserver.vN.*` and `/cursor/agent.vN.*` RPC paths |
@@ -221,3 +222,6 @@ attention; an ambiguous 403, rate limit or server failure does not invalidate a
 key. Checks keep their existing interval and busy-account skip, so this is not
 instant expiration prediction or a new notification service. Expired API keys
 must be replaced at the provider; signing in again does not renew them.
+
+Antigravity uses the native GenAI gateway protocol, not Chat Completions or Responses.
+See [central Antigravity login and client contract](antigravity.md).

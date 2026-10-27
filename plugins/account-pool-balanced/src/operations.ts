@@ -1,3 +1,4 @@
+import type {AgyAuthorization} from "./agy-oauth-login.js";
 import type {
   Account,
   AccountSummary,
@@ -49,9 +50,12 @@ export class PoolOperations {
   ) {}
 
   async add(input: AccountAddInput): Promise<Account> {
+    if (input.provider === "agy") {
+      throw new Error("Use Antigravity login in the Pooler UI; local credentials are not imported.");
+    }
     if (input.source.kind === "api-key") {
       if (input.provider === "codex") {
-        throw new Error("Codex accounts can only be added with --import.");
+        throw new Error("This provider requires its supported OAuth login.");
       }
       const account = await this.accounts.add(
         {
@@ -179,6 +183,14 @@ export class PoolOperations {
     return summary;
   }
 
+  async addAgyOAuth(authenticated:AgyAuthorization):Promise<Account> {
+    const account=await this.accounts.add({provider:'agy',kind:'oauth',label:authenticated.label,
+      email:authenticated.email,accountUuid:null,subscriptionType:authenticated.subscriptionType,
+      rateLimitTier:null,enabled:true,priority:100},authenticated.secret);
+    this.onAccountsChanged();
+    return account;
+  }
+
   async list(): Promise<AccountSummary[]> {
     return (await this.status()).accounts;
   }
@@ -294,13 +306,14 @@ export class PoolOperations {
     await this.hubTokens.prune(hosts.map((host) => host.id));
     const status = await this.hub.status();
     const hostNames = new Map(hosts.map((host) => [host.id, host.name]));
-    const [claude, codex, kimi, zai, opencodeGo, neuraldeep, cursor, devin] = await Promise.all([
+    const [claude, codex, kimi, zai, opencodeGo, neuraldeep, agy, cursor, devin] = await Promise.all([
       this.routing.isProviderEnabled("claude"),
       this.routing.isProviderEnabled("codex"),
       this.routing.isProviderEnabled("kimi"),
       this.routing.isProviderEnabled("zai"),
       this.routing.isProviderEnabled("opencode-go"),
       this.routing.isProviderEnabled("neuraldeep"),
+      this.routing.isProviderEnabled("agy"),
       this.routing.isProviderEnabled("cursor"),
       this.routing.isProviderEnabled("devin"),
     ]);
@@ -324,6 +337,7 @@ export class PoolOperations {
         zai,
         "opencode-go": opencodeGo,
         neuraldeep,
+        agy,
         cursor,
         devin,
       },
