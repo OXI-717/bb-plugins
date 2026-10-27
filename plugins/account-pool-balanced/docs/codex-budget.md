@@ -98,3 +98,18 @@ malformed or contradictory evidence remains insufficient, and explicit absence
 still requires complete successful usage evidence. Existing budgets, project and
 trusted-purpose eligibility, account settings and all-eligible semantics do not
 change. Ordinary responses continue updating header evidence as before.
+
+
+## Neutral headers after an explicit absent slot
+
+Starting with Pooler 0.4.40, a header slot with no duration, positive utilization,
+rejection or future reset does not replace an absent slot already proven by
+complete, still-valid usage evidence. The usage observation timestamp is retained;
+headers cannot renew its five-minute lifetime. This is based on the normalized
+observation and a valid usage proof, not an assumed raw zero sentinel. Without
+that proof, the same headers remain insufficient to establish absence.
+
+A newly supplied duration, positive utilization, rejection, future reset or
+malformed header still refuses authorization. Malformed over-limit booleans and
+explicit over-limit rejection also invalidate the prior allowance. Budget schema,
+floors, project/purpose eligibility and all-eligible semantics are unchanged.
