@@ -175,6 +175,24 @@ function codexQuotaFromHeaders(
   previous: AccountQuota,
   now: number,
 ): AccountQuota {
+  // A natural response represents an absent slot with this exact zero/empty
+  // sentinel. It is neutral only when authoritative usage already proves that
+  // absence; neither the sentinel nor this merge creates or renews proof.
+  if (previous.codexUsageEvidence && codexBudgetQuota(previous, now).budgetReady) {
+    for (const slot of ["primary", "secondary"] as const) {
+      const prefix = `x-codex-${slot}`;
+      if (previous.codexUsageEvidence[slot] === "absent" && previousWindow(previous, slot) === null &&
+          headers.get(`${prefix}-used-percent`) === "0" &&
+          headers.get(`${prefix}-window-minutes`) === "0" &&
+          headers.get(`${prefix}-reset-at`) === "" &&
+          headers.get(`${prefix}-reset-after-seconds`) === "0" &&
+          headers.get(`${prefix}-over-limit`) === null) {
+        headers = new Headers(headers);
+        for (const field of ["used-percent", "window-minutes", "reset-at", "reset-after-seconds"])
+          headers.delete(`${prefix}-${field}`);
+      }
+    }
+  }
   const contradiction = (["primary", "secondary"] as const).some(slot => {
     const raw = headers.get(`x-codex-${slot}-window-minutes`);
     return raw !== null && Number(raw) !== previousWindow(previous, slot)?.windowMinutes;
