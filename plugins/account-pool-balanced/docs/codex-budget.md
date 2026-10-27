@@ -79,3 +79,22 @@ A purpose-opted consumer must require this exact attestation and reject an absen
 or different purpose, while retaining project/schema/route/freshness/window/floor
 checks. Legacy consumers can ignore this additive field. This is neither a selected
 account reservation nor a new quota API for other providers.
+
+
+## Collecting usage during active requests
+
+Starting with Pooler 0.4.39, Codex usage reads may run while the same account is
+serving inference. The Codex adapter opts into this capability; other providers
+retain their busy-account refusal. Concurrent usage checks coalesce into the
+existing per-account single flight. Usage and inference share the existing OAuth
+refresh lock, persisted refresh-token ownership and network policy checks; this
+does not create an independent token refresh owner or bypass authentication.
+An upstream usage401 may request the existing guarded refresh and retry once.
+A definitive refresh refusal remains an authorization error.
+
+This removes the local busy guard before the usage endpoint is contacted. It
+does not guarantee provider availability or a complete payload: unknown, stale,
+malformed or contradictory evidence remains insufficient, and explicit absence
+still requires complete successful usage evidence. Existing budgets, project and
+trusted-purpose eligibility, account settings and all-eligible semantics do not
+change. Ordinary responses continue updating header evidence as before.

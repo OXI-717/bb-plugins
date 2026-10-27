@@ -99,6 +99,8 @@ export interface ProviderAdapter {
   upstreamName: string;
   inboundToken?(headers: Headers): string | null;
   refreshesApiKeyUsage?: boolean;
+  /** Read-only usage may share the account with inference via existing token locks. */
+  refreshesUsageWhileBusy?: boolean;
   importAccount(): Promise<ImportedProviderAccount>;
   parseRequest(
     body: Uint8Array,
