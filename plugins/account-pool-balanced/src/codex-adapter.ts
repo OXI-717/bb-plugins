@@ -1,3 +1,4 @@
+import { codexBudgetQuota } from "./codex-budget.js";
 import { poolErrorResponse } from "./pool-errors.js";
 import { z } from "zod";
 import { parseCodexRequestBody } from "./request-body.js";
@@ -154,6 +155,8 @@ function withoutClaudeSlots(previous: AccountQuota): AccountQuota {
 function invalidBudgetHeaders(headers: Headers): boolean {
   return (["primary", "secondary"] as const).some(slot => {
     const prefix = `x-codex-${slot}`;
+    const overLimit = headers.get(`${prefix}-over-limit`);
+    if (overLimit !== null && !/^(true|false)$/iu.test(overLimit)) return true;
     return ["used-percent", "window-minutes", "reset-at", "reset-after-seconds"].some(field => {
       const raw = headers.get(`${prefix}-${field}`);
       if (raw === null) return false;
@@ -176,17 +179,25 @@ function codexQuotaFromHeaders(
     const raw = headers.get(`x-codex-${slot}-window-minutes`);
     return raw !== null && Number(raw) !== previousWindow(previous, slot)?.windowMinutes;
   });
-  if (previous.codexUsageEvidence && (invalidBudgetHeaders(headers) || contradiction))
+  const refused = (["primary", "secondary"] as const).some(slot =>
+    headers.get(`x-codex-${slot}-over-limit`)?.toLowerCase() === "true");
+  if (previous.codexUsageEvidence && (invalidBudgetHeaders(headers) || contradiction || refused))
     previous = { ...previous, codexUsageEvidence: undefined };
   const priorPrimary = previousWindow(previous, "primary");
   const priorSecondary = previousWindow(previous, "secondary");
-  const primary = windowFromHeaders(headers, "primary", priorPrimary, now);
-  const secondary = windowFromHeaders(
-    headers,
-    "secondary",
-    priorSecondary,
-    now,
-  );
+  // Headers never create absence. A neutral unknown-duration slot must not erase
+  // an existing complete, fresh and unexpired usage proof of that same absence.
+  const completeUsage = previous.codexUsageEvidence !== undefined && codexBudgetQuota(previous, now).budgetReady;
+  const mergeSlot = (slot: LimitWindowSlot, prior: LimitWindow | null) => {
+    const window = windowFromHeaders(headers, slot, prior, now);
+    const provenAbsent = completeUsage && previous.codexUsageEvidence?.[slot] === "absent" && prior === null;
+    const neutral = window !== null && window.windowMinutes === null &&
+      (window.utilization === null || window.utilization === 0) && window.status !== "rejected" &&
+      (window.resetAt === null || window.resetAt <= now);
+    return provenAbsent && headers.get(`x-codex-${slot}-window-minutes`) === null && neutral ? null : window;
+  };
+  const primary = mergeSlot("primary", priorPrimary);
+  const secondary = mergeSlot("secondary", priorSecondary);
   if (primary === priorPrimary && secondary === priorSecondary) return previous;
   // A changed slot layout contradicts the older complete usage response.
   // Partial headers must not reuse that response to assert a missing duration.

@@ -163,3 +163,70 @@ it.each([
   expect(observed.codexUsageEvidence).toBeUndefined();
   expect(codexBudgetQuota(observed, now + 1).budgetReady).toBe(false);
 });
+
+
+it.each(['primary', 'secondary'] as const)('keeps explicit fresh usage absence for a neutral %s header slot without extending proof age', absentSlot => {
+  const adapter=createCodexAdapter({refreshUrl:'https://auth.example/token',usageUrl:'https://usage.example/usage'});
+  const presentSlot=absentSlot==='secondary'?'primary':'secondary';
+  const prior=quota(complete({primary_window:absentSlot==='primary'?null:weekly(),secondary_window:absentSlot==='secondary'?null:weekly()}));
+  // Synthetic raw headers recreate the observed normalized shape, not captured raw values.
+  const fields={
+    [`x-codex-${presentSlot}-used-percent`]:'25',
+    [`x-codex-${presentSlot}-window-minutes`]:'10080',
+    [`x-codex-${absentSlot}-used-percent`]:'0',
+    [`x-codex-${absentSlot}-reset-after-seconds`]:'0',
+  };
+  const observed=adapter.quotaFromHeaders(id,new Headers(fields),prior,'other',now+1681);
+  expect(observed.codexUsageEvidence).toEqual(prior.codexUsageEvidence);
+  expect(observed.limitWindows).toHaveLength(1);
+  expect(codexBudgetQuota(observed,now+1681)).toMatchObject({budgetReady:true,windows:{fiveHour:{state:'absent',source:'usage',observedAt:now},weekly:{state:'present',remainingPercent:75}}});
+  expect(codexBudgetQuota(observed,now+CODEX_BUDGET_MAX_AGE_MS+1).budgetReady).toBe(false);
+});
+
+it.each([
+  { 'x-codex-secondary-used-percent':'1' },
+  { 'x-codex-secondary-used-percent':'0.0001' },
+  { 'x-codex-secondary-window-minutes':'300' },
+  { 'x-codex-secondary-reset-after-seconds':'10' },
+  { 'x-codex-secondary-reset-at':String((now+10000)/1000) },
+  { 'x-codex-secondary-used-percent':'-1' },
+  { 'x-codex-secondary-used-percent':'' },
+  { 'x-codex-secondary-reset-after-seconds':'-1' },
+  { 'x-codex-secondary-window-minutes':'0' },
+  { 'x-codex-secondary-window-minutes':'300.5' },
+  { 'x-codex-secondary-over-limit':'true' },
+  { 'x-codex-secondary-over-limit':'TRUE' },
+  { 'x-codex-primary-over-limit':'true' },
+  { 'x-codex-secondary-over-limit':'unknown' },
+])('does not preserve absence across contradictory or malformed fields %j', fields => {
+  const adapter=createCodexAdapter({refreshUrl:'https://auth.example/token',usageUrl:'https://usage.example/usage'});
+  const headers=new Headers({'x-codex-secondary-used-percent':'0','x-codex-secondary-reset-after-seconds':'0'});
+  for(const [key,value] of Object.entries(fields))if(value!==undefined)headers.set(key,value);
+  const observed=adapter.quotaFromHeaders(id,headers,quota(complete()),'other',now+1);
+  expect(observed.codexUsageEvidence).toBeUndefined();
+  expect(codexBudgetQuota(observed,now+1).budgetReady).toBe(false);
+});
+
+it.each(['missing','partial','stale','future','expired-reset','denied','limited'] as const)('neutral headers never manufacture or renew absent evidence from %s usage', kind => {
+  const adapter=createCodexAdapter({refreshUrl:'https://auth.example/token',usageUrl:'https://usage.example/usage'});
+  const prior=quota(complete());
+  if(kind==='missing')delete prior.codexUsageEvidence;
+  if(kind==='partial')prior.codexUsageEvidence!.secondary='unknown';
+  if(kind==='stale')prior.codexUsageEvidence!.observedAt=now-CODEX_BUDGET_MAX_AGE_MS-1;
+  if(kind==='future')prior.codexUsageEvidence!.observedAt=now+1000;
+  if(kind==='expired-reset')prior.limitWindows[0]!.resetAt=now;
+  if(kind==='denied')prior.codexUsageEvidence!.allowed=false;
+  if(kind==='limited')prior.codexUsageEvidence!.limitReached=true;
+  const observed=adapter.quotaFromHeaders(id,new Headers({'x-codex-secondary-used-percent':'0','x-codex-secondary-reset-after-seconds':'0'}),prior,'other',now+1);
+  expect(codexBudgetQuota(observed,now+1).budgetReady).toBe(false);
+  expect(codexBudgetQuota(observed,now+1).windows.fiveHour.state).toBe('unknown');
+});
+
+
+it('uses absence proof rather than a raw zero sentinel when a neutral reset is already past', () => {
+  const adapter=createCodexAdapter({refreshUrl:'https://auth.example/token',usageUrl:'https://usage.example/usage'});
+  const prior=quota(complete());
+  const observed=adapter.quotaFromHeaders(id,new Headers({'x-codex-secondary-used-percent':'0','x-codex-secondary-reset-at':String((now-10000)/1000)}),prior,'other',now+1);
+  expect(observed.codexUsageEvidence).toEqual(prior.codexUsageEvidence);
+  expect(codexBudgetQuota(observed,now+1)).toMatchObject({budgetReady:true,windows:{fiveHour:{state:'absent',source:'usage',observedAt:now}}});
+});
