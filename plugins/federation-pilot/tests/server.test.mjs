@@ -9,7 +9,7 @@ function harness(store=new Map()){
  const primaryIds=new Set(),primaryErrors=new Map(),remoteIds={alpha:new Set(['proj_alpha','thr_alpha','env_alpha']),beta:new Set(['proj_beta','thr_beta'])};
  const failures=new Map(),moved=new Set();let generation=0;
  const get=async args=>{const id=Object.values(args)[0];if(primaryErrors.has(id))throw primaryErrors.get(id);if(primaryIds.has(id))return {id};throw Object.assign(Error('not found'),{status:404});};
- const bb={cli:{register:value=>cli=value},agents:{registerTool:value=>tools.set(value.name,value),configure:()=>{}},storage:{kv:{get:async key=>store.get(key),set:async(key,value)=>{store.set(key,value)}}},settings:{define:()=>({get:async()=>config})},sdk:Object.fromEntries(['threads','projects','hosts','environments'].map(k=>[k,{get}])),log:{warn:()=>{}},onDispose:fn=>dispose=fn,
+ const bb={rpc:{register:()=>{}},cli:{register:value=>cli=value},agents:{registerTool:value=>tools.set(value.name,value),configure:()=>{}},storage:{kv:{get:async key=>store.get(key),set:async(key,value)=>{store.set(key,value)}}},settings:{define:()=>({get:async()=>config})},sdk:Object.fromEntries(['threads','projects','hosts','environments'].map(k=>[k,{get}])),log:{warn:()=>{}},onDispose:fn=>dispose=fn,
   hosts:{experimental_client:()=>({experimental_onSignal:(k,fn)=>signals.set(k,fn),experimental_onWorkerExit:()=>{},call:async(method,input)=>{
    calls.push({method,...input});
    if(method==='imageUpload')return {status:201,contentType:'application/json',bodyBase64:Buffer.from(JSON.stringify({type:'localImage',sourceProjectId:input.projectId,path:'image.png',name:'image.png',mimeType:input.mimeType,sizeBytes:Buffer.from(input.bytesBase64,'base64').length})).toString('base64')};

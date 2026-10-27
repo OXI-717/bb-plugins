@@ -113,3 +113,9 @@ bb plugin build .
 The tests use synthetic IDs and fake networks, plus a loopback multipart upload test; they do not start models, use real SSH targets or change a BB installation. `tests/ws-manager.integration.mts` is an optional compatibility probe against BB's actual WebSocketManager: set `BB_CHECKOUT` to a BB 0.46.1 source checkout with dependencies installed and run it with that checkout's TypeScript runner. No private checkout path is built in.
 
 See [the bridge contract](CONTRACT.md) and [review and validation](REVIEW.md). The public source in this directory is canonical. Runtime settings, logs, screenshots and real deployment evidence must remain outside this repository.
+
+## Independent-server handoff
+
+The matching Handoff plugin can copy a user-selected saved snapshot and selected
+attachments to a ready remote environment. See [contract and limits](HANDOFF.md).
+This does not enroll remote machines or enable agent consumers.

@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { assertSafeSshConfig, SSH_OPTIONS } from './ssh-policy.ts';
 import { hostContract, hostSignals } from './contract.ts';
 import {uploadImage} from './image-upload.ts';
+import {uploadHandoffFile,handoffHostPayload} from './handoff-upload.ts';
 
 // The SSH child belongs to this host worker. No shell, enrollment or agent runs.
 type Tunnel={child:ChildProcess|null,pending:Promise<number>};
@@ -63,6 +64,11 @@ export default experimental_defineHostEntry({
   contract:hostContract,
   experimental_signals:hostSignals,
   handlers:{
+    async handoffUpload(input,context){
+      const payload=handoffHostPayload(input);
+      const port=await ensureTunnel(input.sshTarget,input.port);
+      return uploadHandoffFile(port,payload,AbortSignal.any([context.signal,context.lifecycle.signal,AbortSignal.timeout(20000)]));
+    },
     async imageUpload(input,context){
       const port=await ensureTunnel(input.sshTarget,input.port);
       return uploadImage(port,input,AbortSignal.any([context.signal,context.lifecycle.signal,AbortSignal.timeout(20000)]));

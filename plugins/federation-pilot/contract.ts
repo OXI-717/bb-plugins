@@ -1,6 +1,7 @@
 import { defineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import {IMAGE_MAX_BYTES, IMAGE_MAX_BASE64, IMAGE_MIMES, isImagePath} from './image-format.ts';
+import {handoffUploadSchema} from './handoff-contract.ts';
 
 export const imageUploadSchema = z.object({
   projectId: z.string().regex(/^proj_[a-z0-9]+$/),
@@ -28,6 +29,10 @@ export const requestSchema = z.object({
   body: z.string().max(3 * 1024 * 1024).nullable().default(null),
 }).strict();
 export const hostContract = defineRpcContract({
+  handoffUpload: {
+    input: handoffUploadSchema.extend(destination),
+    output: z.object({status:z.number().int(), contentType:z.string(), bodyBase64:z.string()}),
+  },
   imageUpload: {
     input: imageUploadSchema.extend(destination),
     output: z.object({status:z.number().int(), contentType:z.string(), bodyBase64:z.string()}),

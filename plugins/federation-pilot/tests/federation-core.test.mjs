@@ -371,3 +371,17 @@ test('send keeps cross-server mention bytes and timeline read never claims refer
  assert.equal(t.env.primaryCalls().at(-1).path,'/api/v1/threads/thr_local01');
  t.fed.dispose();
 });
+
+test('only explicit remote handoff RPCs reach primary; legacy machine operations remain blocked',async()=>{
+ const t=setup();await boot(t);t.env.calls.length=0;
+ const body=JSON.stringify({projectId:'proj_remote01',environmentId:'env_remote01'});
+ for(const method of ['remoteTargets','remoteOptions','remotePrepare','remoteStart','remoteStatus']){
+  await t.fetch(`/api/v1/plugins/handoff/rpc/${method}`,{method:'POST',body});
+  assert.equal(t.env.calls.at(-1).to,'primary');
+ }
+ const count=t.env.calls.length;
+ for(const method of ['startHandoff','listTargets','remoteStartExtra']){
+  const r=await t.fetch(`/api/v1/plugins/handoff/rpc/${method}`,{method:'POST',body});assert.equal(r.status,409);
+ }
+ assert.equal(t.env.calls.length,count);
+});

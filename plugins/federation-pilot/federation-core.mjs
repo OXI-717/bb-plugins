@@ -296,7 +296,10 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     const queryIds = [];
     for (const [k, v] of url.searchParams) if (SCOPE_PARAMS.includes(k) || ID_RE.test(v)) queryIds.push(v);
 
-    // Other plugins: never hand remote objects to local plugin code.
+    // Only the explicit federation-aware handoff RPCs accept remote selectors
+    // on primary. Their backend validates destination ownership and permissions.
+    if(method==='POST'&&/^\/api\/v1\/plugins\/handoff\/rpc\/remote(Targets|Options|Prepare|Start|Status)$/.test(url.pathname))return null;
+    // Other plugin operations remain unsupported for remote objects.
     const pluginMatch = /^\/api\/v1\/plugins\/([^/]+)\/(rpc|http)\//u.exec(url.pathname);
     if (pluginMatch) {
       const raw = READ_METHODS.has(method) ? null : await readBody(req, init);

@@ -6,6 +6,8 @@ import {parseServers,publicServer,type RemoteConfig} from './configuration.ts';
 import {assertExclusive,entityPath,PrimaryCollisionError} from './ownership.ts';
 import {createAgentReads,registerAgentReads} from './agent-read.ts';
 import {registerImageRoutes} from './image-routes.ts';
+import {handoffRpc} from './handoff-contract.ts';
+import {createHandoffs} from './handoff-service.ts';
 
 export default function plugin(bb:BbPluginApi){
  const settings=bb.settings.define({
@@ -95,6 +97,16 @@ export default function plugin(bb:BbPluginApi){
   }
  }
  registerAgentReads(bb,createAgentReads({configurations,exclusive,get:json}));
+ const handoffs=createHandoffs({configurations,selected,exclusive,get:json,
+  upload:(c,input)=>host.call('handoffUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId}),
+  create:(c,body)=>upstream(c,'POST','/api/v1/threads',body),
+  load:id=>bb.storage.kv.get(`handoff:${id}`),save:(id,value)=>bb.storage.kv.set(`handoff:${id}`,value),
+ });
+ bb.rpc.register(handoffRpc,{
+  handoffTargets:()=>handoffs.targets(),handoffOptions:input=>handoffs.options(input),
+  handoffBegin:input=>handoffs.begin(input),handoffUpload:input=>handoffs.upload(input),
+  handoffCommit:input=>handoffs.commit(input),handoffStatus:input=>handoffs.status(input),
+ });
  registerImageRoutes(bb,{selected,exclusive,
   upload:(c,input)=>host.call('imageUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId}),
   get:(c,path)=>upstream(c,'GET',path),
