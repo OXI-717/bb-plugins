@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { catalogMigration, createCatalog } from "./catalog.js";
 import { manageBbCatalog } from "./bb-management.js";
 
@@ -41,12 +41,15 @@ describe("BB management projection", () => {
         if (args[1] === "show") return { id: "auto_test", projectId: "proj_test", name: "Daily", enabled: true };
         throw new Error("BB delete failed");
       };
-      await expect(manageBbCatalog(catalog, command, key, "delete")).rejects.toThrow("BB delete failed");
+      const confirmed = vi.fn();
+      await expect(manageBbCatalog(catalog, command, key, "delete", confirmed)).rejects.toThrow("BB delete failed");
+      expect(confirmed).not.toHaveBeenCalled();
       expect(catalog.list().tasks).toHaveLength(1);
       await manageBbCatalog(catalog, async (...args) => {
         calls.push(args);
         return args[1] === "show" ? { id: "auto_test", projectId: "proj_test", name: "Daily", enabled: true } : { ok: true };
-      }, key, "delete");
+      }, key, "delete", () => { expect(catalog.list().tasks).toHaveLength(1); confirmed(); });
+      expect(confirmed).toHaveBeenCalledTimes(1);
       expect(calls.at(-1)).toEqual(["automation", "delete", "auto_test", "--project", "proj_test", "--yes"]);
       expect(catalog.list().tasks).toHaveLength(0);
       expect(db.prepare("SELECT count(*) AS total FROM automation_catalog_runs").get()).toEqual({ total: 0 });
