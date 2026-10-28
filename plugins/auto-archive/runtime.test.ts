@@ -103,7 +103,8 @@ function host(
   }));
   const bb = {
     sdk: {
-      threads: { list, update, archive, events: { list: events } },
+      threads: { list, update, archive, events: { list: events },
+        experimental_listPluginMetadata: vi.fn(async () => ({ threads: [] })) },
       environments: { status },
     },
   } as unknown as BbPluginApi;
@@ -320,7 +321,7 @@ it("live exclusion status pages, deduplicates and counts reasons using title onl
     await exclusionStatus(h.bb, { keepThreadIds: ["kept", "missing"] }),
   ).toEqual({
     scanned: 103,
-    reasons: { pinned: 101, pinPrefix: 1, uppercase: 1, keepThreadIds: 1 },
+    reasons: { pinned: 101, pinPrefix: 1, permanent: 0, keepThreadIds: 1 },
     overlapping: true,
   });
   expect(h.list).toHaveBeenCalledWith(expect.objectContaining({ offset: 100 }));
@@ -341,7 +342,17 @@ it("preserves pin-prefixed fallback titles in selection and live status", async 
   expect((await exclusionStatus(h.bb, config)).reasons).toEqual({
     pinned: 0,
     pinPrefix: 1,
-    uppercase: 0,
+    permanent: 0,
     keepThreadIds: 0,
   });
+});
+
+it("permanent metadata protects ancestors and failed metadata reads never archive", async () => {
+  const h = host({}, [{parentThreadId: "root"}]);
+  const read = vi.mocked(h.bb.sdk.threads.experimental_listPluginMetadata);
+  read.mockResolvedValue({threads: [{threadId: "child0", metadata: {permanent: true}}]});
+  expect((await runOperation(h.bb, config, {now})).actions).toEqual([]);
+  read.mockRejectedValue(new Error("metadata unavailable"));
+  await expect(runOperation(h.bb, config, {now})).rejects.toThrow("metadata unavailable");
+  expect(h.archive).not.toHaveBeenCalled();
 });

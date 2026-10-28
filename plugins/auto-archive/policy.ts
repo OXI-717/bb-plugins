@@ -12,6 +12,7 @@ export interface Snapshot {
   status: string;
   pinnedAt: number | null;
   workspace: "clean" | "dirty" | "unknown";
+  permanent?: boolean;
   busy?: boolean;
   archived?: boolean;
 }
@@ -87,13 +88,13 @@ export function isUppercaseTitle(title: string | null): boolean {
   );
 }
 export function threadExclusions(
-  t: Pick<Snapshot, "id" | "title" | "titleFallback" | "pinnedAt">,
+  t: Pick<Snapshot, "id" | "title" | "titleFallback" | "pinnedAt" | "permanent">,
   c: Pick<Config, "keepThreadIds">,
 ) {
   return {
     pinned: t.pinnedAt !== null,
     pinPrefix: (t.title ?? t.titleFallback)?.startsWith("📌") === true,
-    uppercase: isUppercaseTitle(t.title),
+    permanent: t.permanent === true,
     keepThreadIds: c.keepThreadIds.includes(t.id),
   };
 }
@@ -101,11 +102,11 @@ export function threadExclusions(
 export function countThreadExclusions(
   threads: readonly Pick<
     Snapshot,
-    "id" | "title" | "titleFallback" | "pinnedAt" | "archived"
+    "id" | "title" | "titleFallback" | "pinnedAt" | "archived" | "permanent"
   >[],
   c: Pick<Config, "keepThreadIds">,
 ) {
-  const counts = { pinned: 0, pinPrefix: 0, uppercase: 0, keepThreadIds: 0 };
+  const counts = { pinned: 0, pinPrefix: 0, permanent: 0, keepThreadIds: 0 };
   for (const t of threads)
     if (!t.archived) {
       const reasons = threadExclusions(t, c);
