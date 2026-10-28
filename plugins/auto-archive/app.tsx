@@ -27,6 +27,9 @@ export function PermanentThread({ threadId }: { threadId: string }) {
     fontSize: 12, whiteSpace: "nowrap", color: error ? "var(--destructive)" : "inherit" }}
     title={error ? "Не удалось сохранить или прочитать отметку. Повторите попытку." :
       "Постоянный тред"}>
+    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M16 3 21 8l-4 1-4 4-1 5-3-3-5 5 5-5-3-3 5-1 4-4z" />
+    </svg>
     <input type="checkbox" aria-label="Постоянный тред" checked={permanent === true}
       disabled={permanent === null || busy} onChange={async (event) => {
         const value = event.target.checked;
@@ -38,9 +41,7 @@ export function PermanentThread({ threadId }: { threadId: string }) {
         } catch { setError(true); }
         finally { saving.current = false; setBusy(false); }
       }} />
-    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M16 3 21 8l-4 1-4 4-1 5-3-3-5 5 5-5-3-3 5-1 4-4z" />
-    </svg>{error ? " ⚠" : ""}
+    {error ? " ⚠" : ""}
   </label>;
 }
 
