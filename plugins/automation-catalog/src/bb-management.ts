@@ -10,6 +10,7 @@ export async function manageBbCatalog(
   command: Command,
   key: string,
   action: "pause" | "resume" | "delete",
+  onConfirmed?: () => void,
 ) {
   const task = catalog.entry(key);
   const source = catalog.list().sources.find((item) => item.id === task.sourceId);
@@ -21,6 +22,8 @@ export async function manageBbCatalog(
   if (action === "pause" && !current.enabled) throw new Error("Already disabled");
   if (action === "resume" && current.enabled) throw new Error("Already enabled");
   await command("automation", action, task.id, "--project", task.projectId, ...(action === "delete" ? ["--yes"] : []));
+  try { onConfirmed?.(); }
+  catch { throw new Error("Настройка в BB изменена, но запись в журнал не сохранена. Обновите каталог и проверьте историю перед повторным действием."); }
   if (action === "delete") catalog.remove(key);
   else catalog.setBbState(key, action === "pause" ? "paused" : "active");
   return { ok: true as const };

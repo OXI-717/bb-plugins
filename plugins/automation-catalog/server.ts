@@ -1,5 +1,6 @@
 import { PLUGIN_CLI_OUTPUT_MAX_BYTES, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { catalogMigration, registerCatalog } from "./src/catalog";
+import { auditMigration } from "./src/audit";
 
 export default function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
@@ -9,6 +10,10 @@ export default function plugin(bb: BbPluginApi) {
     if (!db.prepare("SELECT version FROM catalog_migrations WHERE version = 1").get()) {
       db.exec(catalogMigration);
       db.prepare("INSERT INTO catalog_migrations(version) VALUES (1)").run();
+    }
+    if (!db.prepare("SELECT version FROM catalog_migrations WHERE version = 2").get()) {
+      db.exec(auditMigration);
+      db.prepare("INSERT INTO catalog_migrations(version) VALUES (2)").run();
     }
   })();
   const catalog = registerCatalog(bb, db);

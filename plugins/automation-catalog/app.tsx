@@ -7,6 +7,7 @@ import { definePluginApp, useRealtime, useRpc, useBbNavigate } from "@get-bb/plu
 import type { catalogRpcContract } from "./src/catalog";
 import type { CatalogList } from "./src/catalog-types";
 import { CatalogDetailView } from "./detail";
+import { AuditPage } from "./audit";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { catalogSchedule } from "./lib/catalog-schedule";
@@ -99,6 +100,8 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
     } catch {}
     setPage(0);
   }, [filters]);
+  const auditRoute = /^\/?audits(?:\/(ext_[a-zA-Z0-9_-]+))?\/?$/.exec(subPath);
+  if (auditRoute) return <AuditPage taskKey={auditRoute[1]} />;
   if (compose)
     return (
       <AutomationComposer intent={compose} onBack={() => setCompose(null)} />
@@ -202,6 +205,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => navigate.toPluginPanel("catalog/audits")}>Журнал аудитов</Button>
             <span title="Черновик разбора по выбранным фильтрам, во всех разделах состояний. Агент запустится только после отправки.">
             <Button size="sm" variant="outline" disabled={!data || triage.length === 0}
               onClick={() => { if (data) setCompose(triageIntent(data, triage, filters, Date.now())); }}>

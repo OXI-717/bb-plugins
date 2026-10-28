@@ -84,3 +84,43 @@ MIT; derived catalog code and vendored UI retain BB's upstream attribution in th
 Rows show the configured agent model and project association. BB agent metadata is projected by both scheduled collection and manual refresh; prompts and scripts are excluded. For existing-thread automation targets, the thread's settings control execution, so the catalog explicitly labels the stored model as configuration rather than proof of the effective model. Locally managed targets offer navigation to the thread. Historical model usage, token spend and models invoked inside scripts are not inferred.
 
 The project selector includes unlinked tasks. An external project name without a BB project ID is shown as external/unlinked; the catalog's discussion parent does not imply execution ownership. Built-in Personal is labelled separately from ordinary projects called Personal. Legacy snapshots with no agent metadata remain readable and show that model calls have not been verified.
+
+### Durable audit and decision journal
+
+Each detail card contains **История проверок и решений**. The **Журнал аудитов**
+button opens a searchable, paginated archive at
+`/plugins/automation-catalog/catalog/audits`. Records preserve the task identity,
+actual check time, recording time, outcome, checks, changes, decision, remaining
+work, evidence references and optional audit thread. Removing a task or a missing
+catalog card retains this journal. Corrections append a new entry rather than
+rewriting history. A journal entry does not change scheduler state or dismiss an
+incident. Pause/resume/delete through the panel also records the confirmed action,
+explicitly without claiming that execution passed. External scheduler actions and
+native CLI changes require an explicit audit entry.
+
+Agents finish each audit with the supported RPC (see the installed skill):
+
+```json
+{
+  "key": "ext_example",
+  "idempotencyKey": "inspection-example-1",
+  "outcome": "partial",
+  "decision": "defer",
+  "summary": "Inputs checked; execution awaits access",
+  "checks": "Read the current definition and verified required files",
+  "changes": "No scheduler changes",
+  "remaining": "Verify execution after access is available",
+  "evidence": ["https://example.com/audit-receipt"]
+}
+```
+
+```sh
+bb plugin rpc call automation-catalog catalog_audit_append --input-file audit.json --json
+bb plugin rpc call automation-catalog catalog_audit_list --input-file audit-query.json --json
+```
+
+For the list call, `audit-query.json` may contain `{"key":"ext_example","limit":20}`.
+Reuse the same idempotency key and payload after an uncertain response; a changed
+payload with that key is rejected. Passed checks require evidence. Records are
+bounded to 32 KiB and 16 evidence references. Keep credentials and personal message
+contents out of notes; the journal has the same access boundary as the catalog.
