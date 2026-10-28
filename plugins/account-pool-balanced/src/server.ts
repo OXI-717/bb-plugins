@@ -106,6 +106,7 @@ export function createAccountPoolPlugin(
     );
     // Persist the sanitized configuration so retired switches are not retained.
     await bb.storage.kv.set("config",currentSettings);
+    let onAdmissionLimitsChanged = () => {};
     const config: AccountPoolConfigController = {
       get: () => currentSettings,
       set: async (input) => {
@@ -116,7 +117,9 @@ export function createAccountPoolPlugin(
           ...update,
         });
         await bb.storage.kv.set("config", next);
+        const limitChanged = next.maxConcurrentRequestsPerAccount !== currentSettings.maxConcurrentRequestsPerAccount;
         currentSettings = next;
+        if (limitChanged) onAdmissionLimitsChanged();
         bb.realtime.publish(ACCOUNT_POOL_CONFIG_CHANGED, {});
         return next;
       },
@@ -147,7 +150,7 @@ export function createAccountPoolPlugin(
         : hubTokens.forThread(context.hostId, context.projectId, context.threadId);
     const db = bb.storage.database();
     bb.storage.migrate(db, QUOTA_MIGRATIONS);
-    const quotas = new QuotaStore(db);
+    const quotas = new QuotaStore(db, now);
     const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
     await journal.initialize();
     bb.onDispose(()=>journal.close());
@@ -213,6 +216,7 @@ export function createAccountPoolPlugin(
       onAccountsChanged: () =>
         bb.realtime.publish(ACCOUNT_POOL_ACCOUNTS_CHANGED, {}),
     });
+    onAdmissionLimitsChanged = () => hub.admissionLimitsChanged();
     if (transport !== null) {
       bb.providers.experimental_contributeEnv("acp-oxi-devin-pool", async context => {
         if (!(await operations.isRoutingEnabled("devin")) || await isThreadBypassed(context) ||

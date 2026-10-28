@@ -229,7 +229,7 @@ function codexQuotaFromHeaders(
     limitWindows: orderedWindows([primary, secondary]),
     codexUsageEvidence: layoutUnchanged ? previous.codexUsageEvidence : undefined,
     observedAt: now,
-    heldUntil: null,
+    heldUntil: previous.heldUntil,
   };
 }
 

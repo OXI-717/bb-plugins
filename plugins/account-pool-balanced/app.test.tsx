@@ -85,6 +85,7 @@ function account(overrides: Partial<AccountSummary> = {}): AccountSummary {
     successfulRequests: 0,
     resetCredits: null,
     inFlight: 0,
+    queuedRequests: 0, concurrencyLimit: 2,
     capLimit: null,
     eligible: true,
     capReached: false,
@@ -140,6 +141,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
     cursorUpstreamBaseUrl: "https://api2.cursor.sh",
     devinUpstreamBaseUrl: "https://server.codeium.com",
+    maxConcurrentRequestsPerAccount: 2,
     switchThreshold: 0.98,
     routingStrategy: "sequential",
     reserveDrainHours: 24,
@@ -542,6 +544,18 @@ describe("Account Pool settings", () => {
         input: { provider: "claude", enabled: false },
       }),
     );
+  });
+
+  it("shows shared provider pressure and validates the per-account request limit",async()=>{
+    const slot=render([account({inFlight:1,queuedRequests:3})],{"config.set":()=>config({maxConcurrentRequestsPerAccount:1})});
+    expect(await slot.findByText(/В работе: 1; в очереди: 3/)).toBeTruthy();
+    fireEvent.click(await slot.findByRole("button",{name:"Дополнительно"}));
+    const input=await slot.findByLabelText("Одновременных запросов на аккаунт");
+    fireEvent.change(input,{target:{value:"0"}});fireEvent.blur(input);
+    expect(await slot.findByText("Нужно целое число от 1 до 32.")).toBeTruthy();
+    expect(slot.rpcCalls.filter(c=>c.method==="config.set")).toHaveLength(0);
+    fireEvent.change(input,{target:{value:"1"}});fireEvent.blur(input);
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:"config.set",input:{maxConcurrentRequestsPerAccount:1}}));
   });
 
   it("edits Advanced config fields and shows URL validation inline", async () => {

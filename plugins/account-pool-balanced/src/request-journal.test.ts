@@ -112,3 +112,16 @@ it('removes a temporary snapshot after rename failure and isolates cleanup failu
  const restored=new RequestJournal(f.file,()=>f.now);await expect(restored.initialize()).resolves.toBeUndefined();
  expect(restored.snapshot().storageFailuresSinceStart).toBe(1);await restored.close();remove.mockRestore();
 });
+
+it('bounds returned pages while aggregating every retained provider/account without double counting',async()=>{
+ const f=await fixture(),id='11111111-1111-4111-8111-111111111111';
+ for(let i=0;i<500;i++)f.journal.record(f.event({event:'upstream',accountId:id,status:i<3?429:200,accountInFlight:2}));
+ f.journal.record(f.event({provider:'claude',event:'upstream',status:429}));
+ f.journal.record(f.event({event:'hold',accountId:id,status:429,holdSource:'upstream429'}));
+ const page=f.journal.snapshot(100);expect(page.rows).toHaveLength(100);
+ expect(page).toMatchObject({totalRetainedRows:502,rowsTruncated:true,coverage:'retained-events-only'});
+ expect(page.providers).toEqual(expect.arrayContaining([
+  expect.objectContaining({provider:'codex',upstream429:3,accounts:[expect.objectContaining({accountId:id,upstream429:3,peakInFlight:2})]}),
+  expect.objectContaining({provider:'claude',upstream429:1})]));
+ expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(200_000);
+});

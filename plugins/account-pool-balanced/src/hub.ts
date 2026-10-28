@@ -1,3 +1,4 @@
+import { AccountAdmission, AdmissionUnavailable, ACCOUNT_QUEUE_MAX_WAIT_MS } from "./account-admission.js";
 import {createAgyAdapter} from "./agy-adapter.js";
 import { observeCodexQuotaHeaders } from './codex-quota-observation.js';
 import { zaiBudgetQuota, ZAI_BUDGET_MAX_AGE_MS } from './zai-budget.js';
@@ -199,7 +200,9 @@ export class AccountPoolHub {
 
   private readonly vpn;
   private readonly networkFlights:NetworkFlights;
+  private readonly admission: AccountAdmission;
   constructor(private readonly options: HubOptions) {
+    this.admission = new AccountAdmission(() => options.getSettings().maxConcurrentRequestsPerAccount, options.now);
     this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnPayload,options.guardCheck);
     this.networkFlights = new NetworkFlights(options.fetch, () => this.stopped.signal,
       provider => this.assertNetworkAllowed(provider), (provider, drainable) => {
@@ -219,6 +222,7 @@ export class AccountPoolHub {
     return (input,init)=>this.networkFlights.fetch(provider,input,init);
   }
 
+  admissionLimitsChanged(): void { this.admission.limitsChanged(); }
   async enforceNetworkPolicy():Promise<void>{await this.networkFlights.enforce();}
 
   async start(signal: AbortSignal): Promise<void> {
@@ -263,7 +267,7 @@ export class AccountPoolHub {
     return this.adapter(provider).importAccount();
   }
 
-  observations() { return this.options.journal?.snapshot() ?? { unavailable:true }; }
+  observations() { return this.options.journal?.snapshot(100) ?? { unavailable:true }; }
   private observe(trace: Trace, fields: Partial<Observation>): void {
     try {
       this.options.journal?.record({ ...trace, at:this.options.now(), attempt:0, event:'request', accountId:null,
@@ -520,6 +524,8 @@ export class AccountPoolHub {
           successfulRequests: this.options.quotas.successfulRequests(account.id),
           resetCredits: account.provider === "codex" || account.provider === "claude" ? this.options.quotas.resetCredits(account.id) : null,
           inFlight: this.inFlightByAccount.get(account.id) ?? 0,
+          queuedRequests: this.admission.waiting(account.id) + Math.max(0, this.admission.reserved(account.id) - (this.inFlightByAccount.get(account.id) ?? 0)),
+          concurrencyLimit: settings.maxConcurrentRequestsPerAccount,
           capLimit: limit,
           eligible: eligibleIds.has(account.id),
           drainOpensAt: drainOpensAt(quota, now, reserveHours(account, settings.reserveDrainHours) * 3600000, workWeek),
@@ -542,7 +548,6 @@ export class AccountPoolHub {
   ): Promise<Response> {
     const signal = AbortSignal.any([request.signal, this.stopped.signal]);
     const attempted = new Set<string>();
-    const waited = new Set<string>();
     const routing: RoutingAttempt = {
       binding: null,
       active: null,
@@ -596,46 +601,6 @@ export class AccountPoolHub {
         if (selected === null) break;
         lastAccount=selected.account.id;
         let pacing: PacingFlight | null = null;
-        const heldMs = (selected.quota.heldUntil ?? 0) - this.options.now();
-        let activePacing = this.pacingByAccount.get(selected.account.id);
-        if (
-          activePacing !== undefined &&
-          (activePacing.heldUntil !== selected.quota.heldUntil || heldMs <= 0)
-        ) {
-          this.releasePacing(selected.account.id, activePacing);
-          activePacing = undefined;
-        }
-        if (heldMs > 0) {
-          if (activePacing !== undefined) {
-            pacing = activePacing;
-            waited.add(selected.account.id);
-            await abortable(activePacing.result, signal);
-          } else if (
-            heldMs > MAX_INLINE_HOLD_MS ||
-            waited.has(selected.account.id)
-          ) {
-            this.observe(trace,{event:'local-held',errorClass:'local-held',attempt,accountId:selected.account.id,status:429,holdSource:'existing-hold',heldUntil:selected.quota.heldUntil,retryAfterMs:Math.ceil(heldMs/1000)*1000});
-            failure = {
-              status: 429,
-              message:
-                "The current Account Pooler account is temporarily rate limited.",
-              headers: { "retry-after": String(Math.ceil(heldMs / 1_000)) },
-            };
-            if (selected.keepAffinity)
-              return result(this.errorResponse(adapter, request,
-                failure.status,
-                failure.message,
-                failure.headers,
-              ));
-            attempted.add(selected.account.id);
-            previousAccountId = selected.account.id;
-            continue;
-          } else {
-            waited.add(selected.account.id);
-            await waitForDelay(heldMs, signal);
-            continue;
-          }
-        }
         previousAccountId = selected.account.id;
         attempted.add(selected.account.id);
         const changed = await this.options.accounts.recordUsed(
@@ -670,7 +635,7 @@ export class AccountPoolHub {
           continue;
         }
         let authRetried = false;
-        let paced = waited.has(selected.account.id);
+        let paced = false;
         while (true) {
           signal.throwIfAborted();
           if (purpose === "autopilot") {
@@ -682,7 +647,6 @@ export class AccountPoolHub {
           attempt++;
           distinctAccounts.add(selected.account.id);
           const attemptStartedAt=this.options.now();
-          this.observe(trace,{event:'attempt',attempt,accountId:selected.account.id});
           try {
             upstream = await this.fetchUpstream(
               request,
@@ -691,7 +655,7 @@ export class AccountPoolHub {
               secret,
               adapter,
               trace, attempt,
-              purpose ? {purpose,projectId,family} : undefined,
+              {purpose,projectId,family,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS},
             );
           } catch (error) {
             if (pacing !== null) {
@@ -862,6 +826,10 @@ export class AccountPoolHub {
             failure.headers,
           ));
     } catch (error) {
+      if (error instanceof AdmissionUnavailable) {
+        this.observe(trace,{event:'queue-wait',attempt,accountId:lastAccount,status:503,errorClass:error.code==='POOL_QUEUE_FULL'?'queue-full':'queue-timeout',durationMs:Math.max(0,this.options.now()-startedAt)});
+        return result(this.errorResponse(adapter, request, 503, error.message, {"x-bb-pool-error":error.code,"retry-after":"1"}));
+      }
       if (error instanceof VpnRequiredError) return result(this.errorResponse(adapter, request, 503, error.message, { "x-bb-pool-error": error.code, "retry-after": "10" }));
       if (!signal.aborted) {
         this.observe(trace,{event:'result',attempt,accountId:lastAccount,outcome:'error',errorClass:'request-error',durationMs:Math.max(0,this.options.now()-startedAt)});
@@ -1087,9 +1055,8 @@ export class AccountPoolHub {
       ({ account }) =>
         candidateIds.has(account.id) && !attempted.has(account.id),
     );
-    const candidates = unattempted.filter(
-      ({ quota }) => quota.heldUntil === null || quota.heldUntil <= now,
-    );
+    const ready = unattempted.filter(({ quota }) => quota.heldUntil === null || quota.heldUntil <= now);
+    const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (a.quota.heldUntil ?? 0) - (b.quota.heldUntil ?? 0)).slice(0,1);
     let binding =
       affinityKey === null ? undefined : this.affinityBindings.get(affinityKey);
     const boundAccountId =
@@ -1154,7 +1121,7 @@ export class AccountPoolHub {
           boundAccountId === null &&
           previousAccountId === null &&
           activeAccount !== undefined &&
-          unattempted.includes(activeAccount) && tier(activeAccount) <= bestTier
+          candidates.includes(activeAccount) && tier(activeAccount) <= bestTier
             ? activeAccount
             : next) ??
           null);
@@ -1198,6 +1165,9 @@ export class AccountPoolHub {
     const advance =
       !familyDetour(active.accountId) &&
       (activeAccount === undefined ||
+        // Skipping a cooling unbound cursor has the same effect as its former
+        // local-held detour; established session bindings still wait in place.
+        (boundAccountId === null && (activeAccount.quota.heldUntil ?? 0) > now && active.accountId !== selected.account.id) ||
         active.accountId === selected.account.id ||
         (activeAccount !== undefined && tier(selected) < tier(activeAccount)) ||
         (active === routing.active && attempted.has(active.accountId)));
@@ -1381,8 +1351,15 @@ export class AccountPoolHub {
     secret: AccountSecret,
     adapter: ProviderAdapter,
     trace: Trace, attempt: number,
-    admission?: {purpose:"autopilot";projectId:string|null;family:ModelFamily},
+    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;deadline:number},
   ): Promise<UpstreamResult> {
+    const admissionSignal = AbortSignal.any([request.signal, this.stopped.signal]);
+    const deadline = admission.deadline;
+    const cooldown = () => this.options.quotas.get(account.id).heldUntil;
+    const queuedAt = this.options.now();
+    const waiting = this.admission.waiting(account.id)>0 || this.admission.reserved(account.id)>=this.options.getSettings().maxConcurrentRequestsPerAccount || (cooldown() ?? 0)>queuedAt;
+    const slotRelease = await this.admission.acquire(account.id, admissionSignal, cooldown, deadline);
+    if (waiting) this.observe(trace,{event:'queue-wait',attempt,accountId:account.id,durationMs:Math.max(0,this.options.now()-queuedAt)});
     const controller = new AbortController();
     const abortFromRequest = () => controller.abort(request.signal.reason);
     this.activeControllers.add(controller);
@@ -1397,6 +1374,7 @@ export class AccountPoolHub {
       controller.signal.removeEventListener("abort", abortRelease);
       this.activeControllers.delete(controller);
       this.decrement(account.id);
+      slotRelease();
       this.observe(trace,{event:'stream-end',attempt,accountId:account.id,status:upstreamStatus,durationMs:Math.max(0,this.options.now()-openedAt),outcome:controller.signal.aborted?'canceled':upstreamStatus===null?'error':outcome,errorClass:controller.signal.aborted?'canceled':(upstreamStatus===null||outcome==='error')?'stream-error':null});
     };
     // A queued downstream chunk can stop pull() indefinitely after disconnect.
@@ -1418,17 +1396,27 @@ export class AccountPoolHub {
             ? {}
             : { body: upstreamBody }),
           signal: controller.signal,
-        },true, admission ? async send => {
-          const started = await this.options.accounts.withSnapshot(accounts => {
-            const current = this.eligibleEntries(adapter.provider, admission.projectId,
-              accounts, admission.family, this.options.now(), admission.purpose).eligible;
-            if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
-            return send();
-          });
-          return started.value;
-        } : undefined)
+        },true, async send => {
+          while (true) {
+            const waited = await this.admission.waitCooldown(AbortSignal.any([controller.signal, this.stopped.signal]), cooldown, deadline);
+            if (waited) await this.assertNetworkAllowed(account.provider);
+            const started = await this.options.accounts.withSnapshot(accounts => {
+              const current = this.eligibleEntries(adapter.provider, admission.projectId,
+                accounts, admission.family, this.options.now(), admission.purpose).eligible;
+              if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
+              // Metadata serialization can outlast admission: never start new work after its deadline.
+              if (this.options.now() >= deadline) throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
+              // Snapshot acquisition is asynchronous: another response may have set a hold.
+              if ((cooldown() ?? 0) > this.options.now()) return null;
+              this.stopped.signal.throwIfAborted();
+              this.observe(trace,{event:'attempt',attempt,accountId:account.id});
+              return {response: send()};
+            });
+            if (started.value !== null) return started.value.response;
+          }
+        })
         .catch((cause: unknown) => {
-          if (cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied) throw cause;
+          if (cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
           throw new UpstreamConnectionError("Upstream connection failed.", {
             cause,
           });

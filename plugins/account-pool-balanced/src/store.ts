@@ -781,7 +781,7 @@ const EMPTY_QUOTA = {
 };
 
 export class QuotaStore {
-  constructor(private readonly db: Database.Database) {}
+  constructor(private readonly db: Database.Database, private readonly now = Date.now) {}
 
   resetCredits(accountId: string): ResetCredits | null {
     const row = this.db.prepare("SELECT credits_json FROM pool_reset_credits WHERE account_id = ?")
@@ -863,7 +863,9 @@ export class QuotaStore {
           family_weekly_json = excluded.family_weekly_json,
           limit_windows_json = excluded.limit_windows_json,
           observed_at = excluded.observed_at,
-          held_until = excluded.held_until,
+          held_until = CASE WHEN account_quota.held_until > ?
+            THEN MAX(account_quota.held_until, COALESCE(excluded.held_until, 0))
+            ELSE excluded.held_until END,
           error = excluded.error,
           codex_usage_evidence_json = excluded.codex_usage_evidence_json,
           zai_usage_evidence_json = excluded.zai_usage_evidence_json`,
@@ -884,6 +886,7 @@ export class QuotaStore {
         value.error,
         value.codexUsageEvidence === undefined ? null : JSON.stringify(value.codexUsageEvidence),
         value.zaiUsageEvidence === undefined ? null : JSON.stringify(value.zaiUsageEvidence),
+        this.now(),
       );
   }
 

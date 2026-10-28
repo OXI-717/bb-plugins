@@ -137,6 +137,22 @@ describe("AccountStore", () => {
 });
 
 describe("QuotaStore", () => {
+  it("keeps the longest live upstream hold across late headers, usage writes and reopen", () => {
+    const database=new Database(":memory:");let now=1000;
+    try {
+      for(const migration of QUOTA_MIGRATIONS)database.exec(migration);
+      const store=new QuotaStore(database,()=>now),id="11111111-1111-4111-8111-111111111111";
+      const stale=store.get(id);
+      store.put({...stale,heldUntil:9000});
+      store.put({...stale,observedAt:2000,heldUntil:null});
+      expect(store.get(id)).toMatchObject({observedAt:2000,heldUntil:9000});
+      store.put({...stale,heldUntil:5000});expect(store.get(id).heldUntil).toBe(9000);
+      store.put({...stale,heldUntil:12000});expect(store.get(id).heldUntil).toBe(12000);
+      const reopened=new QuotaStore(database,()=>now);expect(reopened.get(id).heldUntil).toBe(12000);
+      now=12000;reopened.put({...stale,heldUntil:null});expect(store.get(id).heldUntil).toBeNull();
+    } finally { database.close(); }
+  });
+
   it("counts successful pooled requests and removes counts with the account", () => {
     const database = new Database(":memory:");
     try {

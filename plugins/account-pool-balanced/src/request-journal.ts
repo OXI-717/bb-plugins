@@ -9,7 +9,7 @@ const number=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).null
 const binding=(prefix:string)=>z.string().regex(new RegExp(`^${prefix}_[a-z0-9]{6,32}$`)).nullable();
 export const observationSchema=z.object({
  at:z.number().int().nonnegative(),requestId:z.string().uuid(),attempt:z.number().int().min(0).max(100000),
- event:z.enum(['request','attempt','upstream','local-held','hold','result','stream-end']),provider:providerSchema,
+ event:z.enum(['request','attempt','upstream','local-held','hold','result','stream-end','queue-wait']),provider:providerSchema,
  accountId:z.string().uuid().nullable(),clientHash:z.string().regex(/^[a-f0-9]{24}$/).nullable(),projectId:binding('proj'),threadId:binding('thr'),
  model:z.enum(['gpt-6-astra','gpt-6.1-sol','gpt-6-sol','gpt-5.4','gpt-5.3-codex','claude-opus-4-6','claude-sonnet-4-6']).nullable(),
  modelFamily:z.enum(['fable','sonnet','opus','haiku','other']),status:z.number().int().min(100).max(599).nullable(),
@@ -17,7 +17,7 @@ export const observationSchema=z.object({
  holdSource:z.enum(['upstream429','upstream403','existing-hold']).nullable(),heldUntil:number,
  outcome:z.enum(['returned','error','canceled','complete','failed-over']).nullable(),
  failover:z.enum(['none','succeeded','failed']).nullable(),
- errorClass:z.enum(['upstream429','local-held','upstream403-hold','stream-error','request-error','canceled']).nullable(),
+ errorClass:z.enum(['upstream429','local-held','upstream403-hold','stream-error','request-error','canceled','queue-full','queue-timeout']).nullable(),
  codexQuota:codexQuotaObservationSchema.optional(),
 }).strip();
 export type Observation=z.infer<typeof observationSchema>;
@@ -54,7 +54,7 @@ export class RequestJournal {
    this.rows.push(parsed.data);this.dirty=true;this.schedule();
   }catch{this.failures++;}
  }
- snapshot(){
+ snapshot(limit=MAX_ROWS){
   this.prune();const now=this.now();
   const minutes=new Map<number,{at:number;logicalRequests:number;attempts:number;upstream429:number;localHeld429:number;upstream403Holds:number}>();
   for(const r of this.rows){
@@ -66,9 +66,21 @@ export class RequestJournal {
    if(r.event==='hold'&&r.holdSource==='upstream403')b.upstream403Holds++;
    minutes.set(at,b);
   }
+  const providers=new Map<string,{provider:Observation['provider'];requests:number;attempts:number;upstream429:number;localHeld429:number;queueWaits:number;queueFailures:number;accounts:Map<string,{accountId:string;attempts:number;upstream429:number;peakInFlight:number}>}>();
+  for(const r of this.rows){
+   const p=providers.get(r.provider)??{provider:r.provider,requests:0,attempts:0,upstream429:0,localHeld429:0,queueWaits:0,queueFailures:0,accounts:new Map()};
+   if(r.event==='request')p.requests++;if(r.event==='attempt')p.attempts++;
+   if(r.event==='upstream'&&r.status===429)p.upstream429++;
+   if(r.event==='local-held'&&r.status===429)p.localHeld429++;
+   if(r.event==='queue-wait'){p.queueWaits++;if(r.status===503)p.queueFailures++;}
+   if(r.accountId){const a=p.accounts.get(r.accountId)??{accountId:r.accountId,attempts:0,upstream429:0,peakInFlight:0};
+    if(r.event==='attempt')a.attempts++;if(r.event==='upstream'&&r.status===429)a.upstream429++;
+    a.peakInFlight=Math.max(a.peakInFlight,r.accountInFlight);p.accounts.set(r.accountId,a);}
+   providers.set(r.provider,p);
+  }
   return{schema:'bb-account-pool/request-observations/1',coverage:'retained-events-only',maxRows:MAX_ROWS,retentionMs:TTL_MS,
    evictedSinceStart:this.evicted,storageFailuresSinceStart:this.failures,oldestAt:this.rows[0]?.at??null,truncated:this.evicted>0||this.rows.length===MAX_ROWS,
-   observedAt:now,minutes:[...minutes.values()].sort((a,b)=>a.at-b.at),rows:[...this.rows]};
+   observedAt:now,totalRetainedRows:this.rows.length,rowsTruncated:this.rows.length>limit,providers:[...providers.values()].map(p=>({...p,accounts:[...p.accounts.values()]})),minutes:[...minutes.values()].sort((a,b)=>a.at-b.at),rows:this.rows.slice(-Math.max(1, Math.min(MAX_ROWS,limit)))};
  }
  private prune():void{
   const now=this.now(),retained=this.rows.filter(r=>r.at>=now-TTL_MS&&r.at<=now);

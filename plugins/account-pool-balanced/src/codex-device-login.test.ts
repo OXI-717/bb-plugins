@@ -97,6 +97,7 @@ function summary(account: CodexDeviceAccount): AccountSummary {
     successfulRequests: 0,
     resetCredits: null,
     inFlight: 0,
+    queuedRequests: 0, concurrencyLimit: 2,
     capLimit: null,
     eligible: true,
     capReached: false,
