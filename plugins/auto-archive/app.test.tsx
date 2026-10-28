@@ -12,7 +12,7 @@ afterEach(cleanup);
 it("a late focus refresh cannot undo the saved checkbox state", async () => {
   sdk.threads.getPluginMetadata.mockResolvedValueOnce({permanent: true});
   sdk.threads.updatePluginMetadata.mockResolvedValue({permanent: false});
-  render(<PermanentThread threadId="thr_example" compact={false} />);
+  render(<PermanentThread threadId="thr_example" />);
   const checkbox = screen.getByRole("checkbox", {name: "Постоянный тред"}) as HTMLInputElement;
   await waitFor(() => expect(checkbox.checked).toBe(true));
   let finishRefresh!: (value: {permanent: boolean}) => void;
