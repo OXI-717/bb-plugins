@@ -472,6 +472,7 @@ describe("Account Pool config schema", () => {
       neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
       devinUpstreamBaseUrl: "https://server.codeium.com",
+      maxConcurrentRequestsPerAccount: 2,
       switchThreshold: 0.98,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -550,6 +551,7 @@ describe("Account Pool plugin", () => {
       neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
       devinUpstreamBaseUrl: "https://server.codeium.com",
+      maxConcurrentRequestsPerAccount: 2,
       switchThreshold: 0.75,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -1001,12 +1003,13 @@ describe("Account Pool plugin", () => {
       calls++;return Response.json({error:{message:'Upstream refused'}},{status,headers:{'retry-after':'86400',...(status===403?{'content-type':'text/html'}:{})}});
     }}});
     await fixture.host.harness.behavior.callRpc('config.set',{routingStrategy:'balanced'});
-    const send=()=>fixture.host.harness.behavior.fetchHttp('POST','/opencode-go/v1/chat/completions',{headers:authHeaders(fixture.key),body:JSON.stringify({model:'synthetic-model',messages:[]})});
+    const send=(signal?:AbortSignal)=>fixture.host.harness.behavior.fetchHttp('POST','/opencode-go/v1/chat/completions',{headers:authHeaders(fixture.key),body:JSON.stringify({model:'synthetic-model',messages:[]}),signal});
     await (await send()).text();
-    const held=await send();
-    expect(held.status).toBe(403);
-    expect(held.headers.get('x-bb-pool-error')).toBe('POOL_ACCOUNT_HELD');
-    expect(await held.text()).toContain(status===429?'2026-09-18T09:00:00.000Z':'2026-09-17T09:01:00.000Z');
+    const held=await send(AbortSignal.timeout(30));
+    expect(held.status).toBe(499);
+    const account=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null)).accounts[0]!;
+    expect(account.status).toBe('held');
+    expect(new Date(account.heldUntil!).toISOString()).toBe(status===429?'2026-09-18T09:00:00.000Z':'2026-09-17T09:01:00.000Z');
     expect(calls).toBe(1);
   });
   it('shows all three Go quota windows in the BB usage resource',async()=>{
@@ -3880,6 +3883,8 @@ describe("Account Pool plugin", () => {
         },
         () => now,
       );
+      // This OAuth race intentionally needs three overlapping upstream calls.
+      await fixture.host.harness.behavior.callRpc("config.set",{maxConcurrentRequestsPerAccount:3});
       const requests = [1, 2].map(() =>
         fixture.host.harness.behavior.fetchHttp("POST", route, {
           headers: authHeaders(fixture.key),
@@ -4658,13 +4663,14 @@ describe("Account Pool plugin", () => {
           },
           () => now,
         );
-        const send = async (id: string, status = 200) => {
+        const send = async (id: string, status = 200, signal?: AbortSignal) => {
           const response = await fixture.host.harness.behavior.fetchHttp(
             "POST",
             provider === "claude" ? "/v1/messages" : "/v1/responses",
             {
               headers: { ...authHeaders(fixture.key), "session-id": id },
               body: provider === "claude" ? claudeBody(id) : "{}",
+              signal,
             },
           );
           expect(response.status).toBe(status);
@@ -4674,7 +4680,7 @@ describe("Account Pool plugin", () => {
         limited = true;
         await send("warm", 429);
         await send("fresh");
-        await send("warm", 429);
+        await send("warm", 499, AbortSignal.timeout(30));
         now += 60_000;
         limited = false;
         await send("warm");
@@ -6238,7 +6244,8 @@ describe("Account Pool plugin", () => {
     expect(refreshes).toEqual(["refresh-1", "refresh-2"]);
     expect(authorizations).toEqual([
       "Bearer new-refresh-2",
-      "Bearer new-refresh-1",
+      // Account one was disabled while its refresh waited: final admission must not send it.
+      "Bearer new-refresh-2",
     ]);
   });
 
@@ -6705,7 +6712,7 @@ describe("sequential pool recovery", () => {
     const fixture = await createFixture({
       upstreamUrl: "https://upstream.example",
       options: {
-        now: () => 1_800_000_000_000,
+        now: Date.now,
         fetch: async () =>
           ++attempts === 1
             ? Response.json({})
@@ -6728,7 +6735,7 @@ describe("sequential pool recovery", () => {
     const held = await send();
     expect(held.status).toBe(429);
     await held.text();
-    expect(attempts).toBe(3);
+    expect(attempts).toBe(5);
   });
 
   it("keeps a paced session on its account when another request arrives during a short hold", async () => {
@@ -6770,10 +6777,12 @@ describe("sequential pool recovery", () => {
       });
       const duringHold = send();
       now += 249;
+      await new Promise(resolve=>setTimeout(resolve,20));
+      expect(attempts).toHaveLength(2);
+      now += 1;
       const duringHoldResponse = await duringHold;
       expect(duringHoldResponse.status).toBe(200);
       await duringHoldResponse.text();
-      now += 1;
       await (await paced).text();
       await (await send()).text();
       expect(attempts).toEqual([
@@ -7762,18 +7771,18 @@ describe('bounded request metadata observations',()=>{
     expect(result.minutes[0]).toMatchObject({logicalRequests:1,attempts:1,upstream429:1,localHeld429:0});
     expect(JSON.stringify(result)).not.toMatch(/private|authorization|messages|sk-account/);
   });
-  it('distinguishes a local held429 from an upstream429 and preserves one logical ID per request',async()=>{
+  it('queues an existing hold without manufacturing an upstream429 and preserves one logical ID per request',async()=>{
     const outbound=vi.fn().mockImplementation(async()=>Response.json({}));
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
     const body=JSON.stringify({model:'claude-opus-4-6',metadata:{user_id:'user_session_11111111-1111-4111-8111-111111111111'}});
     const first=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body});await first.text();
     fixture.host.bb.storage.database().prepare('UPDATE account_quota SET held_until=? WHERE account_id=?').run(Date.now()+60000,fixture.account.id);
-    const second=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body});expect(second.status).toBe(429);await second.text();
+    const second=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body,signal:AbortSignal.timeout(30)});expect(second.status).toBe(499);await second.text();
     const r=await records(fixture);
     expect(outbound).toHaveBeenCalledTimes(1);
-    expect(r.rows.filter(e=>e.event==='local-held')).toEqual([expect.objectContaining({status:429,holdSource:'existing-hold',attempt:0})]);
+    expect(r.rows.filter(e=>e.event==='local-held')).toEqual([]);
     expect(new Set(r.rows.filter(e=>e.event==='request').map(e=>e.requestId)).size).toBe(2);
-    expect(r.minutes[0]).toMatchObject({logicalRequests:2,attempts:1,upstream429:0,localHeld429:1});
+    expect(r.minutes[0]).toMatchObject({logicalRequests:2,attempts:1,upstream429:0,localHeld429:0});
   });
   it('records recoverable upstream403 holds with a different causal source',async()=>{
     const outbound=vi.fn().mockResolvedValue(new Response('<html>synthetic block</html>',{status:403,headers:{'content-type':'text/html'}}));
@@ -8120,4 +8129,63 @@ describe("busy Codex usage collection", () => {
       expect(usageCalls).toBe(before);
     } finally {await response.body?.cancel();}
   });
+});
+
+describe('shared account request pressure',()=>{
+ it('holds two slots through streaming and queues native hosts and an external client together',async()=>{
+  const streams:ReadableStreamDefaultController<Uint8Array>[]=[];
+  const outbound=vi.fn(async()=>new Response(new ReadableStream<Uint8Array>({start(c){streams.push(c);}})));
+  const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+  const other=await resolveToken(f.host,'host-two','thread-two');
+  const file=path.join(f.dataDir,'external.token');
+  expect((await f.host.harness.behavior.runCli(['client','add','synthetic-pressure','--output',file])).exitCode).toBe(0);
+  const external=(await fs.readFile(file,'utf8')).trim();
+  const send=(key:string,signal?:AbortSignal)=>f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(key),body:'{}',signal});
+  const first=await send(f.key),second=await send(other),thirdPromise=send(external);
+  await vi.waitFor(async()=>{
+   const status=statusSchema.parse(await f.host.harness.behavior.callRpc('status.get',null));
+   expect(status.accounts[0]).toMatchObject({inFlight:2,queuedRequests:1,concurrencyLimit:2});
+  });
+  expect(outbound).toHaveBeenCalledTimes(2);
+  const firstText=first.text();streams[0]!.close();await firstText;
+  const third=await thirdPromise;expect(outbound).toHaveBeenCalledTimes(3);
+  const texts=[second.text(),third.text()];streams[1]!.close();streams[2]!.close();await Promise.all(texts);
+  const status=statusSchema.parse(await f.host.harness.behavior.callRpc('status.get',null));
+  expect(status.accounts[0]).toMatchObject({inFlight:0,queuedRequests:0});
+ });
+ it('preserves actual Codex429 hold through a late200 and queues another attempt instead of fabricating a429',async()=>{
+  const now=Date.now();let calls=0,late!:(value:Response)=>void;
+  const normal=()=>Response.json({}, {headers:{'x-codex-primary-used-percent':'15','x-codex-primary-window-minutes':'10080'}});
+  const outbound=vi.fn(async(input:RequestInfo|URL)=>{
+   if(String(input).includes('usage'))return Response.json({});
+   calls++;if(calls===1)return normal();
+   if(calls===2)return new Promise<Response>(resolve=>{late=resolve;});
+   if(calls===3)return Response.json({}, {status:429,headers:{'retry-after':'60'}});
+   return normal();
+  });
+  const f=await createFixture({upstreamUrl:'https://upstream.example',provider:'codex',source:'import',options:{fetch:outbound,
+   importCodexCredentials:async()=>({accessToken:'synthetic',refreshToken:'synthetic-refresh',idToken:null,accountId:'fixture-account',email:'fixture@example.com',expiresAt:now+3600000})}});
+  const send=(signal?:AbortSignal)=>f.host.harness.behavior.fetchHttp('POST','/v1/responses',{headers:authHeaders(f.key),body:JSON.stringify({model:'gpt-6-sol',prompt_cache_key:'synthetic-session',input:[]}),signal});
+  await (await send()).text();const pending=send();await vi.waitFor(()=>expect(calls).toBe(2));
+  const rejected=await send();expect(rejected.status).toBe(429);await rejected.text();
+  const quotas=new QuotaStore(f.host.bb.storage.database());const hold=quotas.get(f.account.id).heldUntil!;expect(hold).toBeGreaterThan(Date.now()+59000);
+  late(normal());await (await pending).text();expect(quotas.get(f.account.id).heldUntil).toBe(hold);
+  const abort=new AbortController(),queued=send(abort.signal);
+  await vi.waitFor(async()=>expect(statusSchema.parse(await f.host.harness.behavior.callRpc('status.get',null)).accounts[0]!.queuedRequests).toBe(1));
+  expect(calls).toBe(3);abort.abort();expect((await queued).status).toBe(499);expect(calls).toBe(3);
+ });
+ it('rechecks account enablement after waiting and releases a canceled queued slot',async()=>{
+  const streams:ReadableStreamDefaultController<Uint8Array>[]=[];
+  const outbound=vi.fn(async()=>new Response(new ReadableStream<Uint8Array>({start(c){streams.push(c);}})));
+  const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+  await f.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:1});
+  const send=(signal?:AbortSignal)=>f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}',signal});
+  const first=await send(),abort=new AbortController(),canceled=send(abort.signal);
+  await vi.waitFor(async()=>expect(statusSchema.parse(await f.host.harness.behavior.callRpc('status.get',null)).accounts[0]!.queuedRequests).toBe(1));
+  abort.abort();expect((await canceled).status).toBe(499);
+  const denied=send();await vi.waitFor(async()=>expect(statusSchema.parse(await f.host.harness.behavior.callRpc('status.get',null)).accounts[0]!.queuedRequests).toBe(1));
+  await f.host.harness.behavior.callRpc('account.disable',{id:f.account.id});
+  const text=first.text();streams[0]!.close();await text;
+  expect((await denied).status).toBe(403);expect(outbound).toHaveBeenCalledTimes(1);
+ });
 });

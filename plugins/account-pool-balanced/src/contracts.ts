@@ -9,6 +9,7 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
   cursorUpstreamBaseUrl: "https://api2.cursor.sh",
   devinUpstreamBaseUrl: "https://server.codeium.com",
+  maxConcurrentRequestsPerAccount: 2,
   switchThreshold: 0.98,
   routingStrategy: "sequential" as const,
   reserveDrainHours: 24,
@@ -85,6 +86,7 @@ export const accountPoolConfigSchema = z
     devinUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.devinUpstreamBaseUrl,
     ),
+    maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).default(DEFAULT_ACCOUNT_POOL_CONFIG.maxConcurrentRequestsPerAccount),
     switchThreshold: switchThresholdSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.switchThreshold,
     ),
@@ -115,6 +117,7 @@ export const accountPoolConfigSetInputSchema = z
     neuraldeepUpstreamBaseUrl: httpUrlSchema.optional(),
     cursorUpstreamBaseUrl: httpUrlSchema.optional(),
     devinUpstreamBaseUrl: httpUrlSchema.optional(),
+    maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).optional(),
     switchThreshold: switchThresholdSchema.optional(),
     routingStrategy: routingStrategySchema.optional(),
     reserveDrainHours: reserveDrainHoursSchema.optional(),
@@ -355,6 +358,8 @@ export const accountSummarySchema = accountSchema.extend({
   successfulRequests: z.number().int().nonnegative(),
   resetCredits: resetCreditsSchema.nullable(),
   inFlight: z.number().int().nonnegative(),
+  queuedRequests: z.number().int().nonnegative().default(0),
+  concurrencyLimit: z.number().int().positive().default(2),
   capLimit: z.number().nullable(),
   eligible: z.boolean(),
   capReached: z.boolean(),

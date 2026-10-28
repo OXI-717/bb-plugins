@@ -189,6 +189,7 @@ function configDrafts(config: AccountPoolConfig): Record<ConfigField, string> {
     neuraldeepUpstreamBaseUrl: config.neuraldeepUpstreamBaseUrl,
     cursorUpstreamBaseUrl: config.cursorUpstreamBaseUrl,
     devinUpstreamBaseUrl: config.devinUpstreamBaseUrl,
+    maxConcurrentRequestsPerAccount: String(config.maxConcurrentRequestsPerAccount),
     switchThreshold: String(config.switchThreshold),
   };
 }
@@ -1050,6 +1051,7 @@ function AccountPoolSettings() {
     neuraldeepUpstreamBaseUrl: "",
     cursorUpstreamBaseUrl: "",
     devinUpstreamBaseUrl: "",
+    maxConcurrentRequestsPerAccount: "",
     switchThreshold: "",
   });
   const [configErrors, setConfigErrors] = useState<
@@ -1063,6 +1065,7 @@ function AccountPoolSettings() {
     neuraldeepUpstreamBaseUrl: null,
     cursorUpstreamBaseUrl: null,
     devinUpstreamBaseUrl: null,
+    maxConcurrentRequestsPerAccount: null,
     switchThreshold: null,
   });
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -1212,7 +1215,14 @@ function AccountPoolSettings() {
   async function saveConfigField(field: ConfigField): Promise<void> {
     if (config === null || pending !== null) return;
     let update: AccountPoolConfigSetInput;
-    if (field === "switchThreshold") {
+    if (field === "maxConcurrentRequestsPerAccount") {
+      const value = Number(drafts[field]);
+      if (!Number.isInteger(value) || value < 1 || value > 32) {
+        setConfigErrors(previous => ({...previous,[field]: "Нужно целое число от 1 до 32."}));
+        return;
+      }
+      update = {maxConcurrentRequestsPerAccount:value};
+    } else if (field === "switchThreshold") {
       const raw = drafts.switchThreshold.trim();
       const value = Number(raw);
       if (
@@ -1531,7 +1541,7 @@ function AccountPoolSettings() {
           <SettingsSection
             key={provider.id}
             title={provider.title}
-            description={provider.description}
+            description={`${provider.description} В работе: ${providerAccounts.reduce((n,a)=>n+a.inFlight,0)}; в очереди: ${providerAccounts.reduce((n,a)=>n+a.queuedRequests,0)}. Предел на аккаунт: ${config?.maxConcurrentRequestsPerAccount ?? 2}.`}
             action={
               <div className="flex items-center gap-2">
                 <Switch
@@ -1818,6 +1828,15 @@ function AccountPoolSettings() {
                   if (event.key === "Enter") event.currentTarget.blur();
                 }}
               />
+            </ConfigFieldRow>
+            <ConfigFieldRow label="Одновременных запросов на аккаунт"
+              description="Общий предел для всех машин и клиентов. Остальные запросы ждут в очереди; паузы провайдера обязательны."
+              error={configErrors.maxConcurrentRequestsPerAccount}>
+              <Input type="number" min="1" max="32" step="1" aria-label="Одновременных запросов на аккаунт"
+                disabled={config === null || pending !== null} value={drafts.maxConcurrentRequestsPerAccount}
+                onChange={event => updateConfigDraft("maxConcurrentRequestsPerAccount",event.target.value)}
+                onBlur={() => void saveConfigField("maxConcurrentRequestsPerAccount")}
+                onKeyDown={event => {if(event.key === "Enter") event.currentTarget.blur();}} />
             </ConfigFieldRow>
             <ConfigFieldRow
               label="Порог переключения по квоте"

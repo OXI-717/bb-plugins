@@ -147,7 +147,7 @@ export function createAccountPoolPlugin(
         : hubTokens.forThread(context.hostId, context.projectId, context.threadId);
     const db = bb.storage.database();
     bb.storage.migrate(db, QUOTA_MIGRATIONS);
-    const quotas = new QuotaStore(db);
+    const quotas = new QuotaStore(db, now);
     const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
     await journal.initialize();
     bb.onDispose(()=>journal.close());

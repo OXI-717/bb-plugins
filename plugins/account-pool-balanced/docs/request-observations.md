@@ -42,3 +42,45 @@ The feature observes naturally occurring traffic. It requires no model smoke cal
 Codex `upstream` events may additionally contain `codexQuota`, observed at the existing response-header/adapter boundary. No extra provider request is made. `primary` and `secondary` are fixed five-element tuples in this order: `used-percent`, `window-minutes`, `reset-at`, `reset-after-seconds`, `over-limit`, for the respective `x-codex-<slot>-` header prefix. Numeric fields are finite numbers within the safe integer magnitude; boolean fields are case-insensitive exact true/false. Missing, empty and unrepresentable values become the fixed strings `missing`, `empty`, `invalid`. Zero and negative finite numbers remain numbers: recording them does not declare them valid quota evidence. Arbitrary invalid strings and all other headers are discarded.
 
 `priorUsage` records the existing complete/partial usage proof before the adapter call: observation time, signed age in milliseconds, primary/secondary states and allowed/limitReached flags; null means no proof existed. A future observation has negative age, not fresh proof. `priorDurations` lists primary/secondary durations before merging (null if unavailable). `evidencePreserved` reports whether that same proof survives the actual adapter call. These are diagnostic facts, not another validity evaluator; numeric fields and states do not authorize requests or imply fresh budget readiness. A missing diagnostic can mean an older record or isolated collection failure. Existing journal identity, retention, size, coverage and failure limits apply unchanged. Read only the target account/time when investigating; the journal cannot recover prior raw header values.
+
+## Shared account admission (0.4.45)
+
+`maxConcurrentRequestsPerAccount` is a server setting, default **2**, valid integers
+1–32. It applies independently to each selected account and to every provider's
+forwarded inference/RPC route, across native BB hosts and issued external clients.
+It limits requests, not open threads. A slot remains occupied through stream end,
+cancel or error, not merely until response headers arrive. Quota collectors and
+OAuth calls retain their existing separate coalescing/ownership; they do not use
+these inference slots or generate inference pressure observations.
+
+Additional requests enter a FIFO admission queue, bounded to 64 waiting requests
+per account and 1,024 across the server. Capacity and cooldown waits have a shared
+15-minute deadline; disconnect or pool stop cancels waiting requests. Overflow or
+deadline returns HTTP 503 with `POOL_QUEUE_FULL` or `POOL_QUEUE_TIMEOUT`, never a
+fabricated upstream 429. Existing active streams drain under the normal stop
+contract. Lowering the limit does not interrupt existing streams.
+
+A generic upstream 429 sets an account cooldown from Retry-After. Header/usage
+merges cannot shorten any still-active persisted cooldown, including a late 200
+from an already-running request. Dispatch rechecks cooldown and current account,
+project and purpose eligibility after asynchronous network guards and account
+snapshot acquisition. Session affinity stays on its account. Unbound requests
+may use another already-authorized eligible account under existing routing;
+family-specific quota rejections retain their existing quota/reset behavior.
+No new account is enabled or opted into any workload.
+
+`status` adds per-account `queuedRequests` and `concurrencyLimit`. The settings UI
+shows current active/queued requests by provider and edits the shared account
+limit. `observations` returns only the last 100 rows plus aggregates over **all
+retained rows**: provider and account attempts, upstream 429s, account peak active
+requests, and provider queue waits/failures. `totalRetainedRows` and
+`rowsTruncated` distinguish the returned page from retention eviction.
+`attempt` events mark actual dispatch; `queue-wait` records a completed wait or
+queue refusal. These remain lower bounds over the disclosed retained interval,
+not permanent usage accounting. Local queue refusals, upstream failures and
+historical local-held 429 records are separate.
+
+Two concurrent requests is a conservative initial operator setting, not a
+published provider guarantee. Concurrency alone cannot prevent variable provider
+request/token limits or shared subscription consumption outside this server.
+Respect provider cooldowns and observe natural traffic before adjusting it.

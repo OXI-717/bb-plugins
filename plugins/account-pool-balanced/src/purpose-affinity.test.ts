@@ -88,3 +88,27 @@ it('releases the metadata lock once transport has started and lets an in-flight 
     unblock();const response=await pending;expect(response.status).toBe(200);await response.text();
   } finally {unblock();await hub.stop();await host.harness.lifecycle.dispose();await fs.rm(dir,{recursive:true,force:true});}
 });
+
+it('honors a cooldown arriving during the network guard and rechecks network policy after waiting',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'pressure-guard-'));
+  const host=createFakePluginHost({pluginId:'fixture-pool',dataDir:dir});
+  const accounts=new AccountStore(host.bb.storage.kv,path.join(dir,'secrets'));
+  const db=host.bb.storage.database();for(const sql of QUOTA_MIGRATIONS)db.exec(sql);
+  const account=await accounts.add({provider:'claude',kind:'api-key',label:'Fixture',email:null,accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:true,priority:100},{kind:'api-key',apiKey:'synthetic'});
+  let enter!:()=>void,unblock!:()=>void,checks=0;const reached=new Promise<void>(r=>enter=r),gate=new Promise<void>(r=>unblock=r);
+  const quotas=new QuotaStore(db);const times:number[]=[];
+  const settings=accountPoolConfigSchema.parse({vpnOnlyProviders:[],vpnGuardEnabled:true,vpnPolicyVersion:2});
+  const transport:typeof fetch=async()=>{times.push(Date.now());return Response.json({});};
+  const hub=createHub({route:'/pool',accounts,quotas,affinity:new PoolAffinityStore(db),getSettings:()=>settings,
+    hubTokens:{authenticate:async()=> 'host',list:async()=>[]},guardCheck:async()=>{if(++checks===1){enter();await gate;}return 'direct';},
+    fetch:transport,fetchIpv4:transport,now:Date.now});
+  try {
+    const internal=hub as unknown as {forward:Function;options:{adapters:Map<string,unknown>}};
+    const request=new Request('http://localhost/v1/messages',{method:'POST',body:'{}'});
+    const pending=internal.forward(request,new TextEncoder().encode('{}'),internal.options.adapters.get('claude'),'host','project') as Promise<Response>;
+    await reached;const deadline=Date.now()+100;quotas.put({...quotas.get(account.id),heldUntil:deadline});unblock();
+    const response=await pending;await response.text();
+    expect(response.status).toBe(200);expect(times).toHaveLength(1);expect(times[0]).toBeGreaterThanOrEqual(deadline);
+    expect(checks).toBeGreaterThanOrEqual(3); // pre-send, post-wait, post-response
+  } finally {unblock();await hub.stop();await host.harness.lifecycle.dispose();await fs.rm(dir,{recursive:true,force:true});}
+});
