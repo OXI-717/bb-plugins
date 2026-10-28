@@ -1,18 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { definePluginApp, useSdk } from "@get-bb/plugin-sdk/app";
 
-function PermanentThread({ threadId, compact }: { threadId: string; compact: boolean }) {
+export function PermanentThread({ threadId, compact }: { threadId: string; compact: boolean }) {
   const sdk = useSdk();
+  const generation = useRef(0);
+  const saving = useRef(false);
   const [permanent, setPermanent] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
+      if (saving.current) return;
+      const request = ++generation.current;
       try {
         const metadata = await sdk.threads.getPluginMetadata({ threadId, signal: controller.signal });
-        if (!controller.signal.aborted) { setPermanent(metadata.permanent === true); setError(false); }
-      } catch { if (!controller.signal.aborted) setError(true); }
+        if (!controller.signal.aborted && request === generation.current) { setPermanent(metadata.permanent === true); setError(false); }
+      } catch { if (!controller.signal.aborted && request === generation.current) setError(true); }
     };
     setPermanent(null);
     void load();
@@ -26,12 +30,13 @@ function PermanentThread({ threadId, compact }: { threadId: string; compact: boo
     <input type="checkbox" aria-label="Постоянный тред" checked={permanent === true}
       disabled={permanent === null || busy} onChange={async (event) => {
         const value = event.target.checked;
+        saving.current = true; generation.current++;
         setBusy(true); setError(false);
         try {
           await sdk.threads.updatePluginMetadata({ threadId, set: { permanent: value } });
           setPermanent(value);
         } catch { setError(true); }
-        finally { setBusy(false); }
+        finally { saving.current = false; setBusy(false); }
       }} />
     {!compact && "Постоянный тред"}{error ? " ⚠" : ""}
   </label>;
