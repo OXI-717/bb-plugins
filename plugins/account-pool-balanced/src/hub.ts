@@ -1403,6 +1403,8 @@ export class AccountPoolHub {
               const current = this.eligibleEntries(adapter.provider, admission.projectId,
                 accounts, admission.family, this.options.now(), admission.purpose).eligible;
               if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
+              // Metadata serialization can outlast admission: never start new work after its deadline.
+              if (this.options.now() >= deadline) throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
               // Snapshot acquisition is asynchronous: another response may have set a hold.
               if ((cooldown() ?? 0) > this.options.now()) return null;
               this.stopped.signal.throwIfAborted();
