@@ -258,7 +258,7 @@ it("prune never archives target descendants through a second ancestor owner", ()
   expect(ids(p)).toEqual(["r1"]);
   expect(p.actions.flatMap((a) => a.archiveIds)).not.toContain("leaf");
 });
-describe("permanent explicit titles", () => {
+describe("permanent metadata", () => {
   it.each([
     "VPN - GLM",
     "GROWTH. AUTOMATION",
@@ -271,14 +271,14 @@ describe("permanent explicit titles", () => {
     expect(
       ids(
         planSweep(
-          [t("r"), t("c", { parentThreadId: "r", title })],
+          [t("r"), t("c", { parentThreadId: "r", title, permanent: true })],
           config,
           now,
         ),
       ),
     ).toEqual([]);
   });
-  it.each(["Handoff: VPN Kimi", "", "A", "Я", "12 - 😀", "vpn", "День", null])(
+  it.each(["DB", "АВТОПИЛОТ", "Handoff: VPN Kimi", "", "A", "Я", "12 - 😀", "vpn", "День", null])(
     "does not protect %j by title alone",
     (title) => {
       expect(ids(planSweep([t("r", { title })], config, now))).toEqual(["r"]);
@@ -287,13 +287,13 @@ describe("permanent explicit titles", () => {
   it("keeps legacy pin-prefix protection and counts overlapping reasons independently", () => {
     const rows = [
       t("a", { title: "📌 ДЕНЬ", pinnedAt: 1 }),
-      t("b", { title: "DB" }),
+      t("b", { title: "DB", permanent: true }),
       t("c", { title: "Handoff: VPN Kimi" }),
       t("archived", { title: "OLD", archived: true }),
     ];
     expect(
       countThreadExclusions(rows, { ...config, keepThreadIds: ["a", "c"] }),
-    ).toEqual({ pinned: 1, pinPrefix: 1, uppercase: 2, keepThreadIds: 2 });
+    ).toEqual({ pinned: 1, pinPrefix: 1, permanent: 1, keepThreadIds: 2 });
   });
 });
 it("preserves legacy pin-prefix protection from fallback without uppercase fallback protection", () => {
@@ -303,7 +303,7 @@ it("preserves legacy pin-prefix protection from fallback without uppercase fallb
   expect(countThreadExclusions([pin, upper], config)).toEqual({
     pinned: 0,
     pinPrefix: 1,
-    uppercase: 0,
+    permanent: 0,
     keepThreadIds: 0,
   });
 });

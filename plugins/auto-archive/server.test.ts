@@ -3,7 +3,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import plugin from "./server.js";
 it("starts observation-only and preserves install timestamp across reloads", async () => {
   let definitions: Record<string, { default: unknown }> = {};
-  const data = new Map<string, unknown>();
+  const data = new Map<string, unknown>([["permanent-migration-v1", true]]);
   const service = vi.fn();
   const register = vi.fn();
   const bb = {
@@ -51,7 +51,7 @@ it("status returns fresh exclusion counts and preserves existing settings and in
     detachActiveDescendants: false,
     dryRun: false,
   };
-  const data = new Map<string, unknown>([["installed-at", 123]]);
+  const data = new Map<string, unknown>([["installed-at", 123], ["permanent-migration-v1", true]]);
   const set = vi.fn(async () => {});
   const archive = vi.fn();
   const update = vi.fn();
@@ -78,7 +78,7 @@ it("status returns fresh exclusion counts and preserves existing settings and in
     storage: { kv: { get: async (key: string) => data.get(key), set } },
     background: { service: vi.fn() },
     cli: { register },
-    sdk: { threads: { list, archive, update } },
+    sdk: { threads: { list, archive, update, experimental_listPluginMetadata: async () => ({threads: []}) } },
   } as unknown as BbPluginApi;
   await plugin(bb);
   const command = register.mock.calls[0][0];
@@ -88,7 +88,7 @@ it("status returns fresh exclusion counts and preserves existing settings and in
   const status = JSON.parse(result.stdout);
   expect(status.exclusions).toEqual({
     scanned: 2,
-    reasons: { pinned: 1, pinPrefix: 1, uppercase: 1, keepThreadIds: 1 },
+    reasons: { pinned: 1, pinPrefix: 1, permanent: 0, keepThreadIds: 1 },
     overlapping: true,
   });
   expect(status.config).toEqual({

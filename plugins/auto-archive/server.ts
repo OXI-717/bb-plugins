@@ -1,3 +1,4 @@
+import { migratePermanentThreads } from "./permanent.js";
 // Fork of bb-plugin-auto-archive 0.1.0 by Shane Logsdon, MIT (see LICENSE).
 import { cliCommand, defineCli, type BbPluginApi } from "@get-bb/plugin-sdk";
 import {
@@ -51,6 +52,8 @@ export default async function plugin(bb: BbPluginApi) {
       dryRun: s.dryRun,
     };
   };
+  // No archive operation is registered until legacy protection is persisted.
+  await migratePermanentThreads(bb, (await resolve()).keepThreadIds);
   let running = false;
   const execute = async (options: {
     dryRun?: boolean;

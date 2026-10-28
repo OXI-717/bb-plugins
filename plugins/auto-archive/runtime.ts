@@ -1,3 +1,4 @@
+import { permanentIds } from "./permanent.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
   countThreadExclusions,
@@ -47,6 +48,7 @@ export async function collect(
           "Thread inventory exceeds safety limit; no actions performed",
         );
     }
+  const permanent = await permanentIds(bb, [...rows.keys()], signal);
   const snapshots: Snapshot[] = [];
   const statuses = new Map<string, Promise<Snapshot["workspace"]>>();
   await mapBatches([...rows.values()], async (t) => {
@@ -100,6 +102,7 @@ export async function collect(
       latestAttentionAt: at,
       status: t.status,
       pinnedAt: t.pinnedAt,
+      permanent: permanent.has(t.id),
       workspace,
       archived: t.archivedAt !== null,
       busy:
@@ -287,9 +290,10 @@ export async function exclusionStatus(
     if (offset >= 100_000)
       throw new Error("Thread inventory exceeds safety limit");
   }
+  const permanent = await permanentIds(bb, [...rows.keys()], signal);
   return {
     scanned: rows.size,
-    reasons: countThreadExclusions([...rows.values()], config),
+    reasons: countThreadExclusions([...rows.values()].map(t => ({ ...t, permanent: permanent.has(t.id) })), config),
     overlapping: true,
   };
 }

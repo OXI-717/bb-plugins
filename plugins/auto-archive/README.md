@@ -44,7 +44,7 @@ The timestamp persists across reloads and upgrades. Preview reports
 `backlogRoots`: currently quiet roots older than the threshold whose entire
 live tree was already inactive before installation, including protected roots.
 
-Titles with at least two Latin/Cyrillic letters, all uppercase, are also protected using explicit `title` only (existing 📌 protection still uses the explicit-or-fallback title); `status` counts live pinned / 📌 prefix / uppercase / keepThreadIds reasons independently (counts may overlap).
+Permanent metadata protects a thread and its ancestors (📌 protection uses the explicit-or-fallback title); `status` counts live pinned / 📌 prefix / permanent / keepThreadIds reasons independently (counts may overlap).
 
 ## Settings
 
@@ -123,3 +123,17 @@ bb plugin build .
 ```
 
 No account, service credential or live archive is needed for tests.
+
+
+## Permanent threads
+
+The thread header contains a **Постоянный тред** checkbox. Its boolean value is
+stored in this plugin's thread metadata. Permanent threads protect their ancestors
+from both the hourly sweep and manual prune. Pinning and 📌 title prefixes remain
+independent protection; explicit `keepThreadIds` remains supported too.
+
+On the first start of 0.2.2, live threads protected by uppercase explicit titles,
+📌 prefixes or `keepThreadIds` receive permanent metadata before the sweeper starts.
+A failed migration prevents startup and can be retried without losing prior writes.
+After completion, uppercase titles no longer protect new threads. Unchecking a
+migrated flag survives restart; independent pin/keep protections still apply.
