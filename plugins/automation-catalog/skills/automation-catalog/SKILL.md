@@ -61,3 +61,33 @@ The triage button and attention section select exactly the same unresolved execu
 Use catalog_forget_missing with a key object to remove a confirmed missing entry after preserving its history. Do not guess RPC names or edit the database.
 
 The detail UI supports marking a specific incident reviewed with a mandatory evidence note, and undoing that review. The catalog_review RPC accepts key, fingerprint and note (null to undo); the server rejects stale fingerprints. Review survives collector refresh, but a new failed run requires attention again. Review does not claim execution success. Never bulk-review unexplained failures to reduce the count.
+
+## Finish every audit in the durable journal
+
+Every investigated task, including healthy, intentionally disabled, blocked and
+unverified tasks, needs its own catalog_audit_append record. A chat reply or
+catalog_review incident dismissal is not a substitute. Use its stable catalog key;
+read existing entries first with catalog_audit_list to avoid repeating an audit.
+The journal is separate from scheduler health. It never proves a run succeeded
+merely because the schedule is enabled, a message was queued or a scan was skipped.
+
+Append through the supported RPC:
+`bb plugin rpc call automation-catalog catalog_audit_append --input-file audit.json --json`.
+Required fields: key, idempotencyKey (unique per audit; reuse unchanged on retry),
+outcome (passed/partial/failed/not-run), decision
+(keep/disable/delete/replace/defer/delegate/undecided), summary, checks.
+Include changes, remaining and evidence (up to 16 references, each at most 1000
+characters); passed requires evidence. Optional checkedAt is the actual verification
+time in epoch milliseconds, not the import time; authorThreadId links the source
+thread. Do not include credentials or unnecessary personal payload. Limit each
+complete record to 32 KiB. A different payload with the same idempotencyKey is an
+error, not an update. Correct a prior conclusion by appending a new record.
+
+Read with catalog_audit_list and an input object containing optional key/query,
+offset (default 0), limit (1–50; default 20). The panel has a journal section in
+every detail card and a global journal at catalog/audits, including removed tasks.
+History retains the identity snapshot after deletion. Native BB pause/resume/delete
+performed through this panel and removal of missing cards append action receipts;
+actions performed outside the panel still need an explicit audit record. Action
+receipts describe settings changes and do not claim execution acceptance. Unknown
+keys without a current card or previous journal record are rejected.

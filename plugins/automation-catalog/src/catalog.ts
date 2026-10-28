@@ -4,13 +4,15 @@ import { composeRequestSchema, hostRequest } from "./compose";
 import { readRunResult, runResultSchema } from "./run-result";
 import { refreshBbCatalog } from "./bb-refresh.js";
 import { manageBbCatalog } from "./bb-management.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { closeSync, openSync, readSync } from "node:fs";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { Db } from "./data.js";
+import { createAuditJournal } from "./audit.js";
+import { auditAppendSchema, auditListInputSchema, auditListSchema, auditRecordSchema } from "./audit-types.js";
 import {
   catalogSnapshotSchema,
   catalogEntrySchema,
@@ -302,6 +304,8 @@ export function createCatalog(db: Db) {
 }
 
 export const catalogRpcContract = defineRpcContract({
+  catalog_audit_append: { input: auditAppendSchema, output: auditRecordSchema },
+  catalog_audit_list: { input: auditListInputSchema, output: auditListSchema },
   catalog_search: {
     input: z.object({ query: z.string().trim().min(2).max(2000) }).strict(),
     output: discoverySchema,
@@ -350,6 +354,7 @@ export const catalogRpcContract = defineRpcContract({
 });
 export function registerCatalog(bb: BbPluginApi, db: Db) {
   const catalog = createCatalog(db);
+  const audits = createAuditJournal(db, key => catalog.entry(key));
   const settings = bb.settings.define({
     parentThreadId: { type: "string", label: "Родительский тред каталога", description: "Тред BB, под которым группируются обсуждения автоматизаций. Его проект используется по умолчанию для новых и внешних автоматизаций.", default: "" },
   });
@@ -388,10 +393,25 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
   const discovery = createDiscovery(catalog, bbCli);
   bb.onDispose(() => discovery.clear());
   bb.rpc.register(catalogRpcContract, {
+    catalog_audit_append: input => {
+      const record = audits.append(input);
+      bb.realtime.publish("automation-catalog", { key: input.key });
+      return record;
+    },
+    catalog_audit_list: input => audits.list(input),
     catalog_search: ({ query }) => discovery.search(query),
     catalog_definition: ({ key }) => readDefinition(catalog, bbCli, key),
     catalog_review: ({ key, fingerprint, note }) => {
-      const result = catalog.review(key, fingerprint, note);
+      const result = db.transaction(() => {
+        const result = catalog.review(key, fingerprint, note);
+        audits.append({ key, idempotencyKey: randomUUID(), outcome: note === null ? "not-run" : "partial", decision: "undecided",
+          summary: note === null ? "Снята отметка разбора сбоя" : "Разобран сохранённый сбой",
+          checks: note ?? "Проверка выполнения не проводилась. Сбой возвращён во внимание.",
+          changes: note === null ? "Удалена отметка разбора конкретного сбоя." : "Отмечен разбор конкретного сбоя; это не подтверждение успешного выполнения.",
+          evidence: [fingerprint],
+        }, note === null ? "action" : "audit");
+        return result;
+      })();
       bb.realtime.publish("automation-catalog", { key });
       return result;
     },
@@ -403,13 +423,26 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
       return result;
     },
     catalog_forget_missing: ({ key }) => {
-      const result = catalog.forgetMissing(key);
+      const result = db.transaction(() => {
+        audits.append({ key, idempotencyKey: randomUUID(), outcome: "not-run", decision: "delete",
+          summary: "Удалена отсутствующая карточка каталога", checks: "Удаляется сохранённая проекция; исходный планировщик не изменяется.",
+          changes: "Удалены карточка и история запусков из каталога. Журнал проверок и решений сохранён.",
+        }, "action");
+        return catalog.forgetMissing(key);
+      })();
       bb.realtime.publish("automation-catalog", { key });
       return result;
     },
     catalog_manage_bb: async ({ key, action }) => {
       const sourceId = catalog.entry(key).sourceId;
-      const result = await manageBbCatalog(catalog, bbCli, key, action);
+      const result = await manageBbCatalog(catalog, bbCli, key, action, () => {
+        audits.append({ key, idempotencyKey: randomUUID(),
+          outcome: "not-run", decision: action === "pause" ? "disable" : action === "delete" ? "delete" : "keep",
+          summary: action === "pause" ? "Отключено через каталог" : action === "delete" ? "Удалено через каталог" : "Включено через каталог",
+          checks: "Штатная команда BB завершилась успешно. Выполнение самой задачи не проверялось.",
+          changes: `Действие в BB: ${action}`, evidence: [`BB automation ${action}: ${key}`],
+        }, "action");
+      });
       bb.realtime.publish("automation-catalog", { sourceId });
       return result;
     },
