@@ -16,6 +16,10 @@ export class AccountAdmission {
     private readonly maxQueued = 1024) {}
   reserved(id: string): number { return this.lanes.get(id)?.active ?? 0; }
   waiting(id: string): number { return this.lanes.get(id)?.waiting.length ?? 0; }
+  /** Apply a persisted live limit to every already-waiting account lane. */
+  limitsChanged(): void {
+    for (const [id, lane] of this.lanes) this.pump(id, lane);
+  }
   async acquire(id: string, signal: AbortSignal, cooldown: () => number | null, deadline = this.now() + this.maxWaitMs): Promise<() => void> {
     signal.throwIfAborted();
     if (this.now() >= deadline) throw new AdmissionUnavailable('POOL_QUEUE_TIMEOUT');

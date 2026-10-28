@@ -60,3 +60,16 @@ it('preserves a future hold through the exact ordinary Codex quota-header path',
  const headers=new Headers({'x-codex-primary-used-percent':'15','x-codex-primary-window-minutes':'10080'});
  expect(adapter.quotaFromHeaders(previous.accountId,headers,previous,'other',1000).heldUntil).toBe(9000);
 });
+
+it('wakes existing lanes on a live limit increase without releasing active streams',async()=>{
+ let limit=1;const gate=new AccountAdmission(()=>limit);
+ const first=await gate.acquire('a',signal(),()=>null),other=await gate.acquire('b',signal(),()=>null);
+ const second=gate.acquire('a',signal(),()=>null),otherSecond=gate.acquire('b',signal(),()=>null);
+ expect(gate.waiting('a')).toBe(1);expect(gate.waiting('b')).toBe(1);
+ limit=2;gate.limitsChanged();
+ const releases=await Promise.all([second,otherSecond]);
+ expect(gate.reserved('a')).toBe(2);expect(gate.reserved('b')).toBe(2);
+ limit=1;gate.limitsChanged();expect(gate.reserved('a')).toBe(2);
+ first();other();for(const release of releases)release();
+ expect(gate.reserved('a')).toBe(0);expect(gate.waiting('a')).toBe(0);
+});

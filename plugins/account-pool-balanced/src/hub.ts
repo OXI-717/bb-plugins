@@ -222,6 +222,7 @@ export class AccountPoolHub {
     return (input,init)=>this.networkFlights.fetch(provider,input,init);
   }
 
+  admissionLimitsChanged(): void { this.admission.limitsChanged(); }
   async enforceNetworkPolicy():Promise<void>{await this.networkFlights.enforce();}
 
   async start(signal: AbortSignal): Promise<void> {

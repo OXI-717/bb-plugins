@@ -8189,3 +8189,20 @@ describe('shared account request pressure',()=>{
   expect((await denied).status).toBe(403);expect(outbound).toHaveBeenCalledTimes(1);
  });
 });
+
+it('config.set wakes an already queued request while the first stream remains open',async()=>{
+ const streams:ReadableStreamDefaultController<Uint8Array>[]=[];
+ const outbound=vi.fn(async()=>new Response(new ReadableStream<Uint8Array>({start(c){streams.push(c);}})));
+ const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+ await f.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:1});
+ const send=()=>f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+ const first=await send(),queued=send();
+ await vi.waitFor(async()=>expect(statusSchema.parse(await f.host.harness.behavior.callRpc('status.get',null)).accounts[0]!.queuedRequests).toBe(1));
+ expect(outbound).toHaveBeenCalledTimes(1);
+ await f.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:2});
+ await vi.waitFor(()=>expect(outbound).toHaveBeenCalledTimes(2));
+ const second=await queued;
+ const status=statusSchema.parse(await f.host.harness.behavior.callRpc('status.get',null));
+ expect(status.accounts[0]).toMatchObject({inFlight:2,queuedRequests:0,concurrencyLimit:2});
+ const texts=[first.text(),second.text()];for(const stream of streams)stream.close();await Promise.all(texts);
+});
