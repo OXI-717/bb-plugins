@@ -114,7 +114,7 @@ export class TrafficHistory {
     this.dirty = true;
   }
 
-  snapshot() {
+  private metadata() {
     this.prune();
     return {
       schema: 'bb-account-pool/traffic-history/1' as const, startedAt: this.startedAt,
@@ -124,8 +124,31 @@ export class TrafficHistory {
       capacityDroppedEvents: this.capacityDroppedEvents, capacityEvictedBuckets: this.capacityEvictedBuckets,
       truncated: this.capacityDroppedEvents > 0 || this.capacityEvictedBuckets > 0,
       storageFailuresSinceStart: this.storageFailures,
-      rows: [...this.rows.values()].sort((a, b) => a.hour - b.hour).map(r => ({ ...r })),
+      totalRows: this.rows.size,
     };
+  }
+  /** Fixed provider cardinality, evaluated across every retained bucket, independent of detail pages. */
+  summary() {
+    const metadata = this.metadata();
+    const providers = new Map<Observation['provider'], Counters>();
+    for (const row of this.rows.values()) {
+      const total = providers.get(row.provider) ?? empty();
+      for (const k of Object.keys(counters.shape) as Array<keyof Counters>) {
+        total[k] = k === 'peakAccountInFlight' || k.startsWith('last') ? Math.max(total[k],row[k]) : add(total[k],row[k]);
+      }
+      providers.set(row.provider,total);
+    }
+    return {...metadata,providers:[...providers].map(([provider,total])=>({provider,...total})),
+      recentPressure:[...providers].map(([provider,total])=>({provider,lastUpstream429At:total.lastUpstream429At,
+        lastAuthErrorAt:total.lastAuthErrorAt,lastQueueFailureAt:total.lastQueueFailureAt}))};
+  }
+  snapshot(offset = 0, limit = 100) {
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > HISTORY_MAX_ROWS || !Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+      throw Error('History requires offset 0..8192 and limit 1..200');
+    const metadata = this.metadata();
+    const rows = [...this.rows.values()].sort((a,b)=>a.hour-b.hour || key(a).localeCompare(key(b))).slice(offset,offset+limit).map(r=>({...r}));
+    return {...metadata,offset,limit,rowsTruncated:rows.length<metadata.totalRows,
+      nextOffset:offset+rows.length<metadata.totalRows?offset+rows.length:null,rows};
   }
   private cutoff() { return Math.floor(this.now() / HOUR_MS) * HOUR_MS - HISTORY_TTL_MS + HOUR_MS; }
   private prune() {

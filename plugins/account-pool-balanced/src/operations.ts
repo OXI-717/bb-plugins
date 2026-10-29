@@ -301,8 +301,8 @@ export class PoolOperations {
   }
 
   observations() { return this.hub.observations(); }
-  async trafficHistory() {
-    const history = this.hub.trafficHistory();
+  async trafficHistory(offset = 0, limit = 100) {
+    const history = this.hub.trafficHistory(offset,limit);
     if ('unavailable' in history) return history;
     // Resolve current machine labels only on authorized local inspection, never persist labels in telemetry.
     const clientHashes = new Set(history.rows.map(r => r.clientHash));
@@ -310,7 +310,11 @@ export class PoolOperations {
     try { hosts = await this.listHosts(); } catch { identitiesAvailable = false; }
     const clients = hosts.flatMap(h => {
       const clientHash = createHash('sha256').update(h.id).digest('hex').slice(0,24);
-      return clientHashes.has(clientHash) ? [{clientHash,hostId:h.id,hostName:h.name}] : [];
+      if (!clientHashes.has(clientHash)) return [];
+      // Names are display-only. Never let external host metadata defeat the bounded CLI page.
+      if (h.id.length > 128) { identitiesAvailable = false; return []; }
+      clientHashes.delete(clientHash);
+      return [{clientHash,hostId:h.id,hostName:h.name.length<=256?h.name:null}];
     });
     return {...history,identitiesAvailable,clients};
   }

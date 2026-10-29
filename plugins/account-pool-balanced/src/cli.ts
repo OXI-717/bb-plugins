@@ -60,7 +60,7 @@ const HELP = [
   "  bb pool account refresh <id>",
   "  bb pool status [--json]",
   "  bb pool observations [--json]",
-  "  bb pool history [--json]",
+  "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> [--off]",
   "  bb pool config",
   "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
@@ -403,7 +403,7 @@ export function registerPoolCli(
         usage: "bb pool account refresh <id>",
       },
       { name:"observations", summary:"Inspect bounded request metadata and retained-event minute counts", usage:"bb pool observations [--json]" },
-      { name:"history", summary:"Inspect bounded fourteen-day hourly account and client counters", usage:"bb pool history [--json]" },
+      { name:"history", summary:"Inspect bounded fourteen-day hourly account and client counters", usage:"bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]" },
       {
         name: "status",
         summary: "Show hub, machine token, routing, and account status",
@@ -760,8 +760,15 @@ export function registerPoolCli(
           return {exitCode:0,stdout:json(operations.observations())};
         }
         if (argv[0] === "history") {
-          parseFlags(argv.slice(1), ['json'], []);
-          return {exitCode:0,stdout:json(await operations.trafficHistory())};
+          const flags = parseFlags(argv.slice(1), ['json'], ['offset','limit']);
+          const integer = (name: string, fallback: number, min: number, max: number) => {
+            const raw = flags.values.get(name);
+            if (raw === undefined) return fallback;
+            if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw)<min || Number(raw)>max)
+              throw Error(`--${name} requires an integer ${min}..${max}.`);
+            return Number(raw);
+          };
+          return {exitCode:0,stdout:json(await operations.trafficHistory(integer('offset',0,0,8192),integer('limit',100,1,200)))};
         }
         if (argv[0] === "status") {
           const flags = parseFlags(argv.slice(1), ["json"], []);

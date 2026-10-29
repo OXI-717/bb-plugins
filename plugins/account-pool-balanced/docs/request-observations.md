@@ -89,7 +89,7 @@ Respect provider cooldowns and observe natural traffic before adjusting it.
 ## Bounded hourly traffic history (0.4.48)
 
 `bb pool history --json` inspects independently persisted hourly counters for up to
-fourteen days. The existing `observations` output also includes `history`; the
+fourteen days. The existing `observations` output includes a compact `history` summary across all retained buckets; the
 short event ring remains unchanged. Both commands are local authorized inspection,
 not new public endpoints. No provider, quota or model calls are made.
 
@@ -138,3 +138,23 @@ coverage through this pool's existing forward seam, not complete subscription
 accounting or proof about independent applications. It cannot quantify ban risk.
 Actual 429/auth/queue failures are reasons to investigate under existing policy,
 not authorization to disable, reroute or rotate an account automatically.
+
+
+History transport is paginated independently from storage. `bb pool history
+--offset 0 --limit 100 --json` returns at most 100 detail rows by default; `limit`
+is a strict integer 1–200 and `offset` is 0–8,192. `totalRows`, `offset`, `limit`,
+`nextOffset` and `rowsTruncated` describe the page, separately from the persistent
+capacity-omission flag `truncated`. Follow `nextOffset` until null. Rows sort by
+hour then full aggregate key. Pages are live, not an immutable export: each has
+its own `observedAt`; concurrent new keys, expiry or capacity eviction can shift
+offsets. A coherent static export requires a quiet interval or repeating a read,
+not assuming transactional pagination. Machine label lookup is limited to the
+returned page; overlong labels become null instead of unbounded strings.
+
+`observations.history.providers` contains fixed-provider totals across ALL retained
+buckets. Its `recentPressure` has at most one row per provider and the maximum
+actual timestamps of upstream 429, upstream auth errors and queue failures over
+ALL buckets, never just the first page. It has no detail `rows` array. The existing
+monitor uses these actual latest timestamps within its recent observation window;
+large counts alone cannot make stale failures current. Output remains below the
+BB one-MiB CLI limit at admitted capacity; persisted data limits remain unchanged.

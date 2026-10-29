@@ -25,11 +25,11 @@ it('retains logical starts and selected-account dispatch metrics independently o
   j.record(f.event({event:'stream-end',attempt:1,accountId:account,status:200,outcome:'complete',durationMs:2000}));
  }
  const out=j.snapshot();expect(out.rows).toHaveLength(MAX_ROWS);expect(out.truncated).toBe(true);
- expect(out.history.rows).toHaveLength(2);
- expect(out.history.rows.find(r=>r.accountId===null)).toMatchObject({requests:MAX_ROWS+17,attempts:0});
- expect(out.history.rows.find(r=>r.accountId===account)).toMatchObject({requests:0,attempts:MAX_ROWS+17,upstream429:3,peakAccountInFlight:2,streamMs:(MAX_ROWS+17)*2000});
+ expect(j.historySnapshot().rows).toHaveLength(2);
+ expect(j.historySnapshot().rows.find(r=>r.accountId===null)).toMatchObject({requests:MAX_ROWS+17,attempts:0});
+ expect(j.historySnapshot().rows.find(r=>r.accountId===account)).toMatchObject({requests:0,attempts:MAX_ROWS+17,upstream429:3,peakAccountInFlight:2,streamMs:(MAX_ROWS+17)*2000});
  await j.flush();const restored=new RequestJournal(path.join(f.dir,'recent.json'),f.clock);await restored.initialize();cleanups.push(()=>restored.close());
- expect(restored.snapshot().history.rows).toEqual(out.history.rows);
+ expect(restored.historySnapshot().rows).toEqual(j.historySnapshot().rows);
 });
 it('separates provider/account/client/project buckets, retries, auth errors, queue failures and canceled streams',async()=>{
  const f=await fixture();
@@ -56,7 +56,8 @@ it('bounds high-cardinality data, discloses omissions and keeps already admitted
  for(let i=0;i<HISTORY_MAX_ROWS+9;i++)f.history.record(f.event({clientHash:i.toString(16).padStart(24,'0')}));
  f.history.record(f.event({clientHash:'0'.repeat(24)}));
  expect(f.history.snapshot()).toMatchObject({truncated:true,capacityDroppedEvents:9});
- expect(f.history.snapshot().rows).toHaveLength(HISTORY_MAX_ROWS);
+ expect(f.history.snapshot()).toMatchObject({totalRows:HISTORY_MAX_ROWS,rowsTruncated:true,nextOffset:100});
+ expect(f.history.snapshot().rows).toHaveLength(100);
  expect(f.history.snapshot().rows[0].requests).toBe(2);
  await f.history.flush();expect((await fs.stat(f.file)).size).toBeLessThan(HISTORY_MAX_BYTES);
  f.setNow(f.now+HOUR_MS);f.history.record(f.event());
@@ -72,7 +73,7 @@ it('stores no arbitrary text, model, thread, request ID, quota headers or provid
  expect(text).not.toMatch(/synthetic|authorization|prompt|requestId|threadId|model|codexQuota/);
  expect((await fs.stat(f.file)).mode&0o777).toBe(0o600);
  expect((await fs.stat(f.dir)).mode&0o777).toBe(0o700);
- expect(j.snapshot().history.rows[0].requests).toBe(1);
+ expect(j.historySnapshot().rows[0].requests).toBe(1);
 });
 it('isolates slow/failing writes, coalesces them and retries persistence without losing in-memory counts',async()=>{
  const f=await fixture();let release!:()=>void;
@@ -93,7 +94,7 @@ it('rejects corrupt, oversized and duplicate persisted rows, removes orphan temp
 it('restores without deriving longer history from the truncated legacy ring',async()=>{
  const f=await fixture();await fs.writeFile(path.join(f.dir,'recent.json'),JSON.stringify({rows:[f.event()]}));
  const j=new RequestJournal(path.join(f.dir,'recent.json'),f.clock);await j.initialize();cleanups.push(()=>j.close());
- expect(j.snapshot().rows).toHaveLength(1);expect(j.snapshot().history.rows).toEqual([]);
+ expect(j.snapshot().rows).toHaveLength(1);expect(j.historySnapshot().rows).toEqual([]);
 });
 it('drains newer dirty history after a held older write on graceful journal close',async()=>{
  const f=await fixture(),recent=path.join(f.dir,'recent.json');
@@ -108,5 +109,5 @@ it('drains newer dirty history after a held older write on graceful journal clos
  j.record(f.event());const closing=j.close();
  release();await Promise.all([older,closing]);write.mockRestore();
  const restored=new RequestJournal(recent,f.clock);await restored.initialize();cleanups.push(()=>restored.close());
- expect(restored.snapshot().history.rows[0].requests).toBe(2);
+ expect(restored.historySnapshot().rows[0].requests).toBe(2);
 });
