@@ -8,7 +8,7 @@ The journal starts with authenticated requests that passed the hub's admission g
 - `clientHash` is a truncated SHA-256 of the authenticated context's host/client identifier, never of a token. For a machine's project/thread credentials this is the machine identity; for external credentials it is the external client identity. Labels, names, emails, token values and provider-side session identifiers are never recorded. Correlate with known authenticated contexts; the hash is not proof of a human identity.
 - `projectId` and `threadId` come exclusively from the authenticated token context and must match canonical BB ID shapes; otherwise null. External clients often have no thread binding. Body/header session IDs are never interpreted as BB thread IDs.
 - `model` is an exact allowlisted request model ID; unfamiliar aliases remain null. `modelFamily` is the adapter's existing classification, not proof of an upstream selected model. No request text or response model headers are logged.
-- `accountId` is the selected account's internal UUID. `inFlight` is the total upstream count; `accountInFlight` is the selected account's count at that observation. Attempt events precede increment; stream-end events follow decrement. These are instantaneous counters, not a provider concurrency quota.
+- `accountId` is the selected account's internal UUID. `inFlight` is the total upstream count; `accountInFlight` is the selected account's count at that observation. Attempt events follow increment; stream-end events follow decrement. These are instantaneous counters, not a provider concurrency quota.
 
 Event names distinguish causal observations:
 

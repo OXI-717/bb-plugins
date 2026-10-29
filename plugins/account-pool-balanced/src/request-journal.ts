@@ -109,5 +109,5 @@ export class RequestJournal {
   }catch{this.failures++;await fs.rm(this.file+'.tmp',{force:true}).catch(()=>{this.failures++;});}})();
   try{await this.writing;}finally{this.writing=null;}
  }
- async close():Promise<void>{this.closed=true;if(this.timer!==null)clearTimeout(this.timer);await this.writing;await this.flush();}
+ async close():Promise<void>{this.closed=true;if(this.timer!==null)clearTimeout(this.timer);await this.writing;await this.flush();await this.history.close();}
 }

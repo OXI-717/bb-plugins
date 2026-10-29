@@ -7750,7 +7750,7 @@ describe('bounded request metadata observations',()=>{
     const result=JSON.parse(reply.stdout);
     expect(result).toMatchObject({schema:'bb-account-pool/traffic-history/1',identitiesAvailable:true,truncated:false});
     expect(result.clients).toEqual([{clientHash:expect.any(String),hostId:'host-one',hostName:'One'}]);
-    expect(result.rows).toEqual(expect.arrayContaining([expect.objectContaining({accountId:null,requests:1,attempts:0}),expect.objectContaining({accountId:fixture.account.id,requests:0,firstDispatches:1,attempts:1,upstreamResponses:1,streamEnds:1})]));
+    expect(result.rows).toEqual(expect.arrayContaining([expect.objectContaining({accountId:null,requests:1,attempts:0}),expect.objectContaining({accountId:fixture.account.id,requests:0,firstDispatches:1,attempts:1,upstreamResponses:1,streamEnds:1,peakAccountInFlight:1})]));
     expect(JSON.stringify(result)).not.toMatch(/synthetic|forged-machine|ANTHROPIC|threadId|requestId/);
     fixture.host.harness.sdk.stub('hosts.list',async()=>{throw Error('synthetic private failure');});
     const unavailable=JSON.parse((await fixture.host.harness.behavior.runCli(['history','--json'])).stdout);

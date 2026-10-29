@@ -95,3 +95,18 @@ it('restores without deriving longer history from the truncated legacy ring',asy
  const j=new RequestJournal(path.join(f.dir,'recent.json'),f.clock);await j.initialize();cleanups.push(()=>j.close());
  expect(j.snapshot().rows).toHaveLength(1);expect(j.snapshot().history.rows).toEqual([]);
 });
+it('drains newer dirty history after a held older write on graceful journal close',async()=>{
+ const f=await fixture(),recent=path.join(f.dir,'recent.json');
+ const j=new RequestJournal(recent,f.clock);await j.initialize();
+ let release!:()=>void,blocked=false;
+ const gate=new Promise<void>(resolve=>{release=resolve;}),original=fs.writeFile;
+ const write=vi.spyOn(fs,'writeFile').mockImplementation(async(file,data,options)=>{
+  if(String(file)===f.file+'.tmp'&&!blocked){blocked=true;await gate;}
+  return original(file,data,options);
+ });
+ j.record(f.event());const older=j.flush();expect(blocked).toBe(true);
+ j.record(f.event());const closing=j.close();
+ release();await Promise.all([older,closing]);write.mockRestore();
+ const restored=new RequestJournal(recent,f.clock);await restored.initialize();cleanups.push(()=>restored.close());
+ expect(restored.snapshot().history.rows[0].requests).toBe(2);
+});

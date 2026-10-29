@@ -108,9 +108,9 @@ export class TrafficHistory {
       if (r.outcome === 'error') inc('streamErrors');
       if (r.outcome === 'canceled') inc('streamCanceled');
     }
-    // Only upstream dispatch/header observations can establish activity. Attempt is emitted before increment.
+    // The hub increments the account count before dispatch observation, and decrements at stream end.
     if (r.event === 'attempt' || r.event === 'upstream')
-      row.peakAccountInFlight = Math.max(row.peakAccountInFlight, r.accountInFlight + (r.event === 'attempt' ? 1 : 0));
+      row.peakAccountInFlight = Math.max(row.peakAccountInFlight, r.accountInFlight);
     this.dirty = true;
   }
 
@@ -155,5 +155,10 @@ export class TrafficHistory {
       }
     })();
     try { await this.writing; } finally { this.writing = null; }
+  }
+  /** The journal has stopped admission/recording before this finite final drain. */
+  async close(): Promise<void> {
+    if (this.writing) await this.writing;
+    await this.flush();
   }
 }
