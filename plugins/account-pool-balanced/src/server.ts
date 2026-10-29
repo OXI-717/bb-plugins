@@ -340,8 +340,7 @@ export function createAccountPoolPlugin(
     bb.providers.experimental_contributeEnv("claude-code", async (context) => {
       if (
         !(await operations.isRoutingEnabled("claude")) ||
-        (await isThreadBypassed(context)) ||
-        !(await operations.hasUsableEnabledAccount("claude"))
+        (await isThreadBypassed(context))
       ) {
         return [];
       }

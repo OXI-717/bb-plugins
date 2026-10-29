@@ -563,7 +563,7 @@ export class AccountPoolHub {
     const affinityHost = purpose ? JSON.stringify([legacyAffinityHost, "purpose", purpose]) : legacyAffinityHost;
     const parsed = adapter.parseRequest(body, request.headers, request);
     const family = parsed.family;
-    const trace = newTrace(adapter.provider, hostId, projectId, threadId, parsed.model, family);
+    const trace = newTrace(adapter.provider, hostId, projectId, threadId, parsed.model, family, request.headers.get("user-agent"));
     const startedAt = this.options.now();
     let attempt = 0;
     let lastAccount: string|null = null;

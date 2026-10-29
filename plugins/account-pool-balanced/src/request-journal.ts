@@ -18,15 +18,18 @@ export const observationSchema=z.object({
  outcome:z.enum(['returned','error','canceled','complete','failed-over']).nullable(),
  failover:z.enum(['none','succeeded','failed']).nullable(),
  errorClass:z.enum(['upstream429','local-held','upstream403-hold','stream-error','request-error','canceled','queue-full','queue-timeout']).nullable(),
+ clientVersion:z.string().regex(/^\d{1,5}\.\d{1,5}\.\d{1,5}$/).nullable().optional(),
  codexQuota:codexQuotaObservationSchema.optional(),
 }).strip();
 export type Observation=z.infer<typeof observationSchema>;
-export type Trace=Pick<Observation,'requestId'|'provider'|'clientHash'|'projectId'|'threadId'|'model'|'modelFamily'>;
-export function newTrace(provider:Observation['provider'],host:string,project:string|null,thread:string|null,model:unknown,family:Observation['modelFamily']):Trace {
+export type Trace=Pick<Observation,'requestId'|'provider'|'clientHash'|'projectId'|'threadId'|'model'|'modelFamily'|'clientVersion'>;
+export function newTrace(provider:Observation['provider'],host:string,project:string|null,thread:string|null,model:unknown,family:Observation['modelFamily'],userAgent:string|null=null):Trace {
  const parsed=observationSchema.shape.model.safeParse(model);
+ // Self-reported version only; never use it as trusted machine identity or log raw headers.
+ const version=provider==='claude'&&userAgent!==null&&userAgent.length<=256?/(?:^|\s)claude-cli\/(\d{1,5}\.\d{1,5}\.\d{1,5})(?=\s|$)/.exec(userAgent)?.[1]??null:null;
  return {requestId:randomUUID(),provider,clientHash:createHash('sha256').update(host).digest('hex').slice(0,24),
  projectId:binding('proj').safeParse(project).success?project:null,threadId:binding('thr').safeParse(thread).success?thread:null,
- model:parsed.success?parsed.data:null,modelFamily:family};
+ model:parsed.success?parsed.data:null,modelFamily:family,clientVersion:version};
 }
 /** No disk I/O in record(): one bounded async snapshot at a time, outside forwarding. */
 export class RequestJournal {
