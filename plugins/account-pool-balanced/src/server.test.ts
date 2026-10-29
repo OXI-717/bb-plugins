@@ -2234,7 +2234,7 @@ describe("Account Pool plugin", () => {
         projectId: "project-one",
         hostId: "host-one",
       }),
-    ).toEqual([]);
+    ).toEqual(expect.arrayContaining([expect.objectContaining({name:"ANTHROPIC_BASE_URL"}),expect.objectContaining({name:"ANTHROPIC_AUTH_TOKEN"})]));
     await expect(
       host.harness.behavior.resolveProviderEnvHealth("claude-code", {
         hostId: "host-one",
@@ -2800,8 +2800,10 @@ describe("Account Pool plugin", () => {
     expect(await resolveToken(fixture.host)).toBe(fixture.key);
   });
 
-  it("withholds env and proxied health when an enabled account secret is missing", async () => {
+  it("retains pooled env but withholds healthy status when an enabled account secret is missing", async () => {
+    let forwarded=0;
     const upstream = await startUpstream(async (request, response) => {
+      forwarded++;
       await readRequestBody(request);
       response.writeHead(200, { "content-type": "application/json" });
       response.end("{}");
@@ -2823,12 +2825,17 @@ describe("Account Pool plugin", () => {
         projectId: "project-one",
         hostId: "host-one",
       }),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual(expect.arrayContaining([expect.objectContaining({name:"ANTHROPIC_BASE_URL"}),expect.objectContaining({name:"ANTHROPIC_AUTH_TOKEN"})]));
     await expect(
       fixture.host.harness.behavior.resolveProviderEnvHealth("claude-code", {
         hostId: "host-one",
       }),
     ).resolves.toBeNull();
+    const token=await resolveToken(fixture.host);
+    const denied=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(token),body:'{}'});
+    expect(denied.status).toBe(403);
+    expect(forwarded).toBe(0);
+    await denied.text();
   });
 
   it("rotates a machine token with a ten-minute grace window", async () => {
