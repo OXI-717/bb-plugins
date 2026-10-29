@@ -1,4 +1,5 @@
 import type {AgyAuthorization} from "./agy-oauth-login.js";
+import { createHash } from 'node:crypto';
 import type {
   Account,
   AccountSummary,
@@ -300,6 +301,19 @@ export class PoolOperations {
   }
 
   observations() { return this.hub.observations(); }
+  async trafficHistory() {
+    const history = this.hub.trafficHistory();
+    if ('unavailable' in history) return history;
+    // Resolve current machine labels only on authorized local inspection, never persist labels in telemetry.
+    const clientHashes = new Set(history.rows.map(r => r.clientHash));
+    let hosts: PoolHost[] = [], identitiesAvailable = true;
+    try { hosts = await this.listHosts(); } catch { identitiesAvailable = false; }
+    const clients = hosts.flatMap(h => {
+      const clientHash = createHash('sha256').update(h.id).digest('hex').slice(0,24);
+      return clientHashes.has(clientHash) ? [{clientHash,hostId:h.id,hostName:h.name}] : [];
+    });
+    return {...history,identitiesAvailable,clients};
+  }
 
   async status(): Promise<PoolStatus> {
     const hosts = await this.listHosts();

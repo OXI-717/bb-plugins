@@ -272,6 +272,7 @@ export class AccountPoolHub {
   }
 
   observations() { return this.options.journal?.snapshot(100) ?? { unavailable:true }; }
+  trafficHistory() { return this.options.journal?.historySnapshot() ?? { unavailable:true as const }; }
   private observe(trace: Trace, fields: Partial<Observation>): void {
     try {
       this.options.journal?.record({ ...trace, at:this.options.now(), attempt:0, event:'request', accountId:null,

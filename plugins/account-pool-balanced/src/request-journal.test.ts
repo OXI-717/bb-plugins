@@ -79,10 +79,13 @@ it('does no storage I/O in record and stays bounded while a write is blocked',as
  const f=await fixture();let unblock!:()=>void;
  const write=vi.spyOn(fs,'writeFile').mockImplementationOnce(()=>new Promise<void>(resolve=>{unblock=resolve;}));
  f.journal.record(f.event());expect(write).not.toHaveBeenCalled();
- const flush=f.journal.flush();expect(write).toHaveBeenCalledTimes(1);
- for(let i=0;i<MAX_ROWS+1;i++)f.journal.record(f.event());
- expect(f.journal.snapshot().rows).toHaveLength(MAX_ROWS);expect(write).toHaveBeenCalledTimes(1);
- unblock();await flush;write.mockRestore();
+ const flush=f.journal.flush();
+ try {
+  // Recent events and long-term counters each own at most one independent snapshot.
+  expect(write).toHaveBeenCalledTimes(2);
+  for(let i=0;i<MAX_ROWS+1;i++)f.journal.record(f.event());
+  expect(f.journal.snapshot().rows).toHaveLength(MAX_ROWS);expect(write).toHaveBeenCalledTimes(2);
+ } finally { unblock();await flush;write.mockRestore(); }
 });
 it('isolates write failures and refuses corrupt or oversized persisted metadata',async()=>{
  const f=await fixture();f.journal.record(f.event());
@@ -108,7 +111,8 @@ it('removes a temporary snapshot after rename failure and isolates cleanup failu
  const rename=vi.spyOn(fs,'rename').mockRejectedValueOnce(new Error('synthetic rename failure'));
  await f.journal.flush();await expect(fs.stat(f.file+'.tmp')).rejects.toMatchObject({code:'ENOENT'});
  expect(f.journal.snapshot().storageFailuresSinceStart).toBe(1);rename.mockRestore();
- const remove=vi.spyOn(fs,'rm').mockRejectedValueOnce(new Error('synthetic cleanup failure'));
+ const originalRemove=fs.rm;
+ const remove=vi.spyOn(fs,'rm').mockImplementation((file,options)=>String(file)===f.file+'.tmp'?Promise.reject(new Error('synthetic cleanup failure')):originalRemove(file,options));
  const restored=new RequestJournal(f.file,()=>f.now);await expect(restored.initialize()).resolves.toBeUndefined();
  expect(restored.snapshot().storageFailuresSinceStart).toBe(1);await restored.close();remove.mockRestore();
 });

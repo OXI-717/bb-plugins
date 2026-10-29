@@ -84,3 +84,57 @@ Two concurrent requests is a conservative initial operator setting, not a
 published provider guarantee. Concurrency alone cannot prevent variable provider
 request/token limits or shared subscription consumption outside this server.
 Respect provider cooldowns and observe natural traffic before adjusting it.
+
+
+## Bounded hourly traffic history (0.4.48)
+
+`bb pool history --json` inspects independently persisted hourly counters for up to
+fourteen days. The existing `observations` output also includes `history`; the
+short event ring remains unchanged. Both commands are local authorized inspection,
+not new public endpoints. No provider, quota or model calls are made.
+
+Each aggregate groups provider, selected account UUID (or null before selection),
+authenticated client hash and project. There are no prompts, response bodies,
+raw headers, credentials, request IDs, thread IDs, model strings or diagnostic
+quota tuples in long-term storage. Machine labels are resolved on inspection
+from the current trusted host directory, never recorded from request payloads or
+persisted in history. External clients without a trusted machine mapping remain
+hashes; they must not be presented as guessed machine names. Lookup failure sets
+`identitiesAvailable=false` and preserves counters without guessing labels.
+
+`requests` counts logical starts and therefore belongs to the null-account row.
+`firstDispatches` counts the first actual upstream dispatch assigned to an account;
+`attempts` includes retries and failover dispatches. Do not sum attempts as unique
+requests or assign pre-selection refusals to an account. Upstream responses, 429,
+401/403 and 5xx are counted only at upstream header events; pool-local held 429,
+queue waits/refusals and completed/canceled/error stream lifetimes are separate.
+Hold/result events do not count a second upstream failure. Latest 429/auth/queue
+failure timestamps support the existing observer even after raw-event eviction.
+Stream duration sums are recorded in the hour in which the stream ends, and may
+include concurrent streams or ones begun earlier: they are not wall-clock busy
+percentages. The account peak is an observed dispatch/header count, not a provider
+limit. Missing ended streams after a process crash cannot be reconstructed.
+
+The file cap is 8 MiB / 8,192 aggregate buckets, in addition to the existing raw
+2 MiB / 2,048-event ring. At cardinality capacity the oldest hour is evicted as a
+group for new hours; within a full single hour new keys are omitted while existing
+keys continue counting. `capacityEvictedBuckets`, `capacityDroppedEvents` and
+`truncated` disclose these limits. Hour buckets expire entirely after fourteen
+days (the boundary may shorten coverage by less than an hour). There is no
+append-only log or per-request file. One temporary atomic replacement adds at most
+another 8 MiB. The containing directory is 0700 and files are 0600. Temporary files
+are removed at startup or failed writes. Expiry runs on the journal's existing
+background tick even with no traffic. Filesystem refusal may prevent replacement
+or deletion; it increments the isolated history failure counter, never blocks or
+fails forwarding. A single asynchronous write per file coalesces changes; failed
+history writes retry on the next tick. No new service, timer or scheduler is added.
+
+History starts on this version's installation and survives ordinary restarts; it
+is never inferred from the truncated legacy ring. `startedAt`, `observedAt`, caps,
+omission counters and `storageFailuresSinceStart` must accompany any report.
+Unavailable/corrupt storage resets the new in-memory start boundary and reports
+failure; crashes can lose the last coalesced snapshot. This is operational traffic
+coverage through this pool's existing forward seam, not complete subscription
+accounting or proof about independent applications. It cannot quantify ban risk.
+Actual 429/auth/queue failures are reasons to investigate under existing policy,
+not authorization to disable, reroute or rotate an account automatically.

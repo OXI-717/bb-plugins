@@ -7740,6 +7740,22 @@ it('routes browser panel and CLI to the selected Mac with no server browser fall
 });
 
 describe('bounded request metadata observations',()=>{
+  it('inspects persisted hourly traffic through the authorized CLI and resolves only trusted machine identities',async()=>{
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockImplementation(async()=>Response.json({}))}});
+    const env=await fixture.host.harness.behavior.resolveProviderEnv('claude-code',{hostId:'host-one',projectId:'proj_abcdef1234',threadId:'thr_abcdef1234'});
+    const key=env.find(e=>e.name==='ANTHROPIC_AUTH_TOKEN')!.value as string;
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(key),'host-id':'forged-machine'},body:JSON.stringify({messages:[{role:'user',content:'synthetic private prompt'}]})});
+    expect(response.status).toBe(200);await response.text();
+    const reply=await fixture.host.harness.behavior.runCli(['history','--json']);expect(reply.exitCode).toBe(0);
+    const result=JSON.parse(reply.stdout);
+    expect(result).toMatchObject({schema:'bb-account-pool/traffic-history/1',identitiesAvailable:true,truncated:false});
+    expect(result.clients).toEqual([{clientHash:expect.any(String),hostId:'host-one',hostName:'One'}]);
+    expect(result.rows).toEqual(expect.arrayContaining([expect.objectContaining({accountId:null,requests:1,attempts:0}),expect.objectContaining({accountId:fixture.account.id,requests:0,firstDispatches:1,attempts:1,upstreamResponses:1,streamEnds:1})]));
+    expect(JSON.stringify(result)).not.toMatch(/synthetic|forged-machine|ANTHROPIC|threadId|requestId/);
+    fixture.host.harness.sdk.stub('hosts.list',async()=>{throw Error('synthetic private failure');});
+    const unavailable=JSON.parse((await fixture.host.harness.behavior.runCli(['history','--json'])).stdout);
+    expect(unavailable.identitiesAvailable).toBe(false);expect(unavailable.clients).toEqual([]);expect(unavailable.rows).toEqual(result.rows);
+  });
   async function records(fixture:Fixture){
     const reply=await fixture.host.harness.behavior.runCli(['observations','--json']);
     expect(reply.exitCode).toBe(0);
