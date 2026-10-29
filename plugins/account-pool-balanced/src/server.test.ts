@@ -4422,7 +4422,7 @@ describe("Account Pool plugin", () => {
                 status:
                   key === "sk-late" || (healthyFourth && key === "sk-4")
                     ? 200
-                    : 503,
+                    : 502,
               },
             );
           },
@@ -4439,7 +4439,7 @@ describe("Account Pool plugin", () => {
         },
       );
       await response.text();
-      expect(response.status).toBe(healthyFourth ? 200 : 503);
+      expect(response.status).toBe(healthyFourth ? 200 : 502);
       expect(attempts).toEqual(["sk-1", "sk-2", "sk-3", "sk-4"]);
     },
   );
@@ -6807,7 +6807,7 @@ describe("sequential pool recovery", () => {
     }
   });
 
-  it("keeps the last working binding after every account fails during a provider outage", async () => {
+  it("keeps the working binding on a Claude 503 without trying another account", async () => {
     const attempts: Array<string | null> = [];
     let outage = false;
     const fixture = await createFixture({
@@ -6833,7 +6833,7 @@ describe("sequential pool recovery", () => {
     await failed.text();
     outage = false;
     await (await send()).text();
-    expect(attempts).toEqual(["sk-first", "sk-first", "sk-second", "sk-first"]);
+    expect(attempts).toEqual(["sk-first", "sk-first", "sk-first"]);
   });
 
   it("keeps Codex over-limit accounts ineligible until reset when utilization is omitted", async () => {
