@@ -8,8 +8,9 @@ export function projectRole(account: ProjectAccount, projectId: string | null): 
   return role === undefined || role === "inherit" ? account.role : role;
 }
 export function projectTier(account: ProjectAccount, projectId: string | null): number | null {
-  if (account.drainOnce) return 0;
   const rule = projectRule(account, projectId);
   if (account.projects?.onlySelected && account.projects.rules.length > 0 && !rule) return null;
-  return (rule ? 1 : 3) + (projectRole(account, projectId) === "reserve" ? 1 : 0);
+  // Manual drain changes priority only inside its project/general group.
+  // Project access is evaluated first and cannot be widened by a drain flag.
+  return (rule ? 0 : 3) + (account.drainOnce ? 0 : projectRole(account, projectId) === "reserve" ? 2 : 1);
 }
