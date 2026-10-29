@@ -108,7 +108,8 @@ it('removes an abandoned temporary snapshot on startup without natural traffic',
 });
 it('removes a temporary snapshot after rename failure and isolates cleanup failure',async()=>{
  const f=await fixture();f.journal.record(f.event());
- const rename=vi.spyOn(fs,'rename').mockRejectedValueOnce(new Error('synthetic rename failure'));
+ const originalRename=fs.rename;
+ const rename=vi.spyOn(fs,'rename').mockImplementation((from,to)=>String(from)===f.file+'.tmp'?Promise.reject(new Error('synthetic rename failure')):originalRename(from,to));
  await f.journal.flush();await expect(fs.stat(f.file+'.tmp')).rejects.toMatchObject({code:'ENOENT'});
  expect(f.journal.snapshot().storageFailuresSinceStart).toBe(1);rename.mockRestore();
  const originalRemove=fs.rm;
