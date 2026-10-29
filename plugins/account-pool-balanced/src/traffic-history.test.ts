@@ -62,7 +62,7 @@ it('bounds high-cardinality data, discloses omissions and keeps already admitted
  f.setNow(f.now+HOUR_MS);f.history.record(f.event());
  expect(f.history.snapshot()).toMatchObject({capacityEvictedBuckets:HISTORY_MAX_ROWS});
  expect(f.history.snapshot().rows).toHaveLength(1);
- f.setNow(f.now+HISTORY_TTL_MS);f.history.record(f.event());expect(f.history.snapshot().rows).toHaveLength(1);
+ f.setNow(f.now+HISTORY_TTL_MS+HOUR_MS);f.history.record(f.event());expect(f.history.snapshot().rows).toHaveLength(1);
 });
 it('stores no arbitrary text, model, thread, request ID, quota headers or provider error body in long-term data',async()=>{
  const f=await fixture(),j=new RequestJournal(path.join(f.dir,'recent.json'),f.clock);await j.initialize();cleanups.push(()=>j.close());
