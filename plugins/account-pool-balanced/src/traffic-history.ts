@@ -12,6 +12,9 @@ const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const counters = z.object({
   requests: count, firstDispatches: count, attempts: count, upstreamResponses: count, upstream429: count,
   upstreamAuthErrors: count, upstream5xx: count, localHeld429: count,
+  upstream503: count.default(0), accountSwitches: count.default(0), accountSwitchSuccesses: count.default(0),
+  authRefreshes: count.default(0), authRefreshSucceeded: count.default(0), authRefreshTransient: count.default(0),
+  authRefreshRejected: count.default(0), authRefreshFailed: count.default(0), lastUpstream503At: count.default(0), lastAuthRefreshFailureAt: count.default(0),
   queueWaits: count, queueFailures: count, queueWaitMs: count,
   streamEnds: count, streamErrors: count, streamCanceled: count, streamMs: count,
   peakAccountInFlight: count, lastUpstream429At: count, lastAuthErrorAt: count, lastQueueFailureAt: count,
@@ -26,7 +29,7 @@ const rowSchema = counters.extend({
 type Row = z.infer<typeof rowSchema>;
 const snapshotSchema = z.object({
   schema: z.literal('bb-account-pool/traffic-history/1'),
-  startedAt: count, capacityDroppedEvents: count, capacityEvictedBuckets: count, rows: z.array(rowSchema).max(HISTORY_MAX_ROWS),
+  startedAt: count, extendedCountersStartedAt: count.optional(), capacityDroppedEvents: count, capacityEvictedBuckets: count, rows: z.array(rowSchema).max(HISTORY_MAX_ROWS),
 });
 const empty = (): Counters => Object.fromEntries(Object.keys(counters.shape).map(k => [k, 0])) as Counters;
 const add = (a: number, b: number) => Math.min(Number.MAX_SAFE_INTEGER, a + b);
@@ -36,13 +39,14 @@ const key = (r: Row) => JSON.stringify([r.hour, r.provider, r.accountId, r.clien
 export class TrafficHistory {
   private rows = new Map<string, Row>();
   private startedAt: number;
+  private extendedCountersStartedAt: number;
   private capacityDroppedEvents = 0;
   private capacityEvictedBuckets = 0;
   private storageFailures = 0;
   private dirty = false;
   private writing: Promise<void> | null = null;
   private lastPruneHour = -1;
-  constructor(private readonly file: string, private readonly now = Date.now) { this.startedAt = now(); }
+  constructor(private readonly file: string, private readonly now = Date.now) { this.startedAt = now(); this.extendedCountersStartedAt = now(); }
 
   async initialize(): Promise<void> {
     try {
@@ -55,6 +59,8 @@ export class TrafficHistory {
         const data = snapshotSchema.parse(JSON.parse(await fs.readFile(this.file, 'utf8')));
         if (data.startedAt > this.now()) throw Error('future history');
         this.startedAt = data.startedAt;
+        this.extendedCountersStartedAt = data.extendedCountersStartedAt ?? this.now();
+        if (this.extendedCountersStartedAt > this.now()) throw Error("future extended coverage");
         this.capacityDroppedEvents = data.capacityDroppedEvents;
         this.capacityEvictedBuckets = data.capacityEvictedBuckets;
         for (const row of data.rows) {
@@ -63,7 +69,7 @@ export class TrafficHistory {
           this.rows.set(id, row);
         }
       }
-    } catch { this.rows.clear(); this.startedAt = this.now(); this.storageFailures++; }
+    } catch { this.rows.clear(); this.startedAt = this.now(); this.extendedCountersStartedAt = this.now(); this.storageFailures++; }
     this.prune();
   }
 
@@ -94,9 +100,20 @@ export class TrafficHistory {
     if (r.event === 'attempt') { inc('attempts'); if (r.attempt === 1) inc('firstDispatches'); }
     if (r.event === 'upstream') {
       inc('upstreamResponses');
+      if (r.status === 503) { inc('upstream503'); row.lastUpstream503At = Math.max(row.lastUpstream503At,r.at); }
       if (r.status === 429) { inc('upstream429'); row.lastUpstream429At = Math.max(row.lastUpstream429At,r.at); }
       if (r.status === 401 || r.status === 403) { inc('upstreamAuthErrors'); row.lastAuthErrorAt = Math.max(row.lastAuthErrorAt,r.at); }
       if (r.status !== null && r.status >= 500) inc('upstream5xx');
+    }
+    if (r.event === 'account-switch') {
+      if (r.switchOutcome === 'dispatched') inc('accountSwitches');
+      if (r.switchOutcome === 'accepted') inc('accountSwitchSuccesses');
+    }
+    if (r.event === 'auth-refresh' && r.authOutcome) {
+      inc('authRefreshes');
+      const key = {succeeded:'authRefreshSucceeded','transient-failed':'authRefreshTransient','reauth-required':'authRefreshRejected',failed:'authRefreshFailed'} as const;
+      inc(key[r.authOutcome]);
+      if (r.authOutcome !== 'succeeded') row.lastAuthRefreshFailureAt = Math.max(row.lastAuthRefreshFailureAt,r.at);
     }
     if (r.event === 'local-held' && r.status === 429) inc('localHeld429');
     if (r.event === 'queue-wait') {
@@ -118,7 +135,7 @@ export class TrafficHistory {
     this.prune();
     return {
       schema: 'bb-account-pool/traffic-history/1' as const, startedAt: this.startedAt,
-      observedAt: this.now(), retentionMs: HISTORY_TTL_MS, bucketMs: HOUR_MS,
+      observedAt: this.now(), extendedCountersStartedAt:this.extendedCountersStartedAt, retentionMs: HISTORY_TTL_MS, bucketMs: HOUR_MS,
       maxRows: HISTORY_MAX_ROWS, maxBytes: HISTORY_MAX_BYTES,
       coverage: 'forward-events-since-start' as const,
       capacityDroppedEvents: this.capacityDroppedEvents, capacityEvictedBuckets: this.capacityEvictedBuckets,
@@ -140,7 +157,8 @@ export class TrafficHistory {
     }
     return {...metadata,providers:[...providers].map(([provider,total])=>({provider,...total})),
       recentPressure:[...providers].map(([provider,total])=>({provider,lastUpstream429At:total.lastUpstream429At,
-        lastAuthErrorAt:total.lastAuthErrorAt,lastQueueFailureAt:total.lastQueueFailureAt}))};
+        lastAuthErrorAt:total.lastAuthErrorAt,lastQueueFailureAt:total.lastQueueFailureAt,
+        lastUpstream503At:total.lastUpstream503At,lastAuthRefreshFailureAt:total.lastAuthRefreshFailureAt}))};
   }
   snapshot(offset = 0, limit = 100) {
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > HISTORY_MAX_ROWS || !Number.isSafeInteger(limit) || limit < 1 || limit > 200)
@@ -163,7 +181,7 @@ export class TrafficHistory {
     if (this.writing) return this.writing;
     this.prune(); if (!this.dirty) return;
     this.dirty = false;
-    const data = { schema: 'bb-account-pool/traffic-history/1', startedAt: this.startedAt,
+    const data = { schema: 'bb-account-pool/traffic-history/1', startedAt: this.startedAt, extendedCountersStartedAt:this.extendedCountersStartedAt,
       capacityDroppedEvents: this.capacityDroppedEvents, capacityEvictedBuckets: this.capacityEvictedBuckets, rows: [...this.rows.values()] };
     this.writing = (async () => {
       try {

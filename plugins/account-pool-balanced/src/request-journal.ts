@@ -10,7 +10,7 @@ const number=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).null
 const binding=(prefix:string)=>z.string().regex(new RegExp(`^${prefix}_[a-z0-9]{6,32}$`)).nullable();
 export const observationSchema=z.object({
  at:z.number().int().nonnegative(),requestId:z.string().uuid(),attempt:z.number().int().min(0).max(100000),
- event:z.enum(['request','attempt','upstream','local-held','hold','result','stream-end','queue-wait']),provider:providerSchema,
+ event:z.enum(['request','attempt','upstream','local-held','hold','result','stream-end','queue-wait','account-switch','auth-refresh']),provider:providerSchema,
  accountId:z.string().uuid().nullable(),clientHash:z.string().regex(/^[a-f0-9]{24}$/).nullable(),projectId:binding('proj'),threadId:binding('thr'),
  model:z.enum(['gpt-6-astra','gpt-6.1-sol','gpt-6-sol','gpt-5.4','gpt-5.3-codex','claude-opus-4-6','claude-sonnet-4-6']).nullable(),
  modelFamily:z.enum(['fable','sonnet','opus','haiku','other']),status:z.number().int().min(100).max(599).nullable(),
@@ -19,6 +19,9 @@ export const observationSchema=z.object({
  outcome:z.enum(['returned','error','canceled','complete','failed-over']).nullable(),
  failover:z.enum(['none','succeeded','failed']).nullable(),
  errorClass:z.enum(['upstream429','local-held','upstream403-hold','stream-error','request-error','canceled','queue-full','queue-timeout']).nullable(),
+ switchOutcome:z.enum(['dispatched','accepted']).optional(),
+ authOutcome:z.enum(['succeeded','transient-failed','reauth-required','failed']).optional(),
+ oauthCode:z.enum(['invalid_grant','invalid_request','invalid_client','unauthorized_client','unsupported_grant_type','invalid_scope']).nullable().optional(),
  clientVersion:z.string().regex(/^\d{1,5}\.\d{1,5}\.\d{1,5}$/).nullable().optional(),
  codexQuota:codexQuotaObservationSchema.optional(),
 }).strip();

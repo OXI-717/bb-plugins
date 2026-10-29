@@ -3681,7 +3681,7 @@ describe("Account Pool plugin", () => {
   });
 
   it.each([401, 403, 408, 500, 502, 503, 504, 529, "disconnect"])(
-    "tries another account after a pre-stream %s failure",
+    "handles a pre-stream %s failure without unnecessary Claude 503 failover",
     async (failure) => {
       const attempts: Array<string | undefined> = [];
       const upstream = await startUpstream(async (request, response) => {
@@ -3713,9 +3713,9 @@ describe("Account Pool plugin", () => {
         { headers: authHeaders(fixture.key), body: "{}" },
       );
       const payload = await response.json();
-      expect(response.status).toBe(200);
-      expect(payload).toEqual({ result: "second" });
-      expect(attempts).toEqual(["sk-first", "sk-second"]);
+      expect(response.status).toBe(failure === 503 ? 503 : 200);
+      if (failure !== 503) expect(payload).toEqual({ result: "second" });
+      expect(attempts).toEqual(failure === 503 ? ["sk-first"] : ["sk-first", "sk-second"]);
       const accounts = z
         .array(accountSummarySchema)
         .parse(
@@ -4305,7 +4305,7 @@ describe("Account Pool plugin", () => {
                   },
                   cancel,
                 }),
-                { status: 503 },
+                { status: 502 },
               );
             const status = statusSchema.parse(
               await fixture.host.harness.behavior.callRpc("status.get", null),
@@ -4422,7 +4422,7 @@ describe("Account Pool plugin", () => {
                 status:
                   key === "sk-late" || (healthyFourth && key === "sk-4")
                     ? 200
-                    : 503,
+                    : 502,
               },
             );
           },
@@ -4439,7 +4439,7 @@ describe("Account Pool plugin", () => {
         },
       );
       await response.text();
-      expect(response.status).toBe(healthyFourth ? 200 : 503);
+      expect(response.status).toBe(healthyFourth ? 200 : 502);
       expect(attempts).toEqual(["sk-1", "sk-2", "sk-3", "sk-4"]);
     },
   );
@@ -4603,7 +4603,7 @@ describe("Account Pool plugin", () => {
             attempts.push(key);
             return Response.json(
               {},
-              { status: outage && key !== "sk-third" ? 503 : 200 },
+              { status: outage && key !== "sk-third" ? (provider === "claude" ? 502 : 503) : 200 },
             );
           },
         );
@@ -4756,7 +4756,7 @@ describe("Account Pool plugin", () => {
           attempts.push(key);
           return Response.json(
             {},
-            { status: outage && key === "sk-first" ? 503 : 200 },
+            { status: outage && key === "sk-first" ? (provider === "claude" ? 502 : 503) : 200 },
           );
         };
         const fixture = await affinityFixture(provider, upstreamFetch);
@@ -5185,7 +5185,7 @@ describe("Account Pool plugin", () => {
               if (seen.length === 1) return openStream();
               if (rejectNext) {
                 rejectNext = false;
-                return Response.json({}, { status: 503 });
+                return Response.json({}, { status: 502 });
               }
               return Response.json({});
             },
@@ -5823,7 +5823,7 @@ describe("Account Pool plugin", () => {
               attempts.push(new Headers(init?.headers).get("x-api-key"));
               if (attempts.length === 1) {
                 await gate.promise;
-                return Response.json({}, { status: 503 });
+                return Response.json({}, { status: 502 });
               }
               return Response.json({});
             },
@@ -5851,7 +5851,7 @@ describe("Account Pool plugin", () => {
           await rebound.text();
           gate.resolve();
           const exhausted = await old;
-          expect(exhausted.status).toBe(hasFallback ? 200 : 503);
+          expect(exhausted.status).toBe(hasFallback ? 200 : 502);
           await exhausted.text();
           await fixture.host.harness.behavior.callRpc("account.enable", {
             id: fixture.account.id,
@@ -5884,10 +5884,10 @@ describe("Account Pool plugin", () => {
             const key = new Headers(init?.headers).get("x-api-key");
             attempts.push(key);
             if (attempts.length === 1)
-              return Response.json({}, { status: 503 });
+              return Response.json({}, { status: 502 });
             if (key === "sk-second") {
               await gate.promise;
-              return Response.json({}, { status: 503 });
+              return Response.json({}, { status: 502 });
             }
             return Response.json({});
           },
@@ -6807,7 +6807,7 @@ describe("sequential pool recovery", () => {
     }
   });
 
-  it("keeps the last working binding after every account fails during a provider outage", async () => {
+  it("keeps the working binding on a Claude 503 without trying another account", async () => {
     const attempts: Array<string | null> = [];
     let outage = false;
     const fixture = await createFixture({
@@ -6833,7 +6833,7 @@ describe("sequential pool recovery", () => {
     await failed.text();
     outage = false;
     await (await send()).text();
-    expect(attempts).toEqual(["sk-first", "sk-first", "sk-second", "sk-first"]);
+    expect(attempts).toEqual(["sk-first", "sk-first", "sk-first"]);
   });
 
   it("keeps Codex over-limit accounts ineligible until reset when utilization is omitted", async () => {
@@ -7202,7 +7202,7 @@ describe("sequential pool recovery", () => {
               status:
                 (key === "sk-first" && rejectFirst) ||
                 (key === "sk-third" && rejectThird)
-                  ? 503
+                  ? 502
                   : 200,
             },
           );
@@ -8278,4 +8278,73 @@ it('keeps managed Claude on the pool when every account is unavailable',async()=
  expect(env).toEqual(expect.arrayContaining([expect.objectContaining({name:'ANTHROPIC_BASE_URL'}),expect.objectContaining({name:'ANTHROPIC_AUTH_TOKEN'})]));
  await f.host.harness.behavior.runCli(['routing','claude','--off']);
  await expect(f.host.harness.behavior.resolveProviderEnv('claude-code',{threadId:'thread-no-account',projectId:'project-one',hostId:'host-one'})).resolves.toEqual([]);
+});
+
+describe('Claude service-error continuity and bounded auth evidence',()=>{
+  async function observations(f:Fixture){
+    const reply=await f.host.harness.behavior.runCli(['observations','--json']);
+    expect(reply.exitCode).toBe(0);
+    return JSON.parse(reply.stdout) as {rows:Array<import('./request-journal.js').Observation>};
+  }
+  it.each([false,true])('keeps the selected Claude account on a 503 for an established session: %s',async(warm)=>{
+    const keys:Array<string|null>=[];let failing=false;
+    const f=await createFixture({upstreamUrl:'https://upstream.example',apiKey:'sk-first',priority:0,options:{fetch:async(_input,init)=>{
+      keys.push(new Headers(init?.headers).get('x-api-key'));
+      return Response.json({}, {status:failing?503:200,headers:{'retry-after':'2'}});
+    }}});
+    await addApiAccount(f,'sk-second',100);
+    const send=()=>f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:JSON.stringify({metadata:{user_id:'synthetic_session_11111111-1111-4111-8111-111111111111'}})});
+    if(warm)await (await send()).text();
+    failing=true;const failed=await send();expect(failed.status).toBe(503);expect(failed.headers.get('retry-after')).toBe('2');await failed.text();
+    failing=false;await (await send()).text();
+    expect(keys).toEqual(Array(warm?3:2).fill('sk-first'));
+    const rows=(await observations(f)).rows;
+    expect(rows.filter(r=>r.event==='account-switch')).toEqual([]);
+    expect(rows.filter(r=>r.event==='upstream'&&r.status===503)).toHaveLength(1);
+  });
+  it('keeps other provider 503 fallback and counts actual switch dispatch and success',async()=>{
+    const keys:Array<string|null>=[];
+    const f=await createFixture({provider:'zai',upstreamUrl:'https://upstream.example',apiKey:'sk-first',priority:0,options:{fetch:async(input,init)=>{
+      if(!String(input).endsWith('/chat/completions'))return Response.json({});
+      const key=new Headers(init?.headers).get('authorization');keys.push(key);
+      return Response.json({}, {status:key==='Bearer sk-first'?503:200});
+    }}});
+    await f.host.harness.behavior.callRpc('account.add',{provider:'zai',source:{kind:'api-key',apiKey:'sk-second'},label:null,priority:100});
+    const response=await f.host.harness.behavior.fetchHttp('POST','/zai/v1/chat/completions',{headers:authHeaders(f.key),body:'{}'});
+    expect(response.status).toBe(200);await response.text();expect(keys).toEqual(['Bearer sk-first','Bearer sk-second']);
+    const rows=(await observations(f)).rows;
+    expect(rows.filter(r=>r.event==='account-switch').map(r=>r.switchOutcome)).toEqual(['dispatched','accepted']);
+  });
+  it('does not replay a successful Claude stream after its body fails',async()=>{
+    let calls=0;let fail!:()=>void;
+    const f=await createFixture({upstreamUrl:'https://upstream.example',priority:0,options:{fetch:async()=>{
+      calls++;
+      return new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('data: partial\n\n'));fail=()=>c.error(Error('synthetic stream failure'));}}),{headers:{'content-type':'text/event-stream'}});
+    }}});
+    await addApiAccount(f,'sk-second',100);
+    const response=await f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    expect(response.status).toBe(200);const read=response.text();fail();expect(await read).toContain('event: error');expect(calls).toBe(1);
+  });
+  it.each([{status:200,code:null},{status:400,code:'invalid_grant'},{status:400,code:'synthetic-sensitive-code'},{status:503,code:'invalid_grant'}])('records one coalesced OAuth refresh result with account binding: $status/$code',async({status,code})=>{
+    const gate=deferred();let calls=0;
+    const f=await createOAuthRequestFixture('claude',async(input,init)=>{
+      if(String(input).endsWith('/oauth/token')){
+        calls++;await gate.promise;
+        return Response.json(status===200?{access_token:'oauth-new',expires_in:3600}:{error:code,error_description:'synthetic-sensitive-description'},{status});
+      }
+      return Response.json({}, {status:new Headers(init?.headers).get('authorization')==='Bearer oauth-old'?401:200});
+    },()=>1900000000000);
+    const send=()=>f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    const requests=[send(),send()];
+    try{
+      await vi.waitFor(()=>expect(calls).toBe(1));await new Promise<void>(r=>setImmediate(r));gate.resolve();
+      for(const response of await Promise.all(requests))await response.text();
+      expect(calls).toBe(1);
+      const rows=(await observations(f)).rows.filter(r=>r.event==='auth-refresh');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({provider:'claude',accountId:f.account.id,clientHash:null,projectId:null,threadId:null,status,
+        authOutcome:status===200?'succeeded':status===400?'reauth-required':'transient-failed',oauthCode:status===400&&code==='invalid_grant'?'invalid_grant':null});
+      expect(JSON.stringify(rows)).not.toMatch(/oauth-old|oauth-new|sensitive-description|sensitive-code|refresh_token/);
+    }finally{gate.resolve();await Promise.allSettled(requests);}
+  });
 });

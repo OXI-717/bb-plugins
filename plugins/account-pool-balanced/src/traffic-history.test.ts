@@ -111,3 +111,22 @@ it('drains newer dirty history after a held older write on graceful journal clos
  const restored=new RequestJournal(recent,f.clock);await restored.initialize();cleanups.push(()=>restored.close());
  expect(restored.historySnapshot().rows[0].requests).toBe(2);
 });
+it('counts exact 503, real switches and refresh outcomes separately with bounded last-error signals',async()=>{
+ const f=await fixture();
+ for(const status of [503,503,502,429,200])f.history.record(f.event({event:'upstream',accountId:account,status}));
+ for(const switchOutcome of ['dispatched','dispatched','accepted'] as const)f.history.record(f.event({event:'account-switch',accountId:account,switchOutcome}));
+ for(const authOutcome of ['succeeded','transient-failed','reauth-required','failed'] as const)f.history.record(f.event({event:'auth-refresh',accountId:account,authOutcome,clientHash:null}));
+ expect(f.history.summary().providers[0]).toMatchObject({upstream503:2,upstream5xx:3,upstream429:1,accountSwitches:2,accountSwitchSuccesses:1,authRefreshes:4,authRefreshSucceeded:1,authRefreshTransient:1,authRefreshRejected:1,authRefreshFailed:1});
+ expect(f.history.summary().recentPressure[0]).toMatchObject({lastUpstream503At:f.now,lastAuthRefreshFailureAt:f.now});
+});
+it('reads older snapshots with new counters zero and explicit newer coverage, then preserves that coverage',async()=>{
+ const f=await fixture();f.history.record(f.event());await f.history.flush();
+ const data=JSON.parse(await fs.readFile(f.file,'utf8'));delete data.extendedCountersStartedAt;
+ for(const row of data.rows)for(const key of Object.keys(row))if(/^(authRefresh|accountSwitch|upstream503|lastUpstream503|lastAuthRefresh)/.test(key))delete row[key];
+ await fs.writeFile(f.file,JSON.stringify(data));const now=f.now+1000;
+ const old=new TrafficHistory(f.file,()=>now);await old.initialize();
+ expect(old.snapshot()).toMatchObject({startedAt:f.now,extendedCountersStartedAt:now});expect(old.snapshot().rows[0]).toMatchObject({upstream503:0,authRefreshes:0,accountSwitches:0});
+ old.record(f.event({at:now,event:'upstream',status:503}));await old.flush();
+ const restored=new TrafficHistory(f.file,()=>now+1000);await restored.initialize();expect(restored.snapshot().extendedCountersStartedAt).toBe(now);
+ expect(restored.snapshot().rows[0].upstream503).toBe(1);
+});
