@@ -1417,8 +1417,8 @@ export class AccountPoolHub {
               // Snapshot acquisition is asynchronous: another response may have set a hold.
               if ((cooldown() ?? 0) > this.options.now()) return null;
               this.stopped.signal.throwIfAborted();
-              if (account.provider === 'claude') this.claudeStarts.dispatched(account.id);
               this.observe(trace,{event:'attempt',attempt,accountId:account.id});
+              if (account.provider === 'claude') this.claudeStarts.dispatched(account.id);
               return {response: send()};
             });
             if (started.value !== null) return started.value.response;
