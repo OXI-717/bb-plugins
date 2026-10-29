@@ -8206,3 +8206,12 @@ it('config.set wakes an already queued request while the first stream remains op
  expect(status.accounts[0]).toMatchObject({inFlight:2,queuedRequests:0,concurrencyLimit:2});
  const texts=[first.text(),second.text()];for(const stream of streams)stream.close();await Promise.all(texts);
 });
+
+it('keeps managed Claude on the pool when every account is unavailable',async()=>{
+ const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:async()=>Response.json({})}});
+ await f.host.harness.behavior.callRpc('account.disable',{id:f.account.id});
+ const env=await f.host.harness.behavior.resolveProviderEnv('claude-code',{threadId:'thread-no-account',projectId:'project-one',hostId:'host-one'});
+ expect(env).toEqual(expect.arrayContaining([expect.objectContaining({name:'ANTHROPIC_BASE_URL'}),expect.objectContaining({name:'ANTHROPIC_AUTH_TOKEN'})]));
+ await f.host.harness.behavior.runCli(['routing','claude','--off']);
+ await expect(f.host.harness.behavior.resolveProviderEnv('claude-code',{threadId:'thread-no-account',projectId:'project-one',hostId:'host-one'})).resolves.toEqual([]);
+});
