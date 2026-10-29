@@ -3,7 +3,7 @@ import { AccountAdmission, AdmissionUnavailable, ACCOUNT_QUEUE_MAX_WAIT_MS } fro
 import {createAgyAdapter} from "./agy-adapter.js";
 import { observeCodexQuotaHeaders } from './codex-quota-observation.js';
 import { zaiBudgetQuota, ZAI_BUDGET_MAX_AGE_MS } from './zai-budget.js';
-import { RequestJournal, newTrace, type Trace, type Observation } from "./request-journal.js";
+import { RequestJournal, newTrace, observationSchema, type Trace, type Observation } from "./request-journal.js";
 import { codexBudgetQuota, CODEX_BUDGET_MAX_AGE_MS } from './codex-budget.js';
 import { NetworkFlights } from "./network-flights.js";
 import { observeUpstreamFetch } from "./transport-diagnostics.js";
@@ -559,6 +559,7 @@ export class AccountPoolHub {
       pinnedAccountId: null,
     };
     let previousAccountId: string | null = null;
+    let lastDispatchedAccount: string | null = null;
     let failure: FailureSummary | null = null;
     const accounts = (await this.options.accounts.list()).filter(
       (account) => account.provider === adapter.provider,
@@ -650,7 +651,7 @@ export class AccountPoolHub {
           }
           let upstream: UpstreamResult;
           attempt++;
-          distinctAccounts.add(selected.account.id);
+          let switched = false;
           const attemptStartedAt=this.options.now();
           try {
             upstream = await this.fetchUpstream(
@@ -660,7 +661,12 @@ export class AccountPoolHub {
               secret,
               adapter,
               trace, attempt,
-              {purpose,projectId,family,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS},
+              {purpose,projectId,family,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
+                switched = lastDispatchedAccount !== null && lastDispatchedAccount !== selected.account.id;
+                if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'dispatched'});
+                lastDispatchedAccount = selected.account.id;
+                distinctAccounts.add(selected.account.id);
+              }},
             );
           } catch (error) {
             if (pacing !== null) {
@@ -764,6 +770,10 @@ export class AccountPoolHub {
                   ".",
               headers: retryAfter === null ? {} : { "retry-after": retryAfter },
             };
+            // A temporary Claude service failure must not move a warm session to another account.
+            // Return it to the client, whose existing retry remains subject to shared admission.
+            if (adapter.provider === "claude" && response.status === 503)
+              return result(this.errorResponse(adapter, request, failure.status, failure.message, failure.headers));
             if (
               response.status === 401 &&
               secret.kind === "oauth" &&
@@ -817,6 +827,7 @@ export class AccountPoolHub {
           if (response.ok) {
             if(threadId!==null)this.options.affinity.recordObservation(JSON.stringify(['thread',adapter.provider,hostId,projectId,threadId]),selected.account.id,this.options.now());
             selected.accept();
+            if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'accepted'});
             this.options.quotas.recordSuccessfulRequest(selected.account.id);
           }
           return result(this.clientResponse(upstream));
@@ -1284,16 +1295,32 @@ export class AccountPoolHub {
               }
               throw backoff.error;
             }
+            let refreshStarted = false;
+            let refreshStatus: number | null = null;
+            const refreshStartedAt = this.options.now();
+            const refreshTrace = {...newTrace(account.provider,"",null,null,null,"other"),clientHash:null};
+            const refreshObserved = (authOutcome: Observation['authOutcome'], oauthCode: unknown = null) => {
+              if (!refreshStarted) return;
+              const parsed = observationSchema.shape.oauthCode.safeParse(oauthCode);
+              this.observe(refreshTrace,{event:'auth-refresh',accountId:account.id,status:refreshStatus,
+                durationMs:Math.max(0,this.options.now()-refreshStartedAt),authOutcome,oauthCode:parsed.success?parsed.data:null});
+            };
             try {
               const result = await adapter.refreshSecret({
                 account,
                 secret,
                 accounts: this.options.accounts,
                 quotas: this.options.quotas,
-                fetch: (input, init) => this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
+                fetch: async (input, init) => {
+                  refreshStarted = true;
+                  const response = await this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) });
+                  refreshStatus = response.status;
+                  return response;
+                },
                 now: this.options.now,
                 forceRefresh,
               });
+              refreshObserved("succeeded");
               this.refreshBackoffs.delete(account.id);
               if (result.refreshed) {
                 const quota = this.options.quotas.get(account.id);
@@ -1301,6 +1328,8 @@ export class AccountPoolHub {
               }
               return result.secret;
             } catch (error) {
+              refreshObserved(error instanceof AccountAuthorizationRequiredError ? "reauth-required" : error instanceof TransientOAuthRefreshError ? "transient-failed" : "failed",
+                error instanceof AccountAuthorizationRequiredError ? error.oauthCode : null);
               if (error instanceof AccountAuthorizationRequiredError)
                 this.authorizationFailures.set(error, secret);
               if (
@@ -1356,7 +1385,7 @@ export class AccountPoolHub {
     secret: AccountSecret,
     adapter: ProviderAdapter,
     trace: Trace, attempt: number,
-    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;deadline:number},
+    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;deadline:number;onDispatch?:()=>void},
   ): Promise<UpstreamResult> {
     const admissionSignal = AbortSignal.any([request.signal, this.stopped.signal]);
     const deadline = admission.deadline;
@@ -1418,6 +1447,7 @@ export class AccountPoolHub {
               // Snapshot acquisition is asynchronous: another response may have set a hold.
               if ((cooldown() ?? 0) > this.options.now()) return null;
               this.stopped.signal.throwIfAborted();
+              admission.onDispatch?.();
               this.observe(trace,{event:'attempt',attempt,accountId:account.id});
               if (account.provider === 'claude') this.claudeStarts.dispatched(account.id);
               return {response: send()};

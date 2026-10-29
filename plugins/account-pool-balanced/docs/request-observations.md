@@ -158,3 +158,51 @@ ALL buckets, never just the first page. It has no detail `rows` array. The exist
 monitor uses these actual latest timestamps within its recent observation window;
 large counts alone cannot make stale failures current. Output remains below the
 BB one-MiB CLI limit at admitted capacity; persisted data limits remain unchanged.
+
+
+## Claude service-error continuity and authorization refresh evidence (0.4.49)
+
+A Claude HTTP 503 received before a successful response is returned is passed back
+to the client, preserving Retry-After and the selected session account. It does
+not trigger cross-account fallback or successful affinity rebinding. This applies
+to cold sessions too. There is no new retry loop: existing client retries pass
+through the same shared concurrency, start pacing and account hold checks. Other
+providers and other HTTP statuses retain their existing routing behavior. A
+successful stream is never replayed on another account by this forwarding loop;
+a client retry after a stream error is a new operation. Explicit account policy
+changes or authorization failures can still change eligibility.
+
+The raw journal adds `account-switch` with `switchOutcome=dispatched|accepted`.
+Dispatched means a different account is actually about to send within the same
+logical operation, not merely selected or waiting for admission. Accepted means
+that switched attempt returned successful headers and its routing acceptance ran;
+it does not guarantee that a concurrent change allowed a binding write or that
+the stream completed. Requests begun directly on another account are not counted
+as within-request switches. These events do not reconstruct cross-request changes.
+
+`auth-refresh` is recorded once by the existing single owner of a refresh flight,
+not once per coalesced waiter. It is emitted only if the adapter entered the
+outbound fetch pipeline; a guard/transport failure can precede an HTTP response,
+leaving status null. A fresh cached token or a backoff refusal without a new fetch
+produces no refresh event. Outcomes are `succeeded`, `transient-failed`,
+`reauth-required` and `failed` (unexpected parsing/other error). Successful means
+the adapter accepted its refresh result, not that subsequent inference succeeds.
+Provider and account identity are known; client, project and thread are null
+because the refresh can be shared with quota collection or several callers.
+Only the existing fixed OAuth code allowlist is retained. No token, token hash,
+response body, URL or error description is recorded. A rejected refresh does not
+establish account enforcement or the cause of a logout.
+
+History adds `upstream503` (a subset of `upstream5xx`), `accountSwitches`,
+`accountSwitchSuccesses`, `authRefreshes`, `authRefreshSucceeded`,
+`authRefreshTransient`, `authRefreshRejected` and `authRefreshFailed`.
+`lastUpstream503At` and `lastAuthRefreshFailureAt` are included in the compact
+ALL-retained pressure summary. Authorization-operation counters are independent
+of inference starts/attempts and have no client binding. Existing forward-event
+coverage remains limited to that seam; refresh events additionally cover the
+single-owner refresh path. Older snapshots load these new fields as zero, with
+`extendedCountersStartedAt` marking their newer coverage boundary; zeros are not
+historical proof of no errors. No backfill, expiry extension, additional file,
+scheduler or logging service is added. Existing storage/CLI bounds and isolated
+failure handling apply. These are operational facts, not an account risk score or
+permission to disable, rotate, relogin or reassign an account.
