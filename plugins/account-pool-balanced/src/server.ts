@@ -117,7 +117,7 @@ export function createAccountPoolPlugin(
           ...update,
         });
         await bb.storage.kv.set("config", next);
-        const limitChanged = next.maxConcurrentRequestsPerAccount !== currentSettings.maxConcurrentRequestsPerAccount;
+        const limitChanged = next.maxConcurrentRequestsPerAccount !== currentSettings.maxConcurrentRequestsPerAccount || next.claudeRequestStartIntervalMs !== currentSettings.claudeRequestStartIntervalMs;
         currentSettings = next;
         if (limitChanged) onAdmissionLimitsChanged();
         bb.realtime.publish(ACCOUNT_POOL_CONFIG_CHANGED, {});

@@ -1,3 +1,4 @@
+import {AccountStartPacing} from "./account-start-pacing.js";
 import { AccountAdmission, AdmissionUnavailable, ACCOUNT_QUEUE_MAX_WAIT_MS } from "./account-admission.js";
 import {createAgyAdapter} from "./agy-adapter.js";
 import { observeCodexQuotaHeaders } from './codex-quota-observation.js';
@@ -201,7 +202,9 @@ export class AccountPoolHub {
   private readonly vpn;
   private readonly networkFlights:NetworkFlights;
   private readonly admission: AccountAdmission;
+  private readonly claudeStarts: AccountStartPacing;
   constructor(private readonly options: HubOptions) {
+    this.claudeStarts = new AccountStartPacing(() => options.getSettings().claudeRequestStartIntervalMs, options.now);
     this.admission = new AccountAdmission(() => options.getSettings().maxConcurrentRequestsPerAccount, options.now);
     this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnPayload,options.guardCheck);
     this.networkFlights = new NetworkFlights(options.fetch, () => this.stopped.signal,
@@ -232,6 +235,7 @@ export class AccountPoolHub {
     );
     this.activeAccounts = new Map([...this.options.affinity.loadActiveAccounts(), ...this.options.affinity.loadProjectActiveAccounts()]);
     this.pacingByAccount.clear();
+    this.claudeStarts.clear();
     this.stopped = new AbortController();
     this.accepting = true;
     this.stopping = null;
@@ -1355,7 +1359,11 @@ export class AccountPoolHub {
   ): Promise<UpstreamResult> {
     const admissionSignal = AbortSignal.any([request.signal, this.stopped.signal]);
     const deadline = admission.deadline;
-    const cooldown = () => this.options.quotas.get(account.id).heldUntil;
+    const cooldown = () => {
+      const hold = this.options.quotas.get(account.id).heldUntil;
+      const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id) : null;
+      return hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
+    };
     const queuedAt = this.options.now();
     const waiting = this.admission.waiting(account.id)>0 || this.admission.reserved(account.id)>=this.options.getSettings().maxConcurrentRequestsPerAccount || (cooldown() ?? 0)>queuedAt;
     const slotRelease = await this.admission.acquire(account.id, admissionSignal, cooldown, deadline);
@@ -1410,6 +1418,7 @@ export class AccountPoolHub {
               if ((cooldown() ?? 0) > this.options.now()) return null;
               this.stopped.signal.throwIfAborted();
               this.observe(trace,{event:'attempt',attempt,accountId:account.id});
+              if (account.provider === 'claude') this.claudeStarts.dispatched(account.id);
               return {response: send()};
             });
             if (started.value !== null) return started.value.response;
