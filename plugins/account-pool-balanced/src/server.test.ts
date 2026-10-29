@@ -7436,7 +7436,7 @@ describe('project subscription routing', () => {
     expect(stored.role).toBe('primary');expect(stored.projects?.rules[0]?.role).toBe('reserve');
   });
 
-  it('drain overrides scope, schedule and existing pins but not disabled state', async()=>{
+  it('drain respects project access while overriding schedule and pins within the allowed group', async()=>{
     const attempts:Array<string|null>=[];
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',apiKey:'sk-general',priority:0,options:{fetch:async(_input,init)=>{attempts.push(new Headers(init?.headers).get('x-api-key'));return Response.json({});}}});
     const draining=await addApiAccount(fixture,'sk-drain',200),rpc=fixture.host.harness.behavior.callRpc;
@@ -7444,9 +7444,73 @@ describe('project subscription routing', () => {
     await rpc('account.setPolicy',{accountId:draining.id,policy:{enabled:true,schedule:{timeZone:'UTC',intervals:[]},weeklyKeep:90}});
     const send=async()=>{const r=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:JSON.stringify({metadata:{user_id:JSON.stringify({session_id:'sticky'})}})});expect(r.status).toBe(200);await r.text();};
     await send();await rpc('account.setDrainOnce',{accountId:draining.id,enabled:true});await send();
-    expect(attempts).toEqual(['sk-general','sk-drain']);
+    expect(attempts).toEqual(['sk-general','sk-general']);
+    await rpc('account.setProjects',{accountId:draining.id,projects:{onlySelected:true,rules:[{projectId:'project-one',role:'reserve'}]}});
+    await send();expect(attempts.at(-1)).toBe('sk-drain');
     await rpc('account.disable',{id:draining.id});await send();expect(attempts.at(-1)).toBe('sk-general');
     await rpc('account.enable',{id:draining.id});await rpc('account.setDrainOnce',{accountId:draining.id,enabled:false});await send();expect(attempts.at(-1)).toBe('sk-general');
+  });
+
+  it.each(['sequential','balanced'] as const)('returns a warm session to its recovered project before general manual drain (%s)',async strategy=>{
+    let clock=Date.now();
+    const attempts:Array<string|null>=[];
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',apiKey:'sk-general',priority:0,options:{now:()=>clock,fetch:async(_input,init)=>{attempts.push(new Headers(init?.headers).get('x-api-key'));return Response.json({});}}});
+    const rpc=fixture.host.harness.behavior.callRpc;
+    await rpc('config.set',{routingStrategy:strategy});
+    await rpc('account.setDrainOnce',{accountId:fixture.account.id,enabled:true});
+    const assigned=await addApiAccount(fixture,'sk-project',200);
+    await rpc('account.setProjects',{accountId:assigned.id,projects:{onlySelected:true,rules:[{projectId:'project-one',role:'primary'}]}});
+    const quotas=new QuotaStore(fixture.host.bb.storage.database());
+    const body=JSON.stringify({metadata:{user_id:JSON.stringify({session_id:'recovered-project-session'})}});
+    const send=async()=>{const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body});expect(response.status).toBe(200);await response.text();};
+    await send();
+    quotas.put({...quotas.get(assigned.id),fiveHourUtilization:1,fiveHourResetAt:clock+60000});
+    await send();await send();
+    clock+=60001;
+    await send();await send();
+    expect(attempts).toEqual(['sk-project','sk-general','sk-general','sk-project','sk-project']);
+    const stored=(await rpc('account.list',null) as AccountSummary[]).find(a=>a.id===fixture.account.id);
+    expect(stored?.drainOnce).toBe(true);
+  });
+
+  it('returns new requests to a recovered project without cancelling an active general stream',async()=>{
+    let clock=Date.now(),cancelled=false;
+    let stream:ReadableStreamDefaultController<Uint8Array>|undefined;
+    const attempts:Array<string|null>=[];
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',apiKey:'sk-general',options:{now:()=>clock,fetch:async(_input,init)=>{
+      const key=new Headers(init?.headers).get('x-api-key');attempts.push(key);
+      if(key==='sk-general')return new Response(new ReadableStream<Uint8Array>({start(controller){stream=controller;},cancel(){cancelled=true;}}));
+      return Response.json({});
+    }}});
+    const assigned=await addApiAccount(fixture,'sk-project',200),rpc=fixture.host.harness.behavior.callRpc;
+    await rpc('account.setDrainOnce',{accountId:fixture.account.id,enabled:true});
+    await rpc('account.setProjects',{accountId:assigned.id,projects:{onlySelected:true,rules:[{projectId:'project-one',role:'primary'}]}});
+    const quotas=new QuotaStore(fixture.host.bb.storage.database());
+    quotas.put({...quotas.get(assigned.id),fiveHourUtilization:1,fiveHourResetAt:clock+60000});
+    const body=JSON.stringify({metadata:{user_id:JSON.stringify({session_id:'live-recovery'})}});
+    const request=()=>fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body});
+    const active=await request();expect(active.status).toBe(200);
+    try{
+      clock+=60001;
+      const recovered=await request();expect(recovered.status).toBe(200);await recovered.text();
+      expect(attempts).toEqual(['sk-general','sk-project']);expect(cancelled).toBe(false);
+      stream!.enqueue(new TextEncoder().encode('existing-stream'));stream!.close();
+      expect(await active.text()).toBe('existing-stream');expect(cancelled).toBe(false);
+    }finally{await active.body?.cancel().catch(()=>{});}
+  });
+
+  it.each(['codex','zai'] as const)('keeps foreign scoped manual drain out of %s inference and conservative budget',async provider=>{
+    const outbound=vi.fn(async()=>Response.json({}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider,source:provider==='codex'?'import':undefined,options:{fetch:outbound,
+      importCodexCredentials:async()=>({accessToken:'synthetic',refreshToken:'synthetic-refresh',idToken:null,accountId:'fixture-account',email:'fixture@example.com',expiresAt:Date.now()+3600000})}});
+    const rpc=fixture.host.harness.behavior.callRpc;
+    await rpc('account.setProjects',{accountId:fixture.account.id,projects:{onlySelected:true,rules:[{projectId:'foreign',role:'primary'}]}});
+    await rpc('account.setDrainOnce',{accountId:fixture.account.id,enabled:true});
+    outbound.mockClear();
+    const budget=await fixture.host.harness.behavior.fetchHttp('GET',`/budget/${provider}?projectId=project-one`,{headers:authHeaders(fixture.key)});
+    expect(budget.status).toBe(200);expect((await budget.json()).accounts).toEqual([]);
+    const response=await fixture.host.harness.behavior.fetchHttp('POST',provider==='codex'?'/v1/responses':'/zai/v1/chat/completions',{headers:authHeaders(fixture.key),body:'{}'});
+    expect(response.status).toBe(403);await response.text();expect(outbound).not.toHaveBeenCalled();
   });
 
   it('unknown clients cannot claim project identity; project-bound external tokens can use assigned accounts',async()=>{

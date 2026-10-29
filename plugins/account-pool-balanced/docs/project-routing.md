@@ -10,13 +10,17 @@ and its role in each project. Changes save immediately.
 
 Selection order is **project primary → project reserve → general primary → general reserve**.
 Within a tier, the configured routing strategy and existing quota policies apply.
+A recovered eligible project account takes precedence over a general session
+binding on the next request; already-running response streams are not moved.
 The reserve's existing drain-before-reset window can promote it within its own
 project/general group. Quota thresholds, progressive caps and schedules remain
 account-wide; they are not separate quotas for each project.
 
-**Use until exhausted** overrides project restrictions, roles, schedules and pool
-quota thresholds while armed. Disabled accounts, authentication errors and actual
-provider limits still apply. The setting clears on the first observed exhausted
+**Use until exhausted** promotes the account within its own project/general
+group and overrides roles, schedules and pool quota thresholds while armed.
+It cannot escape a nonempty selected-project restriction or outrank eligible
+project accounts from the general group. Disabled accounts, authentication errors
+and actual provider limits still apply. The setting clears on the first observed exhausted
 provider window; it does not perform a provider reset.
 
 BB supplies a project-bound hub token automatically when it starts a routed
@@ -40,8 +44,9 @@ bb pool client add project-client --output NEW_PRIVATE_TOKEN_FILE --project PROJ
 ```
 
 Use the issued token with the normal [external-client setup](external-clients.md).
-An unbound client has no project identity and can use only general accounts or an
-account with **Use until exhausted** armed. Revoking the client also revokes its
+An unbound client has no project identity and can use only accounts whose project
+access permits that context. Arming **Use until exhausted** does not grant project
+identity or widen a selected-project restriction. Revoking the client also revokes its
 project tokens. Rotating a machine token rotates its project tokens with the same
 10-minute grace period. Removing a machine removes its project tokens.
 
@@ -74,3 +79,20 @@ This restricts correctly issued automation clients; it cannot detect automation
 using legacy credentials. Clients opting into the purpose must never fall back to
 legacy credentials or direct provider access on refusal. No accounts are opted in
 automatically. Internal provider usage collection is not a general budget API.
+
+
+## Precedence compatibility (0.4.50)
+
+The selection tiers are project manual drain, project primary, project reserve,
+general manual drain, general primary and general reserve. Automatic reserve
+promotion before reset remains within its project/general group. Ordinary
+priority/routing strategy resolves candidates inside the same tier; equal-tier
+session affinity is preserved. A general drain flag cannot suppress an existing
+project cursor. No stored flag, role, cap, schedule or project assignment is
+rewritten during migration. This deliberately narrows the previous manual-drain
+scope override: a previously armed account no longer escapes selected projects.
+Both inference and cached budget account eligibility use the same access helper;
+budget schema and all-selectable numerical checks remain unchanged. General
+fallback remains possible when project candidates fail the existing eligibility
+checks. No quota collection, authentication or account changes are performed to
+force a return; selection uses actual current evidence on each new request.

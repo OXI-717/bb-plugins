@@ -6,7 +6,7 @@ const reserve = { role: 'reserve' as const };
 const projects = { onlySelected: true, rules: [{ projectId: 'project-a', role: 'inherit' as const }] };
 describe('project routing', () => {
  it('orders project primary, project reserve, global primary, global reserve', () => {
-  expect([projectTier({...primary, projects}, 'project-a'), projectTier({...reserve, projects}, 'project-a'), projectTier(primary, 'project-a'), projectTier(reserve, 'project-a')]).toEqual([1,2,3,4]);
+  expect([projectTier({...primary, projects}, 'project-a'), projectTier({...reserve, projects}, 'project-a'), projectTier(primary, 'project-a'), projectTier(reserve, 'project-a')]).toEqual([1,2,4,5]);
  });
  it('excludes scoped accounts in other or unknown projects', () => {
   expect(projectTier({...primary, projects}, 'project-b')).toBeNull();
@@ -16,14 +16,15 @@ describe('project routing', () => {
   const account = {...reserve, projects:{onlySelected:false, rules:[{projectId:'project-a',role:'primary' as const}]}};
   expect(projectRole(account,'project-a')).toBe('primary');
   expect(projectTier(account,'project-a')).toBe(1);
-  expect(projectTier(account,'project-b')).toBe(4);
+  expect(projectTier(account,'project-b')).toBe(5);
  });
  it('treats empty selection as unrestricted', () => {
-  expect(projectTier({...primary, projects:{onlySelected:true,rules:[]}},null)).toBe(3);
+  expect(projectTier({...primary, projects:{onlySelected:true,rules:[]}},null)).toBe(4);
  });
- it('drain overrides project scope and role', () => {
-  expect(projectTier({...reserve,projects,drainOnce:true},'project-b')).toBe(0);
-  expect(projectTier({...reserve,projects,drainOnce:true},null)).toBe(0);
+ it('keeps manual drain inside its project/general group and never overrides access', () => {
+  expect(projectTier({...reserve,projects,drainOnce:true},'project-b')).toBeNull();
+  expect(projectTier({...reserve,projects,drainOnce:true},null)).toBeNull();
+  expect([projectTier({...reserve,projects,drainOnce:true},'project-a'),projectTier({...primary,projects},'project-a'),projectTier({...reserve,projects},'project-a'),projectTier({...reserve,drainOnce:true},'project-a'),projectTier(primary,'project-a'),projectTier(reserve,'project-a')]).toEqual([0,1,2,3,4,5]);
  });
  it('rejects duplicate project IDs and invalid roles', () => {
   expect(accountProjectsSchema.safeParse({onlySelected:true,rules:[...projects.rules,...projects.rules]}).success).toBe(false);

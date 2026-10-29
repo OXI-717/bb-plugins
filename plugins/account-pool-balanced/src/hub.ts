@@ -1109,14 +1109,14 @@ export class AccountPoolHub {
       ...accounts.slice(anchorIndex + 1),
       ...accounts.slice(0, anchorIndex + 1),
     ];
-    const draining = candidates.filter(({ account }) => account.drainOnce);
     const tier = (entry: (typeof eligible)[number]) => {
       const base = projectTier(entry.account, projectId)!;
-      if ((base === 2 || base === 4) && (drainOpensAt(entry.quota, now, reserveHours(entry.account, settings.reserveDrainHours) * 3600000, workWeek) ?? Infinity) <= now) return base - 1;
+      if ((base === 2 || base === 5) && (drainOpensAt(entry.quota, now, reserveHours(entry.account, settings.reserveDrainHours) * 3600000, workWeek) ?? Infinity) <= now) return base - 1;
       return base;
     };
     const bestTier = Math.min(...candidates.map(tier));
     const preferredCandidates = candidates.filter(entry => tier(entry) === bestTier);
+    const draining = preferredCandidates.filter(({ account }) => account.drainOnce);
     const next = balanced
       ? rankByBalance(
           preferredCandidates,
