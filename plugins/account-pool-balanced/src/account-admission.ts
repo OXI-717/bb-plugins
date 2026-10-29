@@ -11,6 +11,7 @@ interface Lane { active: number; waiting: Waiter[] }
 export class AccountAdmission {
   private readonly lanes = new Map<string, Lane>();
   private queued = 0;
+  private readonly cooldownWakeups = new Set<() => void>();
   constructor(private readonly limit: () => number, private readonly now = Date.now,
     private readonly maxWaitMs = ACCOUNT_QUEUE_MAX_WAIT_MS, private readonly maxPerAccount = 64,
     private readonly maxQueued = 1024) {}
@@ -19,6 +20,7 @@ export class AccountAdmission {
   /** Apply a persisted live limit to every already-waiting account lane. */
   limitsChanged(): void {
     for (const [id, lane] of this.lanes) this.pump(id, lane);
+    for (const wake of [...this.cooldownWakeups]) wake();
   }
   async acquire(id: string, signal: AbortSignal, cooldown: () => number | null, deadline = this.now() + this.maxWaitMs): Promise<() => void> {
     signal.throwIfAborted();
@@ -73,8 +75,17 @@ export class AccountAdmission {
       if (remaining <= 0) return waited;
       waited = true;
       await new Promise<void>((resolve, reject) => {
-        const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(signal.reason ?? new Error('Request canceled.')); };
-        const timer = setTimeout(() => {signal.removeEventListener('abort', abort); resolve();}, Math.min(remaining, deadline - now, 2_147_483_647));
+        let done = false;
+        const finish = (reason?: unknown) => {
+          if (done) return;
+          done = true; clearTimeout(timer);
+          signal.removeEventListener('abort', abort); this.cooldownWakeups.delete(wake);
+          if (reason === undefined) resolve(); else reject(reason);
+        };
+        const wake = () => finish();
+        const abort = () => finish(signal.reason ?? new Error('Request canceled.'));
+        const timer = setTimeout(wake, Math.min(remaining, deadline - now, 2_147_483_647));
+        this.cooldownWakeups.add(wake);
         signal.addEventListener('abort', abort, {once: true});
       });
     }

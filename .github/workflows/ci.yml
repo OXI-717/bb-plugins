@@ -100,6 +100,8 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_upgrade_*.py' -v
       - name: Test Cursor gateway with a synthetic local CLI
         run: python3 -m unittest discover -s scripts -p test_cursor_route.py -v
+      - name: Test read-only Claude host diagnostics
+        run: python3 -m unittest discover -s plugins/account-pool-balanced/scripts -p test_claude_host_doctor.py -v
 
   secrets:
     runs-on: ubuntu-latest

@@ -142,6 +142,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     cursorUpstreamBaseUrl: "https://api2.cursor.sh",
     devinUpstreamBaseUrl: "https://server.codeium.com",
     maxConcurrentRequestsPerAccount: 2,
+    claudeRequestStartIntervalMs: 0,
     switchThreshold: 0.98,
     routingStrategy: "sequential",
     reserveDrainHours: 24,

@@ -10,6 +10,7 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   cursorUpstreamBaseUrl: "https://api2.cursor.sh",
   devinUpstreamBaseUrl: "https://server.codeium.com",
   maxConcurrentRequestsPerAccount: 2,
+  claudeRequestStartIntervalMs: 0,
   switchThreshold: 0.98,
   routingStrategy: "sequential" as const,
   reserveDrainHours: 24,
@@ -86,6 +87,7 @@ export const accountPoolConfigSchema = z
     devinUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.devinUpstreamBaseUrl,
     ),
+    claudeRequestStartIntervalMs: z.number().int().min(0).max(60_000).default(DEFAULT_ACCOUNT_POOL_CONFIG.claudeRequestStartIntervalMs),
     maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).default(DEFAULT_ACCOUNT_POOL_CONFIG.maxConcurrentRequestsPerAccount),
     switchThreshold: switchThresholdSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.switchThreshold,
@@ -118,6 +120,7 @@ export const accountPoolConfigSetInputSchema = z
     cursorUpstreamBaseUrl: httpUrlSchema.optional(),
     devinUpstreamBaseUrl: httpUrlSchema.optional(),
     maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).optional(),
+    claudeRequestStartIntervalMs: z.number().int().min(0).max(60_000).optional(),
     switchThreshold: switchThresholdSchema.optional(),
     routingStrategy: routingStrategySchema.optional(),
     reserveDrainHours: reserveDrainHoursSchema.optional(),
