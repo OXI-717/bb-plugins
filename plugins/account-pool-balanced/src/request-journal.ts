@@ -4,6 +4,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { providerSchema } from './contracts.js';
 import { codexQuotaObservationSchema } from './codex-quota-observation.js';
+import { TrafficHistory } from './traffic-history.js';
 export const MAX_ROWS=2048, TTL_MS=86400000, MAX_BYTES=2*1024*1024;
 const number=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
 const binding=(prefix:string)=>z.string().regex(new RegExp(`^${prefix}_[a-z0-9]{6,32}$`)).nullable();
@@ -36,8 +37,10 @@ export class RequestJournal {
  private rows:Observation[]=[];
  private evicted=0;private failures=0;private dirty=false;private closed=false;
  private timer:ReturnType<typeof setTimeout>|null=null;private writing:Promise<void>|null=null;
- constructor(private readonly file:string,private readonly now=Date.now){}
+ private readonly history:TrafficHistory;
+ constructor(private readonly file:string,private readonly now=Date.now){this.history=new TrafficHistory(path.join(path.dirname(file),'history.json'),now);}
  async initialize():Promise<void>{
+  await this.history.initialize();
   try {
    await fs.mkdir(path.dirname(this.file),{recursive:true,mode:0o700});
    await fs.chmod(path.dirname(this.file),0o700);
@@ -53,6 +56,7 @@ export class RequestJournal {
  record(input:unknown):void{
   try{
    const parsed=observationSchema.safeParse(input);if(!parsed.success||this.closed)return;
+   this.history.record(parsed.data);
    this.prune();if(this.rows.length>=MAX_ROWS){this.rows.shift();this.evicted++;}
    this.rows.push(parsed.data);this.dirty=true;this.schedule();
   }catch{this.failures++;}
@@ -83,8 +87,9 @@ export class RequestJournal {
   }
   return{schema:'bb-account-pool/request-observations/1',coverage:'retained-events-only',maxRows:MAX_ROWS,retentionMs:TTL_MS,
    evictedSinceStart:this.evicted,storageFailuresSinceStart:this.failures,oldestAt:this.rows[0]?.at??null,truncated:this.evicted>0||this.rows.length===MAX_ROWS,
-   observedAt:now,totalRetainedRows:this.rows.length,rowsTruncated:this.rows.length>limit,providers:[...providers.values()].map(p=>({...p,accounts:[...p.accounts.values()]})),minutes:[...minutes.values()].sort((a,b)=>a.at-b.at),rows:this.rows.slice(-Math.max(1, Math.min(MAX_ROWS,limit)))};
+   observedAt:now,totalRetainedRows:this.rows.length,rowsTruncated:this.rows.length>limit,providers:[...providers.values()].map(p=>({...p,accounts:[...p.accounts.values()]})),minutes:[...minutes.values()].sort((a,b)=>a.at-b.at),rows:this.rows.slice(-Math.max(1, Math.min(MAX_ROWS,limit))),history:this.history.summary()};
  }
+ historySnapshot(offset = 0, limit = 100){return this.history.snapshot(offset,limit);}
  private prune():void{
   const now=this.now(),retained=this.rows.filter(r=>r.at>=now-TTL_MS&&r.at<=now);
   if(retained.length!==this.rows.length){this.evicted+=this.rows.length-retained.length;this.rows=retained;this.dirty=true;}
@@ -94,6 +99,9 @@ export class RequestJournal {
   this.timer=setTimeout(()=>{this.timer=null;void this.flush().finally(()=>this.schedule());},1000);this.timer.unref();
  }
  async flush():Promise<void>{
+  await Promise.all([this.flushRecent(),this.history.flush()]);
+ }
+ private async flushRecent():Promise<void>{
   if(this.writing!==null)return this.writing;this.prune();if(!this.dirty)return;this.dirty=false;
   this.writing=(async()=>{try{
    const text=JSON.stringify({rows:this.rows});if(Buffer.byteLength(text)>MAX_BYTES)throw Error('oversized journal');
@@ -101,5 +109,5 @@ export class RequestJournal {
   }catch{this.failures++;await fs.rm(this.file+'.tmp',{force:true}).catch(()=>{this.failures++;});}})();
   try{await this.writing;}finally{this.writing=null;}
  }
- async close():Promise<void>{this.closed=true;if(this.timer!==null)clearTimeout(this.timer);await this.writing;await this.flush();}
+ async close():Promise<void>{this.closed=true;if(this.timer!==null)clearTimeout(this.timer);await this.writing;await this.flush();await this.history.close();}
 }

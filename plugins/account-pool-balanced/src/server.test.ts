@@ -7740,6 +7740,61 @@ it('routes browser panel and CLI to the selected Mac with no server browser fall
 });
 
 describe('bounded request metadata observations',()=>{
+  it('bounds actual CLI pages at full history capacity and summarizes recent pressure outside every returned detail page',async()=>{
+    const {RequestJournal,newTrace}=await import('./request-journal.js');
+    const {HISTORY_MAX_ROWS}=await import('./traffic-history.js');
+    const initialize=RequestJournal.prototype.initialize;let journal!:InstanceType<typeof RequestJournal>;
+    vi.spyOn(RequestJournal.prototype,'initialize').mockImplementation(function(this:InstanceType<typeof RequestJournal>){journal=this;return initialize.call(this);});
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockImplementation(async()=>Response.json({}))}});
+    const now=Date.now(), trace=newTrace('codex','host-synthetic','proj_abcdef1234',null,null,'other');
+    const event={...trace,at:now,event:'request',attempt:0,accountId:null,status:null,durationMs:null,inFlight:0,accountInFlight:0,retryAfterMs:null,retryAfterSupplied:null,quotaEvidence:null,holdSource:null,heldUntil:null,outcome:null,failover:null,errorClass:null};
+    for(let i=0;i<HISTORY_MAX_ROWS-1;i++)journal.record({...event,clientHash:i.toString(16).padStart(24,'0')});
+    journal.record({...event,clientHash:'f'.repeat(24),event:'upstream',status:429});
+    // Evict even this last raw failure, while retaining its long-term bucket outside the first detail page.
+    for(let i=0;i<2049;i++)journal.record({...event,clientHash:'0'.repeat(24),event:'hold'});
+    const maxCliBytes:Record<string,number>={};
+    const read=async(args:string[])=>{
+      const reply=await fixture.host.harness.behavior.runCli(args);
+      expect(reply.exitCode).toBe(0);
+      const bytes=Buffer.byteLength(reply.stdout)+Buffer.byteLength(reply.stderr??'');
+      maxCliBytes[args[0]!]=Math.max(maxCliBytes[args[0]!]??0,bytes);
+      expect(bytes).toBeLessThanOrEqual(1048576);
+      return JSON.parse(reply.stdout);
+    };
+    const observations=await read(['observations','--json']);
+    expect(observations.providers[0].upstream429).toBe(0);
+    expect(observations.history).not.toHaveProperty('rows');
+    expect(observations.history).toMatchObject({totalRows:HISTORY_MAX_ROWS,recentPressure:[{provider:'codex',lastUpstream429At:now,lastAuthErrorAt:0,lastQueueFailureAt:0}]});
+    const first=await read(['history','--json']);
+    expect(first).toMatchObject({offset:0,limit:100,nextOffset:100,totalRows:HISTORY_MAX_ROWS,rowsTruncated:true,truncated:false});
+    expect(first.rows).toHaveLength(100);expect(first.rows.every((r:{lastUpstream429At:number})=>r.lastUpstream429At===0)).toBe(true);
+    const seen=new Set<string>();let offset:number|null=0;
+    while(offset!==null){
+      const page=await read(['history','--offset',String(offset),'--limit','200','--json']);
+      for(const row of page.rows)seen.add(row.clientHash);
+      offset=page.nextOffset;
+    }
+    expect(seen.size).toBe(HISTORY_MAX_ROWS);expect(seen.has('f'.repeat(24))).toBe(true);
+    console.info(JSON.stringify({trafficHistoryCapacity:HISTORY_MAX_ROWS,maxCliBytes,BB_MAX_BYTES:1048576}));
+    for(const args of [['--limit','201'],['--limit','0'],['--limit','1.5'],['--offset','-1'],['--offset','8193']])
+      expect((await fixture.host.harness.behavior.runCli(['history',...args,'--json'])).exitCode).not.toBe(0);
+  });
+  it('inspects persisted hourly traffic through the authorized CLI and resolves only trusted machine identities',async()=>{
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockImplementation(async()=>Response.json({}))}});
+    const env=await fixture.host.harness.behavior.resolveProviderEnv('claude-code',{hostId:'host-one',projectId:'proj_abcdef1234',threadId:'thr_abcdef1234'});
+    const key=env.find(e=>e.name==='ANTHROPIC_AUTH_TOKEN')!.value as string;
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(key),'host-id':'forged-machine'},body:JSON.stringify({messages:[{role:'user',content:'synthetic private prompt'}]})});
+    expect(response.status).toBe(200);await response.text();
+    const reply=await fixture.host.harness.behavior.runCli(['history','--json']);expect(reply.exitCode).toBe(0);
+    const result=JSON.parse(reply.stdout);
+    expect(result).toMatchObject({schema:'bb-account-pool/traffic-history/1',identitiesAvailable:true,truncated:false});
+    expect(result.clients).toEqual([{clientHash:expect.any(String),hostId:'host-one',hostName:'One'}]);
+    expect(result.rows).toEqual(expect.arrayContaining([expect.objectContaining({accountId:null,requests:1,attempts:0}),expect.objectContaining({accountId:fixture.account.id,requests:0,firstDispatches:1,attempts:1,upstreamResponses:1,streamEnds:1,peakAccountInFlight:1})]));
+    expect(JSON.stringify(result)).not.toMatch(/synthetic|forged-machine|ANTHROPIC|threadId|requestId/);
+    fixture.host.harness.sdk.stub('hosts.list',async()=>{throw Error('synthetic private failure');});
+    const unavailable=JSON.parse((await fixture.host.harness.behavior.runCli(['history','--json'])).stdout);
+    expect(unavailable.identitiesAvailable).toBe(false);expect(unavailable.clients).toEqual([]);expect(unavailable.rows).toEqual(result.rows);
+  });
   async function records(fixture:Fixture){
     const reply=await fixture.host.harness.behavior.runCli(['observations','--json']);
     expect(reply.exitCode).toBe(0);

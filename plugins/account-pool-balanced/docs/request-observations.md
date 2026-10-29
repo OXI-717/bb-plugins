@@ -8,7 +8,7 @@ The journal starts with authenticated requests that passed the hub's admission g
 - `clientHash` is a truncated SHA-256 of the authenticated context's host/client identifier, never of a token. For a machine's project/thread credentials this is the machine identity; for external credentials it is the external client identity. Labels, names, emails, token values and provider-side session identifiers are never recorded. Correlate with known authenticated contexts; the hash is not proof of a human identity.
 - `projectId` and `threadId` come exclusively from the authenticated token context and must match canonical BB ID shapes; otherwise null. External clients often have no thread binding. Body/header session IDs are never interpreted as BB thread IDs.
 - `model` is an exact allowlisted request model ID; unfamiliar aliases remain null. `modelFamily` is the adapter's existing classification, not proof of an upstream selected model. No request text or response model headers are logged.
-- `accountId` is the selected account's internal UUID. `inFlight` is the total upstream count; `accountInFlight` is the selected account's count at that observation. Attempt events precede increment; stream-end events follow decrement. These are instantaneous counters, not a provider concurrency quota.
+- `accountId` is the selected account's internal UUID. `inFlight` is the total upstream count; `accountInFlight` is the selected account's count at that observation. Attempt events follow increment; stream-end events follow decrement. These are instantaneous counters, not a provider concurrency quota.
 
 Event names distinguish causal observations:
 
@@ -84,3 +84,77 @@ Two concurrent requests is a conservative initial operator setting, not a
 published provider guarantee. Concurrency alone cannot prevent variable provider
 request/token limits or shared subscription consumption outside this server.
 Respect provider cooldowns and observe natural traffic before adjusting it.
+
+
+## Bounded hourly traffic history (0.4.48)
+
+`bb pool history --json` inspects independently persisted hourly counters for up to
+fourteen days. The existing `observations` output includes a compact `history` summary across all retained buckets; the
+short event ring remains unchanged. Both commands are local authorized inspection,
+not new public endpoints. No provider, quota or model calls are made.
+
+Each aggregate groups provider, selected account UUID (or null before selection),
+authenticated client hash and project. There are no prompts, response bodies,
+raw headers, credentials, request IDs, thread IDs, model strings or diagnostic
+quota tuples in long-term storage. Machine labels are resolved on inspection
+from the current trusted host directory, never recorded from request payloads or
+persisted in history. External clients without a trusted machine mapping remain
+hashes; they must not be presented as guessed machine names. Lookup failure sets
+`identitiesAvailable=false` and preserves counters without guessing labels.
+
+`requests` counts logical starts and therefore belongs to the null-account row.
+`firstDispatches` counts the first actual upstream dispatch assigned to an account;
+`attempts` includes retries and failover dispatches. Do not sum attempts as unique
+requests or assign pre-selection refusals to an account. Upstream responses, 429,
+401/403 and 5xx are counted only at upstream header events; pool-local held 429,
+queue waits/refusals and completed/canceled/error stream lifetimes are separate.
+Hold/result events do not count a second upstream failure. Latest 429/auth/queue
+failure timestamps support the existing observer even after raw-event eviction.
+Stream duration sums are recorded in the hour in which the stream ends, and may
+include concurrent streams or ones begun earlier: they are not wall-clock busy
+percentages. The account peak is an observed dispatch/header count, not a provider
+limit. Missing ended streams after a process crash cannot be reconstructed.
+
+The file cap is 8 MiB / 8,192 aggregate buckets, in addition to the existing raw
+2 MiB / 2,048-event ring. At cardinality capacity the oldest hour is evicted as a
+group for new hours; within a full single hour new keys are omitted while existing
+keys continue counting. `capacityEvictedBuckets`, `capacityDroppedEvents` and
+`truncated` disclose these limits. Hour buckets expire entirely after fourteen
+days (the boundary may shorten coverage by less than an hour). There is no
+append-only log or per-request file. One temporary atomic replacement adds at most
+another 8 MiB. The containing directory is 0700 and files are 0600. Temporary files
+are removed at startup or failed writes. Expiry runs on the journal's existing
+background tick even with no traffic. Filesystem refusal may prevent replacement
+or deletion; it increments the isolated history failure counter, never blocks or
+fails forwarding. A single asynchronous write per file coalesces changes; failed
+history writes retry on the next tick. No new service, timer or scheduler is added.
+
+History starts on this version's installation and survives ordinary restarts; it
+is never inferred from the truncated legacy ring. `startedAt`, `observedAt`, caps,
+omission counters and `storageFailuresSinceStart` must accompany any report.
+Unavailable/corrupt storage resets the new in-memory start boundary and reports
+failure; crashes can lose the last coalesced snapshot. This is operational traffic
+coverage through this pool's existing forward seam, not complete subscription
+accounting or proof about independent applications. It cannot quantify ban risk.
+Actual 429/auth/queue failures are reasons to investigate under existing policy,
+not authorization to disable, reroute or rotate an account automatically.
+
+
+History transport is paginated independently from storage. `bb pool history
+--offset 0 --limit 100 --json` returns at most 100 detail rows by default; `limit`
+is a strict integer 1–200 and `offset` is 0–8,192. `totalRows`, `offset`, `limit`,
+`nextOffset` and `rowsTruncated` describe the page, separately from the persistent
+capacity-omission flag `truncated`. Follow `nextOffset` until null. Rows sort by
+hour then full aggregate key. Pages are live, not an immutable export: each has
+its own `observedAt`; concurrent new keys, expiry or capacity eviction can shift
+offsets. A coherent static export requires a quiet interval or repeating a read,
+not assuming transactional pagination. Machine label lookup is limited to the
+returned page; overlong labels become null instead of unbounded strings.
+
+`observations.history.providers` contains fixed-provider totals across ALL retained
+buckets. Its `recentPressure` has at most one row per provider and the maximum
+actual timestamps of upstream 429, upstream auth errors and queue failures over
+ALL buckets, never just the first page. It has no detail `rows` array. The existing
+monitor uses these actual latest timestamps within its recent observation window;
+large counts alone cannot make stale failures current. Output remains below the
+BB one-MiB CLI limit at admitted capacity; persisted data limits remain unchanged.
