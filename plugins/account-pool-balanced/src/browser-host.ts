@@ -34,6 +34,20 @@ export function createBrowserRouter(options:BrowserRouterOptions){
   if(options.getHostId()!==id)throw Error('Account browser host changed; retry after checking configuration.');
  }
  return {
+  async openAgyLogin(url:string):Promise<{opened:true}>{
+   const id=options.getHostId();
+   if(id===null)throw Error('Select the Mac account browser host before signing in.');
+   const parsed=new URL(url);
+   if(parsed.origin!=='https://accounts.google.com'||parsed.pathname!=='/o/oauth2/v2/auth'||parsed.username||parsed.password||parsed.hash)throw Error('Invalid Google authorization URL');
+   // A stable onboarding profile is separate from every imported account profile.
+   const onboarding:BrowserAccount={id:'01f92891-506b-4b5c-b164-035d69bf8288',provider:'agy',label:'Antigravity sign-in',email:null};
+   const accounts=await inventory();
+   if(accounts.some(a=>a.id===onboarding.id))throw Error('Onboarding profile identity collision');
+   const input=openInput.parse({accounts:[...accounts,onboarding],accountId:onboarding.id,url});
+   await target(id);
+   try{return browserHostContract.open.output.parse(await options.callHost('open',input,id));}
+   catch{throw Error('Remote sign-in browser did not confirm launch. Check the Mac before retrying.');}
+  },
   async open(query:string,url?:string):Promise<{opened:true}>{
    const id=options.getHostId();
    if(id===null){await options.localOpen(query,url);return {opened:true};}

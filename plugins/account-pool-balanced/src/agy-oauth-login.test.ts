@@ -62,3 +62,9 @@ it('does not turn missing project or enterprise bootstrap into a personal subscr
   try{const s=await login.start();await expect(login.complete(s.sessionId,'synthetic-code')).rejects.toThrow(/Activate|enterprise/);}finally{login.dispose();}
  }
 });
+it('browser URL is bound to an unexpired unused session',async()=>{
+ let now=1000;const login=new AgyOAuthLogin({appConfig:async()=>config,fetch:vi.fn(),now:()=>now});
+ try{const started=await login.start();expect(login.authorizationUrl(started.sessionId)).toBe(started.authorizeUrl);
+ expect(()=>login.authorizationUrl('foreign')).toThrow();now=started.expiresAt;expect(()=>login.authorizationUrl(started.sessionId)).toThrow();
+ now=1000;login.cancel(started.sessionId);expect(()=>login.authorizationUrl(started.sessionId)).toThrow();}finally{login.dispose();}
+});

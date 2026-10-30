@@ -11,7 +11,7 @@ export interface AgyAuthorization {
   label:string;email:string;subscriptionType:string|null;
   secret:{kind:'oauth';accessToken:string;refreshToken:string;expiresAt:number;agy:{clientId:string;clientSecret:string;projectId:string;endpoint:"https://daily-cloudcode-pa.googleapis.com"}};
 }
-interface Pending {config:AgyAppConfig;verifier:string;state:string;redirectUri:string;expiresAt:number;controller:AbortController;used:boolean;timer:ReturnType<typeof setTimeout>}
+interface Pending {authorizeUrl?:string;config:AgyAppConfig;verifier:string;state:string;redirectUri:string;expiresAt:number;controller:AbortController;used:boolean;timer:ReturnType<typeof setTimeout>}
 const TOKEN_URL='https://oauth2.googleapis.com/token';
 const AUTHORIZE_URL='https://accounts.google.com/o/oauth2/v2/auth';
 const BOOTSTRAP_URL='https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist';
@@ -66,7 +66,13 @@ export class AgyOAuthLogin {
     const timer=setTimeout(()=>this.cancel(sessionId),600000);timer.unref();
     this.sessions.set(sessionId,{config,verifier,state,redirectUri,expiresAt,controller,used:false,timer});
     const url=new URL(AUTHORIZE_URL);url.search=new URLSearchParams({client_id:config.clientId,redirect_uri:redirectUri,response_type:'code',scope:config.scopes.join(' '),access_type:'offline',prompt:'consent',state,code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'}).toString();
+    this.sessions.get(sessionId)!.authorizeUrl=url.toString();
     return {sessionId,authorizeUrl:url.toString(),expiresAt};
+  }
+  authorizationUrl(id:string):string {
+    const session=this.sessions.get(id);
+    if(!session||session.used||this.now()>=session.expiresAt||!session.authorizeUrl)throw Error('Authorization session expired or already used');
+    return session.authorizeUrl;
   }
   cancel(id:string){const session=this.sessions.get(id);if(!session)return;this.sessions.delete(id);clearTimeout(session.timer);session.controller.abort();}
   dispose(){this.disposed=true;for(const id of this.sessions.keys())this.cancel(id);}

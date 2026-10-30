@@ -141,6 +141,7 @@ export const accountPoolRpcContract = defineRpcContract({
     input: loginCompleteInputSchema,
     output: accountSchema,
   },
+  "agyLogin.openBrowser": {input:z.object({sessionId:z.string().min(1).max(128)}).strict(),output:z.object({opened:z.literal(true)}).strict()},
   "agyLogin.start": {input:z.null(),output:z.object({sessionId:z.string().min(1).max(128),authorizeUrl:z.string().url(),expiresAt:z.number().int().positive()}).strict()},
   "agyLogin.complete": {input:z.object({sessionId:z.string().min(1).max(128),pasted:z.string().trim().min(1).max(16384)}).strict(),output:accountSchema},
   "agyLogin.cancel": {input:z.object({sessionId:z.string().min(1).max(128)}).strict(),output:z.object({cancelled:z.literal(true)}).strict()},
@@ -183,6 +184,7 @@ export function createRpcHandlers(
   projectsList: () => Promise<Array<{ id: string; name: string }>> = async () => [],
   openBrowser: (input: BrowserOpenInput) => Promise<{ opened: true }> = async () => { throw new Error("Account browser unavailable"); },
   agyLogin?: AgyOAuthLogin,
+  openAgyBrowser:(url:string)=>Promise<{opened:true}>=async()=>{throw Error("Sign-in browser unavailable");},
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
     "browser.open": input => openBrowser(input),
@@ -236,6 +238,7 @@ export function createRpcHandlers(
       return login.start(accountId);
     },
     "login.complete": (input) => login.complete(input),
+    "agyLogin.openBrowser":({sessionId})=>{if(!agyLogin)throw Error("Antigravity login unavailable");return openAgyBrowser(agyLogin.authorizationUrl(sessionId));},
     "agyLogin.start":()=>{if(!agyLogin)throw Error('Antigravity login unavailable');return agyLogin.start();},
     "agyLogin.complete":async({sessionId,pasted})=>{if(!agyLogin)throw Error('Antigravity login unavailable');return operations.addAgyOAuth(await agyLogin.complete(sessionId,pasted));},
     "agyLogin.cancel":({sessionId})=>{if(!agyLogin)throw Error('Antigravity login unavailable');agyLogin.cancel(sessionId);return {cancelled:true};},
