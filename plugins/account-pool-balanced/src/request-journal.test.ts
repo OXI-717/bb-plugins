@@ -130,3 +130,9 @@ it('bounds returned pages while aggregating every retained provider/account with
   expect.objectContaining({provider:'claude',upstream429:1})]));
  expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(200_000);
 });
+it('summarizes Guard separately from upstream errors across all retained rows',async()=>{
+ const f=await fixture();f.journal.record(f.event({event:'guard-check',guardOutcome:'timeout',guardPhase:'before-dispatch',durationMs:4000,rawError:'private token'}));
+ f.journal.record(f.event({event:'upstream',status:503}));
+ const result=f.journal.snapshot(1);expect(result.guardChecks.find(r=>r.provider==='codex')).toMatchObject({checks:1,timeouts:1,durationMs:4000,lastTimeoutAt:f.now});
+ expect(result.rows).toHaveLength(1);expect(JSON.stringify(result)).not.toContain('private token');
+});

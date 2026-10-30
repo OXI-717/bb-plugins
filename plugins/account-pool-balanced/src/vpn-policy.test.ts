@@ -93,3 +93,16 @@ it('accepts explicit NeuralDeep VPN membership while preserving existing choices
   await expect(createVpnPolicy(()=>settings,()=>now,async()=>null,guard).assert('neuraldeep')).rejects.toBeInstanceOf(VpnRequiredError);
   await expect(createVpnPolicy(()=>settings,()=>now,async()=>payload,async()=>{throw Error('guard denied');}).assert('neuraldeep')).rejects.toThrow('guard denied');
 });
+it('measures only Guard and isolates observer failure from its decision',async()=>{
+ const observed:unknown[]=[];
+ const settings=()=>accountPoolConfigSchema.parse({vpnGuardEnabled:true});
+ const direct=createVpnPolicy(settings,()=>now,undefined,async()=> 'direct');
+ await direct.assert('cursor',row=>{observed.push(row);throw Error('observer unavailable');});
+ expect(observed).toEqual([{durationMs:expect.any(Number),outcome:'direct'}]);
+ const {GuardRequiredError}=await import('./network-errors.js');
+ const failure=new GuardRequiredError('cursor',true,'timeout');
+ const denied=createVpnPolicy(settings,()=>now,undefined,async()=>{throw failure;});
+ await expect(denied.assert('cursor',row=>observed.push(row))).rejects.toBe(failure);
+ expect(observed.at(-1)).toMatchObject({outcome:'timeout'});
+ const skip:unknown[]=[];await direct.assert('zai',row=>skip.push(row));expect(skip).toEqual([]);
+});

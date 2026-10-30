@@ -10,7 +10,7 @@ const number=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).null
 const binding=(prefix:string)=>z.string().regex(new RegExp(`^${prefix}_[a-z0-9]{6,32}$`)).nullable();
 export const observationSchema=z.object({
  at:z.number().int().nonnegative(),requestId:z.string().uuid(),attempt:z.number().int().min(0).max(100000),
- event:z.enum(['request','attempt','upstream','local-held','hold','result','stream-end','queue-wait','account-switch','auth-refresh']),provider:providerSchema,
+ event:z.enum(['request','attempt','upstream','local-held','hold','result','stream-end','queue-wait','account-switch','auth-refresh','guard-check']),provider:providerSchema,
  accountId:z.string().uuid().nullable(),clientHash:z.string().regex(/^[a-f0-9]{24}$/).nullable(),projectId:binding('proj'),threadId:binding('thr'),
  model:z.enum(['gpt-6-astra','gpt-6.1-sol','gpt-6-sol','gpt-5.4','gpt-5.3-codex','claude-opus-4-6','claude-sonnet-4-6']).nullable(),
  modelFamily:z.enum(['fable','sonnet','opus','haiku','other']),status:z.number().int().min(100).max(599).nullable(),
@@ -19,6 +19,8 @@ export const observationSchema=z.object({
  outcome:z.enum(['returned','error','canceled','complete','failed-over']).nullable(),
  failover:z.enum(['none','succeeded','failed']).nullable(),
  errorClass:z.enum(['upstream429','local-held','upstream403-hold','stream-error','request-error','canceled','queue-full','queue-timeout']).nullable(),
+ guardOutcome:z.enum(['direct','allowed','blocked','timeout','invalid_decision','rpc_failed','unavailable']).optional(),
+ guardPhase:z.enum(['before-dispatch','after-headers','cooldown']).optional(),
  switchOutcome:z.enum(['dispatched','accepted']).optional(),
  authOutcome:z.enum(['succeeded','transient-failed','reauth-required','failed']).optional(),
  oauthCode:z.enum(['invalid_grant','invalid_request','invalid_client','unauthorized_client','unsupported_grant_type','invalid_scope']).nullable().optional(),
@@ -88,7 +90,13 @@ export class RequestJournal {
     a.peakInFlight=Math.max(a.peakInFlight,r.accountInFlight);p.accounts.set(r.accountId,a);}
    providers.set(r.provider,p);
   }
-  return{schema:'bb-account-pool/request-observations/1',coverage:'retained-events-only',maxRows:MAX_ROWS,retentionMs:TTL_MS,
+  const guardChecks=providerSchema.options.map(provider=>{
+   const rows=this.rows.filter(r=>r.provider===provider&&r.event==='guard-check');
+   return {provider,checks:rows.length,timeouts:rows.filter(r=>r.guardOutcome==='timeout').length,
+    blocked:rows.filter(r=>r.guardOutcome==='blocked').length,unavailable:rows.filter(r=>['invalid_decision','rpc_failed','unavailable'].includes(r.guardOutcome??'')).length,
+    durationMs:rows.reduce((sum,r)=>Math.min(Number.MAX_SAFE_INTEGER,sum+(r.durationMs??0)),0),maxDurationMs:Math.max(0,...rows.map(r=>r.durationMs??0)),lastTimeoutAt:Math.max(0,...rows.filter(r=>r.guardOutcome==='timeout').map(r=>r.at))};
+  });
+  return{guardChecks,guardCoverage:'selected-model-flight-checks-retained-events-only',schema:'bb-account-pool/request-observations/1' ,coverage:'retained-events-only',maxRows:MAX_ROWS,retentionMs:TTL_MS,
    evictedSinceStart:this.evicted,storageFailuresSinceStart:this.failures,oldestAt:this.rows[0]?.at??null,truncated:this.evicted>0||this.rows.length===MAX_ROWS,
    observedAt:now,totalRetainedRows:this.rows.length,rowsTruncated:this.rows.length>limit,providers:[...providers.values()].map(p=>({...p,accounts:[...p.accounts.values()]})),minutes:[...minutes.values()].sort((a,b)=>a.at-b.at),rows:this.rows.slice(-Math.max(1, Math.min(MAX_ROWS,limit))),history:this.history.summary()};
  }
