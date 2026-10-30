@@ -31,3 +31,19 @@ it('refuses missing retained registry rather than creating duplicate native prof
  const open=vi.fn();const h=createMacBrowserHandlers({platform:()=> 'darwin',dataDir:()=>'/synthetic/bb',registryExists:async()=>false,readEvidence:async()=>({state:'connected',assurance:'verified_ipv4'}),open,list:async()=>[]});
  await expect(h.open({accounts:[account],accountId:account.id})).rejects.toThrow();expect(open).not.toHaveBeenCalled();
 });
+it('pins Google onboarding to configured Mac and a separate profile',async()=>{
+ const call=vi.fn(async(_m:string,_i:unknown,_h:string)=>({opened:true as const}));const local=vi.fn();let host:string|null='mac';
+ const router=createBrowserRouter({getHostId:()=>host,listHosts:async()=>[{id:'mac',status:'connected'}],accounts:async()=>[account],callHost:call,localOpen:local,localList:async()=>[]});
+ await router.openAgyLogin('https://accounts.google.com/o/oauth2/v2/auth?state=synthetic');
+ const input=call.mock.calls[0]![1] as {accountId:string;accounts:unknown[]};
+ expect(input.accountId).not.toBe(account.id);expect(input.accounts.at(-1)).toMatchObject({provider:'agy',email:null});expect(local).not.toHaveBeenCalled();
+ await expect(router.openAgyLogin('https://evil.example/login')).rejects.toThrow();
+ host=null;await expect(router.openAgyLogin('https://accounts.google.com/o/oauth2/v2/auth')).rejects.toThrow('Select');expect(call).toHaveBeenCalledTimes(1);
+});
+
+it('keeps first-use close-and-retry guidance without exposing remote errors',async()=>{
+ const router=createBrowserRouter({getHostId:()=> 'mac',listHosts:async()=>[{id:'mac',status:'connected'}],accounts:async()=>[account],callHost:async()=>{throw Error('private remote details');},localOpen:vi.fn(),localList:async()=>[]});
+ const error=await router.openAgyLogin('https://accounts.google.com/o/oauth2/v2/auth').catch(e=>e as Error);
+ if(!(error instanceof Error))throw Error('Expected browser failure');
+ expect(error.message).toContain('close Helium once');expect(error.message).not.toContain('private remote details');
+});

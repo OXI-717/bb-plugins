@@ -324,7 +324,7 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin),
+      }, agyLogin, url=>browser.openAgyLogin(url)),
     );
     registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser);
     registerUsageSource(bb, hub);
