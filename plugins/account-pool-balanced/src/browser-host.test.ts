@@ -40,3 +40,10 @@ it('pins Google onboarding to configured Mac and a separate profile',async()=>{
  await expect(router.openAgyLogin('https://evil.example/login')).rejects.toThrow();
  host=null;await expect(router.openAgyLogin('https://accounts.google.com/o/oauth2/v2/auth')).rejects.toThrow('Select');expect(call).toHaveBeenCalledTimes(1);
 });
+
+it('keeps first-use close-and-retry guidance without exposing remote errors',async()=>{
+ const router=createBrowserRouter({getHostId:()=> 'mac',listHosts:async()=>[{id:'mac',status:'connected'}],accounts:async()=>[account],callHost:async()=>{throw Error('private remote details');},localOpen:vi.fn(),localList:async()=>[]});
+ const error=await router.openAgyLogin('https://accounts.google.com/o/oauth2/v2/auth').catch(e=>e as Error);
+ if(!(error instanceof Error))throw Error('Expected browser failure');
+ expect(error.message).toContain('close Helium once');expect(error.message).not.toContain('private remote details');
+});

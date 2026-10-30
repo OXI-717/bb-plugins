@@ -46,7 +46,7 @@ export function createBrowserRouter(options:BrowserRouterOptions){
    const input=openInput.parse({accounts:[...accounts,onboarding],accountId:onboarding.id,url});
    await target(id);
    try{return browserHostContract.open.output.parse(await options.callHost('open',input,id));}
-   catch{throw Error('Remote sign-in browser did not confirm launch. Check the Mac before retrying.');}
+   catch{throw Error('Remote sign-in browser did not confirm launch. Check the Mac before retrying. On first sign-in, close Helium once to prepare the new profile, then click sign-in again.');}
   },
   async open(query:string,url?:string):Promise<{opened:true}>{
    const id=options.getHostId();
