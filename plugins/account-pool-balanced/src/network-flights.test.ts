@@ -40,3 +40,9 @@ it('preserves drainable model streams during shutdown grace until their caller a
  expect(flights.size).toBe(1);
  const pending=reader.read();const error=expect(pending).rejects.toThrow('drain timeout');caller.abort(Error('drain timeout'));await error;expect(flights.size).toBe(0);
 });
+it('uses the request-bound check before dispatch and after headers without replay',async()=>{
+ const stop=new AbortController();const checks:string[]=[];let sent=0;
+ const flights=new NetworkFlights(async()=>{sent++;return new Response('ok');},()=>stop.signal,async()=>{throw Error('unbound check');});
+ const response=await flights.fetch('cursor','https://synthetic.example',undefined,false,undefined,async()=>{checks.push(sent===0?'before':'after');});
+ expect(await response.text()).toBe('ok');expect(checks).toEqual(['before','after']);expect(sent).toBe(1);
+});

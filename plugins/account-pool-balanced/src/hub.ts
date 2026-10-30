@@ -219,7 +219,7 @@ export class AccountPoolHub {
   }
 
   private requiresIpv4(provider:PoolProvider):boolean {const settings=this.options.getSettings();return settings.vpnOnlyProviders.some(value=>value===provider)||(settings.vpnGuardEnabled&&provider!=="kimi"&&provider!=="zai");}
-  async assertNetworkAllowed(provider: PoolProvider): Promise<void> { await this.vpn.assert(provider);if(this.requiresIpv4(provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
+  async assertNetworkAllowed(provider: PoolProvider, observeGuard?: (result:import("./vpn-policy.js").GuardObservation)=>void): Promise<void> { await this.vpn.assert(provider,observeGuard);if(this.requiresIpv4(provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
 
   outboundFetch(provider: PoolProvider): typeof fetch {
     return (input,init)=>this.networkFlights.fetch(provider,input,init);
@@ -1427,6 +1427,8 @@ export class AccountPoolHub {
       const url = adapter.upstreamUrl(request, this.options.getSettings());
       const headers = adapter.requestHeaders(request.headers, account, secret);
       const method=adapter.upstreamMethod?.(request)??request.method;
+      let phase:'before-dispatch'|'after-headers'|'cooldown'='before-dispatch';
+      const check=()=>this.assertNetworkAllowed(account.provider,result=>this.observe(trace,{event:'guard-check',attempt,accountId:account.id,durationMs:result.durationMs,guardOutcome:result.outcome,guardPhase:phase}));
       const response = await this.networkFlights.fetch(account.provider,url, {
           method,
           headers,
@@ -1437,7 +1439,7 @@ export class AccountPoolHub {
         },true, async send => {
           while (true) {
             const waited = await this.admission.waitCooldown(AbortSignal.any([controller.signal, this.stopped.signal]), cooldown, deadline);
-            if (waited) await this.assertNetworkAllowed(account.provider);
+            if (waited) {const previous=phase;phase='cooldown';try{await check();}finally{phase=previous;}}
             const started = await this.options.accounts.withSnapshot(accounts => {
               const current = this.eligibleEntries(adapter.provider, admission.projectId,
                 accounts, admission.family, this.options.now(), admission.purpose).eligible;
@@ -1450,11 +1452,11 @@ export class AccountPoolHub {
               admission.onDispatch?.();
               this.observe(trace,{event:'attempt',attempt,accountId:account.id});
               if (account.provider === 'claude') this.claudeStarts.dispatched(account.id);
-              return {response: send()};
+              phase='after-headers';return {response: send()};
             });
             if (started.value !== null) return started.value.response;
           }
-        })
+        },check)
         .catch((cause: unknown) => {
           if (cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
           throw new UpstreamConnectionError("Upstream connection failed.", {

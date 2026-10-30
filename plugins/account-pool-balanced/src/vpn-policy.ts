@@ -7,6 +7,7 @@ import { requiresGuardCheck } from './guard-network.js';
 import {GuardRequiredError,VpnRequiredError} from './network-errors.js';
 import type { AccountPoolConfig, PoolProvider } from './contracts.js';
 
+export interface GuardObservation {durationMs:number;outcome:'direct'|'allowed'|'blocked'|'timeout'|'invalid_decision'|'rpc_failed'|'unavailable'}
 export type VpnState = 'connected' | 'disconnected' | 'unknown';
 export {VpnRequiredError} from './network-errors.js';
 export function vpnStateFromPayload(payload:unknown,now:number):VpnState{return evaluateVpnEvidence(payload,now).state;}
@@ -72,10 +73,18 @@ export function createVpnPolicy(
   const state=async():Promise<VpnState>=>(await evidence()).state;
   return {
     state, evidence,
-    async assert(provider: PoolProvider) {
+    async assert(provider: PoolProvider, observeGuard?:(result:GuardObservation)=>void) {
       if(settings().vpnGuardEnabled && requiresGuardCheck(provider)) {
-        if(!guardCheck) throw new GuardRequiredError(provider,true);
-        if(await guardCheck(provider)==='direct')return;
+        const started=performance.now();let outcome:GuardObservation['outcome']='unavailable';
+        let direct=false;
+        try {
+          if(!guardCheck)throw new GuardRequiredError(provider,true);
+          direct=await guardCheck(provider)==='direct';outcome=direct?'direct':'allowed';
+        }catch(error){
+          if(error instanceof GuardRequiredError)outcome=error.code==='VPN_GUARD_BLOCKED'?'blocked':error.failureReason??'unavailable';
+          throw error;
+        }finally{try{observeGuard?.({durationMs:Math.max(0,performance.now()-started),outcome});}catch{/* telemetry cannot affect admission */}}
+        if(direct)return;
       }
       if (!settings().vpnOnlyProviders.some(value => value === provider)) return;
       const current=await evidence();
