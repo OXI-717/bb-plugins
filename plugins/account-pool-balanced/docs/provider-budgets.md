@@ -13,8 +13,9 @@ stored token identity binds project, optional purpose and thread. Optional
 refused. No token, label, email or upstream response body is returned.
 
 The schema is `bb-account-pool/provider-budget/1`. `provider`, `projectId`, optional
-`purpose`, server `observedAt`, `maxAgeMs`, existing route flags and `accounts` are
-returned. Each account has `accountId`, actual `eligible`, `heldUntil`, `supported`,
+`purpose`, server `observedAt`, `maxAgeMs`, `eligibilityScope: "shared-policy-superset"`,
+existing route flags and `accounts` are
+returned. Each account has `accountId`, conservative `eligible`, `heldUntil`, `supported`,
 `budgetReady`, `reason`, `coverage`, `usage` and `windows`. A ready window contains
 `id`, `remainingPercent`, `resetAt` (epoch milliseconds, nullable when the source does not promise it), and `durationMinutes`
 (null for Cursor's calendar billing cycle). Empty windows mean unknown, not 100%.
@@ -60,6 +61,15 @@ unavailable. No new timer or on-demand refresh is added. Antigravity replaces it
 no-op usage hook with one bounded native quota-summary request through the same
 guarded transport and server-held subscription identity. Other collectors reuse
 their existing payloads without additional requests.
+
+`eligible` uses the existing shared-policy account set before model-family
+filtering: project, purpose, enabled state, schedule, shared quota and reserve
+membership gates remain intact. Every family-specific generation candidate is
+in this conservative superset. A blocked `other` family cannot hide an account
+which Sonnet or another family can select. The set can contain accounts blocked
+for a particular model: this is not model authorization. Consumers must require
+the declared eligibility scope and check every eligible account; actual dispatch
+rechecks the selected family and all account policy.
 
 Consumers must verify exact schema/provider/project/purpose, route readiness,
 clock freshness, all **eligible** accounts, each required window and their own

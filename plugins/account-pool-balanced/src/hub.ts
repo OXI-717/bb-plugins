@@ -1078,8 +1078,10 @@ export class AccountPoolHub {
       const threadBypassed=context.threadId?await bypassed(context.threadId):false;
       const ready=this.accepting&&routingEnabled&&networkAllowed&&!threadBypassed;
       const accounts=(await this.options.accounts.list()).filter(a=>a.provider===provider&&projectTier(a,context.projectId)!==null);
-      const eligible=new Set(this.eligibleEntries(provider,context.projectId,accounts,'other',now,context.purpose).eligible.map(e=>e.account.id));
-      return reply({schema:'bb-account-pool/provider-budget/1',provider,supported:NUMERIC_BUDGET_PROVIDERS.some(p=>p===provider),projectId:context.projectId,
+      // Available applies shared project/purpose/policy gates before any family filter.
+      // A blocked 'other' family must not hide an account selectable by Sonnet.
+      const eligible=new Set(this.eligibleEntries(provider,context.projectId,accounts,'other',now,context.purpose).available.map(e=>e.account.id));
+      return reply({schema:'bb-account-pool/provider-budget/1',eligibilityScope:'shared-policy-superset',provider,supported:NUMERIC_BUDGET_PROVIDERS.some(p=>p===provider),projectId:context.projectId,
         ...(context.purpose?{purpose:context.purpose}:{}),observedAt:now,maxAgeMs:PROVIDER_BUDGET_MAX_AGE_MS,
         route:{provider,accepting:this.accepting,routingEnabled,networkAllowed,threadBypassed,ready},
         accounts:accounts.map(a=>{const quota=this.options.quotas.get(a.id);return {accountId:a.id,eligible:ready&&eligible.has(a.id),heldUntil:quota.heldUntil,...providerBudgetQuota(provider,quota,now)};}),

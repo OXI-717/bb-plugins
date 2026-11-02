@@ -85,7 +85,7 @@ it('all cached endpoints enforce project/purpose and keep unknown eligible accou
   expect((await read('invalid')).status).toBe(401);expect((await read(token,'?projectId=foreign')).status).toBe(403);
   const noSecret=vi.spyOn(AccountStore.prototype,'readSecret').mockRejectedValue(Error('unexpected credential read'));
   const response=await read(),body=await response.json();expect(response.headers.get('cache-control')).toBe('no-store');
-  expect(body).toMatchObject({schema:'bb-account-pool/provider-budget/1',provider:p,projectId:'project-one',purpose:'autopilot',accounts:[{accountId:first.id,eligible:true},{accountId:unknown.id,eligible:true,budgetReady:false},{accountId:notOpted.id,eligible:false}]});
+  expect(body).toMatchObject({schema:'bb-account-pool/provider-budget/1',eligibilityScope:'shared-policy-superset',provider:p,projectId:'project-one',purpose:'autopilot',accounts:[{accountId:first.id,eligible:true},{accountId:unknown.id,eligible:true,budgetReady:false},{accountId:notOpted.id,eligible:false}]});
   expect(noSecret).not.toHaveBeenCalled();noSecret.mockRestore();
   expect(body.accounts[0].budgetReady).toBe(p!=='devin');
   expect(body.accounts).toHaveLength(3);expect(JSON.stringify(body)).not.toContain(foreign.id);expect(JSON.stringify(body)).not.toMatch(/synthetic|Private|apiKey/);expect(JSON.stringify(body)).not.toContain(token);
@@ -185,4 +185,23 @@ it.each(['rolling','weekly','monthly'] as const)('Go %s blocking or unknown stat
   const quota=opencodeGoQuotaFromUsages(id,v,previous,now)!;
   expect(budget('opencode-go',quota,now).budgetReady,String(status)).toBe(true);
  }
+});
+
+it('budget includes a Claude account selected by Sonnet despite a blocked other-family window',async()=>{
+ const dataDir=await fs.mkdtemp(path.join(os.tmpdir(),'family-budget-'));cleanup.push(()=>fs.rm(dataDir,{recursive:true,force:true}));
+ const fetch=vi.fn<typeof globalThis.fetch>(async()=>Response.json({id:'synthetic-message',type:'message',role:'assistant',content:[],usage:{input_tokens:1,output_tokens:1},stop_reason:'end_turn'}));
+ const host=createFakePluginHost({pluginId:'account-pool-balanced',dataDir,sdk:{hosts:{list:async()=>[{id:'fixture-host',name:'Fixture'}]},system:{providerStates:async()=>({providers:[]})}}});cleanup.push(()=>host.harness.lifecycle.dispose());
+ await host.bb.storage.kv.set('config',{vpnOnlyProviders:[],vpnPolicyVersion:2});await createAccountPoolPlugin({fetch,fetchIpv4:fetch,now:()=>now})(host.bb);
+ const service=host.harness.behavior.runService('hub');cleanup.push(async()=>{service.controller.abort();await service.done;});await new Promise(r=>setImmediate(r));
+ const accounts=new AccountStore(host.bb.storage.kv,path.join(dataDir,'plugins',host.bb.pluginId,'secrets','accounts')),quotas=new QuotaStore(host.bb.storage.database());
+ const account=await accounts.add({provider:'claude',kind:'api-key',label:'Synthetic',email:null,accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:true,priority:100},{kind:'api-key',apiKey:'synthetic-private'});
+ const previous=quotas.get(account.id);previous.familyWeekly.other={utilization:1,status:'rejected',resetAt:reset,source:'usage',observedAt:now};
+ quotas.put(quotaFromUsage(account.id,payload('claude'),previous,now)!);
+ const file=path.join(dataDir,'client.token');expect((await host.harness.behavior.runCli(['client','add','fixture','--project','project-one','--output',file])).exitCode).toBe(0);
+ const headers={authorization:'Bearer '+(await fs.readFile(file,'utf8')).trim(),'content-type':'application/json'};
+ const generation=await host.harness.behavior.fetchHttp('POST','/v1/messages',{headers,body:JSON.stringify({model:'claude-sonnet-4-5',max_tokens:1,messages:[{role:'user',content:'synthetic'}]})});
+ expect(generation.status).toBe(200);await generation.text();expect(fetch).toHaveBeenCalledTimes(1);
+ const snapshot=await (await host.harness.behavior.fetchHttp('GET','/budget/claude',{headers})).json();
+ expect(snapshot.eligibilityScope).toBe('shared-policy-superset');
+ expect(snapshot.accounts).toEqual([expect.objectContaining({accountId:account.id,eligible:true,budgetReady:true})]);
 });
