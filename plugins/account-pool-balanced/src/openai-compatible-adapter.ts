@@ -154,7 +154,7 @@ export function createOpenAiCompatibleAdapter(
     },
     refreshesApiKeyUsage: true,
     async refreshUsage(context) {
-      if(options.provider==='opencode-go')context.quotas.put({...context.quotas.get(context.account.id),providerBudgetEvidence:undefined});
+      if(options.provider==='opencode-go'||options.provider==='neuraldeep')context.quotas.put({...context.quotas.get(context.account.id),providerBudgetEvidence:undefined});
       const secret = await context.freshSecret();
       if (secret.kind !== "api-key") return;
       const response = await context.fetch(options.usagesUrl, {

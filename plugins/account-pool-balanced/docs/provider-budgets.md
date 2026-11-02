@@ -16,7 +16,7 @@ The schema is `bb-account-pool/provider-budget/1`. `provider`, `projectId`, opti
 `purpose`, server `observedAt`, `maxAgeMs`, existing route flags and `accounts` are
 returned. Each account has `accountId`, actual `eligible`, `heldUntil`, `supported`,
 `budgetReady`, `reason`, `coverage`, `usage` and `windows`. A ready window contains
-`id`, `remainingPercent`, `resetAt` (epoch milliseconds), and `durationMinutes`
+`id`, `remainingPercent`, `resetAt` (epoch milliseconds, nullable when the source does not promise it), and `durationMinutes`
 (null for Cursor's calendar billing cycle). Empty windows mean unknown, not 100%.
 Antigravity uses opaque `group:GROUPHASH:BUCKETHASH` IDs; names and descriptions
 are not copied into budget output. Group windows are not relabeled weekly, nor
@@ -32,7 +32,7 @@ A snapshot timestamp is not the evidence timestamp: use `usage.observedAt`.
 | Kimi | Existing usage collector | `weekly`, every reported `rolling:MINUTES` window |
 | OpenCode Go | Existing usage collector | `fiveHour`, `weekly`, `monthly` |
 | Cursor | Existing plan-usage collector | `billingCycle` (plan only, not on-demand spending) |
-| NeuralDeep | No numeric collector contract implemented | `supported:false`, unknown |
+| NeuralDeep | Existing `/v1/limits` collector | `session`, `weekly` chat ratios and provider `can_request` decision |
 | Antigravity | Native CCPA `retrieveUserQuotaSummary`, existing scheduler | All reported group/bucket fractions and resets |
 | Devin | No numeric collector contract implemented | `supported:false`, unknown |
 
@@ -41,10 +41,17 @@ Coverage is the provider's reported subscription windows, not every possible
 model, spending or concurrency restriction. Cursor's billing cycle must not be
 renamed weekly. Kimi's actual rolling duration must not be renamed five-hour.
 
+NeuralDeep uses its documented effective `chat.session/week` remaining/limit
+ratios and the server's `decision.can_request`, `key.status` and chat cooldown.
+Its public response contract does not promise reset timestamps: those stay null,
+and a reset-dependent consumer policy must refuse rather than invent them.
+`providerAllowed` carries the provider decision; RPM counts are never presented
+as a subscription percentage. No quota multiplier is applied again.
+
 Proof starts only at a new complete valid collector response; old normalized
 cache is never promoted. Out-of-range, missing, ambiguous duplicate or malformed
 numeric windows refuse proof. New evidence lasts at most ten minutes (two existing
-five-minute collection intervals), and never beyond any reported reset. This
+five-minute collection intervals), and never beyond any reported reset; missing resets remain explicit for NeuralDeep only. This
 separate TTL changes neither Codex nor ZAI freshness. Collector failure clears
 strict proof without changing old displayed utilization or account policy.
 Inference headers do not renew proof age; observed quota updates invalidate proof
@@ -68,3 +75,5 @@ synthetic payloads and local fake hosts. Live source collection, installation an
 consumer admission require their own evidence; source tests do not establish them.
 
 Antigravity source: the native client documents [model quota usage](https://antigravity.google/docs/cli/commands/usage). Its CCPA quota-summary request uses the same server-bound personal subscription project and endpoint as generation; no local host login or paid API fallback is used.
+
+NeuralDeep source: [Limits API](https://neuraldeep.ru/docs/limits-api.md). This integration starts parsing the payload already requested by the existing collector; it does not add a second request or send the provider key to clients.

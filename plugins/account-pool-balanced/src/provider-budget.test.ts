@@ -19,6 +19,7 @@ const cleanup:Array<()=>unknown>=[];
 afterEach(async()=>{vi.restoreAllMocks();for(const f of cleanup.splice(0).reverse())await f();});
 function store(){const db=new Database(':memory:');for(const sql of QUOTA_MIGRATIONS)db.exec(sql);cleanup.push(()=>db.close());return new QuotaStore(db);}
 function payload(p:PoolProvider):any {
+ if(p==='neuraldeep')return {key:{status:'ok'},decision:{can_request:true},chat:{cooldown_sec:0,session:{limit:100,remaining:75},week:{limit:1000,remaining:600}}};
  if(p==='agy')return {groups:[{displayName:'Gemini Models',buckets:[{displayName:'Weekly Limit Remaining',remainingFraction:0.7,resetTime:reset}]},{displayName:'Claude and GPT models',buckets:[{displayName:'Weekly Limit Remaining',remainingFraction:0.8,resetTime:reset}]}]};
  if(p==='claude')return {five_hour:{utilization:20,resets_at:reset},seven_day:{utilization:30,resets_at:reset}};
  if(p==='kimi')return {usage:{limit:100,used:30,remaining:70,resetTime:reset},limits:[{window:{duration:300,timeUnit:'TIME_UNIT_MINUTE'},detail:{limit:100,used:20,remaining:80,resetTime:reset}}]};
@@ -64,7 +65,7 @@ it('failed collection invalidates proof with one existing call and preserves old
  await createKimiAdapter({usagesUrl:'https://usage.example'}).refreshUsage({account:{id},freshSecret:async()=>({kind:'api-key',apiKey:'synthetic-private'}),quotas,fetch,now:()=>now+1} as any);
  expect(fetch).toHaveBeenCalledTimes(1);expect(quotas.get(id).fiveHourUtilization).toBe(0.2);expect(quotas.get(id).providerBudgetEvidence).toBeUndefined();
 });
-it.each(['neuraldeep','devin'] as const)('%s cannot inherit another provider proof',p=>{
+it.each(['devin'] as const)('%s cannot inherit another provider proof',p=>{
  expect(budget(p,{...complete('claude'),fiveHourUtilization:0,sevenDayUtilization:0},now)).toMatchObject({supported:false,budgetReady:false,reason:'unsupported-numeric-evidence',windows:[]});
 });
 it('all cached endpoints enforce project/purpose and keep unknown eligible accounts visible without upstream calls',async()=>{
@@ -86,7 +87,7 @@ it('all cached endpoints enforce project/purpose and keep unknown eligible accou
   const response=await read(),body=await response.json();expect(response.headers.get('cache-control')).toBe('no-store');
   expect(body).toMatchObject({schema:'bb-account-pool/provider-budget/1',provider:p,projectId:'project-one',purpose:'autopilot',accounts:[{accountId:first.id,eligible:true},{accountId:unknown.id,eligible:true,budgetReady:false},{accountId:notOpted.id,eligible:false}]});
   expect(noSecret).not.toHaveBeenCalled();noSecret.mockRestore();
-  expect(body.accounts[0].budgetReady).toBe(!['neuraldeep','devin'].includes(p));
+  expect(body.accounts[0].budgetReady).toBe(p!=='devin');
   expect(body.accounts).toHaveLength(3);expect(JSON.stringify(body)).not.toContain(foreign.id);expect(JSON.stringify(body)).not.toMatch(/synthetic|Private|apiKey/);expect(JSON.stringify(body)).not.toContain(token);
  }
  expect(fetch).not.toHaveBeenCalled();
@@ -122,4 +123,35 @@ it('AGY existing scheduler collector uses only server-bound subscription and gua
  expect(budget('agy',quotas.get(id),now)).toMatchObject({supported:true,budgetReady:true,coverage:'all-reported-quota-groups'});
  fetch.mockImplementationOnce(async()=>new Response(null,{status:503}));await adapter.refreshUsage(context);
  expect(fetch).toHaveBeenCalledTimes(2);expect(budget('agy',quotas.get(id),now).budgetReady).toBe(false);
+});
+
+it('NeuralDeep retains native session/week ratios and provider decision without fabricating reset timestamps',()=>{
+ const v=payload('neuraldeep'),proof=evidence('neuraldeep',v,now)!;
+ expect(proof.windows).toEqual([{id:'session',remainingPercent:75,resetAt:null,durationMinutes:null},{id:'weekly',remainingPercent:60,resetAt:null,durationMinutes:10080}]);
+ expect(budget('neuraldeep',{...store().get(id),providerBudgetEvidence:proof},now)).toMatchObject({budgetReady:true,providerAllowed:true});
+ for(const kind of ['missing','denied','cooldown','key','boolean','over-limit','negative','missing-week']){
+  const q=payload('neuraldeep');
+  if(kind==='missing')delete q.decision.can_request;
+  if(kind==='denied')q.decision.can_request=false;
+  if(kind==='cooldown')q.chat.cooldown_sec=10;
+  if(kind==='key')q.key.status='disabled';
+  if(kind==='boolean')q.chat.session.remaining=true;
+  if(kind==='over-limit')q.chat.session.remaining=101;
+  if(kind==='negative')q.chat.session.remaining=-1;
+  if(kind==='missing-week')delete q.chat.week;
+  expect(budget('neuraldeep',{...store().get(id),providerBudgetEvidence:evidence('neuraldeep',q,now)},now).budgetReady,kind).toBe(false);
+ }
+});
+it('actual existing NeuralDeep collector stores numeric evidence and cached reads do not repeat it',async()=>{
+ const dataDir=await fs.mkdtemp(path.join(os.tmpdir(),'neuraldeep-budget-'));cleanup.push(()=>fs.rm(dataDir,{recursive:true,force:true}));
+ const fetch=vi.fn<typeof globalThis.fetch>(async()=>Response.json(payload('neuraldeep')));
+ const host=createFakePluginHost({pluginId:'account-pool-balanced',dataDir,sdk:{hosts:{list:async()=>[{id:'fixture-host',name:'Fixture'}]},system:{providerStates:async()=>({providers:[]})}}});cleanup.push(()=>host.harness.lifecycle.dispose());
+ await host.bb.storage.kv.set('config',{vpnOnlyProviders:[],vpnPolicyVersion:2});await createAccountPoolPlugin({fetch,fetchIpv4:fetch,now:()=>now})(host.bb);
+ const service=host.harness.behavior.runService('hub');cleanup.push(async()=>{service.controller.abort();await service.done;});await new Promise(r=>setImmediate(r));
+ const accounts=new AccountStore(host.bb.storage.kv,path.join(dataDir,'plugins',host.bb.pluginId,'secrets','accounts'));
+ const account=await accounts.add({provider:'neuraldeep',kind:'api-key',label:'Synthetic',email:null,accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:true,priority:100},{kind:'api-key',apiKey:'synthetic-private'});
+ expect((await host.harness.behavior.runCli(['account','refresh',account.id])).exitCode).toBe(0);
+ expect(fetch).toHaveBeenCalledTimes(1);expect(fetch.mock.calls[0]?.[0]).toBe('https://api.neuraldeep.ru/v1/limits');
+ const quotas=new QuotaStore(host.bb.storage.database());expect(budget('neuraldeep',quotas.get(account.id),now).budgetReady).toBe(true);
+ expect(quotas.get(account.id).fiveHourUtilization).toBeNull();expect(quotas.get(account.id).sevenDayUtilization).toBeNull();
 });

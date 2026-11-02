@@ -1,4 +1,4 @@
-import { providerBudgetQuota, PROVIDER_BUDGET_MAX_AGE_MS, NUMERIC_BUDGET_PROVIDERS } from './provider-budget.js';
+import { providerBudgetQuota, providerEvidenceFromUsage, PROVIDER_BUDGET_MAX_AGE_MS, NUMERIC_BUDGET_PROVIDERS } from './provider-budget.js';
 import {AccountStartPacing} from "./account-start-pacing.js";
 import { AccountAdmission, AdmissionUnavailable, ACCOUNT_QUEUE_MAX_WAIT_MS } from "./account-admission.js";
 import {createAgyAdapter} from "./agy-adapter.js";
@@ -1800,8 +1800,9 @@ export function createHub(options: {
         mountPrefix: "neuraldeep/",
         upstreamBaseUrl: (settings) => settings.neuraldeepUpstreamBaseUrl,
         usagesUrl: "https://api.neuraldeep.ru/v1/limits",
-        // RPM and model entitlements are not subscription-window percentages.
-        parseUsages: () => null,
+        // Strict chat session/week ratios and provider admission, not RPM totals
+        // or a made-up weekly mapping for unrelated entitlements.
+        parseUsages: (accountId,payload,previous,now) => ({...previous,accountId,providerBudgetEvidence:providerEvidenceFromUsage('neuraldeep',payload,now)}),
         guardRequestBody: (suffix, body) => suffix === "chat/completions" && !isChatCompletionsBody(body)
           ? "NeuralDeep requires a Chat Completions messages array." : null,
       }),
