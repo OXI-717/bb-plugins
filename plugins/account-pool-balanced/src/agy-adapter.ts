@@ -1,3 +1,4 @@
+import {providerEvidenceFromUsage} from './provider-budget.js';
 import type {AccountSecret} from './contracts.js';
 import {agyRoute,agyRequest,agyResponse} from './agy-wire.js';
 import {AGY_CONSUMER_ENDPOINT,raceAbort,readAgyJson} from './agy-oauth-login.js';
@@ -60,7 +61,18 @@ export function createAgyAdapter(onModels?:(ids:string[])=>Promise<void>):Provid
     throw new TransientOAuthRefreshError('Antigravity authorization request failed or timed out.',0);
    }finally{if(signal.aborted)void pending.then(response=>response.body?.cancel()).catch(()=>undefined);}
   },
-  async refreshUsage(){/* No evidenced subscription-window contract. Keep unknown, do not infer headroom. */},
+  async refreshUsage(context){
+   context.quotas.put({...context.quotas.get(context.account.id),providerBudgetEvidence:undefined});
+   const secret=bound(await context.freshSecret());
+   const signal=AbortSignal.timeout(15000);
+   const response=await context.fetch(AGY_CONSUMER_ENDPOINT+'/v1internal:retrieveUserQuotaSummary',{
+    method:'POST',redirect:'error',signal,headers:{'content-type':'application/json',authorization:`Bearer ${secret.accessToken}`},
+    body:JSON.stringify({project:secret.agy.projectId}),
+   });
+   if(!response.ok){void response.body?.cancel().catch(()=>undefined);return;}
+   const payload=await readAgyJson(response,signal);
+   context.quotas.put({...context.quotas.get(context.account.id),providerBudgetEvidence:providerEvidenceFromUsage('agy',payload,context.now())});
+  },
   errorResponse:(status,message,headers,request)=>poolErrorResponse('agy',status,message,headers,request),
  };
 }

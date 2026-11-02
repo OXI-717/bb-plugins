@@ -1,11 +1,12 @@
+import {createHash} from 'node:crypto';
 import { providerBudgetEvidenceSchema, type ProviderBudgetEvidence, type PoolProvider, type AccountQuota } from './contracts.js';
 import { parseReset, modelFamily } from './quota.js';
 
 // Existing non-ZAI collectors run every five minutes. This separate contract
 // allows two collection intervals; it changes neither existing budget TTL.
 export const PROVIDER_BUDGET_MAX_AGE_MS = 600_000;
-export const NUMERIC_BUDGET_PROVIDERS = ['claude','kimi','opencode-go','cursor'] as const;
-export const ADDITIONAL_BUDGET_PROVIDERS = [...NUMERIC_BUDGET_PROVIDERS,'neuraldeep','agy','devin'] as const;
+export const NUMERIC_BUDGET_PROVIDERS = ['claude','kimi','opencode-go','cursor','agy'] as const;
+export const ADDITIONAL_BUDGET_PROVIDERS = [...NUMERIC_BUDGET_PROVIDERS,'neuraldeep','devin'] as const;
 type Window = ProviderBudgetEvidence['windows'][number];
 function object(v:unknown):Record<string,unknown> {return v!==null && typeof v==='object' && !Array.isArray(v)?v as Record<string,unknown>:{};}
 function number(v:unknown):number|null {
@@ -55,6 +56,20 @@ export function providerEvidenceFromUsage(provider:PoolProvider,payload:unknown,
       if(!Number.isSafeInteger(minutes)||minutes<=0)return undefined;
       windows.push(read(`rolling:${minutes}`,r.detail,minutes));
     }
+  } else if(provider==='agy') {
+    // Native CCPA retrieveUserQuotaSummary: all reported groups/buckets, without
+    // assuming their names mean weekly or mapping them to arbitrary model IDs.
+    if(!Array.isArray(p.groups)||p.groups.length===0||p.groups.length>8)return undefined;
+    const hash=(value:string)=>createHash('sha256').update(value).digest('hex').slice(0,16);
+    const label=(v:unknown)=>typeof v==='string'&&v.length>0&&v.length<=256&&!/[\x00-\x1f]/u.test(v)?v:null;
+    for(const raw of p.groups){const group=object(raw),groupId=label(group.groupId??group.group_id??group.displayName??group.display_name);
+      if(!groupId||!Array.isArray(group.buckets)||group.buckets.length===0||group.buckets.length>16)return undefined;
+      for(const rawBucket of group.buckets){const bucket=object(rawBucket),bucketId=label(bucket.bucketId??bucket.bucket_id??bucket.displayName??bucket.display_name??bucket.window);
+        const fraction=number(bucket.remainingFraction??bucket.remaining_fraction);
+        if(!bucketId||bucket.disabled===true||fraction===null||fraction<0||fraction>1)return undefined;
+        windows.push(window(`group:${hash(groupId)}:${hash(bucketId)}`,(1-fraction)*100,bucket.resetTime??bucket.reset_time,null,now));
+      }
+    }
   } else if(provider==='cursor')windows.push(window('billingCycle',object(p.planUsage).totalPercentUsed,p.billingCycleEnd,null,now));
   else return undefined;
   if(windows.some(w=>w===null))return undefined;
@@ -69,11 +84,11 @@ export function providerBudgetQuota(provider:PoolProvider,quota:AccountQuota,now
   const proof=parsed.success && parsed.data.provider===provider?parsed.data:undefined;
   const held=quota.heldUntil!==null&&quota.heldUntil>now;
   const ids=proof?.windows.map(w=>w.id)??[];
-  const required=provider==='claude'?['fiveHour','weekly']:provider==='opencode-go'?['fiveHour','weekly','monthly']:provider==='kimi'?['weekly']:['billingCycle'];
+  const required=provider==='claude'?['fiveHour','weekly']:provider==='opencode-go'?['fiveHour','weekly','monthly']:provider==='kimi'?['weekly']:provider==='agy'?[]:['billingCycle'];
   const complete=required.every(id=>ids.includes(id)) && new Set(ids).size===ids.length && (provider!=='kimi'||ids.some(id=>id.startsWith('rolling:')));
   const valid=supported&&complete&&proof!==undefined&&proof.observedAt<=now&&now-proof.observedAt<=PROVIDER_BUDGET_MAX_AGE_MS &&
     proof.windows.every(w=>w.resetAt>now)&&quota.error===null&&!held;
   return {supported,budgetReady:valid,reason:!supported?'unsupported-numeric-evidence':valid?'ready':held?'held':'missing-stale-or-invalid-evidence',
     usage:proof?{source:'usage',complete:true,observedAt:proof.observedAt}:null,
-    windows:valid?proof.windows:[],coverage:provider==='cursor'?'plan-billing-cycle':'reported-subscription-windows'};
+    windows:valid?proof.windows:[],coverage:provider==='cursor'?'plan-billing-cycle':provider==='agy'?'all-reported-quota-groups':'reported-subscription-windows'};
 }

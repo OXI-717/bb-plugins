@@ -12,12 +12,14 @@ import {opencodeGoQuotaFromUsages} from './openai-compatible-usage.js';
 import {quotaFromHeaders} from './quota.js';
 import {createAccountPoolPlugin} from './server.js';
 import {createKimiAdapter} from './kimi-adapter.js';
+import {createAgyAdapter} from './agy-adapter.js';
 import type {PoolProvider,AccountQuota} from './contracts.js';
 const now=1900000000000,id='11111111-1111-4111-8111-111111111111',reset=now+3600000;
 const cleanup:Array<()=>unknown>=[];
 afterEach(async()=>{vi.restoreAllMocks();for(const f of cleanup.splice(0).reverse())await f();});
 function store(){const db=new Database(':memory:');for(const sql of QUOTA_MIGRATIONS)db.exec(sql);cleanup.push(()=>db.close());return new QuotaStore(db);}
 function payload(p:PoolProvider):any {
+ if(p==='agy')return {groups:[{displayName:'Gemini Models',buckets:[{displayName:'Weekly Limit Remaining',remainingFraction:0.7,resetTime:reset}]},{displayName:'Claude and GPT models',buckets:[{displayName:'Weekly Limit Remaining',remainingFraction:0.8,resetTime:reset}]}]};
  if(p==='claude')return {five_hour:{utilization:20,resets_at:reset},seven_day:{utilization:30,resets_at:reset}};
  if(p==='kimi')return {usage:{limit:100,used:30,remaining:70,resetTime:reset},limits:[{window:{duration:300,timeUnit:'TIME_UNIT_MINUTE'},detail:{limit:100,used:20,remaining:80,resetTime:reset}}]};
  if(p==='opencode-go')return {usage:{rolling:{percent:20,resetsAt:reset},weekly:{percent:30,resetsAt:reset},monthly:{percent:40,resetsAt:reset}}};
@@ -62,7 +64,7 @@ it('failed collection invalidates proof with one existing call and preserves old
  await createKimiAdapter({usagesUrl:'https://usage.example'}).refreshUsage({account:{id},freshSecret:async()=>({kind:'api-key',apiKey:'synthetic-private'}),quotas,fetch,now:()=>now+1} as any);
  expect(fetch).toHaveBeenCalledTimes(1);expect(quotas.get(id).fiveHourUtilization).toBe(0.2);expect(quotas.get(id).providerBudgetEvidence).toBeUndefined();
 });
-it.each(['neuraldeep','agy','devin'] as const)('%s cannot inherit another provider proof',p=>{
+it.each(['neuraldeep','devin'] as const)('%s cannot inherit another provider proof',p=>{
  expect(budget(p,{...complete('claude'),fiveHourUtilization:0,sevenDayUtilization:0},now)).toMatchObject({supported:false,budgetReady:false,reason:'unsupported-numeric-evidence',windows:[]});
 });
 it('all cached endpoints enforce project/purpose and keep unknown eligible accounts visible without upstream calls',async()=>{
@@ -84,8 +86,40 @@ it('all cached endpoints enforce project/purpose and keep unknown eligible accou
   const response=await read(),body=await response.json();expect(response.headers.get('cache-control')).toBe('no-store');
   expect(body).toMatchObject({schema:'bb-account-pool/provider-budget/1',provider:p,projectId:'project-one',purpose:'autopilot',accounts:[{accountId:first.id,eligible:true},{accountId:unknown.id,eligible:true,budgetReady:false},{accountId:notOpted.id,eligible:false}]});
   expect(noSecret).not.toHaveBeenCalled();noSecret.mockRestore();
-  expect(body.accounts[0].budgetReady).toBe(!['neuraldeep','agy','devin'].includes(p));
+  expect(body.accounts[0].budgetReady).toBe(!['neuraldeep','devin'].includes(p));
   expect(body.accounts).toHaveLength(3);expect(JSON.stringify(body)).not.toContain(foreign.id);expect(JSON.stringify(body)).not.toMatch(/synthetic|Private|apiKey/);expect(JSON.stringify(body)).not.toContain(token);
  }
  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('AGY preserves all quota groups and refuses partial, duplicate, disabled or absolute-only buckets',()=>{
+ const good=payload('agy');const proof=evidence('agy',good,now)!;
+ expect(proof.windows.map(w=>Math.round(w.remainingPercent))).toEqual([70,80]);expect(proof.windows.every(w=>w.id.startsWith('group:')&&w.durationMinutes===null)).toBe(true);
+ for(const change of ['empty','duplicate','missing-reset','expired','disabled','missing-fraction','absolute-only','negative','above-one','boolean','empty-percent']){
+  const v=payload('agy'),b=v.groups[0].buckets[0];
+  if(change==='empty')v.groups=[];
+  if(change==='duplicate')v.groups.push(v.groups[0]);
+  if(change==='missing-reset')delete b.resetTime;
+  if(change==='expired')b.resetTime=now;
+  if(change==='disabled')b.disabled=true;
+  if(change==='missing-fraction')delete b.remainingFraction;
+  if(change==='absolute-only'){delete b.remainingFraction;b.remainingAmount=100;}
+  if(change==='negative')b.remainingFraction=-1;
+  if(change==='above-one')b.remainingFraction=1.01;
+  if(change==='boolean')b.remainingFraction=true;
+  if(change==='empty-percent')b.remainingFraction='';
+  expect(evidence('agy',v,now),change).toBeUndefined();
+ }
+});
+it('AGY existing scheduler collector uses only server-bound subscription and guarded transport, once; failures revoke proof',async()=>{
+ const quotas=store(),adapter=createAgyAdapter();
+ const secret={kind:'oauth',accessToken:'synthetic-google-access',refreshToken:'synthetic-google-refresh',expiresAt:now+3600000,agy:{clientId:'synthetic-app',clientSecret:'synthetic-app-secret',projectId:'synthetic-subscription',endpoint:'https://daily-cloudcode-pa.googleapis.com'}};
+ const fetch=vi.fn<typeof globalThis.fetch>(async()=>Response.json(payload('agy')));
+ const context={account:{id},freshSecret:async()=>secret,quotas,fetch,now:()=>now} as any;
+ await adapter.refreshUsage(context);expect(fetch).toHaveBeenCalledTimes(1);
+ expect(fetch.mock.calls[0]?.[0]).toBe('https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary');
+ expect(JSON.parse(fetch.mock.calls[0]?.[1]?.body as string)).toEqual({project:'synthetic-subscription'});
+ expect(budget('agy',quotas.get(id),now)).toMatchObject({supported:true,budgetReady:true,coverage:'all-reported-quota-groups'});
+ fetch.mockImplementationOnce(async()=>new Response(null,{status:503}));await adapter.refreshUsage(context);
+ expect(fetch).toHaveBeenCalledTimes(2);expect(budget('agy',quotas.get(id),now).budgetReady).toBe(false);
 });

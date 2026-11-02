@@ -330,13 +330,13 @@ export const zaiUsageEvidenceSchema = z.object({
 export type ZaiUsageEvidence = z.infer<typeof zaiUsageEvidenceSchema>;
 
 export const providerBudgetWindowSchema = z.object({
-  id: z.string().regex(/^(fiveHour|weekly|monthly|billingCycle|rolling:[1-9][0-9]*|family:(fable|sonnet|opus|haiku|other))$/u),
+  id: z.string().regex(/^(fiveHour|weekly|monthly|billingCycle|rolling:[1-9][0-9]*|family:(fable|sonnet|opus|haiku|other)|group:[a-f0-9]{16}:[a-f0-9]{16})$/u),
   remainingPercent: z.number().finite().min(0).max(100),
   resetAt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   durationMinutes: z.number().int().positive().nullable(),
 }).strict();
 export const providerBudgetEvidenceSchema = z.object({
-  provider: z.enum(['claude','kimi','opencode-go','cursor']),
+  provider: z.enum(['claude','kimi','opencode-go','cursor','agy']),
   source: z.literal('usage'), observedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   windows: z.array(providerBudgetWindowSchema).min(1).max(16),
 }).strict();
