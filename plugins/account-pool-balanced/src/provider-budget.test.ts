@@ -171,3 +171,18 @@ it('Claude rejection status cannot become positive numeric headroom, including s
   for(const status of ['allowed','ok',undefined])expect(evidence('claude',make(status),now),shape+':'+String(status)).toBeDefined();
  }
 });
+
+it.each(['rolling','weekly','monthly'] as const)('Go %s blocking or unknown status refuses strict proof through the existing collector',key=>{
+ const previous=store().get(id);
+ for(const status of ['rate-limited','rejected','allowed','unknown',true]){
+  const v=payload('opencode-go');v.usage[key].status=status;
+  const quota=opencodeGoQuotaFromUsages(id,v,previous,now)??previous;
+  expect(quota.providerBudgetEvidence,String(status)).toBeUndefined();
+  expect(budget('opencode-go',quota,now).budgetReady,String(status)).toBe(false);
+ }
+ for(const status of ['ok',null,undefined]){
+  const v=payload('opencode-go');v.usage[key].status=status;
+  const quota=opencodeGoQuotaFromUsages(id,v,previous,now)!;
+  expect(budget('opencode-go',quota,now).budgetReady,String(status)).toBe(true);
+ }
+});

@@ -44,7 +44,7 @@ export function providerEvidenceFromUsage(provider:PoolProvider,payload:unknown,
     }
   } else if(provider==='opencode-go') {
     const usage=object(p.usage);
-    for(const [id,key,duration] of [['fiveHour','rolling',300],['weekly','weekly',10080],['monthly','monthly',43200]] as const){const b=object(usage[key]);windows.push(window(id,b.percent,b.resetsAt,duration,now));}
+    for(const [id,key,duration] of [['fiveHour','rolling',300],['weekly','weekly',10080],['monthly','monthly',43200]] as const){const b=object(usage[key]);if(b.status!=null&&b.status!=='ok')return undefined;windows.push(window(id,b.percent,b.resetsAt,duration,now));}
   } else if(provider==='kimi') {
     const read=(id:string,v:unknown,duration:number)=>{const d=object(v),limit=number(d.limit),used=number(d.used),remaining=number(d.remaining);
       if((d.used!=null&&used===null)||(d.remaining!=null&&remaining===null)||limit===null||limit<=0||(used===null&&remaining===null)|| (used!==null&&(used<0||used>limit)) || (remaining!==null&&(remaining<0||remaining>limit)) || (used!==null&&remaining!==null&&Math.abs(used+remaining-limit)>0.000001))return null;
