@@ -1,3 +1,4 @@
+import {validateAttachment} from './attachment-format.ts';
 // Frontend transport core of the federation pilot. Pure module: every browser
 // global arrives through `win`, so narrow tests run in Node.
 //
@@ -188,16 +189,16 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     else if(req && !init?.body && req.headers.get('content-type')?.startsWith('multipart/form-data'))form=await req.clone().formData();
     else throw new FederationError('federation_image_invalid',400,'An image upload requires one multipart file.');
     const fields=[...form.keys()],file=form.get('file');
-    if(fields.length!==1||fields[0]!=='file'||!file||typeof file==='string'||typeof file.arrayBuffer!=='function')throw new FederationError('federation_image_invalid',400,'Upload exactly one image file.');
-    if(file.size<1||file.size>IMAGE_MAX_BYTES)throw new FederationError('federation_image_too_large',413,'Remote images must be between 1 byte and 4 MiB.');
-    if(!IMAGE_MIMES.includes(file.type))throw new FederationError('federation_image_format',415,'Remote images support PNG, JPEG, GIF and WebP.');
-    const bytes=new Uint8Array(await file.arrayBuffer());validateImage(bytes,file.type);
+    if(fields.length!==1||fields[0]!=='file'||!file||typeof file==='string'||typeof file.arrayBuffer!=='function')throw new FederationError('federation_image_invalid',400,'Upload exactly one attachment file.');
+    if(file.size<1||file.size>IMAGE_MAX_BYTES)throw new FederationError('federation_image_too_large',413,'Remote attachments must be between 1 byte and 4 MiB.');
+    const mimeType=file.type||'application/octet-stream';
+    const bytes=new Uint8Array(await file.arrayBuffer());validateAttachment(bytes,mimeType);
     if(state.disposed)throw new FederationError('federation_disabled',503,'Federation was disabled during image upload.');
     // Ownership may change while reading a file; never send its bytes then.
     if(ownerOf([peer.projectId])!==peer)throw new FederationError('federation_image_owner',409,'Image project ownership changed.');
     let binary='';for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode(...bytes.subarray(i,i+32768));
     return imageFetch(`${BRIDGE}/image-upload`,{method:'POST',headers:{'content-type':'application/json'},signal:init?.signal??req?.signal,
-      body:JSON.stringify({serverId:peer.serverId,projectId:peer.projectId,filename:file.name,mimeType:file.type,bytesBase64:(win.btoa??globalThis.btoa)(binary)})});
+      body:JSON.stringify({serverId:peer.serverId,projectId:peer.projectId,filename:file.name,mimeType,bytesBase64:(win.btoa??globalThis.btoa)(binary)})});
   }
 
   async function viaBridge(peer, method, path, body) {

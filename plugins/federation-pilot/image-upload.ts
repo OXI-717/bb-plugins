@@ -1,15 +1,17 @@
 import type {z} from 'zod';
 import {imageUploadSchema} from './contract.ts';
-import {imageFilename, validateImage} from './image-format.ts';
+import {imageFilename} from './image-format.ts';
+
+import {attachmentFilename, validateAttachment} from './attachment-format.ts';
 
 // A fixed upstream API, with bytes supplied by the initiating client. No host
 // file reads and no caller-supplied URL, headers, method or destination path.
 export async function uploadImage(port: number, input: z.infer<typeof imageUploadSchema>, signal: AbortSignal) {
   const bytes = Buffer.from(input.bytesBase64, 'base64');
   if (bytes.toString('base64') !== input.bytesBase64) throw Error('Invalid image encoding');
-  const mime = validateImage(bytes, input.mimeType);
+  const mime = validateAttachment(bytes, input.mimeType);
   const form = new FormData();
-  form.set('file', new Blob([new Uint8Array(bytes)], {type: mime}), imageFilename(input.filename, mime));
+  form.set('file', new Blob([new Uint8Array(bytes)], {type: mime}), mime.startsWith('image/') ? imageFilename(input.filename, mime as import('./image-format.ts').ImageMime) : attachmentFilename(input.filename));
   const response = await fetch(`http://127.0.0.1:${port}/api/v1/projects/${input.projectId}/attachments`, {
     method: 'POST', body: form, redirect: 'error', signal,
   });
