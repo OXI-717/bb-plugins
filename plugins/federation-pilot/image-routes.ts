@@ -1,3 +1,4 @@
+import {validateAttachment} from './attachment-format.ts';
 import type {BbPluginApi} from '@get-bb/plugin-sdk';
 import {z} from 'zod';
 import type {RemoteConfig} from './configuration.ts';
@@ -59,7 +60,7 @@ export function registerImageRoutes(bb: BbPluginApi, deps: Dependencies) {
       const {serverId, ...input} = parsed.data;
       const bytes = Buffer.from(input.bytesBase64, 'base64');
       if (bytes.toString('base64') !== input.bytesBase64) throw new ImageTransferError(400, 'Noncanonical image encoding.');
-      validateImage(bytes, input.mimeType);
+      validateAttachment(bytes, input.mimeType);
       const c = await authorize(serverId, input.projectId, true);
       const result = await deps.upload(c, input); // No retries: upload may already have succeeded.
       await authorize(serverId, input.projectId, true, c);
@@ -68,7 +69,7 @@ export function registerImageRoutes(bb: BbPluginApi, deps: Dependencies) {
       try { data = uploadedImageSchema.parse(JSON.parse(Buffer.from(result.bodyBase64, 'base64').toString('utf8'))); }
       catch { throw new ImageTransferError(502, 'Remote image upload returned invalid metadata.'); }
       if (data.sourceProjectId && data.sourceProjectId !== input.projectId) throw new ImageTransferError(502, 'Remote image upload returned a different source project.');
-      if (data.sizeBytes !== bytes.length || data.mimeType !== input.mimeType) throw new ImageTransferError(502, 'Remote image upload metadata does not match the file.');
+      if (data.sizeBytes !== bytes.length || data.mimeType !== input.mimeType || data.type !== (input.mimeType.startsWith('image/') ? 'localImage' : 'localFile')) throw new ImageTransferError(502, 'Remote image upload metadata does not match the file.');
       // Older BB replies omit sourceProjectId; the fixed upload URL already
       // establishes it. Never accept a conflicting remote-provided identity.
       return Response.json({...data, sourceProjectId: input.projectId}, {status: 201, headers: {'cache-control': 'no-store'}});

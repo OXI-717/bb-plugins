@@ -1,22 +1,23 @@
 import { defineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import {IMAGE_MAX_BYTES, IMAGE_MAX_BASE64, IMAGE_MIMES, isImagePath} from './image-format.ts';
+import {isAttachmentPath} from './attachment-format.ts';
 import {handoffUploadSchema} from './handoff-contract.ts';
 
 export const imageUploadSchema = z.object({
   projectId: z.string().regex(/^proj_[a-z0-9]+$/),
   filename: z.string().min(1).max(255),
-  mimeType: z.enum(IMAGE_MIMES),
+  mimeType: z.string().min(3).max(100).regex(/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i),
   // Avoid repeated capture groups: multi-megabyte input can exhaust V8's stack.
   // Canonical padding bits are checked by decode/re-encode before transmission.
   bytesBase64: z.string().min(4).max(IMAGE_MAX_BASE64).regex(/^[A-Za-z0-9+/]*={0,2}$/).refine(value => value.length % 4 === 0),
 }).strict();
 export const uploadedImageSchema = z.object({
-  type: z.literal('localImage'), path: z.string().refine(isImagePath),
+  type: z.enum(['localImage', 'localFile']), path: z.string().refine(isAttachmentPath),
   sourceProjectId: z.string().regex(/^proj_[a-z0-9]+$/).optional(),
-  name: z.string().min(1).max(255), mimeType: z.enum(IMAGE_MIMES),
+  name: z.string().min(1).max(255), mimeType: z.string().min(3).max(100),
   sizeBytes: z.number().int().min(1).max(IMAGE_MAX_BYTES),
-}).strict();
+}).strict().refine(v => v.type === 'localImage' ? IMAGE_MIMES.includes(v.mimeType as typeof IMAGE_MIMES[number]) && isImagePath(v.path) : !v.mimeType.startsWith('image/'));
 
 const destination = {
   sshTarget: z.string().regex(/^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,160}$/),

@@ -167,3 +167,42 @@ test('host upload uses real multipart on a fixed loopback API, exact bytes, safe
  try{const result=await uploadImage(server.address().port,{...upload,filename:'../../pixel.html'},AbortSignal.timeout(5000));assert.equal(result.status,200);assert.equal(received.url,'/api/v1/projects/proj_remote01/attachments');assert.deepEqual(received.fields,['file']);assert.equal(received.name,'pixel.png');assert.deepEqual(received.bytes,png);for(const k of ['authorization','cookie','origin'])assert.equal(received.headers[k],undefined);}
  finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
+
+const zipBytes=Buffer.from('504b0506000000000000000000000000000000000000','hex'); // empty ZIP
+const zipUpload={...upload,filename:'archive.zip',mimeType:'application/zip',bytesBase64:zipBytes.toString('base64')};
+const zipStored={...stored,type:'localFile',path:'archive-123-abc.zip',name:'archive.zip',mimeType:'application/zip',sizeBytes:zipBytes.length};
+test('ZIP and untyped files cross the native multipart bridge without primary fallback',async()=>{
+ const {e,f,calls}=client();try{
+  for(const mime of ['application/zip','']){
+   const data=new FormData();data.set('file',new Blob([zipBytes],{type:mime}),'archive.zip');
+   assert.equal((await e.win.fetch(attachment,{method:'POST',body:data})).status,201);
+   const sent=JSON.parse(calls.at(-1).init.body);
+   assert.equal(sent.filename,'archive.zip');assert.equal(sent.mimeType,mime||'application/octet-stream');
+   assert.deepEqual(Buffer.from(sent.bytesBase64,'base64'),zipBytes);
+  }
+  assert.equal(e.primaryCalls().length,0);
+ }finally{f.dispose();}
+});
+test('ZIP upload retains localFile identity and refuses mismatches, read-only and wrong projects',async()=>{
+ const h=routes();h.metadata=zipStored;
+ assert.deepEqual(await(await h.request('POST','/image-upload',zipUpload)).json(),zipStored);
+ for(const patch of [{type:'localImage'},{path:'../archive.zip'},{sizeBytes:1234},{sourceProjectId:'proj_other'}]){
+  h.metadata={...zipStored,...patch};assert.equal((await h.request('POST','/image-upload',zipUpload)).status,502);
+ }
+ h.metadata=zipStored;h.config={...h.config,allowWrites:false};
+ assert.equal((await h.request('POST','/image-upload',zipUpload)).status,403);
+ assert.equal((await h.request('POST','/image-upload',{...zipUpload,projectId:'proj_other'})).status,403);
+ // Uploading a file does not create an inline active-content download proxy.
+ assert.equal((await h.request('GET','/image-content?serverId=alpha&projectId=proj_remote01&path=archive.zip')).status,400);
+});
+test('host ZIP upload transmits exact bytes and safe extension to the fixed attachment endpoint',async()=>{
+ let received;const server=createServer(async(req,res)=>{
+  const chunks=[];for await(const part of req)chunks.push(part);
+  const form=await(new Request('http://loopback.invalid',{method:'POST',headers:req.headers,body:Buffer.concat(chunks)})).formData();
+  const file=form.get('file');received={path:req.url,name:file.name,bytes:Buffer.from(await file.arrayBuffer())};
+  res.setHeader('content-type','application/json');res.end(JSON.stringify(zipStored));
+ });server.listen(0,'127.0.0.1');await once(server,'listening');
+ try{await uploadImage(server.address().port,{...zipUpload,filename:'../../archive.zip'},AbortSignal.timeout(5000));
+  assert.equal(received.path,'/api/v1/projects/proj_remote01/attachments');assert.equal(received.name,'file-archive.zip');assert.deepEqual(received.bytes,zipBytes);
+ }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
