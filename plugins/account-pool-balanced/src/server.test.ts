@@ -8412,3 +8412,79 @@ describe('Claude service-error continuity and bounded auth evidence',()=>{
     }finally{gate.resolve();await Promise.allSettled(requests);}
   });
 });
+
+
+describe("cached provider readiness", () => {
+  it("shares project/quota admission and preserves flags across inspection and reset", async () => {
+    let clock=Date.now(),calls=0;
+    const f=await createFixture({upstreamUrl:"https://upstream.example",options:{now:()=>clock,fetch:async()=>{calls++;return Response.json({});}}});
+    const rpc=f.host.harness.behavior.callRpc;
+    const read=async(projectId:string)=>(await rpc("readiness.get",{projectId}) as Array<{provider:string;ready:boolean;reason:string}>).find(x=>x.provider==="claude");
+    await rpc("account.setProjects",{accountId:f.account.id,projects:{onlySelected:true,rules:[{projectId:"project-one",role:"primary"}]}});
+    expect(await read("project-two")).toMatchObject({ready:false,reason:"no-selectable-account"});
+    expect(await read("project-one")).toMatchObject({ready:true});
+    await rpc("account.setDrainOnce",{accountId:f.account.id,enabled:true});
+    const q=new QuotaStore(f.host.bb.storage.database());
+    q.put({...q.get(f.account.id),fiveHourUtilization:1,fiveHourResetAt:clock+60000});
+    const store=new AccountStore(f.host.bb.storage.kv,path.join(f.dataDir,"plugins",f.host.bb.pluginId,"secrets","accounts"));
+    const before=await store.list();
+    expect(await read("project-one")).toMatchObject({ready:false});
+    expect(await store.list()).toEqual(before);
+    clock+=60001;
+    expect(await read("project-one")).toMatchObject({ready:true});
+    q.put({...q.get(f.account.id),heldUntil:clock+10000});
+    expect(await read("project-one")).toMatchObject({ready:false,reason:"cooldown"});
+    q.put({...q.get(f.account.id),error:"secret-error-not-for-output"});
+    expect(JSON.stringify(await rpc("readiness.get",{projectId:"project-one"}))).not.toContain("secret-error");
+    expect(calls).toBe(0);
+  });
+  it("reports fixed network and routing denials without provider requests",async()=>{
+    let connected=true,calls=0;
+    const f=await createFixture({upstreamUrl:"https://upstream.example",options:{vpnPayload:async now=>vpnProof(now,connected?"connected":"disconnected"),fetch:async()=>{calls++;return Response.json({});}}});
+    const rpc=f.host.harness.behavior.callRpc;
+    connected=false;
+    const read=async()=>(await rpc("readiness.get",{projectId:"project-one"}) as Array<{provider:string;reason:string}>).find(x=>x.provider==="claude");
+    expect(await read()).toMatchObject({reason:"network-unavailable"});
+    await rpc("routing.set",{provider:"claude",enabled:false});
+    expect(await read()).toMatchObject({reason:"routing-disabled"});
+    expect(calls).toBe(0);
+  });
+  it.each(["claude-code","codex","acp-agy","acp-oxi-cursor","acp-opencode-go","acp-opencode-kimi","acp-opencode-zai","acp-opencode-neuraldeep"])("keeps %s on the managed route with no usable account",async providerId=>{
+    const f=await createFixture({upstreamUrl:"https://upstream.example",options:{fetch:async()=>Response.json({})}});
+    await f.host.harness.behavior.callRpc("account.disable",{id:f.account.id});
+    const scope={hostId:"host-one",projectId:"project-one",threadId:"thread-one"};
+    const env=await f.host.harness.behavior.resolveProviderEnv(providerId,scope);
+    expect(env.length).toBeGreaterThan(0);
+    expect(JSON.stringify(env)).toContain("/api/v1/plugins/account-pool/http");
+    expect(JSON.stringify(env)).not.toContain("sk-account");
+    await expect(f.host.harness.behavior.resolveProviderEnvHealth(providerId,scope)).resolves.toMatchObject({status:"unavailable",statusMessage:expect.stringContaining("no-enabled-account")});
+    await expect(f.host.harness.behavior.resolveProviderEnvHealth(providerId,{hostId:"host-one"})).resolves.toBeNull();
+  });
+  it("keeps the native Devin gateway managed without an account and preserves explicit bypass", async () => {
+    let calls=0;
+    const upstream=await startUpstream(async (_request,response)=>{calls++;response.end("{}");});
+    cleanups.push(upstream.close);
+    const f=await createFixture({upstreamUrl:upstream.url,provider:"devin"});
+    const scope={hostId:"host-one",projectId:"project-one",threadId:"thread-one"};
+    await f.host.harness.behavior.callRpc("account.disable",{id:f.account.id});
+    const env=await f.host.harness.behavior.resolveProviderEnv("acp-oxi-devin-pool",scope);
+    expect(env).toEqual(expect.arrayContaining([expect.objectContaining({name:"OXI_DEVIN_POOL_URL"}),expect.objectContaining({name:"OXI_DEVIN_POOL_TOKEN"})]));
+    await expect(f.host.harness.behavior.resolveProviderEnvHealth("acp-oxi-devin-pool",scope)).resolves.toMatchObject({status:"unavailable",statusMessage:expect.stringContaining("no-enabled-account")});
+    await f.host.harness.behavior.callRpc("bypass.set",{threadId:scope.threadId,bypassed:true});
+    await expect(f.host.harness.behavior.resolveProviderEnv("acp-oxi-devin-pool",scope)).resolves.toEqual([]);
+    await f.host.harness.behavior.callRpc("bypass.set",{threadId:scope.threadId,bypassed:false});
+    await f.host.harness.behavior.callRpc("routing.set",{provider:"devin",enabled:false});
+    await expect(f.host.harness.behavior.resolveProviderEnv("acp-oxi-devin-pool",scope)).resolves.toEqual([]);
+    await expect(f.host.harness.behavior.resolveProviderEnvHealth("acp-oxi-devin-pool",scope)).resolves.toMatchObject({status:"unavailable",statusMessage:expect.stringContaining("routing-disabled")});
+    expect(calls).toBe(0);
+  });
+  it("returns exactly the bounded provider set through the supported CLI",async()=>{
+    const f=await createFixture({upstreamUrl:"https://upstream.example",options:{fetch:async()=>Response.json({})}});
+    const result=await f.host.harness.behavior.runCli(["readiness","--project","project-one","--json"]);
+    expect(result.exitCode).toBe(0);
+    const entries=JSON.parse(result.stdout);
+    expect(entries).toHaveLength(9);
+    expect(entries.find((x:{provider:string})=>x.provider==="agy")).toMatchObject({ready:false,reason:"no-enabled-account",projectId:"project-one"});
+    expect(result.stdout).not.toContain("sk-account");
+  });
+});

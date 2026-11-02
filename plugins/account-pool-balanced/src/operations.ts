@@ -6,8 +6,10 @@ import type {
   HubTokenSummary,
   PoolProvider,
   PoolStatus,
+  ProviderReadiness,
   RoutedThreadStatus,
 } from "./contracts.js";
+import { providerSchema } from "./contracts.js";
 import type { AccountAddInput } from "./contracts.js";
 import type { AccountPoolHub } from "./hub.js";
 import type {
@@ -387,6 +389,15 @@ export class PoolOperations {
   }> {
     await this.routing.setBypassed(threadId, bypassed);
     return { threadId, bypassed };
+  }
+
+  async providerReadiness(provider: PoolProvider, projectId: string | null): Promise<ProviderReadiness> {
+    if (!(await this.isRoutingEnabled(provider))) return {provider, projectId, checkedAt: this.now(), ready: false, reason: "routing-disabled"};
+    return this.hub.providerReadiness(provider, projectId);
+  }
+
+  async readiness(projectId: string | null): Promise<ProviderReadiness[]> {
+    return Promise.all(providerSchema.options.map(provider => this.providerReadiness(provider, projectId)));
   }
 
   async hasUsableEnabledAccount(provider: PoolProvider): Promise<boolean> {
