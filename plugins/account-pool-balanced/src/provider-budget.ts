@@ -26,9 +26,10 @@ function window(id:string,percent:unknown,reset:unknown,durationMinutes:number|n
 export function providerEvidenceFromUsage(provider:PoolProvider,payload:unknown,now:number):ProviderBudgetEvidence|undefined {
   const p=object(payload),windows:Array<Window|null>=[];
   if(p.error!=null||p.success===false)return undefined;
+  const statusAllowed=(status:unknown)=>status==null||status==='allowed'||status==='ok';
   if(provider==='claude') {
     const bucket=(id:string,v:unknown,duration:number)=>{const b=object(v);
-      if(b.status!=null && !['allowed','ok','rejected','rate-limited'].includes(String(b.status)))return null;
+      if(!statusAllowed(b.status))return null;
       const values=[b.used_percentage,b.utilization,b.usedPercentage].filter(x=>x!=null);
       if(values.some(x=>number(x)===null)||new Set(values.map(number)).size>1)return null;
       return window(id,b.used_percentage??b.utilization??b.usedPercentage,b.resets_at??b.reset_at??b.resetAt,duration,now);};
@@ -37,7 +38,7 @@ export function providerEvidenceFromUsage(provider:PoolProvider,payload:unknown,
     if(p.limits!==undefined) {
       if(!Array.isArray(p.limits)||p.limits.length>16)return undefined;
       for(const v of p.limits){const r=object(v),name=object(object(r.scope).model).display_name;
-        if((r.kind!=='weekly_scoped' && r.group!=='weekly')||typeof name!=='string')return undefined;
+        if((r.kind!=='weekly_scoped' && r.group!=='weekly')||typeof name!=='string'||!statusAllowed(r.status))return undefined;
         windows.push(window(`family:${modelFamily(name)}`,r.percent,r.resets_at,10080,now));
       }
     }

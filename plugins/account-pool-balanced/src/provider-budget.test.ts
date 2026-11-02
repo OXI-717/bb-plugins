@@ -155,3 +155,19 @@ it('actual existing NeuralDeep collector stores numeric evidence and cached read
  const quotas=new QuotaStore(host.bb.storage.database());expect(budget('neuraldeep',quotas.get(account.id),now).budgetReady).toBe(true);
  expect(quotas.get(account.id).fiveHourUtilization).toBeNull();expect(quotas.get(account.id).sevenDayUtilization).toBeNull();
 });
+
+it('Claude rejection status cannot become positive numeric headroom, including scoped limits',()=>{
+ for(const shape of ['five_hour','seven_day_sonnet','limits']){
+  const make=(status:unknown)=>{const v=payload('claude');
+   if(shape==='limits')v.limits=[{kind:'weekly_scoped',scope:{model:{display_name:'Claude Sonnet'}},percent:20,resets_at:reset,status}];
+   else v[shape]={utilization:20,resets_at:reset,status};
+   return v;
+  };
+  for(const status of ['rejected','rate-limited','unknown',true]){
+   const proof=evidence('claude',make(status),now);
+   expect(proof,shape+':'+String(status)).toBeUndefined();
+   expect(budget('claude',{...store().get(id),providerBudgetEvidence:proof},now).budgetReady).toBe(false);
+  }
+  for(const status of ['allowed','ok',undefined])expect(evidence('claude',make(status),now),shape+':'+String(status)).toBeDefined();
+ }
+});
