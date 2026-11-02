@@ -219,8 +219,7 @@ export function createAccountPoolPlugin(
     onAdmissionLimitsChanged = () => hub.admissionLimitsChanged();
     if (transport !== null) {
       bb.providers.experimental_contributeEnv("acp-oxi-devin-pool", async context => {
-        if (!(await operations.isRoutingEnabled("devin")) || await isThreadBypassed(context) ||
-          !(await operations.hasUsableEnabledAccount("devin"))) return [];
+        if (!(await operations.isRoutingEnabled("devin")) || await isThreadBypassed(context)) return [];
         return [
           { name: "OXI_DEVIN_POOL_TOKEN", value: await scopedHubToken(context), reason: "Project-bound Account Pooler token" },
           { name: "OXI_DEVIN_POOL_URL", value: { serverPath: hubBasePath(bb.pluginId) }, reason: "Account Pooler route" },
@@ -328,15 +327,14 @@ export function createAccountPoolPlugin(
     );
     registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser);
     registerUsageSource(bb, hub);
-    const proxiedHealth = async (provider: PoolProvider) =>
-      (await operations.isRoutingEnabled(provider)) &&
-      (await operations.hasUsableEnabledAccount(provider))
-        ? {
-            label: "Proxied",
-            statusMessage:
-              "Credentials are provided by the Account Pooler hub.",
-          }
-        : null;
+    const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
+      const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
+      if (readiness.reason === "routing-disabled") return null;
+      if (readiness.ready) return {label: "Proxied", statusMessage: "Credentials are provided by the Account Pooler hub."};
+      if (!("projectId" in context)) return null;
+      return {status: "unavailable" as const, label: "Account Pooler", statusMessage: `Account Pooler is not ready: ${readiness.reason}.`};
+    };
+    if (transport !== null) bb.providers.experimental_contributeEnvHealth("acp-oxi-devin-pool", context => proxiedHealth("devin", context));
     bb.providers.experimental_contributeEnv("claude-code", async (context) => {
       if (
         !(await operations.isRoutingEnabled("claude")) ||
@@ -373,14 +371,13 @@ export function createAccountPoolPlugin(
         },
       ];
     });
-    bb.providers.experimental_contributeEnvHealth("claude-code", () =>
-      proxiedHealth("claude"),
+    bb.providers.experimental_contributeEnvHealth("claude-code", context =>
+      proxiedHealth("claude", context),
     );
     bb.providers.experimental_contributeEnv("codex", async (context) => {
       if (
         !(await operations.isRoutingEnabled("codex")) ||
-        (await isThreadBypassed(context)) ||
-        !(await operations.hasUsableEnabledAccount("codex"))
+        (await isThreadBypassed(context))
       ) {
         return [];
       }
@@ -398,17 +395,17 @@ export function createAccountPoolPlugin(
         },
       ];
     });
-    bb.providers.experimental_contributeEnvHealth("codex", () =>
-      proxiedHealth("codex"),
+    bb.providers.experimental_contributeEnvHealth("codex", context =>
+      proxiedHealth("codex", context),
     );
     bb.http.route('GET','/agy/v1beta/models',context=>hub.handle(context.req.raw,'agy'),{auth:'none'});
     bb.providers.experimental_contributeEnv('acp-agy',async context=>{
-      if(!(await operations.isRoutingEnabled('agy'))||await isThreadBypassed(context)||!(await operations.hasUsableEnabledAccount('agy')))return [];
+      if(!(await operations.isRoutingEnabled('agy'))||await isThreadBypassed(context))return [];
       const token=await scopedHubToken(context);
       return [{name:'OXI_AGY_POOL_BASE_URL',value:{serverPath:`${hubBasePath(bb.pluginId)}/agy`},reason:'Native Antigravity gateway through Pooler'},
         {name:'OXI_AGY_POOL_AUTH_TOKEN',value:token,reason:'Pool credential only; Google OAuth remains server-side'}];
     });
-    bb.providers.experimental_contributeEnvHealth('acp-agy',()=>proxiedHealth('agy'));
+    bb.providers.experimental_contributeEnvHealth('acp-agy',context=>proxiedHealth('agy',context));
     const openAiCompatibleRoutes: ReadonlyArray<{
       provider: PoolProvider;
       mountPrefix: string;
@@ -492,8 +489,7 @@ export function createAccountPoolPlugin(
       bb.providers.experimental_contributeEnv(cursorProviderId, async (context) => {
       if (
         !(await operations.isRoutingEnabled("cursor")) ||
-        (await isThreadBypassed(context)) ||
-        !(await operations.hasUsableEnabledAccount("cursor"))
+        (await isThreadBypassed(context))
       ) {
         return [];
       }
@@ -530,8 +526,8 @@ export function createAccountPoolPlugin(
         },
       ];
     });
-      bb.providers.experimental_contributeEnvHealth(cursorProviderId, () =>
-        proxiedHealth("cursor"),
+      bb.providers.experimental_contributeEnvHealth(cursorProviderId, context =>
+        proxiedHealth("cursor", context),
       );
     }
     for (const entry of openAiCompatibleRoutes) {
@@ -548,8 +544,7 @@ export function createAccountPoolPlugin(
         async (context) => {
           if (
             !(await operations.isRoutingEnabled(entry.provider)) ||
-            (await isThreadBypassed(context)) ||
-            !(await operations.hasUsableEnabledAccount(entry.provider))
+            (await isThreadBypassed(context))
           ) {
             return [];
           }
@@ -570,8 +565,8 @@ export function createAccountPoolPlugin(
           ];
         },
       );
-      bb.providers.experimental_contributeEnvHealth(entry.providerId, () =>
-        proxiedHealth(entry.provider),
+      bb.providers.experimental_contributeEnvHealth(entry.providerId, context =>
+        proxiedHealth(entry.provider, context),
       );
     }
     for (const providerId of [
@@ -581,8 +576,7 @@ export function createAccountPoolPlugin(
       bb.providers.experimental_contributeEnv(providerId, async (context) => {
         if (
           !(await operations.isRoutingEnabled("kimi")) ||
-          (await isThreadBypassed(context)) ||
-          !(await operations.hasUsableEnabledAccount("kimi"))
+          (await isThreadBypassed(context))
         ) {
           return [];
         }
@@ -602,8 +596,8 @@ export function createAccountPoolPlugin(
           },
         ];
       });
-      bb.providers.experimental_contributeEnvHealth(providerId, () =>
-        proxiedHealth("kimi"),
+      bb.providers.experimental_contributeEnvHealth(providerId, context =>
+        proxiedHealth("kimi", context),
       );
     }
     bb.onDispose(async () => {

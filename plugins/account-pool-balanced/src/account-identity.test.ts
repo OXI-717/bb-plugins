@@ -49,7 +49,7 @@ it('does not let a manually supplied address replace provider OAuth identity',as
  await expect(host.harness.behavior.callRpc('account.setEmail',{accountId:account.id,email:'manual@example.com'})).rejects.toThrow('OAuth email');
  expect((await host.bb.storage.kv.get<Account[]>('accounts:v1'))![0]!.email).toBe('verified@example.com');
 });
-it.each(['bypass','routing-off','account-disabled'] as const)('cancels queued recovery after actual %s settings remove pooled credentials',async change=>{
+it.each(['bypass','routing-off','account-disabled'] as const)('cancels queued recovery after actual %s routing or availability changes',async change=>{
  const {host,account}=await setup('kimi','acp-opencode-kimi');
  host.harness.sdk.stub('threads.get',async()=>makeThreadResponse({id:'thread-one',providerId:'acp-opencode-kimi',status:'error'}));
  host.harness.sdk.stub('threads.events.list',async()=>[{threadId:'thread-one',type:'client/turn/requested',data:{requestId:'request-one'}}] as never);
@@ -60,7 +60,9 @@ it.each(['bypass','routing-off','account-disabled'] as const)('cancels queued re
  if(change==='bypass')await host.harness.behavior.callRpc('bypass.set',{threadId:'thread-one',bypassed:true});
  else if(change==='routing-off')await host.harness.behavior.callRpc('routing.set',{provider:'kimi',enabled:false});
  else await host.harness.behavior.callRpc('account.disable',{id:account.id});
- expect(await host.harness.behavior.resolveProviderEnv('acp-opencode-kimi',{threadId:'thread-one',projectId:'project-one',hostId:'host-one'})).toEqual([]);
+ const env=await host.harness.behavior.resolveProviderEnv('acp-opencode-kimi',{threadId:'thread-one',projectId:'project-one',hostId:'host-one'});
+ if(change==='account-disabled')expect(env).toEqual(expect.arrayContaining([expect.objectContaining({name:'OXI_KIMI_BASE_URL'}),expect.objectContaining({name:'KIMI_API_KEY'})]));
+ else expect(env).toEqual([]);
  const hook=host.harness.registrations.hooks['message.dispatch']!;
  expect(await hook(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},requestedExecution:{providerId:'acp-opencode-kimi'},queuedMessage:{id:'retry-one',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}))).toMatchObject({action:'reject'});
 });

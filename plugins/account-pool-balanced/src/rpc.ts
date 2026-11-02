@@ -24,6 +24,7 @@ import {
   loginCompleteInputSchema,
   loginStartSchema,
   providerSchema,
+  providerReadinessSchema,
   routedThreadStatusListSchema,
   statusSchema,
   tokenRotateInputSchema,
@@ -52,6 +53,7 @@ const browserOpenInputSchema = z.object({
 export type BrowserOpenInput = z.infer<typeof browserOpenInputSchema>;
 
 export const accountPoolRpcContract = defineRpcContract({
+  "readiness.get": {input: z.object({projectId:z.string().min(1).max(200).nullable()}).strict(), output:z.array(providerReadinessSchema).length(providerSchema.options.length)},
   "browser.open": { input: browserOpenInputSchema, output: z.object({ opened: z.literal(true) }).strict() },
   "thread.account": { input: z.object({ threadId: z.string().min(1) }).strict(), output: threadAccountStatusSchema },
   "account.add": {
@@ -187,6 +189,7 @@ export function createRpcHandlers(
   openAgyBrowser:(url:string)=>Promise<{opened:true}>=async()=>{throw Error("Sign-in browser unavailable");},
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
+    "readiness.get": ({projectId}) => operations.readiness(projectId),
     "browser.open": input => openBrowser(input),
     "projects.list": () => projectsList(),
     "account.setProjects": async ({ accountId, projects, expectedProjects }) => ({ account: await operations.setProjects(accountId, projects, expectedProjects) }),

@@ -9,6 +9,13 @@ Use `bb pool` for this plugin's accounts and routes. Inspect current state with
 `bb pool status --json` and `bb pool account list --json` before changing routing.
 Use `bb pool --help` for available commands.
 
+Use `bb pool readiness --project <project-id> --json` for a bounded, read-only
+snapshot of the nine pooled routes. It applies existing project, schedule,
+quota, cooldown, network and stored-credential checks without refreshing quotas
+or contacting a provider. Readiness is advisory; actual dispatch checks again.
+It does not prove that a model request will succeed or that a launcher exists
+on a particular machine. Native BB provider states check that installation.
+
 For account login/import, secret handling, quota refresh, routing settings,
 ordering, or failover, read
 [references/accounts-and-routing.md](references/accounts-and-routing.md).

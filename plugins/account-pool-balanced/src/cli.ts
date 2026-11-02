@@ -2,6 +2,7 @@ import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
 import { setTimeout as wait } from "node:timers/promises";
 import {
   accountAddInputSchema,
+  providerReadinessSchema,
   accountProjectsSchema,
   accountCapInputSchema,
   accountIdInputSchema,
@@ -59,6 +60,7 @@ const HELP = [
   "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> <id>...",
   "  bb pool account refresh <id>",
   "  bb pool status [--json]",
+  "  bb pool readiness [--project <id>] [--json]",
   "  bb pool observations [--json]",
   "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> [--off]",
@@ -402,6 +404,7 @@ export function registerPoolCli(
         summary: "Refresh one account's observed usage",
         usage: "bb pool account refresh <id>",
       },
+      { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json]" },
       { name:"observations", summary:"Inspect bounded request metadata and retained-event minute counts", usage:"bb pool observations [--json]" },
       { name:"history", summary:"Inspect bounded fourteen-day hourly account and client counters", usage:"bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]" },
       {
@@ -754,6 +757,12 @@ export function registerPoolCli(
             exitCode: 0,
             stdout: `${argv[1] === "enable" ? "Enabled" : "Disabled"} ${id}.\n`,
           };
+        }
+        if (argv[0] === "readiness") {
+          const flags = parseFlags(argv.slice(1), ["json"], ["project"]);
+          const projectId = providerReadinessSchema.shape.projectId.parse(flags.values.get("project") ?? null);
+          const entries = await operations.readiness(projectId);
+          return {exitCode:0, stdout:flags.booleans.has("json") ? json(entries) : entries.map(entry => `${entry.provider}: ${entry.ready ? "ready" : entry.reason}`).join("\n")+"\n"};
         }
         if (argv[0] === "observations") {
           parseFlags(argv.slice(1), ['json'], []);

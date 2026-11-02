@@ -395,6 +395,15 @@ export const routedThreadStatusSchema = z
 
 export type RoutedThreadStatus = z.infer<typeof routedThreadStatusSchema>;
 
+export const providerReadinessSchema = z.object({
+  provider: providerSchema,
+  projectId: z.string().min(1).max(200).nullable(),
+  checkedAt: z.number().int().nonnegative(),
+  ready: z.boolean(),
+  reason: z.enum(["ready", "routing-disabled", "paused", "no-enabled-account", "no-selectable-account", "cooldown", "network-unavailable", "credential-unavailable"]),
+}).strict();
+export type ProviderReadiness = z.infer<typeof providerReadinessSchema>;
+
 export const statusSchema = z
   .object({
     route: z.string(),

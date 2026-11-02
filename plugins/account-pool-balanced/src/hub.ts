@@ -20,6 +20,7 @@ import type {
   ModelFamily,
   PoolProvider,
   PoolStatus,
+  ProviderReadiness,
 } from "./contracts.js";
 import { providerSchema } from "./contracts.js";
 import { createClaudeAdapter } from "./claude-adapter.js";
@@ -446,12 +447,15 @@ export class AccountPoolHub {
     }
   }
 
-  private async settleDrain(account: Account, rejected = false): Promise<Account> {
-    if (!account.drainOnce) return account;
+  private drainExhausted(account: Account): boolean {
+    if (!account.drainOnce) return false;
     const quota = this.options.quotas.get(account.id);
-    const exhausted = rejected || (["fable", "sonnet", "opus", "haiku", "other"] as const)
-      .some((family) => isQuotaExhausted(quota, family, 1, this.options.now()));
-    if (!exhausted) return account;
+    return (["fable", "sonnet", "opus", "haiku", "other"] as const)
+      .some(family => isQuotaExhausted(quota, family, 1, this.options.now()));
+  }
+
+  private async settleDrain(account: Account, rejected = false): Promise<Account> {
+    if (!account.drainOnce || (!rejected && !this.drainExhausted(account))) return account;
     const updated = await this.options.accounts.finishDrain(account);
     this.options.onAccountsChanged();
     return updated ?? account;
@@ -459,6 +463,24 @@ export class AccountPoolHub {
 
   private async routingAccounts(): Promise<Account[]> {
     return Promise.all((await this.options.accounts.list()).map((account) => this.settleDrain(account)));
+  }
+
+  async providerReadiness(provider: PoolProvider, projectId: string | null): Promise<ProviderReadiness> {
+    const now = this.options.now();
+    const result = (reason: ProviderReadiness["reason"]): ProviderReadiness => ({provider, projectId, checkedAt: now, ready: reason === "ready", reason});
+    if (!this.accepting) return result("paused");
+    const accounts = await this.options.accounts.list();
+    if (!accounts.some(account => account.provider === provider && account.enabled)) return result("no-enabled-account");
+    const inspectable = accounts.filter(account => !this.drainExhausted(account));
+    const eligible = this.eligibleEntries(provider, projectId, inspectable, "other", now).eligible;
+    if (eligible.length === 0) return result("no-selectable-account");
+    const ready = eligible.filter(({quota}) => quota.heldUntil === null || quota.heldUntil <= now);
+    if (ready.length === 0) return result("cooldown");
+    try { await this.assertNetworkAllowed(provider); } catch { return result("network-unavailable"); }
+    for (const {account} of ready) {
+      try { await this.options.accounts.readSecret(account.id); return result("ready"); } catch { continue; }
+    }
+    return result("credential-unavailable");
   }
 
   async status(): Promise<Omit<PoolStatus, "routing">> {
