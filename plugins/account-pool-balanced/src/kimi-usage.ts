@@ -1,3 +1,4 @@
+import { providerEvidenceFromUsage } from './provider-budget.js';
 import { z } from "zod";
 import { EMPTY_FAMILY_WEEKLY, type AccountQuota } from "./contracts.js";
 import { parseReset } from "./quota.js";
@@ -99,6 +100,7 @@ export function kimiQuotaFromUsages(
   if (weeklyUtilization === null && rollingUtilization === null) return null;
   return {
     accountId,
+    providerBudgetEvidence:providerEvidenceFromUsage('kimi',payload,now),
     fiveHourUtilization: rollingUtilization,
     fiveHourResetAt: resetAt(rolling),
     fiveHourStatus: null,

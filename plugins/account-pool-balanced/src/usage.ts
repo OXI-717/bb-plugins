@@ -1,3 +1,4 @@
+import { providerEvidenceFromUsage } from './provider-budget.js';
 import { z } from "zod";
 import {
   EMPTY_FAMILY_WEEKLY,
@@ -169,6 +170,7 @@ export function quotaFromUsage(
     data.seven_day == null ? null : normalizeBucket(data.seven_day, now);
   return {
     ...previous,
+    providerBudgetEvidence:providerEvidenceFromUsage('claude',payload,now),
     accountId,
     fiveHourUtilization: fiveHour?.utilization ?? previous.fiveHourUtilization,
     fiveHourResetAt: data.five_hour == null ? previous.fiveHourResetAt : currentReset(fiveHour?.resetAt ?? null, previous.fiveHourResetAt, now),

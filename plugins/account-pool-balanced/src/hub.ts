@@ -1,3 +1,4 @@
+import { providerBudgetQuota, providerEvidenceFromUsage, PROVIDER_BUDGET_MAX_AGE_MS, NUMERIC_BUDGET_PROVIDERS } from './provider-budget.js';
 import {AccountStartPacing} from "./account-start-pacing.js";
 import { AccountAdmission, AdmissionUnavailable, ACCOUNT_QUEUE_MAX_WAIT_MS } from "./account-admission.js";
 import {createAgyAdapter} from "./agy-adapter.js";
@@ -1063,6 +1064,31 @@ export class AccountPoolHub {
     } catch {return reply({error:'Pool budget evidence unavailable.'},503);}
   }
 
+  /** Cached-only supplemental budget contract. Identity comes exclusively from the token. */
+  async providerBudget(request:Request,provider:PoolProvider,routingEnabled:boolean,bypassed:(threadId:string)=>Promise<boolean>):Promise<Response> {
+    const reply=(body:unknown,status=200)=>Response.json(body,{status,headers:{'cache-control':'no-store'}});
+    try {
+      const context=await this.options.hubTokens.inspectContext?.(this.requestToken(request));
+      if(!context)return reply({error:'Invalid pool token.'},401);
+      if(!context.projectId)return reply({error:'A project-bound pool client is required.'},403);
+      const requested=new URL(request.url).searchParams.get('projectId');
+      if(requested!==null&&requested!==context.projectId)return reply({error:'Pool project binding mismatch.'},403);
+      const now=this.options.now();
+      let networkAllowed=true;try{await this.assertNetworkAllowed(provider);}catch{networkAllowed=false;}
+      const threadBypassed=context.threadId?await bypassed(context.threadId):false;
+      const ready=this.accepting&&routingEnabled&&networkAllowed&&!threadBypassed;
+      const accounts=(await this.options.accounts.list()).filter(a=>a.provider===provider&&projectTier(a,context.projectId)!==null);
+      // Available applies shared project/purpose/policy gates before any family filter.
+      // A blocked 'other' family must not hide an account selectable by Sonnet.
+      const eligible=new Set(this.eligibleEntries(provider,context.projectId,accounts,'other',now,context.purpose).available.map(e=>e.account.id));
+      return reply({schema:'bb-account-pool/provider-budget/1',eligibilityScope:'shared-policy-superset',provider,supported:NUMERIC_BUDGET_PROVIDERS.some(p=>p===provider),projectId:context.projectId,
+        ...(context.purpose?{purpose:context.purpose}:{}),observedAt:now,maxAgeMs:PROVIDER_BUDGET_MAX_AGE_MS,
+        route:{provider,accepting:this.accepting,routingEnabled,networkAllowed,threadBypassed,ready},
+        accounts:accounts.map(a=>{const quota=this.options.quotas.get(a.id);return {accountId:a.id,eligible:ready&&eligible.has(a.id),heldUntil:quota.heldUntil,...providerBudgetQuota(provider,quota,now)};}),
+      });
+    }catch{return reply({error:'Pool budget evidence unavailable.'},503);}
+  }
+
   private async select(
     provider: PoolProvider,
     candidateIds: ReadonlySet<string>,
@@ -1776,8 +1802,9 @@ export function createHub(options: {
         mountPrefix: "neuraldeep/",
         upstreamBaseUrl: (settings) => settings.neuraldeepUpstreamBaseUrl,
         usagesUrl: "https://api.neuraldeep.ru/v1/limits",
-        // RPM and model entitlements are not subscription-window percentages.
-        parseUsages: () => null,
+        // Strict chat session/week ratios and provider admission, not RPM totals
+        // or a made-up weekly mapping for unrelated entitlements.
+        parseUsages: (accountId,payload,previous,now) => ({...previous,accountId,providerBudgetEvidence:providerEvidenceFromUsage('neuraldeep',payload,now)}),
         guardRequestBody: (suffix, body) => suffix === "chat/completions" && !isChatCompletionsBody(body)
           ? "NeuralDeep requires a Chat Completions messages array." : null,
       }),

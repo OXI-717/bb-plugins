@@ -1,3 +1,4 @@
+import { providerEvidenceFromUsage } from './provider-budget.js';
 import { z } from "zod";
 import { EMPTY_FAMILY_WEEKLY, type AccountQuota, type LimitWindow } from "./contracts.js";
 import { parseReset } from "./quota.js";
@@ -135,7 +136,7 @@ export function opencodeGoQuotaFromUsages(
   const additionalWindows:LimitWindow[]=monthlyUtilization!==null||monthlyStatus!==null
     ? [{slot:'secondary',windowMinutes:43200,utilization:monthlyUtilization,status:monthlyStatus,resetAt:parseReset(monthly?.resetsAt??null),observedAt:now,source:'usage'}]
     : previous.limitWindows.filter(window=>window.windowMinutes===43200&&window.source==='usage');
-  return quota(accountId, previous, now, {
+  const normalized=quota(accountId, previous, now, {
     fiveHour: {
       utilization: rollingObserved ? fraction(rolling?.percent) : previous.fiveHourUtilization,
       resetAt: rollingObserved ? parseReset(rolling?.resetsAt ?? null) : previous.fiveHourResetAt,
@@ -147,4 +148,5 @@ export function opencodeGoQuotaFromUsages(
       status:weeklyObserved ? status(weekly?.status) : previous.sevenDayStatus,
     },
   },additionalWindows);
+  return normalized===null?null:{...normalized,providerBudgetEvidence:providerEvidenceFromUsage('opencode-go',payload,now)};
 }
