@@ -329,6 +329,7 @@ export function createAccountPoolPlugin(
     registerUsageSource(bb, hub);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
+      if (readiness.reason === "routing-disabled") return null;
       if (readiness.ready) return {label: "Proxied", statusMessage: "Credentials are provided by the Account Pooler hub."};
       if (!("projectId" in context)) return null;
       return {status: "unavailable" as const, label: "Account Pooler", statusMessage: `Account Pooler is not ready: ${readiness.reason}.`};

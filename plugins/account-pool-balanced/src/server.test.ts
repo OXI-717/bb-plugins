@@ -8475,7 +8475,7 @@ describe("cached provider readiness", () => {
     await f.host.harness.behavior.callRpc("bypass.set",{threadId:scope.threadId,bypassed:false});
     await f.host.harness.behavior.callRpc("routing.set",{provider:"devin",enabled:false});
     await expect(f.host.harness.behavior.resolveProviderEnv("acp-oxi-devin-pool",scope)).resolves.toEqual([]);
-    await expect(f.host.harness.behavior.resolveProviderEnvHealth("acp-oxi-devin-pool",scope)).resolves.toMatchObject({status:"unavailable",statusMessage:expect.stringContaining("routing-disabled")});
+    await expect(f.host.harness.behavior.resolveProviderEnvHealth("acp-oxi-devin-pool",scope)).resolves.toBeNull();
     expect(calls).toBe(0);
   });
   it("returns exactly the bounded provider set through the supported CLI",async()=>{
