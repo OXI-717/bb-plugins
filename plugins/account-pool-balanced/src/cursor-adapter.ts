@@ -1,3 +1,4 @@
+import { providerEvidenceFromUsage } from './provider-budget.js';
 import { poolErrorResponse } from "./pool-errors.js";
 import { z } from "zod";
 import type { AccountSecret } from "./contracts.js";
@@ -221,6 +222,7 @@ export function createCursorAdapter(options: {
     },
     refreshesApiKeyUsage: true,
     async refreshUsage(context) {
+      context.quotas.put({...context.quotas.get(context.account.id),providerBudgetEvidence:undefined});
       // `freshSecret` already hands back a token minted from the pooled API key.
       const secret = await context.freshSecret();
       if (secret.kind !== "oauth") return;
@@ -249,6 +251,7 @@ export function createCursorAdapter(options: {
       const previous = context.quotas.get(context.account.id);
       context.quotas.put({
         ...previous,
+        providerBudgetEvidence:providerEvidenceFromUsage('cursor',parsed.data,context.now()),
         // Cursor meters one billing cycle rather than a rolling week; it lands in the
         // long-window slot because that is the one the gate paces against.
         sevenDayUtilization: Math.min(Math.max(used / 100, 0), 1),

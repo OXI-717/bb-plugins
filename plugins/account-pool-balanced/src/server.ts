@@ -1,3 +1,4 @@
+import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
 import {AgyOAuthLogin,readNativeAgyConfig,type AgyAppConfig} from "./agy-oauth-login.js";
 import { RequestJournal } from "./request-journal.js";
 import {createGuardNetworkCheck,bindGuardNetworkDecision,hostGuardDecisionSchema} from "./guard-network.js";
@@ -629,6 +630,8 @@ export function createAccountPoolPlugin(
         if (timer !== null) clearTimeout(timer);
       }
     });
+    for(const provider of ADDITIONAL_BUDGET_PROVIDERS)bb.http.route('GET',`/budget/${provider}`,async context=>
+      hub.providerBudget(context.req.raw,provider,await routing.isProviderEnabled(provider),threadId=>routing.isBypassed(threadId)),{auth:'none'});
     bb.http.route("GET", "/budget/codex", async context => hub.codexBudget(
       context.req.raw, await routing.isProviderEnabled("codex"), threadId => routing.isBypassed(threadId),
     ), { auth: "none" });

@@ -60,6 +60,7 @@ export function createKimiAdapter(options: { usagesUrl: string }): ProviderAdapt
     },
     refreshesApiKeyUsage: true,
     async refreshUsage(context) {
+      context.quotas.put({...context.quotas.get(context.account.id),providerBudgetEvidence:undefined});
       const secret = await context.freshSecret();
       if (secret.kind !== "api-key") return;
       const response = await context.fetch(options.usagesUrl, {

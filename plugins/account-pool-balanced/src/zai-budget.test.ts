@@ -81,9 +81,9 @@ it('preserves proof through ordinary inference without renewing its age and inva
 
 it('migrates old normalized rows as unknown and persists only new source proof through reopen',async()=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'zai-proof-'));cleanup.push(()=>fs.rm(dir,{recursive:true,force:true}));const file=path.join(dir,'quota.db');
- let db=new Database(file);for(const sql of QUOTA_MIGRATIONS.slice(0,-1))db.exec(sql);
+ let db=new Database(file);for(const sql of QUOTA_MIGRATIONS.filter(sql=>!sql.includes('zai_usage_evidence_json')))db.exec(sql);
  db.prepare("INSERT INTO account_quota(account_id,bucket_exhaustion_json,five_hour_utilization,seven_day_utilization,observed_at) VALUES (?, '{}', 0.01, 0.14, ?)").run(id,now);
- db.exec(QUOTA_MIGRATIONS.at(-1)!);let quotas=new QuotaStore(db);
+ db.exec(QUOTA_MIGRATIONS.find(sql=>sql.includes('zai_usage_evidence_json'))!);let quotas=new QuotaStore(db);
  expect(zaiBudgetQuota(quotas.get(id),now).budgetReady).toBe(false);
  quotas.put(complete());db.close();db=new Database(file);cleanup.push(()=>{db.close();});quotas=new QuotaStore(db);
  expect(zaiBudgetQuota(quotas.get(id),now).budgetReady).toBe(true);

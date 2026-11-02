@@ -138,6 +138,7 @@ export function createClaudeAdapter(options: {
       return { secret: refreshed, refreshed: true };
     },
     async refreshUsage(context) {
+      context.quotas.put({...context.quotas.get(context.account.id),providerBudgetEvidence:undefined});
       if (context.account.kind !== "oauth") return;
       let secret = await context.freshSecret();
       if (secret.kind !== "oauth") return;
