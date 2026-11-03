@@ -5,6 +5,7 @@ import {promisify} from 'node:util';
 import {homedir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {setTimeout as delay} from 'node:timers/promises';
 
 export interface AgyAppConfig {clientId:string;clientSecret:string;scopes:string[]}
 export interface AgyAuthorization {
@@ -104,9 +105,35 @@ export class AgyOAuthLogin {
       const headers={authorization:`Bearer ${token.access_token}`,'content-type':'application/json'};
       const identity=await request('https://www.googleapis.com/oauth2/v2/userinfo',{headers});
       if(typeof identity.email!=='string'||identity.email.length>320||!identity.email.includes('@'))throw Error('Google account identity unavailable');
-      const subscription=await request(BOOTSTRAP_URL,{method:'POST',headers,body:JSON.stringify({metadata:{ideType:'ANTIGRAVITY'}})});
+      const load={method:'POST',headers,body:JSON.stringify({metadata:{ideType:'ANTIGRAVITY'}})};
+      let subscription=await request(BOOTSTRAP_URL,load);
+      const personal=(value:Record<string,unknown>)=>{
+        if(value.gcpManaged===true||[value.paidTier,value.currentTier].some(t=>object(t)&&t.usesGcpTos===true))throw Error('This login supports personal Antigravity subscriptions; enterprise authorization is not configured');
+      };
+      personal(subscription);
+      if(typeof subscription.cloudaicompanionProject!=='string'||!subscription.cloudaicompanionProject.trim()){
+        // An existing personal registration may already be visible on Daily.
+        subscription=await request(AGY_CONSUMER_ENDPOINT+'/v1internal:loadCodeAssist',load);
+        personal(subscription);
+      }
+      if(typeof subscription.cloudaicompanionProject!=='string'||!subscription.cloudaicompanionProject.trim()){
+        // Match native ACP onboarding; never infer eligibility from a missing project.
+        if(!Array.isArray(subscription.allowedTiers)||!subscription.allowedTiers.some(t=>object(t)&&t.id==='free-tier'))throw Error('Google did not return an Antigravity project or explicit personal onboarding eligibility');
+        let operation=await request(AGY_CONSUMER_ENDPOINT+'/v1internal:onboardUser',{method:'POST',headers,body:JSON.stringify({tierId:'free-tier',metadata:{ideType:'ANTIGRAVITY'}})});
+        for(let poll=0;operation.done!==true&&poll<30;poll++){
+          if(operation.error)throw Error('Antigravity onboarding failed');
+          const name=operation.name;
+          if(typeof name!=='string'||name.length>512||!/^operations\/[A-Za-z0-9_-]+$/.test(name))throw Error('Invalid Antigravity onboarding operation');
+          await delay(1000,undefined,{signal:session.controller.signal});
+          operation=await request(AGY_CONSUMER_ENDPOINT+'/v1internal/'+name,{headers});
+        }
+        if(operation.error)throw Error('Antigravity onboarding failed');
+        if(operation.done!==true)throw Error('Antigravity onboarding did not finish within the allowed wait');
+        subscription=await request(AGY_CONSUMER_ENDPOINT+'/v1internal:loadCodeAssist',load);
+        personal(subscription);
+      }
       const project=subscription.cloudaicompanionProject;
-      if(typeof project!=='string'||!project.trim()||project.length>512)throw Error('Activate this subscription in Antigravity before adding it to the pool');
+      if(typeof project!=='string'||!project.trim()||project.length>512)throw Error('Google did not return a valid Antigravity project after onboarding');
       const tier=object(subscription.paidTier)?subscription.paidTier:object(subscription.currentTier)?subscription.currentTier:null;
       if(tier?.usesGcpTos===true||subscription.gcpManaged===true)throw Error('This login supports personal Antigravity subscriptions; enterprise authorization is not configured');
       if(this.options.onModels){
