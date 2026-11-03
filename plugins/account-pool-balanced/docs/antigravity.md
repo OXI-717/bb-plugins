@@ -21,11 +21,20 @@ the installed native Antigravity ACP 1.4.1 package, not an account profile;
 Python 3 and that vendor package must exist on the pool server. Missing or unsafe
 packages refuse login. The package is neither downloaded nor executed by login.
 
-This first integration supports an already activated **personal** subscription.
-Missing subscription projects and enterprise/GCP-managed authorization refuse
-login; there is no automatic enrollment, paid API-key fallback or local token
-import. Existing account admission, project policy and trusted-client purpose
-checks apply. Adding an account does not opt it into automation.
+Login supports **personal** subscriptions. If Google returns no managed project,
+login first checks the personal consumer endpoint for an existing registration.
+If that also has no project, it follows the native personal onboarding flow only
+when Google explicitly
+lists `free-tier` as allowed: one onboarding request, at most 30 operation polls
+with a one-second interval, then a fresh project lookup at the consumer endpoint.
+Every request retains the existing network authorization and cancellation limits.
+The final Google response supplies the actual project and subscription tier;
+onboarding does not imply a paid subscription. Missing eligibility, failed or
+unfinished operations, unresolved projects and enterprise/GCP-managed states
+refuse login with fixed errors, without exposing provider response bodies.
+There is no paid API-key fallback or local token import. Existing account
+admission, project policy and trusted-client purpose checks apply. Adding an
+account does not opt it into automation.
 
 ## Client contract
 
