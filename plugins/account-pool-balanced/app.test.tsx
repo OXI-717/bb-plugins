@@ -510,7 +510,7 @@ describe("Account Pool settings", () => {
     const buttons=await slot.findAllByRole('button',{name:'Добавить аккаунт'});
     fireEvent.pointerDown(buttons[4]!);
     fireEvent.click(await slot.findByText('Вход в Antigravity',{selector:'span.block'}));
-    expect(await slot.findByLabelText('Код или адрес после входа в Google')).toBeTruthy();
+    expect(await slot.findByLabelText('Код авторизации Google')).toBeTruthy();
     expect(slot.queryByText('Добавить API-ключ…')).toBeNull();
     expect(slot.queryByText('Импорт с этой машины')).toBeNull();
     fireEvent.click(slot.getByRole('button',{name:'Закрыть'}));

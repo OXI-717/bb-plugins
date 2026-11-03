@@ -1,5 +1,5 @@
 import {agyModelIds} from "./agy-wire.js";
-import {randomBytes,createHash,randomInt} from 'node:crypto';
+import {randomBytes,createHash} from 'node:crypto';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {homedir} from 'node:os';
@@ -15,6 +15,9 @@ export interface AgyAuthorization {
 interface Pending {authorizeUrl?:string;config:AgyAppConfig;verifier:string;state:string;redirectUri:string;expiresAt:number;controller:AbortController;used:boolean;timer:ReturnType<typeof setTimeout>}
 const TOKEN_URL='https://oauth2.googleapis.com/token';
 const AUTHORIZE_URL='https://accounts.google.com/o/oauth2/v2/auth';
+export const AGY_MANUAL_REDIRECT='https://antigravity.google/oauth-callback';
+// Verified against the official CLI remote Google OAuth request.
+const LOGIN_SCOPES=['cloud-platform','userinfo.email','userinfo.profile','cclog','experimentsandconfigs','aicode'].map(scope=>'https://www.googleapis.com/auth/'+scope).concat('openid');
 const BOOTSTRAP_URL='https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist';
 export const AGY_CONSUMER_ENDPOINT='https://daily-cloudcode-pa.googleapis.com';
 
@@ -62,11 +65,11 @@ export class AgyOAuthLogin {
     try{config=await this.options.appConfig();}finally{this.starting--;}
     if(this.disposed)throw Error('Authorization service stopped');
     const sessionId=randomBytes(24).toString('base64url');const verifier=randomBytes(48).toString('base64url');
-    const state=randomBytes(24).toString('base64url');const redirectUri=`http://127.0.0.1:${randomInt(49152,65536)}/`;
+    const state=randomBytes(24).toString('base64url');const redirectUri=AGY_MANUAL_REDIRECT;
     const expiresAt=this.now()+600000;const controller=new AbortController();
     const timer=setTimeout(()=>this.cancel(sessionId),600000);timer.unref();
     this.sessions.set(sessionId,{config,verifier,state,redirectUri,expiresAt,controller,used:false,timer});
-    const url=new URL(AUTHORIZE_URL);url.search=new URLSearchParams({client_id:config.clientId,redirect_uri:redirectUri,response_type:'code',scope:config.scopes.join(' '),access_type:'offline',prompt:'consent',state,code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'}).toString();
+    const url=new URL(AUTHORIZE_URL);url.search=new URLSearchParams({client_id:config.clientId,redirect_uri:redirectUri,response_type:'code',scope:LOGIN_SCOPES.join(' '),access_type:'offline',prompt:'consent',state,code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256'}).toString();
     this.sessions.get(sessionId)!.authorizeUrl=url.toString();
     return {sessionId,authorizeUrl:url.toString(),expiresAt};
   }

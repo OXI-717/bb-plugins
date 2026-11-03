@@ -120,3 +120,12 @@ it('recovers an existing personal project on Daily without registering again',as
  }});
  try{const s=await login.start();const result=await login.complete(s.sessionId,'synthetic-code');expect(result.secret.agy.projectId).toBe('existing-project');expect(calls.some(u=>u.endsWith(':onboardUser'))).toBe(false);}finally{login.dispose();}
 });
+
+it('uses the official remote code callback and identical redirect in token exchange',async()=>{
+ const {login,calls}=fixture();try{const s=await login.start();const u=new URL(s.authorizeUrl);
+ expect(u.searchParams.get('redirect_uri')).toBe('https://antigravity.google/oauth-callback');
+ expect(u.searchParams.get('scope')!.split(' ')).toEqual(['cloud-platform','userinfo.email','userinfo.profile','cclog','experimentsandconfigs','aicode'].map(x=>'https://www.googleapis.com/auth/'+x).concat('openid'));
+ await login.complete(s.sessionId,'synthetic-manual-code');const token=calls[0]!.init!.body as URLSearchParams;
+ expect(token.get('redirect_uri')).toBe('https://antigravity.google/oauth-callback');expect(token.get('code')).toBe('synthetic-manual-code');expect(token.get('code_verifier')).toBeTruthy();
+ }finally{login.dispose();}
+});
