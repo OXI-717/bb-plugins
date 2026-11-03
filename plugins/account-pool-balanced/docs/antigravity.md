@@ -8,10 +8,11 @@ are preserved. Selecting VPN-only for this provider remains an operator choice.
 ## Server login
 
 Use **Antigravity → Add → Sign in with Google** in Pooler. Open Google's consent
-page, authorize the subscription, then paste the final loopback callback URL
-(or its authorization code) into that same dialog. The remote browser may show
-an unreachable loopback page; the address contains the result. Treat it as a
-credential. Do not paste it into chat, an issue or a shell command.
+page, authorize the subscription, then paste the authorization code shown on
+Google's hosted callback page into that same dialog. Login uses the official
+CLI remote callback and scopes with the same native OAuth application. It does
+not require a localhost listener or copying the browser address. Treat the code
+as a credential. Do not paste it into chat, an issue or a shell command.
 
 The server validates callback origin/state, uses PKCE, and exchanges the code
 itself. Login sessions expire after ten minutes and are consumed once. Google

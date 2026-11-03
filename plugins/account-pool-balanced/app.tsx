@@ -2202,9 +2202,9 @@ function AccountPoolSettings() {
         })}>Завершить</Button>}>
           {loginDone?<p>Аккаунт добавлен: {loginDone}</p>:<>
             <p>Авторизуйте личную подписку Antigravity в Google. Вход сохранится на сервере пула.</p>
-            <p>После подтверждения браузер перейдёт на локальный адрес и может показать ошибку соединения. Скопируйте адрес целиком сюда. Можно также вставить выданный код.</p>
+            <p>После подтверждения Google покажет код авторизации. Скопируйте код в это поле и нажмите «Завершить». Адрес из строки браузера копировать не нужно.</p>
             <Button variant="outline" disabled={!agyStep||pending!==null} onClick={()=>agyStep&&run("agy-browser",async()=>{await rpc.call("agyLogin.openBrowser",{sessionId:agyStep.sessionId});})}>Открыть Google в Helium</Button>
-            <Input aria-label="Код или адрес после входа в Google" value={pastedCode} autoComplete="off" spellCheck={false} type="password" onChange={e=>setPastedCode(e.target.value)}/>
+            <Input aria-label="Код авторизации Google" value={pastedCode} autoComplete="off" spellCheck={false} type="password" onChange={e=>setPastedCode(e.target.value)}/>
             <p>Вход действует 10 минут. Нужна уже активированная личная подписка Antigravity; корпоративный вход не поддерживается.</p>
           </>}
           {error?<p role="alert">{error}</p>:null}
