@@ -37,6 +37,22 @@ export async function raceAbort<T>(promise:Promise<T>,signal:AbortSignal):Promis
   try{return await Promise.race([promise,stopped]);}finally{signal.removeEventListener('abort',reject);}
 }
 function object(value:unknown):value is Record<string,unknown>{return value!==null&&typeof value==='object'&&!Array.isArray(value);}
+function managedProject(value:Record<string,unknown>):string|null {
+  const raw=value.cloudaicompanionProject;
+  const id=typeof raw==='string'?raw:object(raw)?raw.id:null;
+  return typeof id==='string'&&id.trim()&&id.trim().length<=512?id.trim():null;
+}
+function eligibilityFailure(value:Record<string,unknown>):string {
+  const tier=Array.isArray(value.ineligibleTiers)?value.ineligibleTiers.find(t=>object(t)&&t.tierId==='free-tier'):null;
+  const code=object(tier)?tier.reasonCode:null;
+  // Never expose arbitrary provider messages, URLs or identifiers.
+  const reasons:Record<string,string>={
+    UNSUPPORTED_LOCATION:'Google reports that personal Antigravity onboarding is unavailable in the current location',
+    AGE_RESTRICTION:'Google reports an age restriction for personal Antigravity onboarding',
+    VALIDATION_REQUIRED:'Google requires account verification before personal Antigravity onboarding',
+  };
+  return typeof code==='string'&&Object.hasOwn(reasons,code)?reasons[code]!:'Google returned no managed Antigravity project or eligible personal tier; the account was not added';
+}
 export async function readAgyJson(response:Response,signal:AbortSignal):Promise<Record<string,unknown>> {
   const reader=response.body?.getReader();if(!reader)throw Error('Invalid authorization response');
   try {
@@ -114,14 +130,16 @@ export class AgyOAuthLogin {
         if(value.gcpManaged===true||[value.paidTier,value.currentTier].some(t=>object(t)&&t.usesGcpTos===true))throw Error('This login supports personal Antigravity subscriptions; enterprise authorization is not configured');
       };
       personal(subscription);
-      if(typeof subscription.cloudaicompanionProject!=='string'||!subscription.cloudaicompanionProject.trim()){
+      const initialSubscription=subscription;
+      if(!managedProject(subscription)){
         // An existing personal registration may already be visible on Daily.
         subscription=await request(AGY_CONSUMER_ENDPOINT+'/v1internal:loadCodeAssist',load);
         personal(subscription);
       }
-      if(typeof subscription.cloudaicompanionProject!=='string'||!subscription.cloudaicompanionProject.trim()){
+      if(!managedProject(subscription)){
         // Match native ACP onboarding; never infer eligibility from a missing project.
-        if(!Array.isArray(subscription.allowedTiers)||!subscription.allowedTiers.some(t=>object(t)&&t.id==='free-tier'))throw Error('Google did not return an Antigravity project or explicit personal onboarding eligibility');
+        const eligible=(value:Record<string,unknown>)=>Array.isArray(value.allowedTiers)&&value.allowedTiers.some(t=>object(t)&&t.id==='free-tier'&&t.usesGcpTos!==true&&t.userDefinedCloudaicompanionProject!==true);
+        if(!eligible(initialSubscription)&&!eligible(subscription))throw Error(eligibilityFailure(subscription));
         let operation=await request(AGY_CONSUMER_ENDPOINT+'/v1internal:onboardUser',{method:'POST',headers,body:JSON.stringify({tierId:'free-tier',metadata:{ideType:'ANTIGRAVITY'}})});
         for(let poll=0;operation.done!==true&&poll<30;poll++){
           if(operation.error)throw Error('Antigravity onboarding failed');
@@ -135,7 +153,7 @@ export class AgyOAuthLogin {
         subscription=await request(AGY_CONSUMER_ENDPOINT+'/v1internal:loadCodeAssist',load);
         personal(subscription);
       }
-      const project=subscription.cloudaicompanionProject;
+      const project=managedProject(subscription);
       if(typeof project!=='string'||!project.trim()||project.length>512)throw Error('Google did not return a valid Antigravity project after onboarding');
       const tier=object(subscription.paidTier)?subscription.paidTier:object(subscription.currentTier)?subscription.currentTier:null;
       if(tier?.usesGcpTos===true||subscription.gcpManaged===true)throw Error('This login supports personal Antigravity subscriptions; enterprise authorization is not configured');

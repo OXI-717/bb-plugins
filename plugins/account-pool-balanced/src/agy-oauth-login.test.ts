@@ -59,7 +59,7 @@ it('does not turn missing project or enterprise bootstrap into a personal subscr
    if(url.endsWith('/userinfo'))return Response.json({email:'fixture@example.com'});
    return Response.json(bootstrap);
   }});
-  try{const s=await login.start();await expect(login.complete(s.sessionId,'synthetic-code')).rejects.toThrow(/eligibility|enterprise/);}finally{login.dispose();}
+  try{const s=await login.start();await expect(login.complete(s.sessionId,'synthetic-code')).rejects.toThrow(/eligible|enterprise/);}finally{login.dispose();}
  }
 });
 it('browser URL is bound to an unexpired unused session',async()=>{
@@ -128,4 +128,36 @@ it('uses the official remote code callback and identical redirect in token excha
  await login.complete(s.sessionId,'synthetic-manual-code');const token=calls[0]!.init!.body as URLSearchParams;
  expect(token.get('redirect_uri')).toBe('https://antigravity.google/oauth-callback');expect(token.get('code')).toBe('synthetic-manual-code');expect(token.get('code_verifier')).toBeTruthy();
  }finally{login.dispose();}
+});
+
+it('accepts the structured managed project without unnecessary onboarding',async()=>{
+ const {login,calls}=onboardingFixture({cloudaicompanionProject:{id:' existing-project '},currentTier:{id:'personal'}});
+ try{const session=await login.start();const result=await login.complete(session.sessionId,'synthetic-code');
+ expect(result.secret.agy.projectId).toBe('existing-project');expect(calls).toHaveLength(3);expect(calls.some(u=>u.endsWith(':onboardUser'))).toBe(false);
+ }finally{login.dispose();}
+});
+it('accepts a structured project in the final onboarding response',async()=>{
+ const {login}=onboardingFixture({allowedTiers:[{id:'free-tier'}]},{done:true},{cloudaicompanionProject:{id:'final-project'}});
+ try{const session=await login.start();expect((await login.complete(session.sessionId,'synthetic-code')).secret.agy.projectId).toBe('final-project');}finally{login.dispose();}
+});
+it.each(['UNSUPPORTED_LOCATION','untrusted-private-reason'])('reports only allowlisted eligibility reasons: %s',async reasonCode=>{
+ const {login,calls}=onboardingFixture({ineligibleTiers:[{tierId:'free-tier',reasonCode,reasonMessage:'private-provider-message',validationUrl:'https://private.invalid'}]});
+ try{const session=await login.start();const error=await login.complete(session.sessionId,'synthetic-code').catch(e=>e as Error);
+ expect(error).toBeInstanceOf(Error);expect(String(error)).not.toMatch(/private|untrusted/);
+ expect(String(error)).toContain(reasonCode==='UNSUPPORTED_LOCATION'?'current location':'no managed');
+ expect(calls.some(u=>u.endsWith(':onboardUser'))).toBe(false);
+ }finally{login.dispose();}
+});
+
+it('retains explicit bootstrap eligibility when Daily has no registration yet',async()=>{
+ let onboarded=false;let onboardCalls=0;
+ const login=new AgyOAuthLogin({appConfig:async()=>config,fetch:async input=>{
+ const url=String(input);
+ if(url.endsWith('/token'))return Response.json({access_token:'synthetic',refresh_token:'synthetic',expires_in:3600});
+ if(url.endsWith('/userinfo'))return Response.json({email:'fixture@example.com'});
+ if(!url.includes('daily-'))return Response.json({allowedTiers:[{id:'free-tier'}]});
+ if(url.endsWith(':onboardUser')){onboarded=true;onboardCalls++;return Response.json({done:true});}
+ return Response.json(onboarded?{cloudaicompanionProject:{id:'registered-project'}}:{});
+ }});
+ try{const s=await login.start();expect((await login.complete(s.sessionId,'synthetic-code')).secret.agy.projectId).toBe('registered-project');expect(onboardCalls).toBe(1);}finally{login.dispose();}
 });
