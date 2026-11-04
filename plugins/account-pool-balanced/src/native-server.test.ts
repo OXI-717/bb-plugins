@@ -29,6 +29,11 @@ it('real registration binds CLI, BB env, authenticated HTTP and forbids the old 
     const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value as string;
     const response=await host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${token}`},body:JSON.stringify({action:'acquire',executorId:'native-one',sessionId:randomUUID()})});
     expect(response.status).toBe(200);const lease=await response.json();expect(lease.state).toBe('active');
+    expect((await host.harness.behavior.runCli(['bypass','thread-one'])).exitCode).toBe(0);
+    for(const input of [{action:'poll',leaseId:lease.leaseId},{action:'acquire',executorId:'native-one',sessionId:randomUUID()}]){
+      const bypassed=await host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${token}`},body:JSON.stringify(input)});
+      expect(bypassed.status).toBe(403);expect(await bypassed.json()).toEqual({error:'native-thread-bypassed'});
+    }
     const foreign=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'foreign',threadId:'thread-foreign'});
     const denied=await host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${foreign.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value}`},body:JSON.stringify({action:'poll',leaseId:lease.leaseId})});
     expect(denied.status).toBe(403);

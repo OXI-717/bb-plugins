@@ -1,5 +1,5 @@
 import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
-import {NativeSessions,nativeHttp} from './native-sessions.js';
+import {NativeSessions,NativeSessionError,nativeHttp} from './native-sessions.js';
 import {AgyOAuthLogin,readNativeAgyConfig,type AgyAppConfig} from "./agy-oauth-login.js";
 import { RequestJournal } from "./request-journal.js";
 import {createGuardNetworkCheck,bindGuardNetworkDecision,hostGuardDecisionSchema} from "./guard-network.js";
@@ -136,13 +136,14 @@ export function createAccountPoolPlugin(
     const accounts = new AccountStore(bb.storage.kv, secretDir);
     await accounts.initialize();
     const now = options.now ?? Date.now;
-    const nativeSessions=new NativeSessions(bb.storage.kv,now,async hostId=>{
+    const nativeSessions=new NativeSessions(bb.storage.kv,now,async(hostId,caller)=>{
       if(!(await routing.isProviderEnabled('agy')))throw Error('Native AGY routing disabled');
       if(!(await bb.sdk.hosts.list()).some(host=>host.id===hostId))throw Error('Native executor host not enrolled');
       if(currentSettings.vpnGuardEnabled){
         await createGuardNetworkCheck(async(provider,signal)=>bindGuardNetworkDecision(
           await bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal}),hostId))('agy');
       }else if(currentSettings.vpnOnlyProviders.includes('agy'))throw Error('Native protected host requires its Guard decision');
+      if(caller.threadId&&await routing.isBypassed(caller.threadId))throw new NativeSessionError(403,'native-thread-bypassed');
     });
     await nativeSessions.initialize();
     const hubTokens = new HubTokenStore(secretDir, now);

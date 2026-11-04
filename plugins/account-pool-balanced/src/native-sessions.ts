@@ -46,7 +46,7 @@ export class NativeSessions {
   private state:State={managed:false,executors:[],leases:[],events:[]};
   private tail:Promise<unknown>=Promise.resolve();
   private failed=false;
-  constructor(private storage:Storage,private now=Date.now,private admit: (hostId:string)=>Promise<void>=async()=>{}){}
+  constructor(private storage:Storage,private now=Date.now,private admit: (hostId:string,caller:NativeCaller)=>Promise<void>=async()=>{}){}
   async initialize(){
     const stored=await this.storage.get(KEY);
     this.state=stored==null?this.state:stateSchema.parse(stored);
@@ -117,7 +117,7 @@ export class NativeSessions {
       if(!executor||!this.allowed(executor,caller,input.action==='acquire'?input.kind:previous!.kind))throw new NativeSessionError(403,'native-executor-denied');
       checkedHost=executor.hostId;
       // Do network I/O outside the serialization lane, then repeat policy below.
-      await this.admit(checkedHost);
+      await this.admit(checkedHost,caller);
     }
     return this.serial(()=>{
     if(input.action==='release'){
