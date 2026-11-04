@@ -112,6 +112,7 @@ const DROPPED_RESPONSE_HEADERS = new Set([
 ]);
 
 interface HubOptions {
+  nativeAgyManaged?:()=>boolean;
   journal?: RequestJournal;
   route: string;
   agyModels?:(ids:string[])=>Promise<void>;
@@ -284,6 +285,7 @@ export class AccountPoolHub {
   }
   async handle(request: Request, provider: PoolProvider): Promise<Response> {
     const adapter = this.adapter(provider);
+    if(provider==='agy'&&this.options.nativeAgyManaged?.())return this.errorResponse(adapter,request,410,'Use the managed official Antigravity executor.');
     const token = this.requestToken(request, adapter);
     const context = this.options.hubTokens.authenticateContext
       ? await this.options.hubTokens.authenticateContext(token)
@@ -319,6 +321,7 @@ export class AccountPoolHub {
   async refreshUsage(accountId?: string, force = false, reportErrors = false): Promise<void> {
     const accounts = (await this.options.accounts.list()).filter(
       (account) =>
+        !(account.provider==='agy'&&this.options.nativeAgyManaged?.())&&
         (account.enabled || (force && accountId !== undefined)) &&
         (account.kind === "oauth" ||
           this.adapter(account.provider).refreshesApiKeyUsage === true) &&
@@ -1713,6 +1716,7 @@ export class AccountPoolHub {
 }
 
 export function createHub(options: {
+  nativeAgyManaged?:()=>boolean;
   route: string;
   agyModels?:(ids:string[])=>Promise<void>;
   accounts: AccountStore;
@@ -1819,6 +1823,7 @@ export function createHub(options: {
     ["devin", createDevinAdapter()],
   ]);
   return new AccountPoolHub({
+    nativeAgyManaged: options.nativeAgyManaged,
     route: options.route,
     accounts: options.accounts,
     quotas: options.quotas,
