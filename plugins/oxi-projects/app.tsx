@@ -1,3 +1,4 @@
+import {ThreadProjectBoundary} from './thread-project-boundary';
 import {registerMachineMarks} from './machine-marks-view';
 import {ProjectTaskLink} from './task-links-view';
 import {taskItemSubPath, parseTaskPanelTarget, TASK_DETAIL_PANEL_ID} from './task-links';
@@ -6813,34 +6814,11 @@ function ProjectTaskDetailPanel(props: PluginThreadPanelProps) {
 }
 
 function TaskboardThreadPanel({ threadId }: PluginThreadPanelProps) {
-  const rpc = useRpc<TaskboardRpcContract>();
-  const { projectId: contextProjectId, threadId: contextThreadId } =
-    useBbContext();
-  const fallbackProjectId =
-    contextThreadId === threadId ? contextProjectId : null;
-  const [projectId, setProjectId] = useState<string | null | undefined>();
-
-  useEffect(() => {
-    let cancelled = false;
-    setProjectId(undefined);
-    void rpc
-      .call('threadProject', { threadId })
-      .then(result => {
-        if (!cancelled) setProjectId(result.projectId);
-      })
-      .catch(nextError => {
-        if (cancelled) return;
-        setProjectId(fallbackProjectId);
-        toast.error('Could not resolve this thread’s Taskboard project.', {
-          description: describeError(nextError)
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [fallbackProjectId, rpc, threadId]);
-
-  return <TaskboardRightPanel projectId={projectId} />;
+  const { projectId: contextProjectId, threadId: contextThreadId } = useBbContext();
+  const fallbackProjectId = contextThreadId === threadId ? contextProjectId : null;
+  return <ThreadProjectBoundary threadId={threadId} fallbackProjectId={fallbackProjectId}>
+    {projectId => <TaskboardRightPanel projectId={projectId} />}
+  </ThreadProjectBoundary>;
 }
 
 function TaskboardNewThreadPanel({ projectId }: PluginNewThreadPanelProps) {
@@ -6848,7 +6826,7 @@ function TaskboardNewThreadPanel({ projectId }: PluginNewThreadPanelProps) {
 }
 
 function TaskboardThreadHeaderAction({
-  threadId
+  threadId, isCompactViewport
 }: PluginThreadHeaderActionProps) {
   const { openThreadPanel } = useBbNavigate();
   const autoOpenedThreadRef = useRef<string | null>(null);
@@ -6868,6 +6846,7 @@ function TaskboardThreadHeaderAction({
 
   useEffect(() => {
     if (
+      isCompactViewport ||
       !loadRightPanelPinned() ||
       autoOpenedThreadRef.current === threadId
     ) {
@@ -6876,7 +6855,7 @@ function TaskboardThreadHeaderAction({
     autoOpenedThreadRef.current = threadId;
     const timeout = window.setTimeout(() => openTaskboard(false), 0);
     return () => window.clearTimeout(timeout);
-  }, [openTaskboard, threadId]);
+  }, [isCompactViewport, openTaskboard, threadId]);
 
   // Restore a panel pinned from its own controls without adding a header button.
   return null;
