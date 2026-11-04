@@ -35,7 +35,8 @@ Model discovery has no BB thread or project. An explicit `catalogCallerIds` list
 authorizes separate existing project-bound catalog clients, never task clients.
 The private host profile supplies that catalog credential; no null-project task
 token is minted. The wrapper's catalog-only ACP allows initialize/new/list/close,
-blocks prompt/auth/resume/tool callbacks and MCP servers, and stops within 30s.
+blocks prompt/auth/resume/tool callbacks and MCP servers. Admission and metadata
+share a 30s deadline, followed by bounded process-stop/release cleanup.
 The server binds catalog leases to kind=catalog; that credential or lease cannot
 be upgraded into task admission. Ambiguous/missing host configuration refuses.
 
