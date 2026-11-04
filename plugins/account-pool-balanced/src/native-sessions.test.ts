@@ -42,6 +42,24 @@ describe('official native session admission',()=>{
     await expect(sessions.request(caller,{...input,executorId:'other'})).rejects.toThrow('native-session-bound');
     expect((await sessions.snapshot()).leases).toHaveLength(1);
   });
+  it('catalog caller authority never grants tasks or changes an existing lease kind',async()=>{
+    const {sessions}=await fixture();
+    await sessions.configure({...executor,catalogCallerIds:['catalog-one']});
+    const catalog={hostId:'catalog-one',projectId:'project-one'};
+    expect(await sessions.catalogExecutorFor('mac')).toBe(executor.id);
+    expect(await sessions.catalogExecutorFor('foreign')).toBeNull();
+    await expect(sessions.request(catalog,acquire())).rejects.toThrow('native-executor-denied');
+    await expect(sessions.request(caller,{...acquire(),kind:'catalog'})).rejects.toThrow('native-executor-denied');
+    await expect(sessions.request({...catalog,projectId:'foreign'},{...acquire(),kind:'catalog'})).rejects.toThrow('native-executor-denied');
+    const input={...acquire(),kind:'catalog'};
+    const lease=await sessions.request(catalog,input);expect(lease.state).toBe('active');
+    await expect(sessions.request(caller,poll(lease.leaseId!))).rejects.toThrow('native-lease-denied');
+    expect((await sessions.request(catalog,poll(lease.leaseId!))).state).toBe('active');
+    await sessions.request(catalog,release(lease.leaseId!));
+    await sessions.configure({...executor,catalogCallerIds:['mac']});
+    await sessions.request(caller,{...input,sessionId:input.sessionId});
+    await expect(sessions.request(caller,{...input,kind:'task'})).rejects.toThrow('native-session-bound');
+  });
   it('expiry quarantines active capacity instead of starting a competing process',async()=>{
     const {sessions,clock}=await fixture();const first=await sessions.request(caller,acquire());
     clock(1001+NATIVE_LEASE_MS);

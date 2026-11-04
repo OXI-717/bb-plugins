@@ -12,13 +12,20 @@ it('real registration binds CLI, BB env, authenticated HTTP and forbids the old 
   const host=createFakePluginHost({pluginId:'account-pool',dataDir,sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
   try{
     await createAccountPoolPlugin({fetch:upstream})(host.bb);
-    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],catalogCallerIds:['catalog-client'],projectIds:['project-one'],enabled:true};
     expect((await host.harness.behavior.runCli(['native','configure',JSON.stringify(executor)])).exitCode).toBe(0);
     expect((await host.harness.behavior.runCli(['native','mode','managed'])).exitCode).toBe(0);
     const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
     expect(env.find(e=>e.name==='OXI_AGY_NATIVE_REQUIRED')?.value).toBe('1');
     expect(env.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('native-one');
     expect(env.some(e=>e.name==='OXI_AGY_POOL_AUTH_TOKEN')).toBe(false);
+    // Real discovery sends null scope; the fake host helper types only threads.
+    const discoveryContext={hostId:'host-one',projectId:null,threadId:null};
+    const discovery=await host.harness.behavior.resolveProviderEnv('acp-agy',discoveryContext as unknown as Parameters<typeof host.harness.behavior.resolveProviderEnv>[1]);
+    expect(discovery.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('native-one');
+    expect(discovery.find(e=>e.name==='OXI_AGY_NATIVE_CATALOG_ONLY')?.value).toBe('1');
+    expect(discovery.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')?.value).toBe('');
+    expect(env.find(e=>e.name==='OXI_AGY_NATIVE_CATALOG_ONLY')?.value).toBe('0');
     const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value as string;
     const response=await host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${token}`},body:JSON.stringify({action:'acquire',executorId:'native-one',sessionId:randomUUID()})});
     expect(response.status).toBe(200);const lease=await response.json();expect(lease.state).toBe('active');

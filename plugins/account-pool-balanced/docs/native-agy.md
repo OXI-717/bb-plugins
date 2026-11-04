@@ -31,6 +31,14 @@ standalone callers require existing server-issued project/purpose-bound clients;
 project IDs and caller-provided host headers do not create authority. Every
 executor host must be enrolled. Machine login contexts remain host-local.
 
+Model discovery has no BB thread or project. An explicit `catalogCallerIds` list
+authorizes separate existing project-bound catalog clients, never task clients.
+The private host profile supplies that catalog credential; no null-project task
+token is minted. The wrapper's catalog-only ACP allows initialize/new/list/close,
+blocks prompt/auth/resume/tool callbacks and MCP servers, and stops within 30s.
+The server binds catalog leases to kind=catalog; that credential or lease cannot
+be upgraded into task admission. Ambiguous/missing host configuration refuses.
+
 Enable a validated executor by configuring that complete record with enabled=true.
 After host setup and live acceptance, `bb pool native mode managed` activates the
 new provider environment and disables the legacy AGY OAuth/model-proxy paths and
@@ -47,7 +55,8 @@ remote machine's egress.
 
 POST `/native/agy` uses the existing project/purpose bearer. Actions:
 
-- `acquire`: executorId and a fresh UUID sessionId; returns queued or active,
+- `acquire`: executorId, a fresh UUID sessionId and kind=task (default) or catalog;
+  returns queued or active,
   leaseId, hostId, accountId, ttlMs=30000 and heartbeatMs=5000.
 - `poll`: leaseId; repeats authorization and host network checks.
 - `release`: leaseId and exactly one of stopped=true or completed=true.

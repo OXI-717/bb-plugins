@@ -6,6 +6,7 @@ export const nativeExecutorSchema = z.object({
   id, accountId: id, hostId: id,
   // These are server-authenticated callers, never a host/project header.
   callerIds: z.array(id).min(1).max(16),
+  catalogCallerIds: z.array(id).max(16).default([]),
   projectIds: z.array(id).min(1).max(32),
   autopilotAllowed: z.boolean().default(false),
   enabled: z.boolean().default(false),
@@ -15,6 +16,7 @@ export interface NativeCaller { hostId: string; projectId: string | null; thread
 function sameCaller(a:NativeCaller,b:NativeCaller){return a.hostId===b.hostId&&a.projectId===b.projectId&&a.threadId===b.threadId&&a.purpose===b.purpose;}
 const leaseSchema = z.object({
   id: z.string().uuid(), sessionId: z.string().uuid(), executor: nativeExecutorSchema,
+  kind: z.enum(['task','catalog']).default('task'),
   caller: z.object({hostId:id,projectId:id.nullable(),threadId:id.optional(),purpose:z.literal('autopilot').optional()}).strict(),
   state: z.enum(['queued','active','uncertain']), deadline: z.number(), createdAt: z.number(),
 }).strict();
@@ -29,7 +31,7 @@ interface Storage {get<T>(key:string):Promise<T|null|undefined>;set(key:string,v
 const KEY='native-agy-sessions-v1';
 export const NATIVE_LEASE_MS=30_000;
 export const nativeRequestSchema=z.discriminatedUnion('action',[
-  z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid()}).strict(),
+  z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid(),kind:z.enum(['task','catalog']).default('task')}).strict(),
   z.object({action:z.literal('poll'),leaseId:z.string().uuid()}).strict(),
   z.object({action:z.literal('release'),leaseId:z.string().uuid(),stopped:z.literal(true).optional(),completed:z.literal(true).optional()}).strict()
     .refine(value=>(value.stopped===true)!==(value.completed===true)),
@@ -77,13 +79,17 @@ export class NativeSessions {
     this.state.leases=this.state.leases.filter(l=>l.state!=='queued'||l.deadline>now);
     this.state.events=this.state.events.filter(e=>e.at>now-14*86400000);
   }
-  private allowed(executor:Executor,caller:NativeCaller){
+  private allowed(executor:Executor,caller:NativeCaller,kind:'task'|'catalog'='task'){
     return executor.enabled&&caller.projectId!==null&&executor.projectIds.includes(caller.projectId)&&
-      executor.callerIds.includes(caller.hostId)&&(!caller.purpose||executor.autopilotAllowed);
+      (kind==='catalog'?executor.catalogCallerIds:executor.callerIds).includes(caller.hostId)&&(!caller.purpose||executor.autopilotAllowed);
   }
   async available(caller:NativeCaller){return this.serial(()=>this.state.managed&&this.state.executors.some(e=>this.allowed(e,caller)));}
   async executorFor(caller:NativeCaller){return this.serial(()=>{
     const matches=this.state.executors.filter(e=>this.allowed(e,caller));
+    return matches.length===1?matches[0].id:null;
+  });}
+  async catalogExecutorFor(hostId:string){return this.serial(()=>{
+    const matches=this.state.executors.filter(e=>e.enabled&&e.hostId===hostId&&e.catalogCallerIds.length>0);
     return matches.length===1?matches[0].id:null;
   });}
   async configure(value:unknown){const executor=nativeExecutorSchema.parse(value);return this.serial(()=>{
@@ -95,7 +101,7 @@ export class NativeSessions {
   });}
   async setManaged(managed:boolean){return this.serial(()=>{this.state.managed=managed;return {managed};});}
   async snapshot(){return this.serial(()=>({managed:this.state.managed,executors:this.state.executors,
-    leases:this.state.leases.map(({id,executor,caller,state,deadline,createdAt})=>({id,executorId:executor.id,accountId:executor.accountId,hostId:executor.hostId,projectId:caller.projectId,state,deadline,createdAt})),
+    leases:this.state.leases.map(({id,executor,caller,kind,state,deadline,createdAt})=>({id,executorId:executor.id,accountId:executor.accountId,hostId:executor.hostId,projectId:caller.projectId,kind,state,deadline,createdAt})),
     events:this.state.events,budget:'unknown' as const}));}
   async attestStopped(leaseId:string){return this.serial(()=>{
     const lease=this.state.leases.find(l=>l.id===leaseId);
@@ -106,8 +112,9 @@ export class NativeSessions {
     let checkedHost:string|undefined;
     if(input.action!=='release'){
       if(!this.state.managed)throw new NativeSessionError(503,'native-not-managed');
-      const executor=input.action==='acquire'?this.state.executors.find(e=>e.id===input.executorId):this.owned(caller,input.leaseId).executor;
-      if(!executor||!this.allowed(executor,caller))throw new NativeSessionError(403,'native-executor-denied');
+      const previous=input.action==='poll'?this.owned(caller,input.leaseId):undefined;
+      const executor=input.action==='acquire'?this.state.executors.find(e=>e.id===input.executorId):previous!.executor;
+      if(!executor||!this.allowed(executor,caller,input.action==='acquire'?input.kind:previous!.kind))throw new NativeSessionError(403,'native-executor-denied');
       checkedHost=executor.hostId;
       // Do network I/O outside the serialization lane, then repeat policy below.
       await this.admit(checkedHost);
@@ -123,21 +130,21 @@ export class NativeSessions {
     let lease:Lease;
     if(input.action==='acquire'){
       const executor=this.state.executors.find(e=>e.id===input.executorId);
-      if(!executor||!this.allowed(executor,caller))throw new NativeSessionError(403,'native-executor-denied');
+      if(!executor||!this.allowed(executor,caller,input.kind))throw new NativeSessionError(403,'native-executor-denied');
       // Idempotent acquisition prevents losing a slot on an uncertain response.
       const existing=this.state.leases.find(l=>l.sessionId===input.sessionId&&sameCaller(l.caller,caller));
-      if(existing&&existing.executor.id!==executor.id)throw new NativeSessionError(409,'native-session-bound');
+      if(existing&&(existing.executor.id!==executor.id||existing.kind!==input.kind))throw new NativeSessionError(409,'native-session-bound');
       if(existing)lease=existing;
       else{
         if(this.state.leases.length>=128)throw new NativeSessionError(429,'native-queue-full');
         const now=this.now();
-        lease={id:randomUUID(),sessionId:input.sessionId,executor:structuredClone(executor),caller:structuredClone(caller),state:'queued',createdAt:now,deadline:now+NATIVE_LEASE_MS};
+        lease={id:randomUUID(),sessionId:input.sessionId,executor:structuredClone(executor),caller:structuredClone(caller),kind:input.kind,state:'queued',createdAt:now,deadline:now+NATIVE_LEASE_MS};
         this.state.leases.push(lease);this.event(lease,'queued');
       }
     }else lease=this.owned(caller,input.leaseId);
     if(lease.state==='uncertain')throw new NativeSessionError(409,'native-stop-unconfirmed');
     const executor=this.state.executors.find(e=>e.id===lease.executor.id);
-    if(!executor||executor.hostId!==checkedHost||!this.allowed(executor,caller))throw new NativeSessionError(403,'native-executor-denied');
+    if(!executor||executor.hostId!==checkedHost||!this.allowed(executor,caller,lease.kind))throw new NativeSessionError(403,'native-executor-denied');
     const same=this.state.leases.filter(l=>l.executor.accountId===lease.executor.accountId);
     // One common account lane across all machines and purposes. Never preempt.
     if(lease.state==='queued'&&!same.some(l=>l.state!=='queued')&&same.find(l=>l.state==='queued')===lease){lease.state='active';this.event(lease,'active');}

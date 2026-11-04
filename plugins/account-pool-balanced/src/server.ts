@@ -421,12 +421,15 @@ export function createAccountPoolPlugin(
       token=>combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token)),{auth:'none'});
     bb.providers.experimental_contributeEnv('acp-agy',async context=>{
       if(nativeSessions.managed()){
-        const executorId=!(await operations.isRoutingEnabled('agy'))||await isThreadBypassed(context)?null:await nativeSessions.executorFor(context);
+        const catalog=context.threadId===null;
+        const executorId=!(await operations.isRoutingEnabled('agy'))||await isThreadBypassed(context)?null:
+          catalog?await nativeSessions.catalogExecutorFor(context.hostId):await nativeSessions.executorFor(context);
         // Missing admission never restores local fallback or old gateway auth.
         return [{name:'OXI_AGY_NATIVE_REQUIRED',value:'1',reason:'Official native AGY managed by Pooler'},
           {name:'OXI_AGY_NATIVE_EXECUTOR',value:executorId??'',reason:'Explicit host and project executor'},
           {name:'OXI_AGY_NATIVE_URL',value:{serverPath:`${hubBasePath(bb.pluginId)}/native/agy`},reason:'Session admission only; no Google tokens'},
-          {name:'OXI_AGY_NATIVE_TOKEN',value:await scopedHubToken(context),reason:'Pooler admission credential, never sent to AGY'}];
+          {name:'OXI_AGY_NATIVE_CATALOG_ONLY',value:catalog?'1':'0',reason:'Catalog admission never grants task access'},
+          {name:'OXI_AGY_NATIVE_TOKEN',value:catalog?'':await scopedHubToken(context),reason:'Task credential or explicit private catalog pointer; never sent to AGY'}];
       }
       if(!(await operations.isRoutingEnabled('agy'))||await isThreadBypassed(context))return [];
       const token=await scopedHubToken(context);
@@ -436,7 +439,7 @@ export function createAccountPoolPlugin(
     bb.providers.experimental_contributeEnvHealth('acp-agy',async context=>{
       if(!nativeSessions.managed())return proxiedHealth('agy',context);
       const projectId='projectId' in context&&typeof context.projectId==='string'?context.projectId:null;
-      const executor=projectId?await nativeSessions.executorFor({hostId:context.hostId,projectId}):null;
+      const executor=projectId?await nativeSessions.executorFor({hostId:context.hostId,projectId}):await nativeSessions.catalogExecutorFor(context.hostId);
       return executor?null:
         {status:'unavailable' as const,label:'Account Pooler',statusMessage:'No unique enabled native executor for this host and project.'};
     });
