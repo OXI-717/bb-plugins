@@ -6,6 +6,7 @@ import {loadPluginApp} from '@get-bb/plugin-sdk/testing/app';
 import React from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import plugin from './dist/test/server.js';
+import {createJournal} from './dist/test/journal.js';
 
 const route = {
   projectId: 'example-project', hostId: 'example-host', vaultId: 'example-vault',
@@ -14,7 +15,7 @@ const route = {
 };
 const context = {projectId: route.projectId, threadId: 'example-thread'};
 
-function setup(t, overrides = {}) {
+function setup(t, overrides = {}, callHost) {
   const host = createFakePluginHost({
     pluginId: 'oxi-op', settings: {routes: JSON.stringify([{...route, ...overrides}])},
     sdk: {
@@ -22,8 +23,8 @@ function setup(t, overrides = {}) {
       threads: {get: async ({threadId}) => ({id: threadId, projectId: route.projectId, title: 'Example session'})},
       hosts: {get: async ({hostId}) => ({id: hostId, name: 'Example machine'})},
     },
-    experimental_callHostRpc: ({method}) => method === 'store'
-      ? {itemId: 'example-item', verified: true} : method === 'check' ? {authorized: true} : {completed: true},
+    experimental_callHostRpc: callHost ?? (({method}) => method === 'store'
+      ? {itemId: 'example-item', verified: true} : method === 'check' ? {authorized: true} : {completed: true}),
   });
   plugin(host.bb);
   t.after(() => host.harness.lifecycle.dispose());
@@ -65,7 +66,7 @@ test('intake shows its BB form before any op authentication and cancellation doe
 
 test('an unconfigured project cannot request a form or call a host', async t => {
   const h = setup(t);
-  await assert.rejects(h.behavior.callAgentTool('oxi_op_store', {title: 'Example'}, {...context, projectId: 'other-project'}));
+  assert.equal(JSON.parse(await h.behavior.callAgentTool('oxi_op_store', {title: 'Example'}, {...context, projectId: 'other-project'})).completed, false);
   assert.equal(h.inspection.pendingInteractions.length, 0);
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
 });
@@ -83,9 +84,97 @@ test('owner registry setup shows a BB approval before any desktop CLI call', asy
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
 });
 
+test('completed intake is recoverable without retaining the submitted password', async t => {
+  const h = setup(t);
+  const pending = h.behavior.callAgentTool('oxi_op_store', {title: 'Example'}, context);
+  await setImmediate();
+  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {password: 'synthetic-sensitive-value'});
+  await pending;
+  const response = await h.behavior.runCli(['history'], context);
+  const rows = JSON.parse(response.stdout);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].state, 'completed');
+  assert.equal(rows[0].label, 'Example');
+  assert.deepEqual(rows[0].result, {itemId: 'example-item', verified: true});
+  assert(!response.stdout.includes('synthetic-sensitive-value'));
+  assert.equal(JSON.parse((await h.behavior.runCli(['history'], {...context, threadId: 'other-thread'})).stdout).length, 0);
+  const reloaded = await h.lifecycle.reload(plugin);
+  t.after(() => reloaded.harness.lifecycle.dispose());
+  assert.deepEqual(JSON.parse((await reloaded.harness.behavior.runCli(['history'], context)).stdout), rows);
+});
+
+test('restart marks unfinished work as interrupted and concurrent records cannot overwrite each other', async () => {
+  const data = new Map();
+  const storage = {get: async key => data.get(key), set: async (key, value) => data.set(key, structuredClone(value)), list: async prefix => [...data.keys()].filter(key => key.startsWith(prefix))};
+  const first = createJournal(storage);
+  let finish;
+  const pending = first.run('run', 'default', context, async progress => {
+    await progress('running', true);
+    return new Promise(resolve => {finish = resolve;});
+  });
+  await setImmediate();
+  await first.run('run', 'default', context, async () => JSON.stringify({completed: true}));
+  const restarted = createJournal(storage);
+  const rows = await restarted.list(context);
+  assert.equal(rows.length, 2);
+  assert(rows.some(row => row.state === 'completed'));
+  assert(rows.some(row => row.state === 'interrupted' && row.approvedAt));
+  finish(JSON.stringify({completed: true}));
+  await pending;
+});
+
+test('approval and execution states remain visible while the host is busy', async t => {
+  let finish;
+  const h = setup(t, {}, () => new Promise(resolve => {finish = resolve;}));
+  const pending = h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context);
+  await setImmediate();
+  let rows = JSON.parse((await h.behavior.runCli(['history'], context)).stdout);
+  assert.equal(rows[0].state, 'awaiting-approval');
+  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {approved: true});
+  await setImmediate();
+  rows = JSON.parse((await h.behavior.runCli(['history'], context)).stdout);
+  assert.equal(rows[0].state, 'running');
+  assert(rows[0].approvedAt);
+  finish({completed: true});
+  await pending;
+  rows = JSON.parse((await h.behavior.runCli(['history'], context)).stdout);
+  assert.equal(rows[0].state, 'completed');
+});
+
+test('uncertain host failures are recorded without raw exception text and cancellation is distinct', async t => {
+  const h = setup(t, {}, () => {throw new Error('synthetic-sensitive-value');});
+  const pending = h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context);
+  await setImmediate();
+  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {approved: true});
+  const outcome = JSON.parse(await pending);
+  assert.equal(outcome.completed, false);
+  assert(!JSON.stringify(outcome).includes('synthetic-sensitive-value'));
+  let response = await h.behavior.runCli(['history'], context);
+  assert.equal(JSON.parse(response.stdout)[0].state, 'needs-review');
+  assert(!response.stdout.includes('synthetic-sensitive-value'));
+  const cancelled = h.behavior.callAgentTool('oxi_op_store', {title: 'Other example'}, context);
+  await setImmediate();
+  h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);
+  await cancelled;
+  response = await h.behavior.runCli(['history'], context);
+  assert(JSON.parse(response.stdout).some(x => x.state === 'cancelled'));
+});
+
+test('desktop check and verification require contextual approval before contacting op', async t => {
+  for (const command of ['check', 'verify']) {
+    const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined});
+    const pending = h.behavior.runCli([command], context);
+    await setImmediate();
+    assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+    assert.equal(h.inspection.pendingInteractions.length, 1);
+    h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);
+    await pending;
+  }
+});
+
 test('critical operations wait for explicit approval and reject unconfigured commands', async t => {
   const h = setup(t);
-  await assert.rejects(h.behavior.callAgentTool('oxi_op_run', {operation: 'unknown'}, context));
+  assert.equal(JSON.parse(await h.behavior.callAgentTool('oxi_op_run', {operation: 'unknown'}, context)).completed, false);
   const pending = h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context);
   await setImmediate();
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
@@ -158,7 +247,7 @@ test('one project can separate routine and administrative vault access', async t
     {...route, profile: 'routine', requireApproval: false},
     {...route, profile: 'admin', vaultId: 'example-admin-vault'},
   ])});
-  await assert.rejects(h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context));
+  assert.equal(JSON.parse(await h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context)).completed, false);
   await h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation', profile: 'routine'}, context);
   const pending = h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation', profile: 'admin'}, context);
   await setImmediate();

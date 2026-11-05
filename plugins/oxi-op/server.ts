@@ -1,9 +1,16 @@
 import { defineCli, cliCommand, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { contract, resolveRoute, type Route } from './contract.js';
+import {createJournal} from './journal.js';
 export default function plugin(bb: BbPluginApi) {
     const settings = bb.settings.define({ routes: { type: 'string', label: 'Project vault routes (JSON)', default: '[]', experimental_multiline: true }, serviceAccountToken: { type: 'string', label: 'Scoped service account token', secret: true, default: '' } });
     const host = bb.hosts.experimental_client({ contract });
+    const journal = createJournal(bb.storage.kv);
+    // BB resumes an idle agent for a fulfilled tool result, including a reported failure.
+    const toolOutcome = async (work: () => Promise<string>) => {
+        try {return await work();}
+        catch {return JSON.stringify({completed: false, message: 'Operation failed. Inspect oxi_op_history before retrying; no secret values are included.'});}
+    };
     const accessFor = async (projectId: string, profile: string) => { const values = await settings.get(); const route = resolveRoute(JSON.parse(values.routes), projectId, profile); return { route, ...(route.tokenSetting ? { serviceAccountToken: values.serviceAccountToken } : {}) }; };
     async function displayContext(route: Route, ctx: {projectId: string; threadId: string; signal?: AbortSignal}) {
         const [project, thread, machine] = await Promise.allSettled([
@@ -25,14 +32,18 @@ export default function plugin(bb: BbPluginApi) {
         const access = await accessFor(ctx.projectId, profile);
         const { route } = access;
         const display = await displayContext(route, ctx);
+        return journal.run('store', profile, ctx, async progress => {
+        await progress('awaiting-approval');
         const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', title: 'Сохранить пароль: ' + title, payload: { mode: 'store', title, username, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Создать запись и проверить сохранённый пароль', secrets: [{field: 'password', item: title}] }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal });
         if (result.outcome !== 'submitted')
             return 'Cancelled; no credential stored';
         const value = z.object({ password: z.string().min(1).max(16000) }).strict().parse(result.value);
+        await progress('running', true);
         return JSON.stringify(await host.call('store', { ...access, title, username, password: value.password }, { hostId: route.hostId, signal: ctx.signal }));
+        }, title);
     }
     const profileParameter = z.string().min(1).max(80).default('default');
-    bb.agents.registerTool({ name: 'oxi_op_store', description: 'Request a credential in a private BB form and save it to the current project vault and configured access profile. Passwords must never be supplied in tool arguments. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ title: z.string().min(1).max(160), username: z.string().max(200).default(''), profile: profileParameter }).strict(), execute: ({ title, username, profile }, ctx) => store(title, username, profile, ctx) });
+    bb.agents.registerTool({ name: 'oxi_op_store', description: 'Request a credential in a private BB form and save it to the current project vault and configured access profile. Passwords must never be supplied in tool arguments. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ title: z.string().min(1).max(160), username: z.string().max(200).default(''), profile: profileParameter }).strict(), execute: ({ title, username, profile }, ctx) => toolOutcome(() => store(title, username, profile, ctx)) });
     async function runConfigured(operation: string, profile: string, ctx: {threadId: string; projectId: string; signal?: AbortSignal}) {
             const access = await accessFor(ctx.projectId, profile);
             const { route } = access;
@@ -40,29 +51,55 @@ export default function plugin(bb: BbPluginApi) {
             if (matches.length !== 1)
                 throw new Error('Operation is not configured');
             const configured = matches[0];
+            return journal.run('run', profile, ctx, async progress => {
             if (route.requireApproval) {
                 const display = await displayContext(route, ctx);
+                await progress('awaiting-approval');
                 const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', title: 'Использовать секрет: ' + (configured.label ?? configured.purpose ?? operation), payload: { mode: 'approve', title: configured.label ?? configured.purpose ?? operation, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: configured.purpose ?? configured.name, secrets: Object.entries(configured.references).map(([variable, reference]) => ({variable, reference, item: configured.referenceLabels?.[variable]?.item ?? 'Название записи не настроено', field: configured.referenceLabels?.[variable]?.field ?? reference.split('/').at(-1) ?? 'Поле не указано'})) }, describeSubmission: () => ({ title: 'Credential use approved' }) }, { signal: ctx.signal });
                 if (result.outcome !== 'submitted' || z.object({ approved: z.literal(true) }).strict().safeParse(result.value).success === false)
                     return 'Cancelled';
             }
+            await progress('running', route.requireApproval);
             return JSON.stringify(await host.call('run', { ...access, operation }, { hostId: route.hostId, signal: ctx.signal }));
+            }, configured.label ?? configured.name);
     }
-    bb.agents.registerTool({ name: 'oxi_op_run', description: 'Run an owner-configured operation using current project secrets. Only a completion result is returned; command output and secret values are suppressed. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ operation: z.string().min(1), profile: profileParameter }).strict(), execute: ({operation, profile}, ctx) => runConfigured(operation, profile, ctx) });
+    bb.agents.registerTool({ name: 'oxi_op_run', description: 'Run an owner-configured operation using current project secrets. Only a completion result is returned; command output and secret values are suppressed. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ operation: z.string().min(1), profile: profileParameter }).strict(), execute: ({operation, profile}, ctx) => toolOutcome(() => runConfigured(operation, profile, ctx)) });
+    async function inspectVault(kind: 'inventory' | 'check' | 'verify', profile: string, registryTitle: string | undefined, ctx: {projectId: string; threadId: string; signal?: AbortSignal}) {
+        const access = await accessFor(ctx.projectId, profile);
+        const {route} = access;
+        if (kind === 'inventory' && route.authentication !== 'desktop') throw new Error('Registry inventory requires owner desktop access');
+        const title = kind === 'inventory' ? 'Сверка служебных сейфов' : kind === 'verify' ? 'Проверка записи и чтения в сейфе' : 'Проверка доступа к сейфу';
+        const purpose = kind === 'inventory'
+            ? 'Прочитать только служебный реестр и сопоставить названия и ID указанных в нём сейфов. Содержимое проектных и личных записей не читается; права не меняются.'
+            : kind === 'verify' ? 'Создать одну случайную тестовую запись, независимо сравнить её поля и удалить только эту запись.' : 'Проверить доступ к настроенному сейфу без чтения его записей.';
+        return journal.run(kind, profile, ctx, async progress => {
+            const approval = route.requireApproval || route.authentication === 'desktop';
+            if (approval) {
+                const display = await displayContext(route, ctx);
+                await progress('awaiting-approval');
+                const decision = await bb.ui.requestInput({threadId: ctx.threadId, rendererId: 'credential', title: 'Настройка 1Password: ' + title.toLowerCase(), payload: {mode: 'approve', title, purpose, profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', secrets: registryTitle ? [{item: registryTitle, field: 'Служебная заметка'}] : []}, describeSubmission: () => ({title: 'Vault operation approved (no credential values)'})}, {signal: ctx.signal});
+                if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return 'Cancelled';
+            }
+            await progress('running', approval);
+            if (kind === 'inventory') return JSON.stringify(await host.call('inventory', {route, registryTitle: registryTitle!}, {hostId: route.hostId, signal: ctx.signal}));
+            if (kind === 'check') return JSON.stringify(await host.call('check', access, {hostId: route.hostId, signal: ctx.signal}));
+            const result = await host.call('verify', access, {hostId: route.hostId, signal: ctx.signal});
+            const verification = {...result, at: new Date().toISOString()};
+            await bb.storage.kv.set('verification:' + ctx.projectId + ':' + profile, verification);
+            return JSON.stringify(verification);
+        }, title);
+    }
+    bb.agents.registerTool({name: 'oxi_op_inventory', description: 'Ask the owner to approve reading the configured service registry before desktop CLI authorization. Returns only vault metadata. Completion resumes this session through the native BB tool lifecycle.', parameters: z.object({profile: profileParameter, title: z.string().min(1).max(160)}).strict(), execute: ({profile, title}, ctx) => toolOutcome(() => inspectVault('inventory', profile, title, ctx))});
+    bb.agents.registerTool({name: 'oxi_op_history', description: 'Recover this project and session operation states after confirmation, interruption or restart. Contains no credential values. Running or needs-review does not prove that a write was undone; inspect before retrying.', parameters: z.object({}).strict(), execute: async (_, ctx) => JSON.stringify(await journal.list(ctx))});
     bb.cli.register(defineCli({ name: 'oxi-op', summary: 'Project-scoped 1Password operations', commands: {
+            history: cliCommand({summary: 'Recover operation states and safe results for this project and session without contacting op', async run(_, ctx) {if (!ctx.threadId || !ctx.projectId) throw new Error('Run from a BB thread'); return {exitCode: 0, stdout: JSON.stringify(await journal.list({threadId: ctx.threadId, projectId: ctx.projectId}))};}}),
             inventory: cliCommand({summary: 'Approve reading a service vault registry before invoking desktop op', options: {profile: {type: 'string', description: 'Owner-configured registry profile', default: 'default'}, title: {type: 'string', description: 'Registry item title', required: true}}, async run(input, ctx) {
                 if (!ctx.threadId || !ctx.projectId) throw new Error('Run from a BB thread');
-                const {route} = await accessFor(ctx.projectId, input.options.profile);
-                if (route.authentication !== 'desktop') throw new Error('Registry inventory requires owner desktop access');
-                const display = await displayContext(route, {projectId: ctx.projectId, threadId: ctx.threadId, signal: ctx.signal});
-                const decision = await bb.ui.requestInput({threadId: ctx.threadId, rendererId: 'credential', title: 'Настройка 1Password: сверка служебных сейфов', payload: {mode: 'approve', title: 'Сверка служебных сейфов', purpose: 'Прочитать только служебный реестр и сопоставить названия и ID указанных в нём сейфов. Содержимое проектных и личных записей не читается; права не меняются.', profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Служебный реестр', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Служебный реестр', secrets: [{item: input.options.title, field: 'Служебная заметка'}]}, describeSubmission: () => ({title: 'Service registry inventory approved'})}, {signal: ctx.signal});
-                if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return {exitCode: 0, stdout: 'Cancelled'};
-                return {exitCode: 0, stdout: JSON.stringify(await host.call('inventory', {route, registryTitle: input.options.title}, {hostId: route.hostId, signal: ctx.signal}))};
+                return {exitCode: 0, stdout: await inspectVault('inventory', input.options.profile, input.options.title, {projectId: ctx.projectId, threadId: ctx.threadId, signal: ctx.signal})};
             }}),
             run: cliCommand({summary: 'Use a configured secret operation with the same BB approval as the agent tool', positionals: [{name: 'operation', description: 'Configured operation name', required: true}], options: {profile: {type: 'string', description: 'Configured access profile', default: 'default'}}, async run(input, ctx) {if (!ctx.threadId || !ctx.projectId) throw new Error('Run from a BB thread'); return {exitCode: 0, stdout: await runConfigured(input.positionals.operation, input.options.profile, {threadId: ctx.threadId, projectId: ctx.projectId, signal: ctx.signal})};}}),
-            verify: cliCommand({summary: 'Create, compare and remove one synthetic test item', options: {profile: {type: 'string', description: 'Configured access profile', default: 'default'}}, async run(input, ctx) {if (!ctx.projectId) throw new Error('Run in a BB project'); const access = await accessFor(ctx.projectId, input.options.profile); const result=await host.call('verify', access, {hostId: access.route.hostId, signal: ctx.signal}); const verification={...result, at:new Date().toISOString()}; await bb.storage.kv.set('verification:'+ctx.projectId+':'+input.options.profile, verification); return {exitCode: 0, stdout: JSON.stringify(verification)};}}),
-            check: cliCommand({ summary: 'Verify op access to the configured vault before requesting a credential', options: { profile: { type: 'string', description: 'Configured access profile', default: 'default' } }, async run(input, ctx) { if (!ctx.projectId)
-                    throw new Error('Run in a BB project'); const access = await accessFor(ctx.projectId, input.options.profile); return { exitCode: 0, stdout: JSON.stringify(await host.call('check', access, { hostId: access.route.hostId, signal: ctx.signal })) }; } }),
+            verify: cliCommand({summary: 'Approve creating, comparing and removing one synthetic test item', options: {profile: {type: 'string', description: 'Configured access profile', default: 'default'}}, async run(input, ctx) {if (!ctx.projectId || !ctx.threadId) throw new Error('Run from a BB thread'); return {exitCode: 0, stdout: await inspectVault('verify', input.options.profile, undefined, {projectId: ctx.projectId, threadId: ctx.threadId, signal: ctx.signal})};}}),
+            check: cliCommand({summary: 'Approve checking the configured vault without reading records', options: {profile: {type: 'string', description: 'Configured access profile', default: 'default'}}, async run(input, ctx) {if (!ctx.projectId || !ctx.threadId) throw new Error('Run from a BB thread'); return {exitCode: 0, stdout: await inspectVault('check', input.options.profile, undefined, {projectId: ctx.projectId, threadId: ctx.threadId, signal: ctx.signal})};}}),
             status: cliCommand({ summary: 'Check the current project route without reading credentials', options: { profile: { type: 'string', description: 'Configured access profile', default: 'default' } }, async run(input, ctx) { if (!ctx.projectId)
                     throw new Error('Run in a BB project'); const { route } = await accessFor(ctx.projectId, input.options.profile); return { exitCode: 0, stdout: JSON.stringify({ configured: true, ...(ctx.threadId ? await displayContext(route, {projectId: ctx.projectId, threadId: ctx.threadId, signal: ctx.signal}) : {}), profile: route.profile, hostId: route.hostId, vaultId: route.vaultId, authentication: route.authentication, requireApproval: route.requireApproval, operations: route.operations.map(x => x.name), lastVerification: await bb.storage.kv.get('verification:'+ctx.projectId+':'+input.options.profile) ?? null }) }; } }),
             store: cliCommand({ summary: 'Open a private credential form', positionals: [{ name: 'title', description: 'Item title', required: true }], options: { username: { type: 'string', description: 'Account name', default: '' }, profile: { type: 'string', description: 'Configured access profile', default: 'default' } }, async run(input, ctx) { if (!ctx.threadId || !ctx.projectId)
