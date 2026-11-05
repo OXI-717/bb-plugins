@@ -89,6 +89,19 @@ test('routine operations run without an approval form only when configured', asy
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 1);
 });
 
+test('CLI operation uses the same approval gate and accepts no arbitrary command', async t => {
+  const h = setup(t);
+  const pending = h.behavior.runCli(['run', 'example-operation'], context);
+  await setImmediate();
+  assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+  assert.equal(h.inspection.pendingInteractions[0].payload.secrets[0].reference, route.operations[0].references.EXAMPLE_PASSWORD);
+  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {approved: true});
+  const result = await pending;
+  assert.equal(result.exitCode, 0);
+  assert.equal(h.inspection.experimental_hostRpcCalls[0].method, 'run');
+  assert(!result.stdout.includes('op://'));
+});
+
 test('service tokens use native secret settings and never appear in tool results', async t => {
   const h = setup(t, {tokenEnvironment: undefined, tokenSetting: 'serviceAccountToken', requireApproval: false});
   await h.behavior.setSettings({serviceAccountToken: 'synthetic-service-value'});

@@ -6,6 +6,8 @@ Native BB tools for project-scoped 1Password credential intake and configured cr
 
 `oxi_op_run` executes an owner-configured command using `op run`. The agent selects an operation name, never command arguments or secret references. Command stdout and stderr are discarded; only completion is returned. Approval is required by default. Disable approval only for routine operations you intend to run unattended.
 
+`bb oxi-op run <operation> --profile <profile>` uses the same project scope and approval gate as `oxi_op_run`, including when newly registered agent tools are not yet available in an existing provider session. It accepts only a configured operation name.
+
 ## Configuration
 
 Configure `routes` in BB plugin settings, outside the source repository. Each project and access profile pair must have exactly one route. Omitted `profile` means `default`. Use separate profiles for routine API access and administrative credentials, with separate vault permissions. Example with synthetic identifiers:
