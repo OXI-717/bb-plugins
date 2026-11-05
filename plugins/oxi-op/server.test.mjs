@@ -15,12 +15,12 @@ const route = {
 };
 const context = {projectId: route.projectId, threadId: 'example-thread'};
 
-function setup(t, overrides = {}, callHost) {
+function setup(t, overrides = {}, callHost, send) {
   const host = createFakePluginHost({
     pluginId: 'oxi-op', settings: {routes: JSON.stringify([{...route, ...overrides}])},
     sdk: {
       projects: {get: async ({projectId}) => ({id: projectId, name: 'Example workspace'})},
-      threads: {get: async ({threadId}) => ({id: threadId, projectId: route.projectId, title: 'Example session'})},
+      threads: {get: async ({threadId}) => ({id: threadId, projectId: route.projectId, title: 'Example session'}), send: send ?? (async () => ({delivery: 'sent'}))},
       hosts: {get: async ({hostId}) => ({id: hostId, name: 'Example machine'})},
     },
     experimental_callHostRpc: callHost ?? (({method}) => method === 'store'
@@ -231,6 +231,40 @@ test('CLI operation uses the same approval gate and accepts no arbitrary command
   assert.equal(result.exitCode, 0);
   assert.equal(h.inspection.experimental_hostRpcCalls[0].method, 'run');
   assert(!result.stdout.includes('op://'));
+});
+
+test('interactive CLI can return completion to the same session without sending secret values', async t => {
+  const notices = [];
+  const h = setup(t, {}, undefined, async input => {notices.push(input); return {delivery: 'sent'};});
+  const pending = h.behavior.runCli(['run', 'example-operation', '--notify'], context);
+  await setImmediate();
+  assert.equal(notices.length, 0);
+  assert.equal(h.inspection.pendingInteractions[0].timeoutMs, 60 * 60 * 1000);
+  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {approved: true});
+  assert.equal((await pending).exitCode, 0);
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].threadId, context.threadId);
+  assert.equal(notices[0].mode, 'queue-if-active');
+  assert(!JSON.stringify(notices).includes('op://'));
+});
+
+test('CLI notification failures never retry an already completed credential operation', async t => {
+  let notices = 0;
+  const h = setup(t, {requireApproval: false}, undefined, async () => {notices++; throw Error('synthetic-sensitive-value');});
+  const result = await h.behavior.runCli(['run', 'example-operation', '--notify'], context);
+  assert.equal(result.exitCode, 0);
+  assert.equal(h.inspection.experimental_hostRpcCalls.length, 1);
+  assert.equal(notices, 1);
+  assert(!JSON.stringify(result).includes('synthetic-sensitive-value'));
+});
+
+test('CLI completion cannot resume a stopped request or a thread outside its original project', async t => {
+  const notices=[];
+  const h=setup(t, {requireApproval:false}, undefined, async input => {notices.push(input);return {delivery:'sent'};});
+  const controller=new AbortController(); controller.abort();
+  await h.behavior.runCli(['run','example-operation','--notify'], {...context, signal:controller.signal});
+  await h.behavior.runCli(['run','example-operation','--notify'], {...context, projectId:'other-project'});
+  assert.equal(notices.length,0);
 });
 
 test('service tokens use native secret settings and never appear in tool results', async t => {
