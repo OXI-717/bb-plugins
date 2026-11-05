@@ -1,7 +1,7 @@
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
 import { contract, type Route } from './contract.js';
-import { runProcess, storeCredential, serviceEnvironment } from './core.js';
+import { runProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings } from './core.js';
 const pending = new Set<string>();
 async function environment(route: Route, signal: AbortSignal, serviceAccountToken?: string) {
     if (signal.aborted)
@@ -16,6 +16,15 @@ async function environment(route: Route, signal: AbortSignal, serviceAccountToke
     return serviceEnvironment(route.tokenSetting ? serviceAccountToken ?? '' : process.env[route.tokenEnvironment!] ?? '');
 }
 export default experimental_defineHostEntry({ contract, handlers: {
+        resolve: async ({route, operation}, ctx) => {
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            return {bindings: await readOperationBindings(runner, await environment(route, ctx.signal), route, operation, ctx.signal)};
+        },
+        execute: async ({route, operation, bindings}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval || !route.credentialHostId) throw new Error('Remote execution requires approved desktop access');
+            await executeOperationBindings(runProcess, process.env, route, operation, bindings, ctx.signal);
+            return {completed: true as const};
+        },
         inventory: async ({route, registryTitle}, ctx) => {
             if (route.authentication !== 'desktop') throw new Error('Registry inventory requires explicit owner desktop access');
             const env = await environment(route, ctx.signal);

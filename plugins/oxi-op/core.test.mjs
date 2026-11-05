@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {storeCredential,serviceEnvironment,runProcess} from './dist/test/core.js';
+import {storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
@@ -33,4 +33,28 @@ test('missing token cannot fall back to personal account',()=>{
 });
 test('cancelled process never starts',async()=>{
  const controller=new AbortController();controller.abort();await assert.rejects(runProcess('/not-a-command',[],{},undefined,controller.signal),/cancelled/);
+});
+const desktopRoute = {...route, authentication:'desktop', accountId:'example-account', tokenEnvironment:undefined, requireApproval:true, operations:[{name:'example',argv:['example-command'],references:{EXAMPLE_PASSWORD:'op://example-vault/example-item/password'}}]};
+test('remote resolution preserves exact secret bytes and passes only references in arguments',async()=>{
+ const calls=[];
+ const value=' synthetic-sensitive-value\n';
+ const bindings=await readOperationBindings(async(binary,args)=>{calls.push(args);return value;},{},desktopRoute,'example');
+ assert.deepEqual(bindings,{EXAMPLE_PASSWORD:value});
+ assert.deepEqual(calls,[['read','--no-newline','op://example-vault/example-item/password']]);
+ assert(!JSON.stringify(calls).includes(value));
+ let execution;
+ await executeOperationBindings(async(binary,args,env)=>{execution={binary,args,env};return 'synthetic-child-output';},{OP_SERVICE_ACCOUNT_TOKEN:'synthetic-other-token'},desktopRoute,'example',bindings);
+ assert.equal(execution.binary,'example-command');
+ assert.equal(execution.env.EXAMPLE_PASSWORD,value);
+ assert(!('OP_SERVICE_ACCOUNT_TOKEN' in execution.env));
+ assert(!JSON.stringify(execution.args).includes(value));
+});
+test('remote transfer rejects outside-vault references and missing or extra bindings before running a child',async()=>{
+ let calls=0;const runner=async()=>{calls++;return '';};
+ await assert.rejects(readOperationBindings(runner,{}, {...desktopRoute,operations:[{...desktopRoute.operations[0],references:{EXAMPLE_PASSWORD:'op://other-vault/example-item/password'}}]},'example'));
+ await assert.rejects(executeOperationBindings(runner,{},desktopRoute,'example',{}));
+ await assert.rejects(executeOperationBindings(runner,{},desktopRoute,'example',{EXAMPLE_PASSWORD:'synthetic',EXTRA:'synthetic'}));
+ assert.equal(calls,0);
+ assert.throws(()=>resolveRoute([{...route,credentialHostId:'other-host'}],route.projectId));
+ assert.throws(()=>resolveRoute([{...desktopRoute,credentialHostId:'other-host',requireApproval:false}],route.projectId));
 });

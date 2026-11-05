@@ -6,6 +6,7 @@ export const routeSchema = z.object({
     profile: z.string().min(1).max(80).default('default'),
     label: z.string().min(1).max(160).optional(),
     hostId: z.string().min(1),
+    credentialHostId: z.string().min(1).optional(),
     hostLabel: z.string().min(1).max(160).optional(),
     vaultId: z.string().min(1),
     vaultLabel: z.string().min(1).max(160).optional(),
@@ -17,8 +18,8 @@ export const routeSchema = z.object({
     requireApproval: z.boolean().default(true),
     operations: z.array(operationSchema).default([]),
 }).strict().refine(x => x.authentication === 'desktop'
-    ? !!x.accountId && !x.tokenEnvironment && !x.tokenSetting
-    : (!!x.tokenEnvironment !== !!x.tokenSetting) && !x.accountId,
+    ? !!x.accountId && !x.tokenEnvironment && !x.tokenSetting && (!x.credentialHostId || x.requireApproval)
+    : (!!x.tokenEnvironment !== !!x.tokenSetting) && !x.accountId && !x.credentialHostId,
     'Configure one explicit op authentication mode');
 export type Route = z.infer<typeof routeSchema>;
 export function resolveRoute(routes: unknown, projectId: string, profile = 'default') {
@@ -30,6 +31,8 @@ export function resolveRoute(routes: unknown, projectId: string, profile = 'defa
     return matches[0];
 }
 export const contract = defineRpcContract({
+    resolve: {input: z.object({route: routeSchema, operation: z.string()}).strict(), output: z.object({bindings: z.record(z.string(), z.string())}).strict()},
+    execute: {input: z.object({route: routeSchema, operation: z.string(), bindings: z.record(z.string(), z.string())}).strict(), output: z.object({completed: z.literal(true)}).strict()},
     inventory: { input: z.object({route: routeSchema, registryTitle: z.string().min(1)}).strict(), output: z.object({vaults: z.array(z.object({id: z.string(), name: z.string()}))}) },
     verify: { input: z.object({ route: routeSchema, serviceAccountToken: z.string().optional() }).strict(), output: z.object({ verified: z.literal(true), cleaned: z.literal(true) }) },
     check: { input: z.object({ route: routeSchema, serviceAccountToken: z.string().optional() }).strict(), output: z.object({ authorized: z.literal(true) }) },

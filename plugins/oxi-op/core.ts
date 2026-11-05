@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import type {Route} from './contract.js';
 class CredentialProcessError extends Error {}
 export type Runner = (binary: string, args: string[], env: NodeJS.ProcessEnv, input?: string, signal?: AbortSignal) => Promise<string>;
 export const runProcess: Runner = (binary, args, env, input, signal) => new Promise((resolve, reject) => {
@@ -77,4 +78,32 @@ export function serviceEnvironment(token: string) {
         if (key.startsWith('OP_SESSION') || key.startsWith('OP_CONNECT') || key === 'OP_RUN_NO_MASKING')
             delete env[key];
     return env;
+}
+
+function configuredOperation(route: Route, name: string) {
+    const matches = route.operations.filter(x => x.name === name);
+    if (matches.length !== 1) throw new Error('Operation is not configured');
+    const operation = matches[0];
+    for (const [key, reference] of Object.entries(operation.references)) {
+        if (key.startsWith('OP_') || !reference.startsWith('op://' + route.vaultId + '/')) throw new Error('Reference is outside the configured vault');
+    }
+    return operation;
+}
+export async function readOperationBindings(run: Runner, env: NodeJS.ProcessEnv, route: Route, name: string, signal?: AbortSignal) {
+    if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Remote resolution requires approved desktop access');
+    const operation = configuredOperation(route, name);
+    const bindings: Record<string, string> = {};
+    for (const [key, reference] of Object.entries(operation.references)) {
+        bindings[key] = await run('op', ['read', '--no-newline', reference], env, undefined, signal);
+    }
+    return { ...bindings };
+}
+export async function executeOperationBindings(run: Runner, env: NodeJS.ProcessEnv, route: Route, name: string, bindings: Record<string, string>, signal?: AbortSignal) {
+    const operation = configuredOperation(route, name);
+    const keys = Object.keys(operation.references).sort();
+    if (JSON.stringify(keys) !== JSON.stringify(Object.keys(bindings).sort()) || keys.some(key => typeof bindings[key] !== 'string')) throw new Error('Resolved fields do not match the configured operation');
+    const childEnv = {...env};
+    for (const key of Object.keys(childEnv)) if (key.startsWith('OP_')) delete childEnv[key];
+    Object.assign(childEnv, bindings);
+    await run(operation.argv[0], operation.argv.slice(1), childEnv, undefined, signal);
 }

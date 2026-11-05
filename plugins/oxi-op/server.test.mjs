@@ -241,6 +241,30 @@ test('service tokens use native secret settings and never appear in tool results
   assert(!JSON.stringify(result).includes('synthetic-service-value'));
 });
 
+test('approved remote desktop operation resolves on its credential host and executes only on its target', async t => {
+  const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined, credentialHostId: 'example-credential-host'}, ({method}) => method === 'resolve' ? {bindings: {EXAMPLE_PASSWORD: 'synthetic-sensitive-value'}} : {completed: true});
+  const pending = h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context);
+  await setImmediate();
+  assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+  assert(h.inspection.pendingInteractions[0].payload.purpose.includes('Авторизация 1Password: Example machine'));
+  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {approved: true});
+  const result = await pending;
+  const calls = h.inspection.experimental_hostRpcCalls;
+  assert.deepEqual(calls.map(x => [x.method, x.hostId]), [['resolve', 'example-credential-host'], ['execute', route.hostId]]);
+  assert.equal(calls[1].input.bindings.EXAMPLE_PASSWORD, 'synthetic-sensitive-value');
+  assert(!JSON.stringify(result).includes('synthetic-sensitive-value'));
+  assert(!(await h.behavior.runCli(['history'], context)).stdout.includes('synthetic-sensitive-value'));
+});
+
+test('cancelling remote desktop access contacts neither host', async t => {
+  const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined, credentialHostId: 'example-credential-host'});
+  const pending = h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context);
+  await setImmediate();
+  h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);
+  await pending;
+  assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+});
+
 test('one project can separate routine and administrative vault access', async t => {
   const h = setup(t);
   await h.behavior.setSettings({routes: JSON.stringify([

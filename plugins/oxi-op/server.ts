@@ -5,6 +5,7 @@ import {createJournal} from './journal.js';
 export default function plugin(bb: BbPluginApi) {
     const settings = bb.settings.define({ routes: { type: 'string', label: 'Project vault routes (JSON)', default: '[]', experimental_multiline: true }, serviceAccountToken: { type: 'string', label: 'Scoped service account token', secret: true, default: '' } });
     const host = bb.hosts.experimental_client({ contract });
+    const credentialHost = (route: Route) => route.credentialHostId ?? route.hostId;
     const journal = createJournal(bb.storage.kv);
     // BB resumes an idle agent for a fulfilled tool result, including a reported failure.
     const toolOutcome = async (work: () => Promise<string>) => {
@@ -31,7 +32,7 @@ export default function plugin(bb: BbPluginApi) {
     }) {
         const access = await accessFor(ctx.projectId, profile);
         const { route } = access;
-        const display = await displayContext(route, ctx);
+        const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
         return journal.run('store', profile, ctx, async progress => {
         await progress('awaiting-approval');
         const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', title: 'Сохранить пароль: ' + title, payload: { mode: 'store', title, username, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Создать запись и проверить сохранённый пароль', secrets: [{field: 'password', item: title}] }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal });
@@ -39,7 +40,7 @@ export default function plugin(bb: BbPluginApi) {
             return 'Cancelled; no credential stored';
         const value = z.object({ password: z.string().min(1).max(16000) }).strict().parse(result.value);
         await progress('running', true);
-        return JSON.stringify(await host.call('store', { ...access, title, username, password: value.password }, { hostId: route.hostId, signal: ctx.signal }));
+        return JSON.stringify(await host.call('store', { ...access, title, username, password: value.password }, { hostId: credentialHost(route), signal: ctx.signal }));
         }, title);
     }
     const profileParameter = z.string().min(1).max(80).default('default');
@@ -51,15 +52,22 @@ export default function plugin(bb: BbPluginApi) {
             if (matches.length !== 1)
                 throw new Error('Operation is not configured');
             const configured = matches[0];
+            const authorization = route.credentialHostId ? await displayContext({...route, hostId: route.credentialHostId}, ctx) : undefined;
+            const purpose = (configured.purpose ?? configured.name) + (authorization ? '\nАвторизация 1Password: ' + authorization.hostLabel + '. Значение передаётся только настроенной команде на указанной машине.' : '');
             return journal.run('run', profile, ctx, async progress => {
             if (route.requireApproval) {
                 const display = await displayContext(route, ctx);
                 await progress('awaiting-approval');
-                const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', title: 'Использовать секрет: ' + (configured.label ?? configured.purpose ?? operation), payload: { mode: 'approve', title: configured.label ?? configured.purpose ?? operation, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: configured.purpose ?? configured.name, secrets: Object.entries(configured.references).map(([variable, reference]) => ({variable, reference, item: configured.referenceLabels?.[variable]?.item ?? 'Название записи не настроено', field: configured.referenceLabels?.[variable]?.field ?? reference.split('/').at(-1) ?? 'Поле не указано'})) }, describeSubmission: () => ({ title: 'Credential use approved' }) }, { signal: ctx.signal });
+                const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', title: 'Использовать секрет: ' + (configured.label ?? configured.purpose ?? operation), payload: { mode: 'approve', title: configured.label ?? configured.purpose ?? operation, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose, secrets: Object.entries(configured.references).map(([variable, reference]) => ({variable, reference, item: configured.referenceLabels?.[variable]?.item ?? 'Название записи не настроено', field: configured.referenceLabels?.[variable]?.field ?? reference.split('/').at(-1) ?? 'Поле не указано'})) }, describeSubmission: () => ({ title: 'Credential use approved' }) }, { signal: ctx.signal });
                 if (result.outcome !== 'submitted' || z.object({ approved: z.literal(true) }).strict().safeParse(result.value).success === false)
                     return 'Cancelled';
             }
             await progress('running', route.requireApproval);
+            if (route.credentialHostId) {
+                const {bindings} = await host.call('resolve', {route, operation}, {hostId: route.credentialHostId, signal: ctx.signal});
+                try {return JSON.stringify(await host.call('execute', {route, operation, bindings}, {hostId: route.hostId, signal: ctx.signal}));}
+                finally {for (const key of Object.keys(bindings)) delete bindings[key];}
+            }
             return JSON.stringify(await host.call('run', { ...access, operation }, { hostId: route.hostId, signal: ctx.signal }));
             }, configured.label ?? configured.name);
     }
@@ -75,15 +83,15 @@ export default function plugin(bb: BbPluginApi) {
         return journal.run(kind, profile, ctx, async progress => {
             const approval = route.requireApproval || route.authentication === 'desktop';
             if (approval) {
-                const display = await displayContext(route, ctx);
+                const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
                 await progress('awaiting-approval');
                 const decision = await bb.ui.requestInput({threadId: ctx.threadId, rendererId: 'credential', title: 'Настройка 1Password: ' + title.toLowerCase(), payload: {mode: 'approve', title, purpose, profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', secrets: registryTitle ? [{item: registryTitle, field: 'Служебная заметка'}] : []}, describeSubmission: () => ({title: 'Vault operation approved (no credential values)'})}, {signal: ctx.signal});
                 if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return 'Cancelled';
             }
             await progress('running', approval);
-            if (kind === 'inventory') return JSON.stringify(await host.call('inventory', {route, registryTitle: registryTitle!}, {hostId: route.hostId, signal: ctx.signal}));
-            if (kind === 'check') return JSON.stringify(await host.call('check', access, {hostId: route.hostId, signal: ctx.signal}));
-            const result = await host.call('verify', access, {hostId: route.hostId, signal: ctx.signal});
+            if (kind === 'inventory') return JSON.stringify(await host.call('inventory', {route, registryTitle: registryTitle!}, {hostId: credentialHost(route), signal: ctx.signal}));
+            if (kind === 'check') return JSON.stringify(await host.call('check', access, {hostId: credentialHost(route), signal: ctx.signal}));
+            const result = await host.call('verify', access, {hostId: credentialHost(route), signal: ctx.signal});
             const verification = {...result, at: new Date().toISOString()};
             await bb.storage.kv.set('verification:' + ctx.projectId + ':' + profile, verification);
             return JSON.stringify(verification);
