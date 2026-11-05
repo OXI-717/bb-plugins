@@ -196,7 +196,11 @@ export function createClaudeAdapter(options: {
           if (quota !== null) context.quotas.put({ ...quota, error: null });
         }
       } else {
+        const status = response.status;
         await response.body?.cancel();
+        // Never acknowledge a failed collector as a successful quota refresh.
+        // Expose only the status, not the upstream body, URL or credentials.
+        throw new Error(`Claude usage refresh failed with HTTP ${status}.`);
       }
       if (context.account.accountUuid !== null) return;
       const profile = await context.fetch(options.profileUrl, {
