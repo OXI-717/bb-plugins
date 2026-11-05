@@ -200,6 +200,30 @@
           "tagPrefix": "pool-maintenance/"
         }
       }
+    },
+    {
+      "id": "oxi-op",
+      "displayName": "OXI OP",
+      "description": "Project-scoped 1Password intake and approved credential use for BB agents.",
+      "author": {
+        "name": "OXI",
+        "github": "OXI-717"
+      },
+      "tags": [
+        "secrets",
+        "agents"
+      ],
+      "icon": {
+        "url": "./icons/oxi-op.svg"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/oxi-op",
+          "range": "^0.1.0",
+          "tagPrefix": "oxi-op/"
+        }
+      }
     }
   ]
 }

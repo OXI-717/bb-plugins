@@ -8,23 +8,29 @@ Native BB tools for project-scoped 1Password credential intake and configured cr
 
 ## Configuration
 
-Configure `routes` in BB plugin settings, outside the source repository. Each BB project must have exactly one route. Example with synthetic identifiers:
+Configure `routes` in BB plugin settings, outside the source repository. Each project and access profile pair must have exactly one route. Omitted `profile` means `default`. Use separate profiles for routine API access and administrative credentials, with separate vault permissions. Example with synthetic identifiers:
 
 ```json
 [
   {
     "projectId": "example-project",
+    "profile": "routine",
+    "label": "Example project: routine API access",
     "hostId": "example-host",
     "vaultId": "example-vault",
     "authentication": "service-account",
-    "tokenEnvironment": "EXAMPLE_OP_TOKEN",
+    "tokenSetting": "serviceAccountToken",
     "requireApproval": true,
     "operations": []
   }
 ]
 ```
 
-Choose an explicit supported `op` authentication mode. `desktop` requires `accountId` and uses the installed 1Password app's CLI integration and its owner approval. `service-account` requires `tokenEnvironment`, the name of a variable provisioned securely to the host worker. A missing or expired service token fails without falling back to a personal account. The plugin never reads macOS Keychain directly or asks for the Mac login password. Tokens are never tool results.
+Choose an explicit supported `op` authentication mode. `desktop` requires `accountId` and uses the installed 1Password app's CLI integration and its owner approval. `service-account` requires either `tokenSetting: "serviceAccountToken"` (the native BB secret setting) or `tokenEnvironment` (the name of a variable provisioned securely to the host worker). Never put a token in routes JSON. A missing or expired service token fails without falling back to a personal account. The plugin never reads macOS Keychain directly or asks for the Mac login password. Tokens are never tool results.
+
+The host daemon must be able to find `op` on its PATH, or the route can specify `opBinary` with its installed executable path. `bb oxi-op check --profile <profile>` checks the configured vault through that host before requesting a password. Intake performs this check before showing its form. With desktop authentication, this can open the normal 1Password CLI approval dialog. The form identifies the configured project label, profile, host and vault; confirmation governs that operation. `bb oxi-op store <title> --username <name> --profile <profile>` opens the same native form used by the agent tool.
+
+`bb oxi-op verify --profile <profile>` creates a uniquely named synthetic Login, compares its fields by a separate read and removes that test item. It returns only verification and cleanup status. Successful results, including their time, appear in `bb oxi-op status` so a disconnected caller can check before repeating a write. JSON templates are passed through `/dev/stdin`; no plaintext template file is created. The host implementation targets macOS and Linux.
 
 Each operation has `name`, `argv` (the fixed executable and arguments) and `references` (environment variable names mapped to `op://<vaultId>/<item>/<field>`). References must use the route's exact vault ID; `OP_*` overrides are forbidden. Provision service accounts with the least required vault permissions. Writing requires read permission in 1Password. Keep administrative vaults separate and use expiring credentials for them.
 

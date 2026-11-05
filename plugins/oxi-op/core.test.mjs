@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {storeCredential,serviceEnvironment,runProcess} from './core.ts';
-import {resolveRoute} from './contract.ts';
+import {storeCredential,serviceEnvironment,runProcess} from './dist/test/core.js';
+import {resolveRoute} from './dist/test/contract.js';
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
  assert.throws(()=>resolveRoute([route],'other'));
@@ -11,9 +11,9 @@ test('unknown and duplicate projects fail closed',()=>{
 });
 test('password is stdin only and separate get verifies it',async()=>{
  let stored;const calls=[];
- const runner=async(bin,args,env,input)=>{calls.push({args,input});if(args[1]==='list')return '[]';if(args[1]==='create'){stored=JSON.parse(input);return JSON.stringify({id:'example-item'});}return JSON.stringify(stored);};
+ const runner=async(bin,args,env,input)=>{calls.push({args,input});if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({category:'LOGIN',fields:[{id:'username',label:'username',type:'STRING',purpose:'USERNAME'},{id:'password',label:'password',type:'CONCEALED',purpose:'PASSWORD'}]});if(args[1]==='create'){stored=JSON.parse(input);assert.equal(stored.fields[1].purpose,'PASSWORD');return JSON.stringify({id:'example-item'});}return JSON.stringify(stored);};
  assert.equal((await storeCredential(runner,{},'example-vault','Example','user','synthetic-value')).verified,true);
- assert.equal(calls.length,3);assert(!JSON.stringify(calls.map(x=>x.args)).includes('synthetic-value'));assert(calls[2].args.includes('--reveal'));
+ assert.equal(calls.length,4);assert(!JSON.stringify(calls.map(x=>x.args)).includes('synthetic-value'));assert(calls[3].args.includes('--reveal'));
 });
 test('retry recovers matching item without duplicate write',async()=>{
  const runner=async(_b,args)=>args[1]==='list'?JSON.stringify([{id:'example-item',title:'Example'}]):JSON.stringify({fields:[{label:'username',value:'user'},{label:'password',value:'synthetic'}]});
