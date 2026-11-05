@@ -14,7 +14,7 @@ export const routeSchema = z.object({
     authentication: z.enum(['desktop', 'service-account']).default('service-account'),
     accountId: z.string().min(1).optional(),
     tokenEnvironment: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
-    tokenSetting: z.literal('serviceAccountToken').optional(),
+    tokenSetting: z.enum(['serviceAccountToken', 'projectServiceAccounts']).optional(),
     requireApproval: z.boolean().default(true),
     operations: z.array(operationSchema).default([]),
 }).strict().refine(x => x.authentication === 'desktop'

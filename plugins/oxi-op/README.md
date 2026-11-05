@@ -29,14 +29,14 @@ Configure `routes` in BB plugin settings, outside the source repository. Each pr
     "hostId": "example-host",
     "vaultId": "example-vault",
     "authentication": "service-account",
-    "tokenSetting": "serviceAccountToken",
+    "tokenSetting": "projectServiceAccounts",
     "requireApproval": true,
     "operations": []
   }
 ]
 ```
 
-Choose an explicit supported `op` authentication mode. `desktop` requires `accountId` and uses the installed 1Password app's CLI integration and its owner approval. `service-account` requires either `tokenSetting: "serviceAccountToken"` (the native BB secret setting) or `tokenEnvironment` (the name of a variable provisioned securely to the host worker). Never put a token in routes JSON. A missing or expired service token fails without falling back to a personal account. The plugin never reads macOS Keychain directly or asks for the Mac login password. Tokens are never tool results.
+Choose an explicit supported `op` authentication mode. `desktop` requires `accountId` and uses the installed 1Password app's CLI integration and its owner approval. For `service-account`, prefer `tokenSetting: "projectServiceAccounts"`: the native encrypted secret setting holds a JSON object mapping project IDs to profile objects, each containing its own service token. For example, use the shape `{"example-project":{"routine":"<scoped-service-token>"}}` in the secret setting, never in routes JSON. A missing project/profile entry fails without a shared-token or desktop fallback. The legacy single `serviceAccountToken` setting remains supported for existing installations; a route can alternatively name a securely provisioned host variable with `tokenEnvironment`. Provision each account with the corresponding vault permissions; the map selects tokens but does not narrow their provider-side grants. A missing or expired service token fails without falling back to a personal account. The plugin never reads macOS Keychain directly or asks for the Mac login password. Tokens are never tool results.
 
 A desktop route can set `credentialHostId` to the enrolled machine running the owner's 1Password app while `hostId` identifies a different execution machine. These routes always require BB approval. The form names the execution machine and describes where desktop authorization occurs. After approval, the credential host resolves only the configured references; the backend forwards their values through internal host RPC to the fixed command's environment on the execution machine. Values never become tool results, CLI arguments, files or journal entries. The execution machine needs no service token for that administrative vault. Intake and vault checks run on the credential host. Both hosts and the BB server must be trusted and available. This is a BB-mediated operation, not a remote biometric approval feature supplied by 1Password.
 

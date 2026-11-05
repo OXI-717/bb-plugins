@@ -4,7 +4,7 @@ import { contract, resolveRoute, type Route } from './contract.js';
 import {createJournal} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal; interactionTimeoutMs?: number};
 export default function plugin(bb: BbPluginApi) {
-    const settings = bb.settings.define({ routes: { type: 'string', label: 'Project vault routes (JSON)', default: '[]', experimental_multiline: true }, serviceAccountToken: { type: 'string', label: 'Scoped service account token', secret: true, default: '' } });
+    const settings = bb.settings.define({ routes: { type: 'string', label: 'Project vault routes (JSON)', default: '[]', experimental_multiline: true }, serviceAccountToken: { type: 'string', label: 'Legacy scoped service account token', secret: true, default: '' }, projectServiceAccounts: {type: 'string', label: 'Project and profile service accounts (encrypted JSON)', secret: true, default: '{}'} });
     const host = bb.hosts.experimental_client({ contract });
     const credentialHost = (route: Route) => route.credentialHostId ?? route.hostId;
     const journal = createJournal(bb.storage.kv);
@@ -13,7 +13,19 @@ export default function plugin(bb: BbPluginApi) {
         try {return await work();}
         catch {return JSON.stringify({completed: false, message: 'Operation failed. Inspect oxi_op_history before retrying; no secret values are included.'});}
     };
-    const accessFor = async (projectId: string, profile: string) => { const values = await settings.get(); const route = resolveRoute(JSON.parse(values.routes), projectId, profile); return { route, ...(route.tokenSetting ? { serviceAccountToken: values.serviceAccountToken } : {}) }; };
+    const accessFor = async (projectId: string, profile: string) => {
+        const values = await settings.get();
+        const route = resolveRoute(JSON.parse(values.routes), projectId, profile);
+        if (route.tokenSetting === 'projectServiceAccounts') {
+            let tokens: Record<string, Record<string, string>>;
+            try {tokens = z.record(z.string(), z.record(z.string(), z.string().min(1))).parse(JSON.parse(values.projectServiceAccounts));}
+            catch {throw new Error('Project service-account settings are invalid');}
+            const serviceAccountToken = Object.hasOwn(tokens, projectId) && Object.hasOwn(tokens[projectId], profile) ? tokens[projectId][profile] : undefined;
+            if (!serviceAccountToken) throw new Error('A service account is not configured for this project and profile; no shared or desktop fallback is allowed');
+            return {route, serviceAccountToken};
+        }
+        return {route, ...(route.tokenSetting ? {serviceAccountToken: values.serviceAccountToken} : {})};
+    };
     async function displayContext(route: Route, ctx: {projectId: string; threadId: string; signal?: AbortSignal}) {
         const [project, thread, machine] = await Promise.allSettled([
             bb.sdk.projects.get({projectId: ctx.projectId, signal: ctx.signal}),

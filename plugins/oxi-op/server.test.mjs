@@ -275,6 +275,22 @@ test('service tokens use native secret settings and never appear in tool results
   assert(!JSON.stringify(result).includes('synthetic-service-value'));
 });
 
+test('project service tokens are selected by both project and profile without a shared fallback', async t => {
+  const h = setup(t, {tokenEnvironment: undefined, tokenSetting: 'projectServiceAccounts', profile: 'routine', requireApproval: false});
+  await h.behavior.setSettings({projectServiceAccounts: JSON.stringify({[route.projectId]: {routine: 'synthetic-first-token'}, 'other-project': {routine: 'synthetic-second-token'}}), serviceAccountToken: 'synthetic-legacy-token', routes: JSON.stringify([
+    {...route, profile: 'routine', tokenEnvironment: undefined, tokenSetting: 'projectServiceAccounts', requireApproval: false},
+    {...route, projectId: 'other-project', profile: 'routine', tokenEnvironment: undefined, tokenSetting: 'projectServiceAccounts', requireApproval: false},
+    {...route, profile: 'admin', tokenEnvironment: undefined, tokenSetting: 'projectServiceAccounts', requireApproval: false},
+  ])});
+  await h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation', profile: 'routine'}, context);
+  await h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation', profile: 'routine'}, {...context, projectId: 'other-project'});
+  assert.deepEqual(h.inspection.experimental_hostRpcCalls.map(x => x.input.serviceAccountToken), ['synthetic-first-token', 'synthetic-second-token']);
+  const missing = await h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation', profile: 'admin'}, context);
+  assert.equal(JSON.parse(missing).completed, false);
+  assert.equal(h.inspection.experimental_hostRpcCalls.length, 2);
+  assert(!(await h.behavior.runCli(['history'], context)).stdout.includes('synthetic-first-token'));
+});
+
 test('approved remote desktop operation resolves on its credential host and executes only on its target', async t => {
   const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined, credentialHostId: 'example-credential-host'}, ({method}) => method === 'resolve' ? {bindings: {EXAMPLE_PASSWORD: 'synthetic-sensitive-value'}} : {completed: true});
   const pending = h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context);
