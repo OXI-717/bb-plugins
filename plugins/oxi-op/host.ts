@@ -16,6 +16,16 @@ async function environment(route: Route, signal: AbortSignal, serviceAccountToke
     return serviceEnvironment(route.tokenSetting ? serviceAccountToken ?? '' : process.env[route.tokenEnvironment!] ?? '');
 }
 export default experimental_defineHostEntry({ contract, handlers: {
+        inventory: async ({route, registryTitle}, ctx) => {
+            if (route.authentication !== 'desktop') throw new Error('Registry inventory requires explicit owner desktop access');
+            const env = await environment(route, ctx.signal);
+            const args = ['--account', route.accountId!];
+            const registry = JSON.parse(await runProcess(route.opBinary, [...args, 'item', 'get', registryTitle, '--vault', route.vaultId, '--format=json', '--reveal'], env, undefined, ctx.signal));
+            const notes = String(registry.notesPlain ?? '') + '\n' + (registry.fields ?? []).filter((x: {id: string}) => x.id === 'notesPlain').map((x: {value: string}) => x.value).join('\n');
+            const ids = new Set(notes.match(/\b[a-z2-7]{26}\b/g) ?? []);
+            const vaults = JSON.parse(await runProcess(route.opBinary, [...args, 'vault', 'list', '--format=json'], env, undefined, ctx.signal));
+            return {vaults: vaults.filter((x: {id: string}) => ids.has(x.id)).map((x: {id: string; name: string}) => ({id: x.id, name: x.name}))};
+        },
         verify: async ({route, serviceAccountToken}, ctx) => {
             const env = await environment(route, ctx.signal, serviceAccountToken);
             const title = 'OXI OP verification ' + randomUUID();

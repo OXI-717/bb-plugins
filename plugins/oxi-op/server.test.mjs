@@ -70,6 +70,19 @@ test('an unconfigured project cannot request a form or call a host', async t => 
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
 });
 
+test('owner registry setup shows a BB approval before any desktop CLI call', async t => {
+  const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined});
+  const pending = h.behavior.runCli(['inventory', '--title', 'Example registry'], context);
+  await setImmediate();
+  assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+  const interaction = h.inspection.pendingInteractions[0];
+  assert.equal(interaction.payload.title, 'Сверка служебных сейфов');
+  assert.equal(interaction.payload.secrets[0].item, 'Example registry');
+  h.behavior.cancelInteraction(interaction.id);
+  await pending;
+  assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+});
+
 test('critical operations wait for explicit approval and reject unconfigured commands', async t => {
   const h = setup(t);
   await assert.rejects(h.behavior.callAgentTool('oxi_op_run', {operation: 'unknown'}, context));

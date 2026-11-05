@@ -12,6 +12,8 @@ Forms resolve the current project, thread and execution machine names directly f
 
 ## Configuration
 
+For owner setup, `bb oxi-op inventory --profile <registry-profile> --title <registry-item-title>` first displays a contextual BB approval. Only after submission does it use desktop CLI access to read the configured service registry and return vault metadata matching the registry's IDs. Cancellation never invokes `op`. Run interactive CLI requests from a persistent BB terminal when they must remain available after an agent turn ends.
+
 Configure `routes` in BB plugin settings, outside the source repository. Each project and access profile pair must have exactly one route. Omitted `profile` means `default`. Use separate profiles for routine API access and administrative credentials, with separate vault permissions. Example with synthetic identifiers:
 
 ```json
