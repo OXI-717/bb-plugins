@@ -10,13 +10,18 @@ import plugin from './dist/test/server.js';
 const route = {
   projectId: 'example-project', hostId: 'example-host', vaultId: 'example-vault',
   tokenEnvironment: 'EXAMPLE_TOKEN',
-  operations: [{name: 'example-operation', purpose: 'Configure the example server', argv: ['example-program'], references: {EXAMPLE_PASSWORD: 'op://example-vault/example-server/password'}}],
+  operations: [{name: 'example-operation', label: 'Check server access', purpose: 'Configure the example server', argv: ['example-program'], references: {EXAMPLE_PASSWORD: 'op://example-vault/example-server/password'}, referenceLabels: {EXAMPLE_PASSWORD: {item: 'Example server', field: 'Password'}}}],
 };
 const context = {projectId: route.projectId, threadId: 'example-thread'};
 
 function setup(t, overrides = {}) {
   const host = createFakePluginHost({
     pluginId: 'oxi-op', settings: {routes: JSON.stringify([{...route, ...overrides}])},
+    sdk: {
+      projects: {get: async ({projectId}) => ({id: projectId, name: 'Example workspace'})},
+      threads: {get: async ({threadId}) => ({id: threadId, projectId: route.projectId, title: 'Example session'})},
+      hosts: {get: async ({hostId}) => ({id: hostId, name: 'Example machine'})},
+    },
     experimental_callHostRpc: ({method}) => method === 'store'
       ? {itemId: 'example-item', verified: true} : method === 'check' ? {authorized: true} : {completed: true},
   });
@@ -35,6 +40,9 @@ test('native intake keeps the password out of interaction metadata and tool resu
   assert.equal(interaction.payload.secrets[0].item, 'Example');
   assert.equal(interaction.payload.secrets[0].field, 'password');
   assert.equal(interaction.payload.threadId, context.threadId);
+  assert.equal(interaction.payload.projectName, 'Example workspace');
+  assert.equal(interaction.payload.threadName, 'Example session');
+  assert.equal(interaction.payload.hostLabel, 'Example machine');
   assert(!JSON.stringify(interaction).includes('synthetic-sensitive-value'));
   assert(!JSON.stringify(interaction.describeSubmission({password: 'synthetic-sensitive-value'})).includes('synthetic-sensitive-value'));
   h.behavior.submitInteraction(interaction.id, {password: 'synthetic-sensitive-value'});
@@ -71,15 +79,36 @@ test('critical operations wait for explicit approval and reject unconfigured com
   const payload = h.inspection.pendingInteractions[0].payload;
   assert.equal(payload.threadId, context.threadId);
   assert.equal(payload.purpose, 'Configure the example server');
+  assert.equal(payload.title, 'Check server access');
+  assert.equal(payload.secrets[0].item, 'Example server');
   assert.equal(payload.secrets[0].reference, 'op://example-vault/example-server/password');
   const app = await loadPluginApp(() => import('./dist/test/app.js'));
   const html = renderToStaticMarkup(React.createElement(app.pendingInteractions[0].component, {
     interaction: {payload}, submit: async () => {}, cancel: () => {},
   }));
   for (const value of [context.projectId, context.threadId, payload.purpose, payload.secrets[0].reference, route.hostId, route.vaultId]) assert(html.includes(value));
+  const visible = html.split('<details>')[0];
+  for (const value of ['Example workspace', 'Example session', 'Example machine', 'Example server']) assert(visible.includes(value));
+  for (const value of [context.projectId, context.threadId, route.hostId, route.vaultId, 'op://']) assert(!visible.includes(value));
   h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {approved: true});
   await pending;
   assert.equal(h.inspection.experimental_hostRpcCalls[0].input.operation, 'example-operation');
+});
+
+test('unavailable BB names are explicit and never replaced with opaque IDs', async t => {
+  const h = setup(t);
+  h.sdk.stub('projects.get', async () => {throw Error('unavailable');});
+  h.sdk.stub('threads.get', async () => ({id: 'other-thread', projectId: route.projectId, title: 'Wrong session'}));
+  h.sdk.stub('hosts.get', async () => ({id: 'other-host', name: 'Wrong machine'}));
+  const pending = h.behavior.callAgentTool('oxi_op_store', {title: 'Example'}, context);
+  await setImmediate();
+  const payload = h.inspection.pendingInteractions[0].payload;
+  assert.equal(payload.projectName, 'Название проекта недоступно');
+  assert.equal(payload.threadName, 'Название сессии недоступно');
+  assert.equal(payload.hostLabel, 'Название машины недоступно');
+  assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+  h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);
+  await pending;
 });
 
 test('routine operations run without an approval form only when configured', async t => {

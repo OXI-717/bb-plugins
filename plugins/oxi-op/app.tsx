@@ -11,7 +11,9 @@ export default definePluginApp(app => {
                 username?: string;
                 profile: string;
                 projectId: string;
+                projectName: string;
                 threadId: string;
+                threadName: string;
                 label: string;
                 hostId: string;
                 hostLabel: string;
@@ -42,11 +44,13 @@ export default definePluginApp(app => {
      .oxi-op-form summary { cursor: pointer; }
    `}</style>
    <strong>{storing ? 'Сохранить пароль' : 'Разрешить использование секрета'}: {payload.title}</strong>
-   <span>Проект: {payload.label}</span>
+   <span>Проект сессии: {payload.projectName}</span>
+   <span>Сессия: {payload.threadName}</span>
+   <span>Доступ: {payload.label}</span>
    <span>Цель: {payload.purpose}</span>
-   <div>{payload.secrets.map((secret, index) => <div key={index}>{secret.reference ? <><span>Секрет ({secret.variable}): </span><code>{secret.reference}</code></> : <>Запись: {secret.item}. Поле: {secret.field}.</>}</div>)}</div>
+   <div>{payload.secrets.map((secret, index) => <div key={index}>Запись: {secret.item}. Поле: {secret.field}.</div>)}</div>
    <span>Машина: {payload.hostLabel}. Сейф: {payload.vaultLabel}.</span>
-   <details><summary>Сессия и границы доступа</summary><div>Проект: {payload.projectId}<br/>Сессия: {payload.threadId}<br/>Профиль: {payload.profile}<br/>Машина: {payload.hostId}<br/>Сейф: {payload.vaultId}</div></details>
+   <details><summary>Технические сведения</summary><div>Проект ID: {payload.projectId}<br/>Сессия ID: {payload.threadId}<br/>Профиль: {payload.profile}<br/>Машина ID: {payload.hostId}<br/>Сейф ID: {payload.vaultId}{payload.secrets.filter(x => x.reference).map((secret, index) => <div key={index}>{secret.variable}: <code>{secret.reference}</code></div>)}</div></details>
    {storing && <><span>Учётная запись: {payload.username || 'не указана'}. Пароль передаётся через сервер BB на выбранную машину и не включается в историю разговора.</span><label>Пароль<input type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} required disabled={busy} style={{ display: 'block', width: '100%', boxSizing: 'border-box', padding: 8 }}/></label></>}
    <span>Разрешение действует на эту операцию плагина. Окно 1Password отдельно разрешает доступ CLI к аккаунту.</span>
    {failed && <span role="alert">Не удалось отправить. Повторите попытку.</span>}

@@ -8,6 +8,8 @@ Native BB tools for project-scoped 1Password credential intake and configured cr
 
 `bb oxi-op run <operation> --profile <profile>` uses the same project scope and approval gate as `oxi_op_run`, including when newly registered agent tools are not yet available in an existing provider session. It accepts only a configured operation name.
 
+Forms resolve the current project, thread and execution machine names directly from BB metadata before contacting 1Password. The invoking project and the configured access label are displayed separately. Unavailable names are explicit. IDs and exact secret references are collapsed under technical details. Set an operation's `label` and `referenceLabels` (environment name mapped to `{ "item": "Example server", "field": "Password" }`) for readable operation and record names; these labels stay in private plugin settings alongside the exact references.
+
 ## Configuration
 
 Configure `routes` in BB plugin settings, outside the source repository. Each project and access profile pair must have exactly one route. Omitted `profile` means `default`. Use separate profiles for routine API access and administrative credentials, with separate vault permissions. Example with synthetic identifiers:

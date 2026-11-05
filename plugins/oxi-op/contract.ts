@@ -1,6 +1,6 @@
 import { defineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
-export const operationSchema = z.object({ name: z.string().min(1), purpose: z.string().min(1).max(500).optional(), argv: z.array(z.string()).min(1).max(100), references: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string().startsWith('op://')) }).strict();
+export const operationSchema = z.object({ name: z.string().min(1), label: z.string().min(1).max(160).optional(), purpose: z.string().min(1).max(500).optional(), argv: z.array(z.string()).min(1).max(100), references: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string().startsWith('op://')), referenceLabels: z.record(z.string(), z.object({item: z.string().min(1).max(160), field: z.string().min(1).max(160)}).strict()).optional() }).strict();
 export const routeSchema = z.object({
     projectId: z.string().min(1),
     profile: z.string().min(1).max(80).default('default'),
@@ -23,7 +23,10 @@ export const routeSchema = z.object({
 export type Route = z.infer<typeof routeSchema>;
 export function resolveRoute(routes: unknown, projectId: string, profile = 'default') {
     const matches = z.array(routeSchema).parse(routes).filter(x => x.projectId === projectId && x.profile === profile);
-    if (matches.length !== 1) throw new Error('Configure exactly one route for this BB project and access profile');
+    if (matches.length !== 1) {
+        const profiles = [...new Set(z.array(routeSchema).parse(routes).filter(x => x.projectId === projectId).map(x => x.profile))].slice(0, 12);
+        throw new Error('1Password access needs exactly one route for this BB project and profile. Configured profiles for this project: ' + JSON.stringify(profiles) + '. Select an existing profile explicitly, or ask the owner to connect this project in Oxi Op settings. No credential was requested or read. Do not use macOS Keychain, another project route, chat, or command arguments as a fallback for passwords.');
+    }
     return matches[0];
 }
 export const contract = defineRpcContract({
