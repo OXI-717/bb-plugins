@@ -12,8 +12,11 @@ mkdirSync(output, {recursive: true});
 for (const mode of ['store', 'approve']) {
   const payload = {
     mode, title: 'Example server access', username: 'example-user',
-    profile: 'admin', projectId: 'example-project',
+    profile: 'admin', projectId: 'example-project', threadId: 'example-thread',
     label: 'Example project: administration', hostId: 'example-host', vaultId: 'example-vault',
+    hostLabel: 'Example Mac', vaultLabel: 'Example administration',
+    purpose: mode === 'store' ? 'Сохранить доступ к серверу' : 'Настроить сервер',
+    secrets: mode === 'store' ? [{item: 'Example server access', field: 'password'}] : [{variable: 'EXAMPLE_PASSWORD', reference: 'op://example-vault/example-server/password'}],
   };
   const body = renderToStaticMarkup(React.createElement(component, {
     interaction: {payload}, submit: async () => {}, cancel: () => {},

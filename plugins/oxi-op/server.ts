@@ -12,8 +12,7 @@ export default function plugin(bb: BbPluginApi) {
     }) {
         const access = await accessFor(ctx.projectId, profile);
         const { route } = access;
-        await host.call('check', access, { hostId: route.hostId, signal: ctx.signal });
-        const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', title: 'Save credential to 1Password', payload: { mode: 'store', title, username, profile, projectId: ctx.projectId, label: route.label ?? ctx.projectId, hostId: route.hostId, vaultId: route.vaultId }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal });
+        const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', title: 'Сохранить пароль: ' + title, payload: { mode: 'store', title, username, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? ctx.projectId, hostId: route.hostId, hostLabel: route.hostLabel ?? route.hostId, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? route.vaultId, purpose: 'Создать запись и проверить сохранённый пароль', secrets: [{field: 'password', item: title}] }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal });
         if (result.outcome !== 'submitted')
             return 'Cancelled; no credential stored';
         const value = z.object({ password: z.string().min(1).max(16000) }).strict().parse(result.value);
@@ -24,10 +23,12 @@ export default function plugin(bb: BbPluginApi) {
     bb.agents.registerTool({ name: 'oxi_op_run', description: 'Run an owner-configured operation using current project secrets. Only a completion result is returned; command output and secret values are suppressed.', parameters: z.object({ operation: z.string().min(1), profile: profileParameter }).strict(), async execute({ operation, profile }, ctx) {
             const access = await accessFor(ctx.projectId, profile);
             const { route } = access;
-            if (!route.operations.some(x => x.name === operation))
+            const matches = route.operations.filter(x => x.name === operation);
+            if (matches.length !== 1)
                 throw new Error('Operation is not configured');
+            const configured = matches[0];
             if (route.requireApproval) {
-                const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', title: 'Approve credential use', payload: { mode: 'approve', title: operation, profile, projectId: ctx.projectId, label: route.label ?? ctx.projectId, hostId: route.hostId, vaultId: route.vaultId }, describeSubmission: () => ({ title: 'Credential use approved' }) }, { signal: ctx.signal });
+                const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', title: 'Использовать секрет: ' + operation, payload: { mode: 'approve', title: operation, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? ctx.projectId, hostId: route.hostId, hostLabel: route.hostLabel ?? route.hostId, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? route.vaultId, purpose: configured.purpose ?? configured.name, secrets: Object.entries(configured.references).map(([variable, reference]) => ({variable, reference})) }, describeSubmission: () => ({ title: 'Credential use approved' }) }, { signal: ctx.signal });
                 if (result.outcome !== 'submitted' || z.object({ approved: z.literal(true) }).strict().safeParse(result.value).success === false)
                     return 'Cancelled';
             }

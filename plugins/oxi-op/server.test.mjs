@@ -2,12 +2,15 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {setImmediate} from 'node:timers/promises';
 import {createFakePluginHost} from '@get-bb/plugin-sdk/testing';
+import {loadPluginApp} from '@get-bb/plugin-sdk/testing/app';
+import React from 'react';
+import {renderToStaticMarkup} from 'react-dom/server';
 import plugin from './dist/test/server.js';
 
 const route = {
   projectId: 'example-project', hostId: 'example-host', vaultId: 'example-vault',
   tokenEnvironment: 'EXAMPLE_TOKEN',
-  operations: [{name: 'example-operation', argv: ['example-program'], references: {}}],
+  operations: [{name: 'example-operation', purpose: 'Configure the example server', argv: ['example-program'], references: {EXAMPLE_PASSWORD: 'op://example-vault/example-server/password'}}],
 };
 const context = {projectId: route.projectId, threadId: 'example-thread'};
 
@@ -29,6 +32,9 @@ test('native intake keeps the password out of interaction metadata and tool resu
   const interaction = h.inspection.pendingInteractions[0];
   assert.equal(interaction.threadId, context.threadId);
   assert.equal(interaction.payload.vaultId, route.vaultId);
+  assert.equal(interaction.payload.secrets[0].item, 'Example');
+  assert.equal(interaction.payload.secrets[0].field, 'password');
+  assert.equal(interaction.payload.threadId, context.threadId);
   assert(!JSON.stringify(interaction).includes('synthetic-sensitive-value'));
   assert(!JSON.stringify(interaction.describeSubmission({password: 'synthetic-sensitive-value'})).includes('synthetic-sensitive-value'));
   h.behavior.submitInteraction(interaction.id, {password: 'synthetic-sensitive-value'});
@@ -39,13 +45,14 @@ test('native intake keeps the password out of interaction metadata and tool resu
   assert(!JSON.stringify(result).includes('synthetic-sensitive-value'));
 });
 
-test('cancelled intake checks access but never sends a password or writes an item', async t => {
+test('intake shows its BB form before any op authentication and cancellation does not contact op', async t => {
   const h = setup(t);
   const pending = h.behavior.callAgentTool('oxi_op_store', {title: 'Example'}, context);
   await setImmediate();
+  assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
   h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);
   await pending;
-  assert.deepEqual(h.inspection.experimental_hostRpcCalls.map(x => x.method), ['check']);
+  assert.deepEqual(h.inspection.experimental_hostRpcCalls, []);
 });
 
 test('an unconfigured project cannot request a form or call a host', async t => {
@@ -61,6 +68,15 @@ test('critical operations wait for explicit approval and reject unconfigured com
   const pending = h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context);
   await setImmediate();
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+  const payload = h.inspection.pendingInteractions[0].payload;
+  assert.equal(payload.threadId, context.threadId);
+  assert.equal(payload.purpose, 'Configure the example server');
+  assert.equal(payload.secrets[0].reference, 'op://example-vault/example-server/password');
+  const app = await loadPluginApp(() => import('./dist/test/app.js'));
+  const html = renderToStaticMarkup(React.createElement(app.pendingInteractions[0].component, {
+    interaction: {payload}, submit: async () => {}, cancel: () => {},
+  }));
+  for (const value of [context.projectId, context.threadId, payload.purpose, payload.secrets[0].reference, route.hostId, route.vaultId]) assert(html.includes(value));
   h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {approved: true});
   await pending;
   assert.equal(h.inspection.experimental_hostRpcCalls[0].input.operation, 'example-operation');

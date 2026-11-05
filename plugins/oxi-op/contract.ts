@@ -1,12 +1,14 @@
 import { defineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
-export const operationSchema = z.object({ name: z.string().min(1), argv: z.array(z.string()).min(1).max(100), references: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string().startsWith('op://')) }).strict();
+export const operationSchema = z.object({ name: z.string().min(1), purpose: z.string().min(1).max(500).optional(), argv: z.array(z.string()).min(1).max(100), references: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string().startsWith('op://')) }).strict();
 export const routeSchema = z.object({
     projectId: z.string().min(1),
     profile: z.string().min(1).max(80).default('default'),
     label: z.string().min(1).max(160).optional(),
     hostId: z.string().min(1),
+    hostLabel: z.string().min(1).max(160).optional(),
     vaultId: z.string().min(1),
+    vaultLabel: z.string().min(1).max(160).optional(),
     opBinary: z.string().min(1).default('op'),
     authentication: z.enum(['desktop', 'service-account']).default('service-account'),
     accountId: z.string().min(1).optional(),
