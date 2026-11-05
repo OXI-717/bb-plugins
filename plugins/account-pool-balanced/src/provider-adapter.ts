@@ -18,7 +18,7 @@ export class AccountAuthorizationRequiredError extends Error {
     super(message);
   }
   get accountMessage(): string {
-    return `[OAUTH_REAUTH_REQUIRED] ${this.message}${this.oauthCode ? ` OAuth: ${this.oauthCode}.` : ""} Требуется повторная авторизация / Sign in again. HTTP status alone does not establish why the token was rejected.`;
+    return `[OAUTH_REAUTH_REQUIRED] ${this.message}${this.oauthCode ? ` OAuth: ${this.oauthCode}.` : ""} Sign in again. HTTP status alone does not establish why the token was rejected.`;
   }
 }
 
@@ -113,7 +113,12 @@ export interface ProviderAdapter {
     parentAffinityId: string | null;
     forAccount: (account: Account, secret: AccountSecret) => Uint8Array;
   };
-  upstreamUrl(request: Request, settings: AccountPoolConfig): URL;
+  upstreamUrl(
+    request: Request,
+    settings: AccountPoolConfig,
+    account?: Account,
+    secret?: AccountSecret,
+  ): URL;
   upstreamMethod?(request:Request):string;
   transformResponse?(request:Request,response:Response,signal:AbortSignal):Response;
   guardRequest?(request: Request, body: Uint8Array): Response | null;

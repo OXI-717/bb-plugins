@@ -55,6 +55,7 @@ export const USAGE_PROVIDER_IDS: Record<PoolProvider, string> = {
   agy: "acp-agy",
   cursor: "acp-oxi-cursor",
   devin: "acp-devin",
+  grok: "acp-grok",
 };
 
 const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
@@ -67,12 +68,13 @@ const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
   agy: "Antigravity",
   cursor: "Cursor",
   devin: "Devin",
+  grok: "Grok",
 };
 
-// Devin's adapter has no quota collector. Do not advertise an unmeasurable
+// Devin and Grok have no quota collector. Do not advertise an unmeasurable
 // resource as a failed collection; the account remains available for routing.
 function reportsUsage(account: Pick<AccountSummary, "provider">): boolean {
-  return account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy";
+  return account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy" && account.provider !== "grok";
 }
 
 export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
@@ -95,7 +97,10 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
       async [usageFetchMethod]({ resourceId, refresh }) {
         const account = (await hub.status()).accounts.find(account => account.id === resourceId);
         if (!account) throw new Error("Usage resource no longer exists.");
-        if (!reportsUsage(account)) throw new Error("Quota reporting is not available for Devin.");
+        if (!reportsUsage(account)) {
+          const name = account.provider === "grok" ? "Grok" : "Devin";
+          throw new Error(`Quota reporting is not available for ${name}.`);
+        }
         await hub.assertNetworkAllowed(account.provider);
         await hub.refreshUsage(resourceId, refresh, true);
         const { accounts: allAccounts } = await hub.status();

@@ -71,9 +71,13 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   // before a late row appears, after event/startup cancellation already ran.
   const dispatchReads=new Map<string,Promise<{requestId:string|null;eligible:boolean}>>();
   bb.experimental_hooks.on('message.dispatch',async context=>{
-    const entry=context.queuedMessage;
-    if(!entry||entry.payload.kind!=='retry')return {action:'proceed'};
+    const queued=context.queuedMessages;
+    if(!queued.some(entry=>entry.payload.kind==='retry'))return {action:'proceed'};
+    if(queued.length!==1)return {action:'reject',message:'Automatic retry cancelled because its dispatch group includes other queued work.'};
+    const entry=queued[0]!;
+    if(entry.payload.kind!=='retry')return {action:'reject',message:'Automatic retry cancelled because its queued work could not be verified.'};
     const payload=entry.payload;
+
     if(!claims)return /^Temporary connection failure\. Retry [123]\/3\.$/.test(payload.reason)?{action:'wait',reason:'Pooler retry journal unavailable',sendAt:now()+10_000}:{action:'proceed'};
     const claim=claims.find(value=>value.threadId===context.thread.id&&(value.queuedMessageId===entry.id||
       (value.originalRequestId===payload.retryOfTurnRequestId&&payload.reason===`Temporary connection failure. Retry ${value.attempt}/3.`)));

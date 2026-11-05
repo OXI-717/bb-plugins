@@ -32,6 +32,7 @@ import {
 } from "./codex-adapter.js";
 import { createCursorAdapter } from "./cursor-adapter.js";
 import { createDevinAdapter } from "./devin-adapter.js";
+import { createGrokAdapter } from "./grok-adapter.js";
 import { createKimiAdapter } from "./kimi-adapter.js";
 import {
   createOpenAiCompatibleAdapter,
@@ -378,7 +379,7 @@ export class AccountPoolHub {
     await this.assertNetworkAllowed(account.provider);
     const adapter = this.adapter(account.provider);
     if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) {
-      if (force) throw new Error("Аккаунт занят запросом. Повторите обновление квот после его завершения.");
+      if (force) throw new Error("The account has an active request. Refresh quotas after it finishes.");
       return;
     }
     const now = this.options.now();
@@ -413,7 +414,7 @@ export class AccountPoolHub {
         if (error instanceof AccountAuthorizationRequiredError) {
           const rejected = this.authorizationFailures.get(error) ?? usageSecret;
           const marked = rejected === undefined ? false : await this.markAuthError(account, rejected, error.accountMessage, this.stopped.signal);
-          if (!marked) throw new TransientOAuthRefreshError("Авторизация изменилась во время проверки квот. Повторите проверку / Authorization changed while checking quotas; retry.", 0);
+          if (!marked) throw new TransientOAuthRefreshError("Authorization changed while checking quotas; retry.", 0);
           this.options.onAccountsChanged();
           throw new Error(error.accountMessage);
         }
@@ -543,6 +544,7 @@ export class AccountPoolHub {
         agy: activeFor("agy"),
         cursor: activeFor("cursor"),
         devin: activeFor("devin"),
+        grok: activeFor("grok"),
       },
       accounts: accounts.map((account) => {
         const quota = this.options.quotas.get(account.id);
@@ -1475,7 +1477,12 @@ export class AccountPoolHub {
     try {
       const upstreamBody = new ArrayBuffer(body.byteLength);
       new Uint8Array(upstreamBody).set(body);
-      const url = adapter.upstreamUrl(request, this.options.getSettings());
+      const url = adapter.upstreamUrl(
+        request,
+        this.options.getSettings(),
+        account,
+        secret,
+      );
       const headers = adapter.requestHeaders(request.headers, account, secret);
       const method=adapter.upstreamMethod?.(request)??request.method;
       let phase:'before-dispatch'|'after-headers'|'cooldown'='before-dispatch';
@@ -1604,7 +1611,7 @@ export class AccountPoolHub {
     const enabled = accounts.filter(account => account.enabled);
     accounts = accounts.filter(account => projectTier(account, projectId) !== null);
     if (enabled.length > 0 && !accounts.some(account => account.enabled)) {
-      return this.errorResponse(adapter, request, 403, "Для проекта нет разрешённого аккаунта / No enabled account is allowed for this project context.", {"x-bb-pool-error":"POOL_PROJECT_RESTRICTED"});
+      return this.errorResponse(adapter, request, 403, "No enabled account is allowed for this project context.", {"x-bb-pool-error":"POOL_PROJECT_RESTRICTED"});
     }
     if (!accounts.some((account) => account.enabled)) {
       return this.errorResponse(adapter, request,
@@ -1615,12 +1622,12 @@ export class AccountPoolHub {
     }
     const now = this.options.now();
     if (!accounts.some(account => account.enabled && (account.drainOnce || scheduleAllows(account.policy, now)))) {
-      return this.errorResponse(adapter, request, 403, "Аккаунты недоступны по расписанию / Every enabled account is outside its allowed schedule.", {"x-bb-pool-error":"POOL_SCHEDULE_RESTRICTED"});
+      return this.errorResponse(adapter, request, 403, "Every enabled account is outside its allowed schedule.", {"x-bb-pool-error":"POOL_SCHEDULE_RESTRICTED"});
     }
     accounts = accounts.filter(account => account.enabled && (account.drainOnce || scheduleAllows(account.policy, now)));
     if (accounts.every(account => this.options.quotas.get(account.id).error !== null)) {
       return this.errorResponse(adapter, request, 403,
-        `${adapter.upstreamName}: аккаунты недоступны из-за сохранённых ошибок авторизации или подключения; проверьте карточки / Accounts have stored credential or connection errors.`,
+        `${adapter.upstreamName}: accounts have stored credential or connection errors. Check their cards.`,
         {"x-bb-pool-error":"POOL_ACCOUNT_UNAVAILABLE"});
     }
     const threshold = this.options.getSettings().switchThreshold;
@@ -1651,11 +1658,11 @@ export class AccountPoolHub {
     const upstreamHeld = !quotaBlocked && usable.length>0 && usable.every(account => (this.options.quotas.get(account.id).heldUntil??0)>now);
     const reason = providerSpent ? "POOL_QUOTA_EXHAUSTED" : quotaBlocked ? "POOL_QUOTA_THRESHOLD" : upstreamHeld ? "POOL_ACCOUNT_HELD" : "POOL_ACCOUNT_POLICY";
     let message = upstreamHeld
-      ? `${adapter.upstreamName}: пул временно не использует аккаунты / Accounts temporarily held by Pooler.`
+      ? `${adapter.upstreamName}: accounts are temporarily held by Pooler.`
       : providerSpent
-      ? `${adapter.upstreamName}: лимит провайдера исчерпан / Provider quota exhausted.`
-      : quotaBlocked ? `${adapter.upstreamName}: достигнут порог квоты в настройках пула / Pool quota threshold reached.`
-      : `${adapter.upstreamName}: нет доступных аккаунтов по настройкам пула / No eligible account under pool policy.`;
+      ? `${adapter.upstreamName}: provider quota exhausted.`
+      : quotaBlocked ? `${adapter.upstreamName}: pool quota threshold reached.`
+      : `${adapter.upstreamName}: no eligible account under pool policy.`;
     if (quotaBlocked && !providerSpent) {
       const account = usable.find(account => !isQuotaExhausted(this.options.quotas.get(account.id), family, 1, now));
       if (account) {
@@ -1668,10 +1675,10 @@ export class AccountPoolHub {
           ...q.limitWindows.map(w=>({used:w.utilization,reset:w.resetAt,limit:w.windowMinutes===300?limits.fiveHour:w.windowMinutes===10080?limits.weekly:limits.other})),
         ];
         const window = windows.find(w=>w.used!==null&&w.used>=w.limit&&(w.reset===null||w.reset>now));
-        if (window) message += ` Использовано / used ${Number((window.used!*100).toFixed(2))}%, порог / threshold ${Number((window.limit*100).toFixed(2))}%.`;
+        if (window) message += ` Used ${Number((window.used!*100).toFixed(2))}%; threshold ${Number((window.limit*100).toFixed(2))}%.`;
       }
     }
-    if (resetAt!==null) message += upstreamHeld ? ` Повторная попытка не ранее / Retry no earlier than: ${resetAt}.` : ` Сброс / reset: ${resetAt}.`;
+    if (resetAt!==null) message += upstreamHeld ? ` Retry no earlier than: ${resetAt}.` : ` Reset: ${resetAt}.`;
     return this.errorResponse(adapter, request, 403, message, {"x-bb-pool-error":reason});
   }
 
@@ -1821,6 +1828,7 @@ export function createHub(options: {
       }),
     ],
     ["devin", createDevinAdapter()],
+    ["grok", createGrokAdapter()],
   ]);
   return new AccountPoolHub({
     nativeAgyManaged: options.nativeAgyManaged,

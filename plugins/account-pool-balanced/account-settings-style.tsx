@@ -29,9 +29,9 @@ export const accountSettingsCss = `
 .pool-settings-days .pool-settings-toggle { font-size:12px; gap:4px; }
 .pool-settings-times { display:grid; grid-template-columns:var(--pool-number) var(--pool-number); gap:12px; }
 .pool-settings-schedule-actions { display:flex; flex-wrap:wrap; gap:8px; }
-.pool-settings button:not([aria-label='Закрыть']) { box-sizing:border-box; height:var(--pool-control); min-height:var(--pool-control); width:auto; max-width:100%; white-space:nowrap; padding:6px 10px; border:1px solid var(--input,#ddd); border-radius:6px; font:inherit; font-size:12px; line-height:18px; justify-self:start; }
+.pool-settings button:not([aria-label='Close']) { box-sizing:border-box; height:var(--pool-control); min-height:var(--pool-control); width:auto; max-width:100%; white-space:nowrap; padding:6px 10px; border:1px solid var(--input,#ddd); border-radius:6px; font:inherit; font-size:12px; line-height:18px; justify-self:start; }
 .pool-settings .pool-settings-remove { width:36px!important; padding:0!important; font-size:18px!important; }
-.pool-settings button[aria-label='Закрыть'] { width:28px; height:28px; padding:0; border:0; background:transparent; }
+.pool-settings button[aria-label='Close'] { width:28px; height:28px; padding:0; border:0; background:transparent; }
 .pool-settings footer, .pool-settings .pool-settings-footer { display:flex; flex-wrap:wrap; justify-content:flex-start; gap:8px; }
 .pool-settings button.pool-settings-link { border-color:transparent; background:transparent; padding-inline:4px; color:var(--muted-foreground,#666); }
 .pool-settings button.pool-settings-link:hover { color:var(--foreground,#222); text-decoration:underline; }

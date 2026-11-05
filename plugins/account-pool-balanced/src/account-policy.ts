@@ -26,9 +26,9 @@ export function reserveHours(account: { policy?: AccountPolicy }, fallback: numb
 export function policySummary(policy?: AccountPolicy): string {
   if (!policy?.enabled) return '';
   return [
-    policy.fiveHourKeep == null ? null : `5 ч: оставить ${policy.fiveHourKeep}%`,
-    policy.weeklyKeep == null ? null : `Неделя: оставить ${policy.weeklyKeep}%`,
-    policy.reserveDrainHours == null ? null : `Резерв: за ${policy.reserveDrainHours} ч`,
-    policy.schedule ? `${policy.schedule.intervals.map(i => `${i.days.map(d => ["Вс","Пн","Вт","Ср","Чт","Пт","Сб"][d]).join(",")} ${i.start}–${i.end}`).join("; ") || "Нет разрешённых интервалов"} · ${policy.schedule.timeZone}` : null,
-  ].filter(Boolean).join(' · ') || 'Наследуются общие значения';
+    policy.fiveHourKeep == null ? null : `5-hour quota: keep ${policy.fiveHourKeep}%`,
+    policy.weeklyKeep == null ? null : `Weekly quota: keep ${policy.weeklyKeep}%`,
+    policy.reserveDrainHours == null ? null : `Reserve enabled ${policy.reserveDrainHours} hours before reset`,
+    policy.schedule ? `${policy.schedule.intervals.map(i => `${i.days.map(d => ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d]).join(",")} ${i.start}–${i.end}`).join("; ") || "No allowed intervals"} · ${policy.schedule.timeZone}` : null,
+  ].filter(Boolean).join(' · ') || 'Using shared settings';
 }

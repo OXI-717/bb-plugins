@@ -34,6 +34,7 @@ import {
 import type { PoolOperations } from "./operations.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
+import type { GrokDeviceLogin } from "./grok-device-login.js";
 
 export const threadAccountStatusSchema = z.object({
   state: z.enum(["observed", "unobserved", "bypassed", "unsupported"]),
@@ -159,6 +160,18 @@ export const accountPoolRpcContract = defineRpcContract({
     input: codexLoginPollInputSchema,
     output: codexLoginCancelSchema,
   },
+  "grokLogin.start": {
+    input: z.null(),
+    output: codexLoginStartSchema,
+  },
+  "grokLogin.poll": {
+    input: codexLoginPollInputSchema,
+    output: codexLoginPollSchema,
+  },
+  "grokLogin.cancel": {
+    input: codexLoginPollInputSchema,
+    output: codexLoginCancelSchema,
+  },
   "status.get": {
     input: z.null(),
     output: statusSchema,
@@ -187,6 +200,7 @@ export function createRpcHandlers(
   openBrowser: (input: BrowserOpenInput) => Promise<{ opened: true }> = async () => { throw new Error("Account browser unavailable"); },
   agyLogin?: AgyOAuthLogin,
   openAgyBrowser:(url:string)=>Promise<{opened:true}>=async()=>{throw Error("Sign-in browser unavailable");},
+  grokLogin?: GrokDeviceLogin,
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
     "readiness.get": ({projectId}) => operations.readiness(projectId),
@@ -249,6 +263,17 @@ export function createRpcHandlers(
     "codexLogin.poll": (input) => codexLogin.poll(input),
     "codexLogin.cancel": (input) => ({
       cancelled: codexLogin.cancel(input),
+    }),
+    "grokLogin.start": () => {
+      if (grokLogin === undefined) throw new Error("Grok sign-in is unavailable.");
+      return grokLogin.start();
+    },
+    "grokLogin.poll": (input) => {
+      if (grokLogin === undefined) throw new Error("Grok sign-in is unavailable.");
+      return grokLogin.poll(input);
+    },
+    "grokLogin.cancel": (input) => ({
+      cancelled: grokLogin === undefined ? false : grokLogin.cancel(input),
     }),
     "status.get": () => operations.status(),
     "status.routedThreads": () => operations.routedThreadsWithoutLocalLogin(),

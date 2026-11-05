@@ -1,6 +1,15 @@
-import { createFakePluginHost, makeMessageDispatchHookContext, makeThreadResponse, makeTurnFailedEvent } from '@get-bb/plugin-sdk/testing';
+import { createFakePluginHost, makeMessageDispatchHookContext, makeQueueEntry, makeThreadResponse, makeTurnFailedEvent } from '@get-bb/plugin-sdk/testing';
 import { expect, it, vi } from 'vitest';
 import { registerNetworkRetry } from './network-retry.js';
+
+type DispatchOverrides = Omit<NonNullable<Parameters<typeof makeMessageDispatchHookContext>[0]>, 'queuedMessages'> & {
+ queuedMessages?: Partial<ReturnType<typeof makeQueueEntry>>[];
+ queuedMessage?: Partial<ReturnType<typeof makeQueueEntry>> | null;
+};
+function dispatchContext(overrides:DispatchOverrides={}) {
+ const {queuedMessage,queuedMessages,...context}=overrides;
+ return makeMessageDispatchHookContext({...context,queuedMessages:queuedMessage===undefined?queuedMessages??[]:queuedMessage===null?[]:[queuedMessage]});
+}
 async function setup() {
  const retry=vi.fn(async(_input:unknown)=>({ok:true,delivery:'queued'}) as never);
  const fake=createFakePluginHost({pluginId:'account-pool-balanced',sdk:{threads:{get:async()=>makeThreadResponse({id:'thread-one',status:'error'}),queue:{list:async()=>[]},events:{list:async()=>[{threadId:'thread-one',type:'client/turn/requested',data:{requestId:'request-one'}}] as never},retry}}});
@@ -106,21 +115,32 @@ it('rejects a late owned queued retry at dispatch after a lost scheduling reply 
  const {fake,retry,fail}=await setup();retry.mockRejectedValue(Error('lost reply'));await fail();
  fake.harness.sdk.stub('threads.events.list',async()=>[{threadId:'thread-one',type:'client/turn/requested',data:{requestId:'new-user-request'}}] as never);
  const hook=fake.harness.registrations.hooks['message.dispatch'];expect(hook).toBeTypeOf('function');
- const result=await hook!(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},queuedMessage:{id:'late-owned',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}));
+ const result=await hook!(dispatchContext({thread:{id:'thread-one',status:'error'},queuedMessage:{id:'late-owned',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}));
  expect(result.action).toBe('reject');await fake.harness.lifecycle.dispose();
 });
 it('permits the current owned queued retry and never fences manual retries or ordinary messages',async()=>{
  const {fake,fail}=await setup();await fail();const hook=fake.harness.registrations.hooks['message.dispatch'];expect(hook).toBeTypeOf('function');
- const context=makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
+ const context=dispatchContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
  expect(await hook!(context)).toEqual({action:'proceed'});
  fake.harness.sdk.stub('threads.events.list',async()=>{throw Error('unavailable');});
- expect(await hook!({...context,queuedMessage:{...context.queuedMessage!,payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Manual retry'}}})).toEqual({action:'proceed'});
- expect(await hook!({...context,queuedMessage:null})).toEqual({action:'proceed'});await fake.harness.lifecycle.dispose();
+ expect(await hook!(dispatchContext({...context,queuedMessage:{...context.queuedMessages[0]!,payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Manual retry'}}}))).toEqual({action:'proceed'});
+ expect(await hook!(dispatchContext({...context,queuedMessage:null}))).toEqual({action:'proceed'});await fake.harness.lifecycle.dispose();
+});
+
+it('rejects a dispatch group that combines an owned retry with manual queued work',async()=>{
+ const {fake,fail,eligible}=await setup();await fail();eligible.mockClear();
+ const hook=fake.harness.registrations.hooks['message.dispatch']!;
+ const retry=makeQueueEntry({id:'owned-retry',threadId:'thread-one',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}});
+ const manual=makeQueueEntry({id:'manual-message',threadId:'thread-one',payload:{kind:'inline'}});
+ const result=await hook(dispatchContext({thread:{id:'thread-one',status:'error'},queuedMessages:[retry,manual]}));
+ expect(result).toMatchObject({action:'reject',message:'Automatic retry cancelled because its dispatch group includes other queued work.'});
+ expect(eligible).not.toHaveBeenCalled();
+ await fake.harness.lifecycle.dispose();
 });
 it('holds an owned queued retry when current request history is unavailable',async()=>{
  const {fake,fail}=await setup();await fail();fake.harness.sdk.stub('threads.events.list',async()=>{throw Error('private');});
  const hook=fake.harness.registrations.hooks['message.dispatch'];expect(hook).toBeTypeOf('function');
- expect(await hook!(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}))).toMatchObject({action:'wait',sendAt:110_000});
+ expect(await hook!(dispatchContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}))).toMatchObject({action:'wait',sendAt:110_000});
  await fake.harness.lifecycle.dispose();
 });
 
@@ -128,7 +148,7 @@ it('bounds a stalled dispatch history read and shares its slot until the underly
  vi.useFakeTimers();const {fake,fail}=await setup();await fail();let release!:(rows:never)=>void;
  const read=vi.fn(()=>new Promise<never>(resolve=>{release=resolve;}));fake.harness.sdk.stub('threads.events.list',read);
  const hook=fake.harness.registrations.hooks['message.dispatch']!;
- const context=makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
+ const context=dispatchContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
  try{
   const first=hook(context);await vi.advanceTimersByTimeAsync(1_500);expect(await first).toMatchObject({action:'wait'});
   const second=hook(context);await vi.advanceTimersByTimeAsync(1_500);expect(await second).toMatchObject({action:'wait'});expect(read).toHaveBeenCalledTimes(1);
@@ -155,19 +175,19 @@ it('refuses new scheduling at capacity without evicting queued ownership, and re
 it('rejects an owned retry when the user bypasses routing or disables its usable accounts during the delay',async()=>{
  const {fake,fail,eligible}=await setup();await fail();eligible.mockResolvedValue(false);
  const hook=fake.harness.registrations.hooks['message.dispatch']!;
- expect(await hook(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}))).toMatchObject({action:'reject'});
+ expect(await hook(dispatchContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}))).toMatchObject({action:'reject'});
  expect(fake.harness.inspection.sdk.callsTo('threads.send')).toHaveLength(0);await fake.harness.lifecycle.dispose();
 });
 it('rejects an owned retry when the provider changes before queue drain',async()=>{
  const {fake,fail}=await setup();await fail();const hook=fake.harness.registrations.hooks['message.dispatch']!;
- expect(await hook(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},requestedExecution:{providerId:'different-provider'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}))).toMatchObject({action:'reject'});
+ expect(await hook(dispatchContext({thread:{id:'thread-one',status:'error'},requestedExecution:{providerId:'different-provider'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}))).toMatchObject({action:'reject'});
  await fake.harness.lifecycle.dispose();
 });
 it('holds recognizable automatic queue rows when their ownership journal is malformed without affecting manual retries',async()=>{
  const fake=createFakePluginHost({pluginId:'account-pool-balanced'});await fake.bb.storage.kv.set('network-retry-claims-v1',{invalid:true});await registerNetworkRetry(fake.bb,async()=>true);
  const hook=fake.harness.registrations.hooks['message.dispatch']!;
- const context=makeMessageDispatchHookContext({queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
+ const context=dispatchContext({queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
  expect(await hook(context)).toMatchObject({action:'wait'});
- expect(await hook({...context,queuedMessage:{...context.queuedMessage!,payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Manual retry'}}})).toEqual({action:'proceed'});
+ expect(await hook(dispatchContext({...context,queuedMessage:{...context.queuedMessages[0]!,payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Manual retry'}}}))).toEqual({action:'proceed'});
  await fake.harness.lifecycle.dispose();
 });

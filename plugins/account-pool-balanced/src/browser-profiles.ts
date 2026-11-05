@@ -38,6 +38,7 @@ const PROVIDER_TITLE: Readonly<Record<string, string>> = {
   "opencode-go": "OpenCode Go",
   cursor: "Cursor",
   devin: "Devin",
+  grok: "Grok",
 };
 
 const DEFAULT_GEO_URL = "https://ipinfo.io/json";
@@ -47,7 +48,7 @@ const GEO_MAX_BYTES = 65536;
 /** Optional override for the Helium executable. */
 const BROWSER_PATH_ENV = "POOL_BROWSER_EXECUTABLE";
 const HELIUM_APP_BINARY = "Helium.app/Contents/MacOS/Helium";
-// Chromium на macOS хранит профили по bundle id, не по имени приложения.
+// Chromium on macOS stores profiles by bundle ID, not by application name.
 const HELIUM_MAC_DATA_DIR = path.join("Application Support", "net.imput.helium");
 
 export interface ExitGeo {

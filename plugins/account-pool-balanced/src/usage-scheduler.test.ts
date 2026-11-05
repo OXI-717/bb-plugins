@@ -80,7 +80,7 @@ it('coalesces a forced check with the running collector and aborts without anoth
 
 it('retains ZAI busy refusal and stops future scheduler passes',async()=>{
  const f=await fixture();const flights=(f.hub as unknown as {inFlightByAccount:Map<string,number>}).inFlightByAccount;
- flights.set(f.zai.id,1);await expect(f.hub.refreshUsage(f.zai.id,true,true)).rejects.toThrow('занят');
+ flights.set(f.zai.id,1);await expect(f.hub.refreshUsage(f.zai.id,true,true)).rejects.toThrow('active request');
  await vi.advanceTimersByTimeAsync(180000);expect(f.calls.filter(x=>x.provider==='zai')).toHaveLength(1);
  flights.clear();f.controller.abort();await f.service;const count=f.calls.length;
  await vi.advanceTimersByTimeAsync(600000);expect(f.calls).toHaveLength(count);

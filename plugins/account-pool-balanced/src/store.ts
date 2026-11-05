@@ -285,12 +285,12 @@ export class AccountStore {
       const index = accounts.findIndex(account => account.id === id);
       const account = accounts[index];
       if (!account || account.provider !== "claude" || account.kind !== "oauth")
-        throw new Error("Аккаунт Claude OAuth уже удалён / Claude OAuth account no longer exists.");
+        throw new Error("Claude OAuth account no longer exists.");
       const matches = account.accountUuid !== null
         ? account.accountUuid === identity.accountUuid
         : account.email !== null && identity.email !== null && account.email.toLowerCase() === identity.email.toLowerCase();
       if (!matches)
-        throw new Error("Вы вошли в другой аккаунт. Авторизуйтесь под выбранной подпиской / Signed in to a different account.");
+        throw new Error("Signed in to a different account. Authorize the selected subscription.");
       const updated = accountSchema.parse({
         ...account,
         email: identity.email,
@@ -307,7 +307,7 @@ export class AccountStore {
         try {
           await this.writeSecret(id, previousSecret);
         } catch {
-          throw new Error("Не удалось сохранить или восстановить авторизацию. Проверьте хранилище и повторите вход / Authorization persistence and rollback failed; repair storage and sign in again.");
+          throw new Error("Could not save or restore authorization. Check storage and sign in again.");
         }
         throw error;
       }
