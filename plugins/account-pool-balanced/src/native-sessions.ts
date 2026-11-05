@@ -1,0 +1,181 @@
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
+
+const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
+export const nativeExecutorSchema = z.object({
+  id, accountId: id, hostId: id,
+  // These are server-authenticated callers, never a host/project header.
+  callerIds: z.array(id).min(1).max(16),
+  catalogCallerIds: z.array(id).max(16).default([]),
+  projectIds: z.array(id).min(1).max(32),
+  autopilotAllowed: z.boolean().default(false),
+  enabled: z.boolean().default(false),
+}).strict();
+type Executor = z.infer<typeof nativeExecutorSchema>;
+export interface NativeCaller { hostId: string; projectId: string | null; threadId?: string; purpose?: 'autopilot' }
+function sameCaller(a:NativeCaller,b:NativeCaller){return a.hostId===b.hostId&&a.projectId===b.projectId&&a.threadId===b.threadId&&a.purpose===b.purpose;}
+const leaseSchema = z.object({
+  id: z.string().uuid(), sessionId: z.string().uuid(), executor: nativeExecutorSchema,
+  kind: z.enum(['task','catalog']).default('task'),
+  caller: z.object({hostId:id,projectId:id.nullable(),threadId:id.optional(),purpose:z.literal('autopilot').optional()}).strict(),
+  state: z.enum(['queued','active','uncertain']), deadline: z.number(), createdAt: z.number(),
+}).strict();
+type Lease = z.infer<typeof leaseSchema>;
+const eventSchema = z.object({at:z.number(),event:z.enum(['queued','active','uncertain','released','cancelled','attested-stopped']),executorId:id,accountId:id,hostId:id,projectId:id.nullable()});
+const stateSchema = z.object({
+  managed:z.boolean(), executors:z.array(nativeExecutorSchema).max(32),
+  leases:z.array(leaseSchema).max(128), events:z.array(eventSchema).max(256),
+}).strict();
+type State = z.infer<typeof stateSchema>;
+interface Storage {get<T>(key:string):Promise<T|null|undefined>;set(key:string,value:unknown):Promise<void>}
+const KEY='native-agy-sessions-v1';
+export const NATIVE_LEASE_MS=30_000;
+export const nativeRequestSchema=z.discriminatedUnion('action',[
+  z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid(),kind:z.enum(['task','catalog']).default('task')}).strict(),
+  z.object({action:z.literal('poll'),leaseId:z.string().uuid()}).strict(),
+  z.object({action:z.literal('release'),leaseId:z.string().uuid(),stopped:z.literal(true).optional(),completed:z.literal(true).optional()}).strict()
+    .refine(value=>(value.stopped===true)!==(value.completed===true)),
+]);
+export class NativeSessionError extends Error {constructor(readonly status:number,readonly code:string){super(code);}}
+
+/** Admission for official processes, not an OAuth or model proxy.
+ * Expiry never frees an active slot: a disconnected process could still run.
+ * Only acknowledged termination or explicit operator attestation releases it.
+ */
+export class NativeSessions {
+  private state:State={managed:false,executors:[],leases:[],events:[]};
+  private tail:Promise<unknown>=Promise.resolve();
+  private failed=false;
+  constructor(private storage:Storage,private now=Date.now,private admit: (hostId:string,caller:NativeCaller)=>Promise<void>=async()=>{}){}
+  async initialize(){
+    const stored=await this.storage.get(KEY);
+    this.state=stored==null?this.state:stateSchema.parse(stored);
+    // A plugin restart does not establish termination of remote children.
+    for(const lease of this.state.leases)if(lease.state==='active')this.uncertain(lease);
+    this.sweep();
+    await this.storage.set(KEY,this.state);
+  }
+  managed(){return this.state.managed;}
+  private async serial<T>(fn:()=>T|Promise<T>):Promise<T>{
+    const run=this.tail.then(async()=>{
+      if(this.failed)throw new NativeSessionError(503,'native-storage-unavailable');
+      this.sweep();
+      const result=await fn();
+      try{await this.storage.set(KEY,structuredClone(this.state));}
+      catch{this.failed=true;throw new NativeSessionError(503,'native-storage-unavailable');}
+      return result;
+    });
+    this.tail=run.catch(()=>{});return run;
+  }
+  private event(lease:Lease,event:z.infer<typeof eventSchema>['event']){
+    const now=this.now();
+    this.state.events=this.state.events.filter(e=>e.at>now-14*86400000).slice(-255);
+    this.state.events.push({at:now,event,executorId:lease.executor.id,accountId:lease.executor.accountId,hostId:lease.executor.hostId,projectId:lease.caller.projectId});
+  }
+  private uncertain(lease:Lease){lease.state='uncertain';this.event(lease,'uncertain');}
+  private sweep(){
+    const now=this.now();
+    for(const lease of this.state.leases)if(lease.state==='active'&&lease.deadline<=now)this.uncertain(lease);
+    this.state.leases=this.state.leases.filter(l=>l.state!=='queued'||l.deadline>now);
+    this.state.events=this.state.events.filter(e=>e.at>now-14*86400000);
+  }
+  private allowed(executor:Executor,caller:NativeCaller,kind:'task'|'catalog'='task'){
+    return executor.enabled&&caller.projectId!==null&&executor.projectIds.includes(caller.projectId)&&
+      (kind==='catalog'?executor.catalogCallerIds:executor.callerIds).includes(caller.hostId)&&(!caller.purpose||executor.autopilotAllowed);
+  }
+  async available(caller:NativeCaller){return this.serial(()=>this.state.managed&&this.state.executors.some(e=>this.allowed(e,caller)));}
+  async executorFor(caller:NativeCaller){return this.serial(()=>{
+    const matches=this.state.executors.filter(e=>this.allowed(e,caller));
+    return matches.length===1?matches[0].id:null;
+  });}
+  async catalogExecutorFor(hostId:string){return this.serial(()=>{
+    const matches=this.state.executors.filter(e=>e.enabled&&e.hostId===hostId&&e.catalogCallerIds.length>0);
+    return matches.length===1?matches[0].id:null;
+  });}
+  async configure(value:unknown){const executor=nativeExecutorSchema.parse(value);return this.serial(()=>{
+    const existing=this.state.executors.findIndex(e=>e.id===executor.id);
+    if(this.state.leases.some(l=>l.executor.id===executor.id))throw new NativeSessionError(409,'native-executor-busy');
+    if(existing<0){if(this.state.executors.length>=32)throw new NativeSessionError(409,'native-executor-limit');this.state.executors.push(executor);}
+    else this.state.executors[existing]=executor;
+    return executor;
+  });}
+  async setManaged(managed:boolean){return this.serial(()=>{this.state.managed=managed;return {managed};});}
+  async snapshot(){return this.serial(()=>({managed:this.state.managed,executors:this.state.executors,
+    leases:this.state.leases.map(({id,executor,caller,kind,state,deadline,createdAt})=>({id,executorId:executor.id,accountId:executor.accountId,hostId:executor.hostId,projectId:caller.projectId,kind,state,deadline,createdAt})),
+    events:this.state.events,budget:'unknown' as const}));}
+  async attestStopped(leaseId:string){return this.serial(()=>{
+    const lease=this.state.leases.find(l=>l.id===leaseId);
+    if(!lease||lease.state!=='uncertain')throw new NativeSessionError(409,'native-not-uncertain');
+    this.event(lease,'attested-stopped');this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
+  });}
+  async request(caller:NativeCaller,raw:unknown){const input=nativeRequestSchema.parse(raw);
+    let checkedHost:string|undefined;
+    if(input.action!=='release'){
+      if(!this.state.managed)throw new NativeSessionError(503,'native-not-managed');
+      const previous=input.action==='poll'?this.owned(caller,input.leaseId):undefined;
+      const executor=input.action==='acquire'?this.state.executors.find(e=>e.id===input.executorId):previous!.executor;
+      if(!executor||!this.allowed(executor,caller,input.action==='acquire'?input.kind:previous!.kind))throw new NativeSessionError(403,'native-executor-denied');
+      checkedHost=executor.hostId;
+      // Do network I/O outside the serialization lane, then repeat policy below.
+      await this.admit(checkedHost,caller);
+    }
+    return this.serial(()=>{
+    if(input.action==='release'){
+      const lease=this.owned(caller,input.leaseId);
+      if(lease.state==='uncertain'&&!input.stopped)throw new NativeSessionError(409,'native-stop-unconfirmed');
+      this.event(lease,lease.state==='queued'?'cancelled':'released');
+      this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
+    }
+    if(!this.state.managed)throw new NativeSessionError(503,'native-not-managed');
+    let lease:Lease;
+    if(input.action==='acquire'){
+      const executor=this.state.executors.find(e=>e.id===input.executorId);
+      if(!executor||!this.allowed(executor,caller,input.kind))throw new NativeSessionError(403,'native-executor-denied');
+      // Idempotent acquisition prevents losing a slot on an uncertain response.
+      const existing=this.state.leases.find(l=>l.sessionId===input.sessionId&&sameCaller(l.caller,caller));
+      if(existing&&(existing.executor.id!==executor.id||existing.kind!==input.kind))throw new NativeSessionError(409,'native-session-bound');
+      if(existing)lease=existing;
+      else{
+        if(this.state.leases.length>=128)throw new NativeSessionError(429,'native-queue-full');
+        const now=this.now();
+        lease={id:randomUUID(),sessionId:input.sessionId,executor:structuredClone(executor),caller:structuredClone(caller),kind:input.kind,state:'queued',createdAt:now,deadline:now+NATIVE_LEASE_MS};
+        this.state.leases.push(lease);this.event(lease,'queued');
+      }
+    }else lease=this.owned(caller,input.leaseId);
+    if(lease.state==='uncertain')throw new NativeSessionError(409,'native-stop-unconfirmed');
+    const executor=this.state.executors.find(e=>e.id===lease.executor.id);
+    if(!executor||executor.hostId!==checkedHost||!this.allowed(executor,caller,lease.kind))throw new NativeSessionError(403,'native-executor-denied');
+    const same=this.state.leases.filter(l=>l.executor.accountId===lease.executor.accountId);
+    // One common account lane across all machines and purposes. Never preempt.
+    if(lease.state==='queued'&&!same.some(l=>l.state!=='queued')&&same.find(l=>l.state==='queued')===lease){lease.state='active';this.event(lease,'active');}
+    lease.deadline=this.now()+NATIVE_LEASE_MS;
+    return {leaseId:lease.id,state:lease.state,ttlMs:NATIVE_LEASE_MS,heartbeatMs:5000,accountId:executor.accountId,hostId:executor.hostId};
+  });}
+  private owned(caller:NativeCaller,leaseId:string){
+    const lease=this.state.leases.find(l=>l.id===leaseId);
+    if(!lease||!sameCaller(lease.caller,caller))throw new NativeSessionError(403,'native-lease-denied');
+    return lease;
+  }
+}
+
+export async function nativeHttp(request:Request,sessions:NativeSessions,authenticate:(token:string|null)=>Promise<NativeCaller|null>){
+  try{
+    const bearer=request.headers.get('authorization');
+    const caller=await authenticate(bearer?.startsWith('Bearer ')?bearer.slice(7):null);
+    if(!caller)return Response.json({error:'native-unauthorized'},{status:401});
+    // Stream-bound input, independent of Content-Length and chunking.
+    const reader=request.body?.getReader();let body='';let length=0;
+    if(!reader)throw new NativeSessionError(400,'native-invalid-request');
+    const chunks:Uint8Array[]=[];
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{await Promise.race([(async()=>{while(true){const part=await reader.read();if(part.done)break;length+=part.value.byteLength;
+      if(length>4096)throw new NativeSessionError(413,'native-request-too-large');chunks.push(part.value);
+    }})(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new NativeSessionError(408,'native-request-timeout')),2000);})]);
+    }finally{clearTimeout(timer);void reader.cancel().catch(()=>{});}
+    body=Buffer.concat(chunks).toString('utf8');
+    return Response.json(await sessions.request(caller,JSON.parse(body)));
+  }catch(error){
+    const known=error instanceof NativeSessionError;
+    return Response.json({error:known?error.code:'native-invalid-request'},{status:known?error.status:400});
+  }
+}

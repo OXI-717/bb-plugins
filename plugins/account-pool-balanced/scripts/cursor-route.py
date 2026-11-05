@@ -26,6 +26,7 @@ import subprocess
 import threading
 import json
 import re
+import select
 from urllib.parse import urlsplit
 
 CURSOR_BINARY = "cursor-agent"
@@ -115,6 +116,8 @@ class AcpPoolFailures:
 
 def relay_acp(process, failures):
     """Preserve JSONL traffic except an explicitly correlated failed prompt."""
+    stopped = threading.Event()
+    input_fd = sys.stdin.fileno()
     def parse(line):
         if len(line) > 1024 * 1024:
             return None
@@ -124,16 +127,33 @@ def relay_acp(process, failures):
             return None
 
     def incoming():
+        pending = bytearray()
+        limit = 1024 * 1024 + 1
+
+        def forward(line):
+            message = parse(line)
+            if message is not None:
+                failures.client(message)
+            process.stdin.write(line)
+            process.stdin.flush()
+
         try:
-            while True:
-                line = sys.stdin.buffer.readline(1024 * 1024 + 1)
-                if not line:
+            while not stopped.is_set():
+                if not select.select([input_fd], [], [], 0.1)[0]:
+                    continue
+                chunk = os.read(input_fd, 65536)
+                if not chunk:
+                    if pending:
+                        forward(bytes(pending))
                     break
-                message = parse(line)
-                if message is not None:
-                    failures.client(message)
-                process.stdin.write(line)
-                process.stdin.flush()
+                pending.extend(chunk)
+                while pending:
+                    newline = pending.find(b'\n', 0, limit)
+                    if newline < 0 and len(pending) < limit:
+                        break
+                    length = newline + 1 if newline >= 0 else limit
+                    forward(bytes(pending[:length]))
+                    del pending[:length]
         except (BrokenPipeError, OSError):
             pass
         finally:
@@ -141,17 +161,22 @@ def relay_acp(process, failures):
                 process.stdin.close()
             except OSError:
                 pass
-    threading.Thread(target=incoming, daemon=True).start()
-    while True:
-        line = process.stdout.readline(1024 * 1024 + 1)
-        if not line:
-            break
-        message = parse(line)
-        transformed = failures.child(message) if message is not None else message
-        if transformed is not message:
-            line = json.dumps(transformed, separators=(',', ':')).encode() + b'\n'
-        sys.stdout.buffer.write(line)
-        sys.stdout.buffer.flush()
+    reader = threading.Thread(target=incoming, daemon=True)
+    reader.start()
+    try:
+        while True:
+            line = process.stdout.readline(1024 * 1024 + 1)
+            if not line:
+                break
+            message = parse(line)
+            transformed = failures.child(message) if message is not None else message
+            if transformed is not message:
+                line = json.dumps(transformed, separators=(',', ':')).encode() + b'\n'
+            sys.stdout.buffer.write(line)
+            sys.stdout.buffer.flush()
+    finally:
+        stopped.set()
+        reader.join(timeout=1)
 
 
 def build_argv(executable, argv, env):
