@@ -2,11 +2,11 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {storeCredential,serviceEnvironment,runProcess} from './core.ts';
 import {resolveRoute} from './contract.ts';
-const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',keychainAccount:'example-account'};
+const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
  assert.throws(()=>resolveRoute([route],'other'));
  assert.throws(()=>resolveRoute([route,route],route.projectId));
- assert.throws(()=>resolveRoute([{...route,tokenEnvironment:'EXAMPLE_TOKEN'}],route.projectId));
+ assert.throws(()=>resolveRoute([{...route,authentication:'desktop'}],route.projectId));
  assert.equal(resolveRoute([route],route.projectId).requireApproval,true);
 });
 test('password is stdin only and separate get verifies it',async()=>{

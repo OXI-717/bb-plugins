@@ -16,18 +16,19 @@ Configure `routes` in BB plugin settings, outside the source repository. Each BB
     "projectId": "example-project",
     "hostId": "example-host",
     "vaultId": "example-vault",
-    "keychainAccount": "example-service-account",
+    "authentication": "service-account",
+    "tokenEnvironment": "EXAMPLE_OP_TOKEN",
     "requireApproval": true,
     "operations": []
   }
 ]
 ```
 
-On macOS the service-account token is read from Keychain service `oxi.op.agent-service-account`, with the configured account name. Alternatively use `tokenEnvironment` to name an environment variable supplied securely to the host worker, including on Linux. Exactly one credential source is required. Tokens are never plugin settings or tool results. A missing or expired token fails without falling back to a personal account.
+Choose an explicit supported `op` authentication mode. `desktop` requires `accountId` and uses the installed 1Password app's CLI integration and its owner approval. `service-account` requires `tokenEnvironment`, the name of a variable provisioned securely to the host worker. A missing or expired service token fails without falling back to a personal account. The plugin never reads macOS Keychain directly or asks for the Mac login password. Tokens are never tool results.
 
 Each operation has `name`, `argv` (the fixed executable and arguments) and `references` (environment variable names mapped to `op://<vaultId>/<item>/<field>`). References must use the route's exact vault ID; `OP_*` overrides are forbidden. Provision service accounts with the least required vault permissions. Writing requires read permission in 1Password. Keep administrative vaults separate and use expiring credentials for them.
 
-This plugin does not create service accounts, bootstrap Keychain tokens or grant vault access. Configure those through 1Password's supported owner workflow. It does not isolate other processes running as the same OS user. BB confirmation governs this plugin's operations; service-account permissions and host isolation define the underlying security boundary.
+This plugin does not create service accounts or grant vault access. Configure those through 1Password's supported owner workflow. It does not isolate other processes running as the same OS user. BB confirmation governs this plugin's operations; service-account permissions and host isolation define the underlying security boundary. Desktop CLI approval authorizes a terminal session to the account and is broader than one item; the BB form is not a replacement for that account-level authorization.
 
 ## Development
 
