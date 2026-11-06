@@ -22,7 +22,11 @@ export type EgressProfile = z.infer<typeof egressProfileSchema>;
 const refSchema = z.object({id, version:z.number().int().positive()}).strict();
 export const egressStateSchema = z.object({schema:z.literal(1),profiles:z.array(egressProfileSchema).max(128),
   bindings:z.record(z.string().uuid(),refSchema),
-  pins:z.record(z.string().max(2048),z.object({accountId:z.string().uuid(),ref:refSchema}).strict()).default({})}).strict();
+  pins:z.record(z.string().max(2048),z.object({accountId:z.string().uuid(),ref:refSchema}).strict()).default({}),
+  // Absence of a profile is also an immutable route decision. Keep it per
+  // account so unassigned providers retain their existing selection policy.
+  unassigned:z.record(z.string().max(2048),z.array(z.string().uuid()).min(1).max(128)).default({}),
+}).strict();
 export class EgressUnavailable extends Error {
   readonly code = 'POOL_EGRESS_UNAVAILABLE';
   constructor(){super('Assigned account egress unavailable; no fallback or replay.');}
@@ -35,7 +39,7 @@ export interface AccountRoute {
 
 /** Server-owned selection, never read from client headers or model names. */
 export class AccountEgress {
-  private state:z.infer<typeof egressStateSchema> = {schema:1,profiles:[],bindings:{},pins:{}};
+  private state:z.infer<typeof egressStateSchema> = {schema:1,profiles:[],bindings:{},pins:{},unassigned:{}};
   private readonly agents = new Map<string,ProxyAgent>();
   private readonly sessions = new Map<string,{accountId:string;route:AccountRoute}>();
   private mutation:Promise<unknown> = Promise.resolve();
@@ -71,7 +75,8 @@ export class AccountEgress {
     if(old){if(old.accountId!==accountId || old.route.profile && !old.route.profile.hostIds.includes(await this.hostId()))throw new EgressUnavailable();return old.route;}
     const pin=sessionKey?this.state.pins[sessionKey]:undefined;
     if(pin && pin.accountId!==accountId)throw new EgressUnavailable();
-    const ref=pin?.ref??this.state.bindings[accountId];
+    const previousUnassigned=sessionKey && this.state.unassigned[sessionKey]?.includes(accountId);
+    const ref=pin?.ref??(previousUnassigned?undefined:this.state.bindings[accountId]);
     let route:AccountRoute={assigned:false,profile:null,fetch:()=>undefined};
     if(ref){
       const value=this.state.profiles.find(p=>p.id===ref.id&&p.version===ref.version);
@@ -90,17 +95,21 @@ export class AccountEgress {
       route={assigned:true,profile,fetch:()=>send};
     }
     // Pins survive settings edits. Bounded refusal does not evict warm sessions.
-    if(sessionKey && route.assigned){
-      if(this.sessions.size>=4096)throw new EgressUnavailable();
+    // Providers outside central egress retain their policy even at capacity.
+    if(sessionKey && (ref || await this.accountExists(accountId))){
       await this.update(async()=>{
         const prior=this.state.pins[sessionKey];
-        if(prior && (prior.accountId!==accountId || prior.ref.id!==ref!.id || prior.ref.version!==ref!.version))throw new EgressUnavailable();
-        if(!prior){
-          if(Object.keys(this.state.pins).length>=4096)throw new EgressUnavailable();
-          const next={...this.state,pins:{...this.state.pins,[sessionKey]:{accountId,ref:ref!}}};
+        if(prior && (prior.accountId!==accountId || prior.ref?.id!==ref?.id || prior.ref?.version!==ref?.version))throw new EgressUnavailable();
+        const unassigned=this.state.unassigned[sessionKey]??[];
+        if(!prior && (ref || !unassigned.includes(accountId))){
+          const count=Object.keys(this.state.pins).length+Object.values(this.state.unassigned).reduce((n,accounts)=>n+accounts.length,0);
+          if(count>=4096 || !ref && unassigned.length>=128)throw new EgressUnavailable();
+          const next=ref
+            ? {...this.state,pins:{...this.state.pins,[sessionKey]:{accountId,ref}}}
+            : {...this.state,unassigned:{...this.state.unassigned,[sessionKey]:[...unassigned,accountId]}};
           await this.kv.set('account-egress-v1',next);this.state=next;
         }
-        this.sessions.set(sessionKey,{accountId,route});
+        if(ref)this.sessions.set(sessionKey,{accountId,route});
       });
     }
     return route;

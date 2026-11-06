@@ -34,9 +34,33 @@ it('pins account and version across edits and server restart without changing pr
  await initial.fetch(false)!('https://model.example/v1');expect(observed).toHaveBeenCalledOnce();
  expect(process.env.HTTPS_PROXY).toBe('http://127.0.0.1:1');
 });
+it('keeps an already warm unassigned session on its previous route across binding and restart',async()=>{
+ const kv=storage(),e=new AccountEgress(kv,async()=>'host-one',async()=>true);cleanup.push(()=>e.close());
+ expect((await e.acquire(a,'already-warm')).assigned).toBe(false);
+ await e.configure(profile);await e.bind(a,{id:profile.id,version:1});
+ expect((await e.acquire(a,'already-warm')).assigned).toBe(false);
+ expect((await e.acquire(a,'started-after-binding')).profile?.version).toBe(1);
+ const restarted=new AccountEgress(kv,async()=>'host-one',async()=>true);cleanup.push(()=>restarted.close());await restarted.initialize();
+ expect((await restarted.acquire(a,'already-warm')).assigned).toBe(false);
+ expect((await restarted.acquire(b,'already-warm')).assigned).toBe(false);
+ await restarted.bind(b,{id:profile.id,version:1});
+ expect((await restarted.acquire(b,'already-warm')).assigned).toBe(false);
+ expect((await restarted.acquire(b,'new-after-b-binding')).assigned).toBe(true);
+ await expect(restarted.acquire(a,'new-after-b-binding')).rejects.toBeInstanceOf(EgressUnavailable);
+});
 it('rejects unsupported server hosts and IPv6 destinations',async()=>{
  const e=new AccountEgress(storage(),async()=>'host-two',async()=>true);cleanup.push(()=>e.close());
  await e.configure(profile);await e.bind(a,{id:profile.id,version:1});await expect(e.acquire(a)).rejects.toBeInstanceOf(EgressUnavailable);
+});
+it('refuses new route decisions at capacity without evicting a warm unassigned route',async()=>{
+ const kv=storage(),pins=Object.fromEntries(Array.from({length:4095},(_,i)=>['assigned-'+i,{accountId:a,ref:{id:profile.id,version:1}}]));
+ await kv.set('account-egress-v1',{schema:1,profiles:[profile],bindings:{[a]:{id:profile.id,version:1}},pins,unassigned:{warm:[a]}});
+ const e=new AccountEgress(kv,async()=>'host-one',async id=>id===a);cleanup.push(()=>e.close());await e.initialize();
+ expect((await e.acquire(a,'warm')).assigned).toBe(false);
+ expect((await e.acquire(a,'assigned-0')).assigned).toBe(true);
+ await expect(e.acquire(a,'new')).rejects.toBeInstanceOf(EgressUnavailable);
+ expect((await e.acquire(b,'unrelated-provider')).assigned).toBe(false);
+ expect((await e.acquire(a,'warm')).assigned).toBe(false);
 });
 it('sends CONNECT to the assigned socket despite NO_PROXY; socket failure never reaches the origin',async()=>{
  let connects=0,direct=0;
