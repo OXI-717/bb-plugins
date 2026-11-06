@@ -113,7 +113,11 @@ export interface ProviderAdapter {
     parentAffinityId: string | null;
     forAccount: (account: Account, secret: AccountSecret) => Uint8Array;
   };
-  upstreamUrl(request: Request, settings: AccountPoolConfig): URL;
+  upstreamUrl(
+    request: Request,
+    settings: AccountPoolConfig,
+    body?: Uint8Array,
+  ): URL;
   upstreamMethod?(request:Request):string;
   transformResponse?(request:Request,response:Response,signal:AbortSignal):Response;
   guardRequest?(request: Request, body: Uint8Array): Response | null;

@@ -35,9 +35,8 @@ import { createDevinAdapter } from "./devin-adapter.js";
 import { createKimiAdapter } from "./kimi-adapter.js";
 import {
   createOpenAiCompatibleAdapter,
-  guardOpencodeGoRequestBody,
-  normalizeOpencodeGoUpstreamPathSuffix,
   isChatCompletionsBody,
+  opencodeGoUpstreamPathSuffix,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
@@ -1475,7 +1474,11 @@ export class AccountPoolHub {
     try {
       const upstreamBody = new ArrayBuffer(body.byteLength);
       new Uint8Array(upstreamBody).set(body);
-      const url = adapter.upstreamUrl(request, this.options.getSettings());
+      const url = adapter.upstreamUrl(
+          request,
+          this.options.getSettings(),
+          body,
+        );
       const headers = adapter.requestHeaders(request.headers, account, secret);
       const method=adapter.upstreamMethod?.(request)??request.method;
       let phase:'before-dispatch'|'after-headers'|'cooldown'='before-dispatch';
@@ -1792,9 +1795,10 @@ export function createHub(options: {
         upstreamBaseUrl: (settings) => settings.opencodeGoUpstreamBaseUrl,
         usagesUrl:
           options.opencodeGoUsagesUrl ?? DEFAULT_OPENCODE_GO_USAGES_URL,
-        allowedHeaderPrefixes: ["x-opencode-"],
-        normalizeUpstreamPathSuffix: normalizeOpencodeGoUpstreamPathSuffix,
-        guardRequestBody: guardOpencodeGoRequestBody,
+        allowedHeaderPrefixes: ["x-opencode-", "anthropic-"],
+        normalizeUpstreamPathSuffix: opencodeGoUpstreamPathSuffix,
+        // Anthropic clients authenticate with x-api-key, not Bearer.
+        inboundToken: (headers) => headers.get("x-api-key"),
         parseUsages: opencodeGoQuotaFromUsages,
       }),
     ],
