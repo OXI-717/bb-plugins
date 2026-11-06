@@ -27,7 +27,18 @@ def evaluate(config, inventories, sources, now):
         if inv is None or now - inv.get('observedAt', 0) > config['staleAfterMs']:
             add('coverage', host, 'Host inventory missing or stale')
             continue
-        for c in inv['coverage']:
+        coverage = inv.get('coverage')
+        expected = config.get('coverageRequirements', {}).get(host, [])
+        if not isinstance(coverage, list) or not coverage or not isinstance(inv.get('observations'), list):
+            add('coverage', host, 'Host inventory structure or coverage incomplete')
+            continue
+        if any(not isinstance(c, dict) or not isinstance(c.get('scheduler'), str) or not isinstance(c.get('scope'), str) or not isinstance(c.get('ok'), bool) for c in coverage):
+            add('coverage', host, 'Host coverage malformed')
+            continue
+        for required in expected:
+            if not any(c['scheduler'] == required['scheduler'] and c['scope'] == required['scope'] for c in coverage):
+                add('coverage', identity(host, required['scheduler'], required['scope'], '*'), 'Expected scheduler scope not observed')
+        for c in coverage:
             if not c['ok']:
                 add('coverage', identity(host, c['scheduler'], c['scope'], '*'), 'Scheduler inventory unavailable')
         for row in inv['observations']:
@@ -50,6 +61,19 @@ def evaluate(config, inventories, sources, now):
     return findings
 
 
+def coverage_blocks(old, failed):
+    if failed['kind'] != 'coverage':
+        return False
+    try:
+        origin = json.loads(old['identity'])
+        missing = json.loads(failed['identity'])
+        if isinstance(origin, list) and isinstance(missing, list):
+            return origin[:3] == missing[:3] or missing[1] == 'host' and origin[0] == missing[0]
+    except ValueError:
+        pass
+    return old.get('host') == failed.get('host')
+
+
 def snapshot(config, findings, previous, now):
     """Stable visible cards; bounded repeat history, recovery recorded only after valid coverage."""
     from catalog_collect import task_base
@@ -62,7 +86,7 @@ def snapshot(config, findings, previous, now):
         old = previous.get(key)
         if item is None and old:
             # A missing host/source is not evidence that its old problems recovered.
-            if any(f['kind'] == 'coverage' for f in findings.values()):
+            if old.get('active') and old['finding']['kind'] != 'coverage' and any(coverage_blocks(old['finding'], f) for f in findings.values()):
                 item = dict(old['finding'], unresolved=True)
             elif budget > 0 and old.get('active'):
                 runs.append(dict(taskId=key, host=old['finding'].get('host', config['host']), id=f'{key}:{now}:recovered', status='succeeded',

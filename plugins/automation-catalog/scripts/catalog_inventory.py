@@ -6,6 +6,7 @@ from pathlib import Path
 import platform
 import plistlib
 import subprocess
+import time
 
 
 def command(argv):
@@ -81,8 +82,10 @@ def discover(run=command, system=None, home=None, etc=None):
         return ['entry:' + hashlib.sha256(line.strip().encode()).hexdigest()[:24] for line in content.splitlines()
                 if line.strip() and not line.lstrip().startswith('#') and (' ' in line.strip()) and not line.split()[0].count('=')]
     probe('cron', 'user', cron)
+    if os.geteuid() != 0:
+        coverage.append(dict(scheduler='cron', scope='root', ok=False))
     return dict(observations=observations, coverage=coverage)
 
 
 if __name__ == '__main__':
-    print(json.dumps(discover()))
+    print(json.dumps(dict(discover(), observedAt=int(time.time()*1000))))

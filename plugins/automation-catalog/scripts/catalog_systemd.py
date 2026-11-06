@@ -33,19 +33,24 @@ def collect(host, selection, command, task_base):
         raise ValueError('Select between 1 and 100 exact timers')
     tasks, runs = [], []
     for identifier, config in selection.items():
-        if not isinstance(identifier, str) or not re.fullmatch(r'(system|user):[a-zA-Z0-9_.@:-]+\.timer', identifier):
+        if not isinstance(identifier, str) or not re.fullmatch(r'(system|user):[a-zA-Z0-9_.@:-]+\.(timer|service)', identifier):
             raise ValueError('Selection must name an exact system: or user: timer')
         scope, timer = identifier.split(':', 1)
+        is_timer = timer.endswith('.timer')
         if not isinstance(config, dict) or set(config) - {'name', 'service', 'projectId'}:
             raise ValueError('Expected name/service/projectId selection object')
-        service = config.get('service', timer[:-6] + '.service')
+        service = config.get('service', timer[:-6] + '.service' if is_timer else timer)
+        if not is_timer and service != timer:
+            raise ValueError('Standalone service must match its identity')
+        if is_timer and scope + ':' + service in selection:
+            raise ValueError('Timer and companion service must have one card')
         if not isinstance(service, str) or not re.fullmatch(r'[a-zA-Z0-9_.@:-]+\.service', service):
             raise ValueError('Select an exact service')
         name = config.get('name')
         if not isinstance(name, str) or not 1 <= len(name) <= 300:
             raise ValueError('Display name required')
         timer_state = properties(command, scope, timer)
-        live = properties(command, scope, service)
+        live = properties(command, scope, service) if is_timer else timer_state
         if timer_state.get('LoadState') != 'loaded' or live.get('LoadState') != 'loaded':
             raise ValueError('Selected timer/service not loaded')
         enabled = timer_state.get('UnitFileState', 'unknown')
@@ -53,16 +58,16 @@ def collect(host, selection, command, task_base):
         state = 'unknown'
         if active == 'failed':
             state = 'failed'
-        elif enabled in ('enabled', 'enabled-runtime') and active == 'active':
+        elif active == 'active' and (not is_timer or enabled in ('enabled', 'enabled-runtime')):
             state = 'active'
         elif enabled in ('disabled', 'masked', 'masked-runtime') and active == 'inactive':
             state = 'paused'
         task = task_base(identifier, name, host)
         task.update(scheduler='systemd', executor=service, projectId=config.get('projectId'),
-                    state=state, declaredState=enabled, schedule=timer_state.get('TimersCalendar') or None,
-                    nextRunAt=timestamp(timer_state.get('NextElapseUSecRealtime', '')),
+                    state=state, declaredState=enabled, schedule=(timer_state.get('TimersCalendar') or None) if is_timer else None,
+                    nextRunAt=timestamp(timer_state.get('NextElapseUSecRealtime', '')) if is_timer else None,
                     history='not-recorded',
-                    description=f'{scope} timer: enabled={enabled}, active={active}; service result={live.get("Result", "unknown")}.')
+                    description=f'{scope} {"timer" if is_timer else "service"}: enabled={enabled}, active={active}; service result={live.get("Result", "unknown")}.')
         started = timestamp(live.get('ExecMainStartTimestamp', ''))
         finished = timestamp(live.get('ExecMainExitTimestamp', ''))
         invocation = live.get('InvocationID', '')

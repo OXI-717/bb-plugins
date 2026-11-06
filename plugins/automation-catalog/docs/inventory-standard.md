@@ -38,3 +38,18 @@ Stopping unknown jobs is never automatic. The registry's `stop` and `rollback`
 identify the original scheduler operation; use the existing catalog action draft
 to inspect that source before changing it. Native BB stop remains the supported
 native action. Audit results belong in the existing durable per-task journal.
+
+Remote collection may instead use `remoteHosts` (at most two connected BB hosts)
+through the official read-only terminal transport. `coverageRequirements` maps
+host IDs to required scheduler/scope pairs. Missing required pairs, malformed or
+empty coverage do not establish recovery. `hostAliases` maps legacy display host
+names for comparison only, without rewriting persisted catalog identities.
+
+The collector's optional `--metadata-registry` applies that same explicit registry
+to display names, ownership and the purpose/source/limits/stop/rollback text. It
+never modifies technical IDs, state, schedules or native job definitions. Entries
+without the necessary metadata remain visible compliance findings.
+
+Selected systemd sources also accept standalone `.service` identities. An active
+long-running service has no invented schedule or next run. A selected timer and
+its companion service form one card; selecting both separately is rejected.

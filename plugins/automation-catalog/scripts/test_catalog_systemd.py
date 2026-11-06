@@ -61,3 +61,15 @@ class SystemdTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class StandaloneTests(unittest.TestCase):
+    def test_long_running_service_has_no_invented_schedule(self):
+        live=SERVICE.replace('ActiveState=inactive','ActiveState=active').replace('ExecMainExitTimestamp=Fri 2026-11-06 16:00:01 UTC','ExecMainExitTimestamp=')
+        tasks,runs=s.collect('worker',{'user:example.service':{'name':'Example service'}},Mock(side_effect=[live,'']),task_base)
+        self.assertEqual(tasks[0]['state'],'active')
+        self.assertIsNone(tasks[0]['schedule'])
+        self.assertIsNone(tasks[0]['nextRunAt'])
+        self.assertEqual(runs[0]['status'],'running')
+    def test_timer_companion_cannot_be_separate_card(self):
+        with self.assertRaises(ValueError):
+            s.collect('worker',{'system:example.timer':{'name':'Example'},'system:example.service':{'name':'Duplicate'}},Mock(),task_base)

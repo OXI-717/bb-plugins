@@ -306,6 +306,7 @@ def main():
     parser.add_argument('--team')
     parser.add_argument('--include-private-metadata', action='store_true', help='Include private registry entries; visible to everyone with access to the destination BB instance. Destination access is not verified.')
     parser.add_argument('--include-results', action='store_true', help='Include authorized Scheduler results in this trusted BB instance')
+    parser.add_argument('--metadata-registry', type=Path, help='Explicit display metadata; does not alter scheduler IDs')
     parser.add_argument('--publish', action='store_true', help='Publish through the currently selected BB server')
     parser.add_argument('--selection', type=Path, help='Required local registry: JSON object mapping task IDs to display names')
     parser.add_argument('--state-dir', type=Path, default=Path.home() / '.local/state/bb-automation-catalog')
@@ -360,6 +361,13 @@ def main():
     except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         snapshot['error'] = 'Source unavailable (' + type(error).__name__ + ')'
         snapshot['tasks'], snapshot['runs'] = [], []
+    if args.metadata_registry and snapshot['error'] is None:
+        try:
+            from catalog_registration import overlay
+            overlay(snapshot['tasks'], args.metadata_registry)
+        except (OSError, ValueError, KeyError, TypeError):
+            snapshot['error'] = 'Registry metadata unavailable'
+            snapshot['tasks'], snapshot['runs'] = [], []
     if args.host_prefix:
         for task in snapshot['tasks']:
             task['hostLabel'] = task['host'] if task['host'].startswith(args.host_prefix) else args.host_prefix + task['host']

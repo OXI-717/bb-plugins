@@ -47,7 +47,7 @@ def main():
                 audit = subprocess.run([sys.executable, str(Path(__file__).with_name('catalog_audit.py')),
                                         '--config', config['auditConfig'], '--publish'],
                                        env=dict(os.environ, BB_SERVER_URL=config['serverUrl']),
-                                       capture_output=True, text=True, timeout=120)
+                                       capture_output=True, text=True, timeout=220)
                 state['results'].append(dict(source='inventory-audit', exitCode=audit.returncode))
             except (OSError, subprocess.TimeoutExpired) as error:
                 state['results'].append(dict(source='inventory-audit', error=type(error).__name__))

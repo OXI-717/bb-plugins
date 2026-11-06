@@ -9,7 +9,7 @@ import time
 
 def remote(host, bb='bb'):
     def cli(args):
-        r=subprocess.run([bb,*args],capture_output=True,text=True,timeout=30)
+        r=subprocess.run([bb,*args],capture_output=True,text=True,timeout=15)
         if r.returncode or len(r.stdout)>1_000_000:
             raise RuntimeError('Remote inventory unavailable')
         p=json.loads(r.stdout)
@@ -20,11 +20,11 @@ def remote(host, bb='bb'):
     code=source.rsplit("if __name__ == '__main__':",1)[0]+'\nimport time\nprint(json.dumps(dict(discover(),observedAt=int(time.time()*1000))))\n'
     terminal=cli(['terminal','create','--machine',host,'--cwd','/','--title','Read-only inventory',
                   '--command','python3 -c '+shlex.quote(code),'--json'])
-    if terminal.get('hostId')!=host:
-        raise RuntimeError('Remote host mismatch')
     identifier=terminal['id']
     try:
-        deadline=time.monotonic()+45
+        if terminal.get('hostId')!=host:
+            raise RuntimeError('Remote host mismatch')
+        deadline=time.monotonic()+20
         while time.monotonic()<deadline:
             output=cli(['terminal','output',identifier,'--tail-bytes','200000','--json'])
             if output.get('status')=='exited':

@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--publish', action='store_true')
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
-    if len(config['hosts']) > 32 or len(config.get('remoteHosts', [])) > 3:
+    if len(config['hosts']) > 32 or len(config.get('remoteHosts', [])) > 2:
         raise ValueError('Bounded host selection required')
     if not 60000 <= config['staleAfterMs'] <= 604800000 or config.get('reminderMs', 86400000) < 60000:
         raise ValueError('Invalid freshness or reminder bound')

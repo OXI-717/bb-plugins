@@ -38,3 +38,31 @@ class ComplianceTests(unittest.TestCase):
         self.assertEqual({f['kind'] for f in evaluate(self.cfg,self.inv,self.sources,1000).values()}, {'coverage','noncompliant'})
 
 if __name__=='__main__':unittest.main()
+
+class RegressionTests(ComplianceTests):
+    def test_recovered_not_reopened_by_lost_coverage(self):
+        f=evaluate(self.cfg,self.inv,self.sources,1000)
+        _,state=snapshot(self.cfg,f,{},1000)
+        _,state=snapshot(self.cfg,{},state,1001)
+        lost=evaluate(self.cfg,{},self.sources,1002)
+        result,_=snapshot(self.cfg,lost,state,1002)
+        recovered=[t for t in result['tasks'] if t['id'] in state]
+        self.assertEqual([t['state'] for t in recovered],['paused'])
+    def test_empty_coverage_cannot_recover(self):
+        f=evaluate(self.cfg,self.inv,self.sources,1000)
+        _,state=snapshot(self.cfg,f,{},1000)
+        self.inv['sample'].update(coverage=[],observations=[])
+        lost=evaluate(self.cfg,self.inv,self.sources,1001)
+        result,_=snapshot(self.cfg,lost,state,1001)
+        self.assertFalse(any(r['status']=='succeeded' for r in result['runs']))
+    def test_expected_scope_missing_is_unknown(self):
+        self.cfg['coverageRequirements']={'sample':[dict(scheduler='cron',scope='root')]}
+        f=evaluate(self.cfg,self.inv,self.sources,1000)
+        self.assertIn('coverage',[v['kind'] for v in f.values()])
+    def test_unrelated_scope_does_not_prevent_recovery(self):
+        f=evaluate(self.cfg,self.inv,self.sources,1000)
+        _,state=snapshot(self.cfg,f,{},1000)
+        self.inv['sample']['observations']=[]
+        self.inv['sample']['coverage'].append(dict(scheduler='cron',scope='root',ok=False))
+        result,_=snapshot(self.cfg,evaluate(self.cfg,self.inv,self.sources,1001),state,1001)
+        self.assertTrue(any(r['status']=='succeeded' for r in result['runs']))
