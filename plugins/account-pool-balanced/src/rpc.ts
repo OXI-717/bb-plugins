@@ -1,3 +1,4 @@
+import { egressProfileSchema, egressStateSchema, type AccountEgress } from "./account-egress.js";
 import type {AgyOAuthLogin} from "./agy-oauth-login.js";
 import { defineRpcContract, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -53,6 +54,9 @@ const browserOpenInputSchema = z.object({
 export type BrowserOpenInput = z.infer<typeof browserOpenInputSchema>;
 
 export const accountPoolRpcContract = defineRpcContract({
+  "egress.status":{input:z.null(),output:egressStateSchema},
+  "egress.bind":{input:z.object({accountId:z.string().uuid(),ref:z.object({id:z.string(),version:z.number().int().positive()}).strict().nullable()}).strict(),output:z.null()},
+  "egress.configure":{input:egressProfileSchema,output:z.null()},
   "readiness.get": {input: z.object({projectId:z.string().min(1).max(200).nullable()}).strict(), output:z.array(providerReadinessSchema).length(providerSchema.options.length)},
   "browser.open": { input: browserOpenInputSchema, output: z.object({ opened: z.literal(true) }).strict() },
   "thread.account": { input: z.object({ threadId: z.string().min(1) }).strict(), output: threadAccountStatusSchema },
@@ -187,8 +191,12 @@ export function createRpcHandlers(
   openBrowser: (input: BrowserOpenInput) => Promise<{ opened: true }> = async () => { throw new Error("Account browser unavailable"); },
   agyLogin?: AgyOAuthLogin,
   openAgyBrowser:(url:string)=>Promise<{opened:true}>=async()=>{throw Error("Sign-in browser unavailable");},
+  egress?:AccountEgress,
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
+    "egress.status":()=>{if(!egress)throw Error("Egress unavailable");return egress.snapshot();},
+    "egress.configure":async input=>{if(!egress)throw Error("Egress unavailable");await egress.configure(input);return null;},
+    "egress.bind":async({accountId,ref})=>{if(!egress)throw Error("Egress unavailable");await egress.bind(accountId,ref);return null;},
     "readiness.get": ({projectId}) => operations.readiness(projectId),
     "browser.open": input => openBrowser(input),
     "projects.list": () => projectsList(),

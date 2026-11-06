@@ -1,3 +1,4 @@
+import { EgressUnavailable, type AccountRoute } from "./account-egress.js";
 import { providerBudgetQuota, providerEvidenceFromUsage, PROVIDER_BUDGET_MAX_AGE_MS, NUMERIC_BUDGET_PROVIDERS } from './provider-budget.js';
 import {AccountStartPacing} from "./account-start-pacing.js";
 import { AccountAdmission, AdmissionUnavailable, ACCOUNT_QUEUE_MAX_WAIT_MS } from "./account-admission.js";
@@ -112,6 +113,7 @@ const DROPPED_RESPONSE_HEADERS = new Set([
 ]);
 
 interface HubOptions {
+  accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
   nativeAgyManaged?:()=>boolean;
   journal?: RequestJournal;
   route: string;
@@ -223,6 +225,14 @@ export class AccountPoolHub {
 
   private requiresIpv4(provider:PoolProvider):boolean {const settings=this.options.getSettings();return settings.vpnOnlyProviders.some(value=>value===provider)||(settings.vpnGuardEnabled&&provider!=="kimi"&&provider!=="zai");}
   async assertNetworkAllowed(provider: PoolProvider, observeGuard?: (result:import("./vpn-policy.js").GuardObservation)=>void): Promise<void> { await this.vpn.assert(provider,observeGuard);if(this.requiresIpv4(provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
+
+  private async acquireRoute(account:Account,sessionKey?:string|null):Promise<AccountRoute>{
+    return this.options.accountRoute?.(account.id,sessionKey) ?? {assigned:false,profile:null,fetch:()=>undefined};
+  }
+
+  private accountFetch(account:Account,route:AccountRoute):typeof fetch {
+    return (input,init)=>this.networkFlights.fetch(account.provider,input,init,false,undefined,undefined,route.fetch(this.requiresIpv4(account.provider)));
+  }
 
   outboundFetch(provider: PoolProvider): typeof fetch {
     return (input,init)=>this.networkFlights.fetch(provider,input,init);
@@ -377,6 +387,7 @@ export class AccountPoolHub {
   ): Promise<void> {
     await this.assertNetworkAllowed(account.provider);
     const adapter = this.adapter(account.provider);
+    const route=await this.acquireRoute(account);
     if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) {
       if (force) throw new Error("Аккаунт занят запросом. Повторите обновление квот после его завершения.");
       return;
@@ -399,13 +410,13 @@ export class AccountPoolHub {
         freshSecret: async (rejectedAccessToken) => {
           const secret = await this.freshSecret(account, adapter, rejectedAccessToken === undefined
             ? { kind: "normal" }
-            : { kind: "rejected", accessToken: rejectedAccessToken });
+            : { kind: "rejected", accessToken: rejectedAccessToken },route);
           usageSecret = secret;
           return secret;
         },
         accounts: this.options.accounts,
         quotas: this.options.quotas,
-        fetch: (input, init) => this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
+        fetch: (input, init) => this.accountFetch(account,route)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
         now: this.options.now,
       })
       .then(async () => { await this.settleDrain(account); })
@@ -631,6 +642,7 @@ export class AccountPoolHub {
           purpose,
         );
         if (selected === null) break;
+        const route=await this.acquireRoute(selected.account,threadId===null?affinityKey:JSON.stringify([hostId,projectId,threadId,adapter.provider]));
         lastAccount=selected.account.id;
         let pacing: PacingFlight | null = null;
         previousAccountId = selected.account.id;
@@ -645,11 +657,12 @@ export class AccountPoolHub {
         try {
           signal.throwIfAborted();
           secret = await abortable(
-            this.freshSecret(selected.account, adapter, { kind: "normal" }),
+            this.freshSecret(selected.account, adapter, { kind: "normal" },route),
             signal,
           );
         } catch (error) {
-          if (error instanceof VpnRequiredError) throw error;
+          if (error instanceof EgressUnavailable || error instanceof VpnRequiredError) throw error;
+          if(route.assigned)throw new EgressUnavailable();
           if (pacing !== null) {
             this.releasePacing(selected.account.id, pacing);
             pacing = null;
@@ -686,7 +699,7 @@ export class AccountPoolHub {
               selected.account,
               secret,
               adapter,
-              trace, attempt,
+              trace, attempt, route,
               {purpose,projectId,family,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
                 switched = lastDispatchedAccount !== null && lastDispatchedAccount !== selected.account.id;
                 if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'dispatched'});
@@ -737,6 +750,13 @@ export class AccountPoolHub {
           if (pacing !== null && !response.ok) {
             this.releasePacing(selected.account.id, pacing);
             pacing = null;
+          }
+          if(route.assigned && !response.ok){
+            if(response.status===429 && !adapter.isQuotaRejection(response.headers)){
+              const heldUntil=this.options.now()+retryAfterMilliseconds(response.headers.get('retry-after'),this.options.now());
+              this.options.quotas.put({...observed,heldUntil});
+            }
+            return result(this.clientResponse(upstream));
           }
           if (response.status === 429) {
             if (adapter.isQuotaRejection(response.headers)) {
@@ -811,7 +831,7 @@ export class AccountPoolHub {
                   this.freshSecret(selected.account, adapter, {
                     kind: "rejected",
                     accessToken: secret.accessToken,
-                  }),
+                  },route),
                   signal,
                 );
               } catch (error) {
@@ -868,6 +888,7 @@ export class AccountPoolHub {
             failure.headers,
           ));
     } catch (error) {
+      if (error instanceof EgressUnavailable)return result(this.errorResponse(adapter,request,503,error.message,{"x-bb-pool-error":error.code}));
       if (error instanceof AdmissionUnavailable) {
         this.observe(trace,{event:'queue-wait',attempt,accountId:lastAccount,status:503,errorClass:error.code==='POOL_QUEUE_FULL'?'queue-full':'queue-timeout',durationMs:Math.max(0,this.options.now()-startedAt)});
         return result(this.errorResponse(adapter, request, 503, error.message, {"x-bb-pool-error":error.code,"retry-after":"1"}));
@@ -1267,7 +1288,9 @@ export class AccountPoolHub {
     account: Account,
     adapter: ProviderAdapter,
     use: SecretUse,
+    route?:AccountRoute,
   ): Promise<AccountSecret> {
+    route ??= await this.acquireRoute(account);
     while (true) {
       const existing = this.refreshes.get(account.id);
       if (existing !== undefined) {
@@ -1364,7 +1387,7 @@ export class AccountPoolHub {
                 quotas: this.options.quotas,
                 fetch: async (input, init) => {
                   refreshStarted = true;
-                  const response = await this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) });
+                  const response = await this.accountFetch(account,route)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) });
                   refreshStatus = response.status;
                   return response;
                 },
@@ -1435,7 +1458,7 @@ export class AccountPoolHub {
     account: Account,
     secret: AccountSecret,
     adapter: ProviderAdapter,
-    trace: Trace, attempt: number,
+    trace: Trace, attempt: number, route:AccountRoute,
     admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;deadline:number;onDispatch?:()=>void},
   ): Promise<UpstreamResult> {
     const admissionSignal = AbortSignal.any([request.signal, this.stopped.signal]);
@@ -1507,9 +1530,9 @@ export class AccountPoolHub {
             });
             if (started.value !== null) return started.value.response;
           }
-        },check)
+        },check,route.fetch(this.requiresIpv4(account.provider)))
         .catch((cause: unknown) => {
-          if (cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
+          if (cause instanceof EgressUnavailable || cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
           throw new UpstreamConnectionError("Upstream connection failed.", {
             cause,
           });
@@ -1716,6 +1739,7 @@ export class AccountPoolHub {
 }
 
 export function createHub(options: {
+  accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
   nativeAgyManaged?:()=>boolean;
   route: string;
   agyModels?:(ids:string[])=>Promise<void>;
@@ -1835,7 +1859,7 @@ export function createHub(options: {
     vpnPayload: options.vpnPayload,
     guardCheck: options.guardCheck,
     adapters,
-    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,
+    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),

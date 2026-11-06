@@ -8488,3 +8488,39 @@ describe("cached provider readiness", () => {
     expect(result.stdout).not.toContain("sk-account");
   });
 });
+
+describe('server-owned account egress dispatch',()=>{
+  const routeProfile={id:'exit-one',version:1,label:'Test exit',node:'node-one',hostIds:['host-one'],transport:'ssh-connect',endpoint:'http://127.0.0.1:19081',dns:'remote',ipv4:true,ipv6:false,failure:'closed',expectedExit:['192.0.2.1'],assurance:'proxy-enforced'};
+  it('binds model and usage after account selection, ignores client profile headers, and never replays 429',async()=>{
+    const direct=vi.fn(async()=>Response.json({direct:true}));
+    const fixture=await createFixture({upstreamUrl:'https://model.example',source:'import',options:{fetch:direct,importCredentials:async()=>importedCredentials(),usageUrl:'https://usage.example'}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}));
+    const rpc=fixture.host.harness.behavior.callRpc;
+    await rpc('egress.configure',routeProfile);
+    await rpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
+    const routed=vi.spyOn(globalThis,'fetch').mockImplementation(async(_input,init)=>{
+      expect((init as any).dispatcher).toBeDefined();return Response.json({error:'synthetic quota'},{status:429});
+    });
+    direct.mockClear();
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(fixture.key),'x-bb-egress-profile':'untrusted'},body:JSON.stringify({model:'claude-any-supported-model',messages:[]})});
+    expect(response.status).toBe(429);await response.text();expect(routed).toHaveBeenCalledTimes(1);expect(direct).not.toHaveBeenCalled();
+    await rpc('account.refreshUsage',{accountId:fixture.account.id});
+    expect(routed.mock.calls.length).toBeGreaterThan(1);expect(direct).not.toHaveBeenCalled();
+    const status=await rpc('egress.status',null) as any;
+    expect(status.bindings[fixture.account.id]).toEqual({id:'exit-one',version:1});
+    expect((await rpc('account.list',null) as any[])[0].autopilotAllowed).toBe(false);
+  });
+  it('returns a route failure without a second account, direct request or model rewrite',async()=>{
+    const direct=vi.fn(async()=>Response.json({direct:true}));
+    const fixture=await createFixture({upstreamUrl:'https://model.example',options:{fetch:direct}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}));
+    await addApiAccount(fixture,'synthetic-other-account-key',200);
+    await fixture.host.harness.behavior.callRpc('egress.configure',routeProfile);
+    await fixture.host.harness.behavior.callRpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
+    direct.mockClear();
+    const routed=vi.spyOn(globalThis,'fetch').mockRejectedValue(new Error('transport down'));
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:JSON.stringify({model:'claude-any-supported-model',messages:[]})});
+    expect(response.status).toBe(503);expect(response.headers.get('x-bb-pool-error')).toBe('POOL_EGRESS_UNAVAILABLE');
+    await response.text();expect(routed).toHaveBeenCalledOnce();expect(direct).not.toHaveBeenCalled();
+  });
+});
