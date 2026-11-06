@@ -8547,12 +8547,16 @@ describe('server-owned account egress dispatch',()=>{
     await rpc('egress.configure',routeProfile);
     await rpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
     const routed=vi.spyOn(globalThis,'fetch').mockImplementation(async(_input,init)=>{
-      expect((init as any).dispatcher).toBeDefined();return Response.json({error:'synthetic quota'},{status:429});
+      expect((init as any).dispatcher).toBeDefined();
+      if(init?.body)expect(JSON.parse(Buffer.from(init.body as ArrayBuffer).toString()).model).toBe('claude-any-supported-model');
+      return Response.json({error:'synthetic quota'},{status:429});
     });
     direct.mockClear();
     const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(fixture.key),'x-bb-egress-profile':'untrusted'},body:JSON.stringify({model:'claude-any-supported-model',messages:[]})});
     expect(response.status).toBe(429);await response.text();expect(routed).toHaveBeenCalledTimes(1);expect(direct).not.toHaveBeenCalled();
-    await rpc('account.refreshUsage',{accountId:fixture.account.id});
+    const after429=(await rpc('account.list',null) as any[]).find(a=>a.id===fixture.account.id);
+    expect(after429.heldUntil).not.toBeNull();
+    await expect(rpc('account.refreshUsage',{accountId:fixture.account.id})).rejects.toThrow('HTTP 429');
     expect(routed.mock.calls.length).toBeGreaterThan(1);expect(direct).not.toHaveBeenCalled();
     const status=await rpc('egress.status',null) as any;
     expect(status.bindings[fixture.account.id]).toEqual({id:'exit-one',version:1});

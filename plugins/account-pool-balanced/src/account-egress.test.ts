@@ -54,3 +54,13 @@ it('sends CONNECT to the assigned socket despite NO_PROXY; socket failure never 
  await expect(route.fetch(false)!(`https://127.0.0.1:${originPort}/`)).rejects.toBeInstanceOf(EgressUnavailable);
  expect(connects).toBe(1);expect(direct).toBe(0);
 });
+it('revalidates the server host for warm sessions and refuses IPv6 before dispatch',async()=>{
+ let host='host-one';
+ const e=new AccountEgress(storage(),async()=>host,async()=>true);cleanup.push(()=>e.close());
+ await e.configure(profile);await e.bind(a,{id:profile.id,version:1});
+ const route=await e.acquire(a,'session');const outgoing=vi.spyOn(globalThis,'fetch');
+ await expect(route.fetch(false)!('https://[::1]/')).rejects.toBeInstanceOf(EgressUnavailable);
+ host='host-two';await expect(e.acquire(a,'session')).rejects.toBeInstanceOf(EgressUnavailable);
+ await expect(route.fetch(false)!('https://model.example/')).rejects.toBeInstanceOf(EgressUnavailable);
+ expect(outgoing).not.toHaveBeenCalled();
+});
