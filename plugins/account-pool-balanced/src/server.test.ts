@@ -1714,6 +1714,53 @@ describe("Account Pool plugin", () => {
       );
     });
 
+    it("I7f: a free-tier 429 does not hold the account for paid models", async () => {
+      const urls: string[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        const request = new Request(input, init);
+        urls.push(request.url);
+        if (request.url.includes("free-upstream")) {
+          return new Response("free quota", {
+            status: 429,
+            headers: { "retry-after": "120" },
+          });
+        }
+        return Response.json({ id: "paid-one" });
+      });
+      const freeResponse = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": fixture.key,
+          },
+          body: JSON.stringify({
+            model: "flint-40b-free",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(freeResponse.status).toBe(429);
+      const paidResponse = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: JSON.stringify({
+            model: "glm-5.3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(paidResponse.status).toBe(200);
+      expect(urls[0]).toBe("https://free-upstream.example/chat/completions");
+      expect(urls[1]).toBe("https://upstream.example/chat/completions");
+    });
+
     it("I8: zai /responses is never rewritten to chat/completions", async () => {
       const requests: Request[] = [];
       const fixture = await createFixture({
