@@ -295,7 +295,7 @@ def bb_collect(server, host):
 
 def main():
     parser = argparse.ArgumentParser(description='Read external automation metadata; never executes tasks or models.')
-    parser.add_argument('kind', choices=['local', 'registry', 'aim', 'bb'])
+    parser.add_argument('kind', choices=['local', 'registry', 'aim', 'bb', 'systemd'])
     parser.add_argument('--source-id', required=True)
     parser.add_argument('--name', required=True)
     parser.add_argument('--host', help='Execution host for local or Scheduler API tasks')
@@ -315,8 +315,8 @@ def main():
         parser.error("--bb-server is required for bb and only applies to bb")
     if args.kind == "bb" and not args.host:
         parser.error("--host is required for the BB server execution host")
-    if (args.kind == "local") != (args.selection is not None):
-        parser.error("--selection is required for local and only applies to local")
+    if (args.kind in ("local", "systemd")) != (args.selection is not None):
+        parser.error("--selection is required for local/systemd and only applies to them")
     if args.launch_log is not None and args.kind != 'local':
         parser.error('--launch-log only applies to local')
     if args.include_private_metadata and args.kind != 'registry':
@@ -344,6 +344,11 @@ def main():
                 raise ValueError('Invalid local selection registry')
             snapshot['source']['taskIds'] = list(selection)
             snapshot['tasks'], snapshot['runs'] = local_collect(args.host or socket.gethostname(), args.state_dir, args.launch_log, selection)
+        elif args.kind == 'systemd':
+            from catalog_systemd import collect
+            selection = json.loads(args.selection.read_text())
+            snapshot['source']['taskIds'] = list(selection)
+            snapshot['tasks'], snapshot['runs'] = collect(args.host or socket.gethostname(), selection, command, task_base)
         elif args.kind == 'bb':
             snapshot['tasks'], snapshot['runs'] = bb_collect(args.bb_server, args.host)
         elif args.kind == 'registry':
