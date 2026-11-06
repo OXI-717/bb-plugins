@@ -1,0 +1,40 @@
+import unittest
+from catalog_compliance import evaluate, snapshot, identity
+
+class ComplianceTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = dict(host='sample', hosts=['sample'], registry=[], exclusions=[], sources=['native'],
+                        staleAfterMs=60000, sourceId='coverage', name='Inventory', owner='operator', reminderMs=100)
+        self.inv = {'sample': dict(observedAt=1000, coverage=[dict(scheduler='systemd',scope='user',ok=True)],
+                                  observations=[dict(scheduler='systemd',scope='user',unit='example.service')])}
+        self.sources = {'native': dict(lastSuccessAt=1000, staleAfterMs=60000, error=None)}
+    def test_unknown_dedup_reminder_and_recovery(self):
+        f = evaluate(self.cfg, self.inv, self.sources, 1000)
+        self.assertEqual([v['kind'] for v in f.values()], ['unregistered'])
+        a, state = snapshot(self.cfg, f, {}, 1000)
+        self.assertEqual(len(a['runs']), 1)
+        b, state = snapshot(self.cfg, f, state, 1001)
+        self.assertEqual(b['runs'], [])
+        c, state = snapshot(self.cfg, f, state, 1100)
+        self.assertEqual(len(c['runs']), 1)
+        d, state = snapshot(self.cfg, {}, state, 1101)
+        self.assertEqual(d['runs'][0]['status'], 'succeeded')
+        self.assertEqual(d['tasks'][0]['state'], 'paused')
+    def test_access_loss_does_not_recover_unknown(self):
+        f = evaluate(self.cfg, self.inv, self.sources, 1000)
+        _, state = snapshot(self.cfg, f, {}, 1000)
+        lost = evaluate(self.cfg, {}, self.sources, 1001)
+        snap, _ = snapshot(self.cfg, lost, state, 1001)
+        self.assertFalse(any(r['status']=='succeeded' for r in snap['runs']))
+        self.assertEqual(len(snap['tasks']),2)
+    def test_exclusions_are_scoped_and_reasoned(self):
+        self.cfg['exclusions']=[dict(host='other',scheduler='systemd',scope='user',units=['example.service'],reason='vendor')]
+        self.assertEqual(len(evaluate(self.cfg,self.inv,self.sources,1000)),1)
+        self.cfg['exclusions'][0]['host']='sample'
+        self.assertEqual(evaluate(self.cfg,self.inv,self.sources,1000),{})
+    def test_registry_missing_metadata_and_failed_source(self):
+        self.cfg['registry']=[dict(host='sample',scheduler='systemd',scope='user',unit='example.service')]
+        self.sources['native']['error']='unavailable'
+        self.assertEqual({f['kind'] for f in evaluate(self.cfg,self.inv,self.sources,1000).values()}, {'coverage','noncompliant'})
+
+if __name__=='__main__':unittest.main()
