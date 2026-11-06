@@ -124,3 +124,31 @@ Reuse the same idempotency key and payload after an uncertain response; a change
 payload with that key is rejected. Passed checks require evidence. Records are
 bounded to 32 KiB and 16 evidence references. Keep credentials and personal message
 contents out of notes; the journal has the same access boundary as the catalog.
+
+### Selected Linux systemd timers
+
+`catalog_collect.py systemd` reads only an explicit selection, for example:
+
+```json
+{"system:example-cleanup.timer": {"name": "Expired test data", "service": "example-cleanup.service", "projectId": "example-project"}}
+```
+
+Use `--selection selection.json --source-id linux-systemd --name 'Linux timers'`
+and optionally `--publish`. `user:` selects the current user manager; `system:`
+selects the system manager. Wildcards and arbitrary commands are rejected.
+Timer enabled/active state and next firing are separate from service execution.
+The latest retained service invocation supplies start/end, result and exit status;
+repeated snapshots preserve distinct invocation identities in catalog history.
+Earlier invocations between collections may be unavailable. Timer enablement alone
+never establishes execution success. All systemctl timestamps are requested in UTC.
+
+Journal reads are bounded to 500 entries and seven days. Only numeric counts from
+recognized cleanup JSON are exported, never paths or arbitrary stdout. Missing
+journal access is explicit; it does not erase the systemctl execution evidence.
+The collector never invokes sudo, changes unit permissions or starts a service.
+
+For periodic refresh, add `kind: "systemd"` with `--selection` in `options` to the
+existing `catalog_sync.py` configuration. Keep settings, selections and snapshots
+outside the source checkout. If a host has no publisher, an explicitly configured
+script task may invoke that same synchronizer; do not create a second schedule for
+the underlying cleanup. The synchronizer respects `enabled: false`.
