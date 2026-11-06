@@ -81,6 +81,7 @@ export interface OpenAiCompatibleAdapterOptions {
   ) => string;
   guardRequestBody?: (suffix: string, body: Uint8Array) => string | null;
   inboundToken?: (headers: Headers) => string | null;
+  upstreamApiKeyHeader?: string;
   parseUsages: (
     accountId: string,
     payload: unknown,
@@ -147,6 +148,9 @@ export function createOpenAiCompatibleAdapter(
         );
       }
       headers.set("authorization", `Bearer ${secret.apiKey}`);
+      if (options.upstreamApiKeyHeader) {
+        headers.set(options.upstreamApiKeyHeader, secret.apiKey);
+      }
       return headers;
     },
     quotaFromHeaders,

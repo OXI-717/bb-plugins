@@ -1799,6 +1799,8 @@ export function createHub(options: {
         normalizeUpstreamPathSuffix: opencodeGoUpstreamPathSuffix,
         // Anthropic clients authenticate with x-api-key, not Bearer.
         inboundToken: (headers) => headers.get("x-api-key"),
+        // The Go Messages wire authenticates upstream the Anthropic way too.
+        upstreamApiKeyHeader: "x-api-key",
         parseUsages: opencodeGoQuotaFromUsages,
       }),
     ],

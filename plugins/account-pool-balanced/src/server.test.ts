@@ -1648,7 +1648,9 @@ describe("Account Pool plugin", () => {
       expect(response.status).toBe(200);
       expect(requests).toHaveLength(1);
       expect(requests[0]?.url).toBe("https://upstream.example/messages");
-      expect(requests[0]?.headers.get("x-api-key")).toBeNull();
+      // The subscription key reaches upstream as x-api-key (the Messages
+      // wire's auth scheme) — never the inbound pool token.
+      expect(requests[0]?.headers.get("x-api-key")).toBe("sk-go-subscription");
       expect(requests[0]?.headers.get("authorization")).toBe(
         "Bearer sk-go-subscription",
       );
