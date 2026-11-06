@@ -42,8 +42,17 @@ export function isChatCompletionsBody(body: Uint8Array): boolean {
   }
 }
 
-export function normalizeOpencodeGoUpstreamPathSuffix(suffix: string): string {
-  return suffix === "responses" ? "chat/completions" : suffix;
+export function opencodeGoUpstreamPathSuffix(
+  suffix: string,
+  body: Uint8Array,
+): string {
+  // A Chat Completions body on /responses asked for the wrong endpoint —
+  // point it at the endpoint its body matches. A genuine Responses body
+  // goes to the native /responses wire that OpenCode Go also serves.
+  if (suffix === "responses" && isChatCompletionsBody(body)) {
+    return "chat/completions";
+  }
+  return suffix;
 }
 
 export function wireProtocolRefusalResponse(message: string): Response {
@@ -59,24 +68,6 @@ export function wireProtocolRefusalResponse(message: string): Response {
   );
 }
 
-export function guardOpencodeGoRequestBody(
-  suffix: string,
-  body: Uint8Array,
-): string | null {
-  if (suffix !== "responses") return null;
-  if (isChatCompletionsBody(body)) return null;
-  return (
-    "OpenCode Go serves this model on POST /v1/chat/completions (Chat " +
-    "Completions, messages[]). The inbound /responses body is not " +
-    "Chat Completions shaped (missing messages[], or carrying Responses " +
-    "input/instructions). Path normalization cannot bridge the protocol " +
-    "gap and no request-body conversion is performed. Configure the " +
-    "client to the Chat Completions wire for this model, or add an " +
-    "explicit Responses-to-Chat-Completions bridge. " +
-    `(${WIRE_PROTOCOL_REFUSAL_CODE})`
-  );
-}
-
 export interface OpenAiCompatibleAdapterOptions {
   provider: PoolProvider;
   upstreamName: string;
@@ -84,8 +75,13 @@ export interface OpenAiCompatibleAdapterOptions {
   upstreamBaseUrl: (settings: AccountPoolConfig) => string;
   usagesUrl: string;
   allowedHeaderPrefixes?: readonly string[];
-  normalizeUpstreamPathSuffix?: (upstreamPath: string) => string;
+  normalizeUpstreamPathSuffix?: (
+    upstreamPath: string,
+    body: Uint8Array,
+  ) => string;
   guardRequestBody?: (suffix: string, body: Uint8Array) => string | null;
+  inboundToken?: (headers: Headers) => string | null;
+  upstreamApiKeyHeader?: string;
   parseUsages: (
     accountId: string,
     payload: unknown,
@@ -100,6 +96,7 @@ export function createOpenAiCompatibleAdapter(
   return {
     provider: options.provider,
     upstreamName: options.upstreamName,
+    inboundToken: (headers) => options.inboundToken?.(headers) ?? null,
     async importAccount() {
       throw new Error(
         `${options.upstreamName} accounts carry no local login to import; add them with --api-key-stdin.`,
@@ -115,12 +112,18 @@ export function createOpenAiCompatibleAdapter(
         forAccount: () => body,
       };
     },
-    upstreamUrl: (request, settings) =>
+    upstreamUrl: (request, settings, body) =>
       mountedUpstreamUrl(
         request,
         options.upstreamBaseUrl(settings),
         `${options.mountPrefix}v1/`,
-        options.normalizeUpstreamPathSuffix,
+        options.normalizeUpstreamPathSuffix
+          ? (upstreamPath) =>
+              options.normalizeUpstreamPathSuffix!(
+                upstreamPath,
+                body ?? new Uint8Array(),
+              )
+          : undefined,
       ),
     guardRequest: options.guardRequestBody
       ? (request, body) => {
@@ -145,6 +148,9 @@ export function createOpenAiCompatibleAdapter(
         );
       }
       headers.set("authorization", `Bearer ${secret.apiKey}`);
+      if (options.upstreamApiKeyHeader) {
+        headers.set(options.upstreamApiKeyHeader, secret.apiKey);
+      }
       return headers;
     },
     quotaFromHeaders,

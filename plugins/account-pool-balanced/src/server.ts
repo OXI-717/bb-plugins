@@ -569,7 +569,9 @@ export function createAccountPoolPlugin(
       );
     }
     for (const entry of openAiCompatibleRoutes) {
-      for (const route of (entry.provider === "neuraldeep" ? ["chat/completions", "models"] : ["chat/completions", "responses", "models"])) {
+      // OpenCode Go multiplexes Anthropic Messages next to Chat Completions
+      // and Responses on the same base URL — route all three wires through.
+      for (const route of (entry.provider === "neuraldeep" ? ["chat/completions", "models"] : entry.provider === "opencode-go" ? ["chat/completions", "responses", "messages", "models"] : ["chat/completions", "responses", "models"])) {
         bb.http.route(
           entry.provider === "neuraldeep" && route === "models" ? "GET" : "POST",
           `/${entry.mountPrefix}v1/${route}`,

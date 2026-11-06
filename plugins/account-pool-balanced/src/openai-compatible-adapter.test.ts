@@ -3,10 +3,8 @@ import { mountedUpstreamUrl } from "./provider-adapter.js";
 import {
   createOpenAiCompatibleAdapter,
   isChatCompletionsBody,
-  guardOpencodeGoRequestBody,
-  normalizeOpencodeGoUpstreamPathSuffix,
+  opencodeGoUpstreamPathSuffix,
   OPENCODE_GO_MOUNT_PREFIX,
-  WIRE_PROTOCOL_REFUSAL_CODE,
   type OpenAiCompatibleAdapterOptions,
 } from "./openai-compatible-adapter.js";
 import { DEFAULT_ACCOUNT_POOL_CONFIG } from "./contracts.js";
@@ -35,8 +33,7 @@ const OP_ENCODE_GO_OPTIONS: OpenAiCompatibleAdapterOptions = {
   upstreamBaseUrl: () => "https://opencode.example/zen/go/v1",
   usagesUrl: "https://usages.example/usage",
   parseUsages: () => null,
-  normalizeUpstreamPathSuffix: normalizeOpencodeGoUpstreamPathSuffix,
-  guardRequestBody: guardOpencodeGoRequestBody,
+  normalizeUpstreamPathSuffix: opencodeGoUpstreamPathSuffix,
 };
 
 function mountedRequest(suffix: string, search = ""): Request {
@@ -47,7 +44,7 @@ function mountedRequest(suffix: string, search = ""): Request {
 }
 
 function chatRewrite(path: string): string {
-  return normalizeOpencodeGoUpstreamPathSuffix(path);
+  return opencodeGoUpstreamPathSuffix(path, CHAT_BODY);
 }
 
 describe("opencode-go upstream path suffix normalization", () => {
@@ -113,7 +110,24 @@ describe("opencode-go upstream path suffix normalization", () => {
     );
   });
 
-  it("normalizeOpencodeGoUpstreamPathSuffix is identity outside responses", () => {
+  it("U7: a genuine Responses body keeps the native /responses wire", () => {
+    expect(opencodeGoUpstreamPathSuffix("responses", RESPONSES_BODY)).toBe("responses");
+    expect(opencodeGoUpstreamPathSuffix("responses", AMBIGUOUS_BOTH)).toBe("responses");
+    const url = mountedUpstreamUrl(
+      mountedRequest("responses"),
+      "https://opencode.example/zen/go/v1",
+      `${OPENCODE_GO_MOUNT_PREFIX}v1/`,
+      (path) => opencodeGoUpstreamPathSuffix(path, RESPONSES_BODY),
+    );
+    expect(url.toString()).toBe("https://opencode.example/zen/go/v1/responses");
+  });
+
+  it("U8: the messages wire passes through untouched", () => {
+    expect(opencodeGoUpstreamPathSuffix("messages", RESPONSES_BODY)).toBe("messages");
+    expect(opencodeGoUpstreamPathSuffix("messages", CHAT_BODY)).toBe("messages");
+  });
+
+  it("opencodeGoUpstreamPathSuffix is identity outside responses", () => {
     expect(chatRewrite("chat/completions")).toBe("chat/completions");
     expect(chatRewrite("models")).toBe("models");
     expect(chatRewrite("")).toBe("");
@@ -140,62 +154,35 @@ describe("isChatCompletionsBody (fail closed)", () => {
   });
 });
 
-describe("guardOpencodeGoRequestBody", () => {
-  it("U11: allows a chat body on the rewritten responses suffix", () => {
-    expect(guardOpencodeGoRequestBody("responses", CHAT_BODY)).toBeNull();
-  });
 
-  it("U12: refuses a Responses body on the rewritten responses suffix", () => {
-    expect(guardOpencodeGoRequestBody("responses", RESPONSES_BODY)).not.toBeNull();
-    expect(guardOpencodeGoRequestBody("responses", AMBIGUOUS_BOTH)).not.toBeNull();
-  });
-
-  it("U13: does not guard the native chat/completions suffix", () => {
-    expect(guardOpencodeGoRequestBody("chat/completions", RESPONSES_BODY)).toBeNull();
-    expect(guardOpencodeGoRequestBody("chat/completions", AMBIGUOUS_BOTH)).toBeNull();
-    expect(guardOpencodeGoRequestBody("chat/completions", EMPTY_BODY)).toBeNull();
-  });
-
-  it("U14: does not guard the models suffix", () => {
-    expect(guardOpencodeGoRequestBody("models", RESPONSES_BODY)).toBeNull();
-    expect(guardOpencodeGoRequestBody("models", EMPTY_BODY)).toBeNull();
-  });
-});
-
-describe("opencode-go adapter guardRequest wiring", () => {
+describe("opencode-go adapter wire routing", () => {
   const secret: AccountSecret = { kind: "api-key", apiKey: "sk-go-subscription" };
 
-  it("U15: returns a typed 400 unsupported_wire_protocol refusal and never forwards", async () => {
+  it("U15: wires no body guard — genuine Responses traffic is legal", () => {
     const adapter = createOpenAiCompatibleAdapter(OP_ENCODE_GO_OPTIONS);
-    const refusal = adapter.guardRequest?.(mountedRequest("responses"), RESPONSES_BODY);
-    expect(refusal).toBeInstanceOf(Response);
-    expect(refusal?.status).toBe(400);
-    const payload = (await refusal?.json()) as {
-      error: { message: string; type: string; code: string };
-    };
-    expect(payload.error.code).toBe(WIRE_PROTOCOL_REFUSAL_CODE);
-    expect(payload.error.type).toBe("invalid_request_error");
-    expect(payload.error.message).toContain("chat/completions");
+    expect(adapter.guardRequest).toBeUndefined();
   });
 
-  it("U16: allows chat-completions body on responses and returns null", () => {
-    const adapter = createOpenAiCompatibleAdapter(OP_ENCODE_GO_OPTIONS);
-    expect(
-      adapter.guardRequest?.(mountedRequest("responses"), CHAT_BODY),
-    ).toBeNull();
-  });
-
-  it("U17: applies the rewrite in upstreamUrl for opencode-go only", () => {
+  it("U16: upstreamUrl picks the wire by body shape", () => {
     const adapter = createOpenAiCompatibleAdapter(OP_ENCODE_GO_OPTIONS);
     const settings = {
       ...DEFAULT_ACCOUNT_POOL_CONFIG,
       opencodeGoUpstreamBaseUrl: "https://opencode.example/zen/go/v1",
     };
+    // Chat body on /responses is still corrected onto /chat/completions.
     expect(
-      adapter.upstreamUrl(mountedRequest("responses"), settings).toString(),
+      adapter.upstreamUrl(mountedRequest("responses"), settings, CHAT_BODY).toString(),
     ).toBe("https://opencode.example/zen/go/v1/chat/completions");
+    // A genuine Responses body keeps the native /responses wire.
     expect(
-      adapter.upstreamUrl(mountedRequest("chat/completions"), settings).toString(),
+      adapter.upstreamUrl(mountedRequest("responses"), settings, RESPONSES_BODY).toString(),
+    ).toBe("https://opencode.example/zen/go/v1/responses");
+    // Anthropic Messages wire passes through untouched.
+    expect(
+      adapter.upstreamUrl(mountedRequest("messages"), settings, RESPONSES_BODY).toString(),
+    ).toBe("https://opencode.example/zen/go/v1/messages");
+    expect(
+      adapter.upstreamUrl(mountedRequest("chat/completions"), settings, CHAT_BODY).toString(),
     ).toBe("https://opencode.example/zen/go/v1/chat/completions");
     void secret;
   });
