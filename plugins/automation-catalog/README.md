@@ -1,5 +1,12 @@
 # Automation Catalog
 
+External service cards offer **Подготовить отключение**. This opens an editable,
+parent-bound request; it does not send the request, start a model or change a
+scheduler. The request requires fresh source identity and dependency checks,
+reversible source-side disabling and a durable audit. Inventory findings carry
+their underlying scheduler identity; coverage-only or missing records cannot be
+used as a stop target. Direct BB pause controls remain unchanged.
+
 An independent BB inventory and management-entry plugin. No BB fork or patched desktop application is required.
 
 ## Use the panel
