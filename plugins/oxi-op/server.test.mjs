@@ -36,6 +36,7 @@ test('native intake keeps the password out of interaction metadata and tool resu
   const pending = h.behavior.callAgentTool('oxi_op_store', {title: 'Example', username: 'example'}, context);
   await setImmediate();
   const interaction = h.inspection.pendingInteractions[0];
+  assert.equal(interaction.timeoutMs, 60_000);
   assert.equal(interaction.threadId, context.threadId);
   assert.equal(interaction.payload.vaultId, route.vaultId);
   assert.equal(interaction.payload.secrets[0].item, 'Example');
@@ -62,6 +63,26 @@ test('intake shows its BB form before any op authentication and cancellation doe
   h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);
   await pending;
   assert.deepEqual(h.inspection.experimental_hostRpcCalls, []);
+});
+
+test('native and CLI forms expire at one minute without contacting either credential host', async t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
+  for (const mode of ['native', 'cli']) {
+    const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined, credentialHostId: 'example-credential-host'});
+    let settled = false;
+    const pending = (mode === 'native'
+      ? h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context)
+      : h.behavior.runCli(['run', 'example-operation', '--notify'], context)).then(value => {settled = true; return value;});
+    await setImmediate();
+    t.mock.timers.tick(59_999);
+    await setImmediate();
+    assert.equal(settled, false);
+    t.mock.timers.tick(1);
+    await pending;
+    assert.equal(h.inspection.pendingInteractions.length, 0);
+    assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+    assert.equal(JSON.parse((await h.behavior.runCli(['history'], context)).stdout)[0].state, 'cancelled');
+  }
 });
 
 test('an unconfigured project cannot request a form or call a host', async t => {
@@ -239,7 +260,7 @@ test('interactive CLI can return completion to the same session without sending 
   const pending = h.behavior.runCli(['run', 'example-operation', '--notify'], context);
   await setImmediate();
   assert.equal(notices.length, 0);
-  assert.equal(h.inspection.pendingInteractions[0].timeoutMs, 60 * 60 * 1000);
+  assert.equal(h.inspection.pendingInteractions[0].timeoutMs, 60_000);
   h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {approved: true});
   assert.equal((await pending).exitCode, 0);
   assert.equal(notices.length, 1);

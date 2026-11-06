@@ -20,3 +20,5 @@ Choose only a configured access `profile` for the current project. Routine and a
 For automatic access, prefer owner-provisioned project/profile tokens in the encrypted `projectServiceAccounts` setting. Missing entries are setup failures, never permission to reuse another profile's or project's token. The provider-side account must itself have suitably restricted vault permissions; the token map alone is not a vault access boundary.
 
 After an uncertain store, retry the same title and value. A matching item is verified without creating a duplicate; a differing item requires owner review. Cancellation can occur after a remote write, so do not assume cancellation proves no item exists.
+
+All BB confirmation and intake forms expire after 60 seconds. Timeout is cancellation, not approval. Do not automatically reopen an expired request.
