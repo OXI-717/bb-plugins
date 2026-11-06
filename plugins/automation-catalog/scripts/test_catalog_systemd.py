@@ -49,6 +49,12 @@ class SystemdTests(unittest.TestCase):
                 s.collect('worker', {key: {'name': 'Bad'}}, read, task_base)
             read.assert_not_called()
 
+    def test_new_invocation_does_not_reuse_previous_completion(self):
+        live = SERVICE.replace('ActiveState=inactive', 'ActiveState=activating').replace('16:00:01 UTC', '15:00:01 UTC')
+        _, runs = s.collect('worker', SELECTION, Mock(side_effect=[TIMER, live, '']), task_base)
+        self.assertEqual(runs[0]['status'], 'running')
+        self.assertIsNone(runs[0]['finishedAt'])
+
     def test_unknown_timestamp_is_unknown(self):
         self.assertIsNone(s.timestamp('n/a'))
         self.assertIsNone(s.timestamp('Fri 2026-11-06 16:00:00 Invalid/Zone'))

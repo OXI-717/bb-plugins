@@ -67,8 +67,10 @@ def collect(host, selection, command, task_base):
         finished = timestamp(live.get('ExecMainExitTimestamp', ''))
         invocation = live.get('InvocationID', '')
         if re.fullmatch(r'[a-f0-9]{32}', invocation) and started is not None:
+            if finished is not None and finished < started:
+                finished = None  # A new invocation can retain the previous exit time.
             exit_code = None
-            status = 'running' if finished is None and live.get('ActiveState') == 'activating' else 'unknown'
+            status = 'running' if finished is None and live.get('ActiveState') in ('activating', 'active') else 'unknown'
             if finished is not None and finished >= started:
                 if live.get('ExecMainCode') == '1' and live.get('ExecMainStatus', '').isdigit():
                     exit_code = int(live['ExecMainStatus'])
