@@ -51,3 +51,5 @@ This plugin does not create service accounts or grant vault access. Configure th
 ## Development
 
 Run `npm ci`, `npm run typecheck`, `npm test` and `bb plugin build .` in this directory. Tests use synthetic values. Install with `bb plugin install <source> --subdirectory plugins/oxi-op`. A local path must be readable by the BB server; a Mac path cannot be installed directly by a remote Linux server.
+
+Owner-requested project onboarding uses `bb oxi-op connect --project <project-id> --profile <desktop-setup-profile>` from an already configured setup session. It shows a 60-second BB approval before desktop authorization, creates one project vault with an exact project marker, independently reads it back, and adds a default desktop route. Existing routes are preserved; an existing default or an unmarked namesake fails closed. No automatic read operations or service tokens are granted. After interruption, inspect history and settings before retrying; a created vault may remain and can be recovered by its exact marker. Use `--notify` in a persistent terminal when native tool lifecycle is unavailable.

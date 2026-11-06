@@ -31,6 +31,7 @@ export function resolveRoute(routes: unknown, projectId: string, profile = 'defa
     return matches[0];
 }
 export const contract = defineRpcContract({
+    provisionVault: {input: z.object({route: routeSchema, projectId: z.string().min(1), name: z.string().min(1).max(160)}).strict(), output: z.object({vaultId: z.string(), name: z.string()}).strict()},
     resolve: {input: z.object({route: routeSchema, operation: z.string()}).strict(), output: z.object({bindings: z.record(z.string(), z.string())}).strict()},
     execute: {input: z.object({route: routeSchema, operation: z.string(), bindings: z.record(z.string(), z.string())}).strict(), output: z.object({completed: z.literal(true)}).strict()},
     inventory: { input: z.object({route: routeSchema, registryTitle: z.string().min(1)}).strict(), output: z.object({vaults: z.array(z.object({id: z.string(), name: z.string()}))}) },

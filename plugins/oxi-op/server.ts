@@ -1,6 +1,6 @@
 import { defineCli, cliCommand, defineRpcContract, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
-import { contract, resolveRoute, type Route } from './contract.js';
+import { contract, routeSchema, resolveRoute, type Route } from './contract.js';
 import {createJournal} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal};
 const approvalTimeoutMs = 60_000;
@@ -65,6 +65,34 @@ export default function plugin(bb: BbPluginApi) {
         await progress('running', true);
         return JSON.stringify(await host.call('store', { ...access, title, username, password: value.password }, { hostId: credentialHost(route), signal: ctx.signal }));
         }, title);
+    }
+    let connecting = false;
+    async function connectProject(projectId: string, profile: string, ctx: OperationContext) {
+        if (connecting) throw new Error('Project setup is already pending');
+        connecting = true;
+        try {
+            const {route} = await accessFor(ctx.projectId, profile);
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Project setup requires approved desktop access');
+            const project = await bb.sdk.projects.get({projectId, signal: ctx.signal});
+            if (project.id !== projectId || !project.name?.trim()) throw new Error('Target project could not be verified');
+            const routes = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
+            if (routes.some(r => r.projectId === projectId && r.profile === 'default')) throw new Error('Project already has a default route; no changes made');
+            const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
+            return await journal.run('connect', profile, ctx, async progress => {
+                await progress('awaiting-approval');
+                const decision = await bb.ui.requestInput({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Подключить хранилище: '+project.name,payload:{mode:'approve',title:'Подключить проект '+project.name,profile,projectId:ctx.projectId,threadId:ctx.threadId,label:project.name+' — защищённое хранилище',hostId:credentialHost(route),...display,vaultId:'new-project-vault',vaultLabel:project.name,purpose:'Создать отдельный сейф «'+project.name+'» и сохранить привязку проекта в Oxi Op. Существующий одноимённый сейф используется только при точном совпадении метки этого BB-проекта. Пароли не читаются, автоматический доступ не выдаётся.',secrets:[]},describeSubmission:()=>({title:'Project vault setup approved (no credential values)'})},{signal:ctx.signal});
+                if (decision.outcome !== 'submitted' || !z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success) return 'Cancelled';
+                await progress('running', true);
+                const vault = await host.call('provisionVault',{route,projectId,name:project.name},{hostId:credentialHost(route),signal:ctx.signal});
+                const latest = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
+                if (latest.some(r=>r.projectId===projectId && r.profile==='default')) throw new Error('Routing changed during setup; vault preserved for recovery');
+                const target = routeSchema.parse({projectId,profile:'default',label:project.name,hostId:route.hostId,credentialHostId:credentialHost(route),vaultId:vault.vaultId,vaultLabel:vault.name,opBinary:route.opBinary,authentication:'desktop',accountId:route.accountId,requireApproval:true,operations:[]});
+                await settings.experimental_set({routes:JSON.stringify([...latest,target])});
+                const saved=resolveRoute(JSON.parse((await settings.get()).routes),projectId);
+                if (saved.vaultId!==vault.vaultId) throw new Error('Saved route differs');
+                return JSON.stringify({configured:true,projectId,vaultId:vault.vaultId});
+            }, 'Подключить проект '+project.name);
+        } finally {connecting=false;}
     }
     const profileParameter = z.string().min(1).max(80).default('default');
     bb.agents.registerTool({ name: 'oxi_op_store', description: 'Request a credential in a private BB form and save it to the current project vault and configured access profile. Passwords must never be supplied in tool arguments. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ title: z.string().min(1).max(160), username: z.string().max(200).default(''), profile: profileParameter }).strict(), execute: ({ title, username, profile }, ctx) => toolOutcome(() => store(title, username, profile, ctx)) });
@@ -140,6 +168,7 @@ export default function plugin(bb: BbPluginApi) {
         return result;
     }
     bb.cli.register(defineCli({ name: 'oxi-op', summary: 'Project-scoped 1Password operations', commands: {
+            connect: cliCommand({summary:'Approve creating a dedicated vault and default project route',options:{notify:notifyOption,project:{type:'string',description:'Exact target BB project ID',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectProject(input.options.project,input.options.profile,context));}}),
             'display-status':cliCommand({summary:'Read form rendering receipts for this session; never contacts 1Password',async run(_,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const keys=await bb.storage.kv.list(receiptPrefix(ctx.projectId,ctx.threadId));const rows=await Promise.all(keys.map(k=>bb.storage.kv.get<Receipt>(k)));return {exitCode:0,stdout:JSON.stringify(rows.filter(Boolean).sort((a,b)=>b!.mountedAt.localeCompare(a!.mountedAt)).slice(0,20))};}}),
             'display-test':cliCommand({summary:'Show a diagnostic form without reading or using any credentials',options:{profile:{type:'string',description:'Configured profile used for display names only',default:'default'}},async run(input,ctx){
                 if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');

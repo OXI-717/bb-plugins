@@ -107,3 +107,18 @@ export async function executeOperationBindings(run: Runner, env: NodeJS.ProcessE
     Object.assign(childEnv, bindings);
     await run(operation.argv[0], operation.argv.slice(1), childEnv, undefined, signal);
 }
+
+// Recover only vaults carrying this exact project marker; never adopt a namesake.
+export async function provisionProjectVault(run: Runner, env: NodeJS.ProcessEnv, projectId: string, name: string, signal?: AbortSignal) {
+    const description = 'Managed by Oxi Op for BB project ' + projectId;
+    const op = async (args: string[]) => JSON.parse(await run('op', args, env, undefined, signal));
+    const vaults = await op(['vault', 'list', '--format=json']);
+    if (!Array.isArray(vaults)) throw new Error('Invalid vault list');
+    const matches = vaults.filter((v: {name: string}) => v.name === name);
+    if (matches.length > 1) throw new Error('Duplicate vault names require owner review');
+    const candidate = matches[0] ?? await op(['vault', 'create', name, '--description', description, '--format=json']);
+    if (typeof candidate.id !== 'string' || !candidate.id) throw new Error('Missing vault identifier');
+    const verified = await op(['vault', 'get', candidate.id, '--format=json']);
+    if (verified.id !== candidate.id || verified.name !== name || verified.description !== description) throw new Error('Vault identity differs; no route was configured');
+    return {vaultId: verified.id as string, name};
+}

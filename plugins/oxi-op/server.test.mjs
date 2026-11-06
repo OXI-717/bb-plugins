@@ -382,3 +382,30 @@ test('one project can separate routine and administrative vault access', async t
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 1);
   await assert.rejects(h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation', argv: ['unconfigured']}, context));
 });
+
+test('project connection requires desktop approval and preserves existing project routes',async t=>{
+ const h=setup(t,{authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,credentialHostId:'example-credential-host'},({method})=>{
+  assert.equal(method,'provisionVault');return {vaultId:'example-target-vault',name:'Example workspace'};
+ });
+ const args=['connect','--project','target-project','--profile','default'];
+ const cancelled=h.behavior.runCli(args,context);await setImmediate();
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ assert.equal(h.inspection.pendingInteractions[0].timeoutMs,60_000);
+ h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);await cancelled;
+ assert.equal((await h.behavior.runCli(['status'],{...context,projectId:'target-project'})).exitCode,1);
+ const work=h.behavior.runCli(args,context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ const result=JSON.parse((await work).stdout);assert.equal(result.configured,true);
+ assert.equal(h.inspection.experimental_hostRpcCalls[0].hostId,'example-credential-host');
+ const target=JSON.parse((await h.behavior.runCli(['status'],{...context,projectId:'target-project'})).stdout);
+ assert.equal(target.vaultId,'example-target-vault');assert.equal(target.requireApproval,true);assert.deepEqual(target.operations,[]);
+ assert.equal(JSON.parse((await h.behavior.runCli(['status'],context)).stdout).vaultId,route.vaultId);
+ assert.equal((await h.behavior.runCli(args,context)).exitCode,1);
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,1);
+ assert.equal(JSON.parse((await h.behavior.runCli(['history'],context)).stdout).some(x=>x.kind==='connect'&&x.state==='completed'),true);
+});
+test('service account routing cannot bootstrap a desktop project connection',async t=>{
+ const h=setup(t);
+ assert.equal((await h.behavior.runCli(['connect','--project','target-project','--profile','default'],context)).exitCode,1);
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);assert.equal(h.inspection.pendingInteractions.length,0);
+});

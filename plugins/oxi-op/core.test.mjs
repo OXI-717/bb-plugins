@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
@@ -57,4 +57,27 @@ test('remote transfer rejects outside-vault references and missing or extra bind
  assert.equal(calls,0);
  assert.throws(()=>resolveRoute([{...route,credentialHostId:'other-host'}],route.projectId));
  assert.throws(()=>resolveRoute([{...desktopRoute,credentialHostId:'other-host',requireApproval:false}],route.projectId));
+});
+
+test('project vault provisioning verifies identity and safely recovers an uncertain create', async () => {
+ const vault={id:'example-project-vault',name:'Example project',description:'Managed by Oxi Op for BB project target-project'};
+ let exists=false,creates=0;
+ const run=async (_binary,args)=>{
+  if(args[1]==='list')return JSON.stringify(exists?[vault]:[]);
+  if(args[1]==='create'){creates++;exists=true;throw new Error('uncertain response');}
+  if(args[1]==='get')return JSON.stringify(vault);
+  throw new Error('Unexpected operation');
+ };
+ await assert.rejects(provisionProjectVault(run,{},'target-project',vault.name));
+ assert.deepEqual(await provisionProjectVault(run,{},'target-project',vault.name),{vaultId:vault.id,name:vault.name});
+ assert.equal(creates,1);
+ await assert.rejects(provisionProjectVault(run,{},'different-project',vault.name));
+ assert.equal(creates,1);
+});
+test('a new project vault is independently read before returning its identity',async()=>{
+ const calls=[];
+ const run=async(_binary,args)=>{calls.push(args);return JSON.stringify(args[1]==='list'?[]:{id:'example-vault',name:'Example project',description:'Managed by Oxi Op for BB project target'});};
+ assert.deepEqual(await provisionProjectVault(run,{},'target','Example project'),{vaultId:'example-vault',name:'Example project'});
+ assert.deepEqual(calls.map(x=>x[1]),['list','create','get']);
+ await assert.rejects(provisionProjectVault(async()=>JSON.stringify([{name:'Example project'},{name:'Example project'}]),{},'target','Example project'));
 });
