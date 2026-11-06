@@ -38,6 +38,7 @@ import {
   createOpenAiCompatibleAdapter,
   isChatCompletionsBody,
   opencodeGoUpstreamPathSuffix,
+  isOpenCodeGoFreeModelBody,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
@@ -605,6 +606,7 @@ export class AccountPoolHub {
     const affinityHost = purpose ? JSON.stringify([legacyAffinityHost, "purpose", purpose]) : legacyAffinityHost;
     const parsed = adapter.parseRequest(body, request.headers, request);
     const family = parsed.family;
+    const freeTier = adapter.provider === "opencode-go" && isOpenCodeGoFreeModelBody(body);
     const trace = newTrace(adapter.provider, hostId, projectId, threadId, parsed.model, family, request.headers.get("user-agent"));
     const startedAt = this.options.now();
     let attempt = 0;
@@ -639,6 +641,7 @@ export class AccountPoolHub {
           projectId,
           signal,
           purpose,
+          freeTier,
         );
         if (selected === null) break;
         const route=await this.acquireRoute(selected.account,threadId===null?affinityKey:JSON.stringify([hostId,projectId,threadId,adapter.provider]));
@@ -684,7 +687,7 @@ export class AccountPoolHub {
           signal.throwIfAborted();
           if (purpose === "autopilot") {
             const current = this.eligibleEntries(adapter.provider, projectId,
-              await this.options.accounts.list(), family, this.options.now(), purpose).eligible;
+              await this.options.accounts.list(), family, this.options.now(), purpose, freeTier).eligible;
             if (!current.some(entry => entry.account.id === selected.account.id)) break;
           }
           let upstream: UpstreamResult;
@@ -699,7 +702,7 @@ export class AccountPoolHub {
               secret,
               adapter,
               trace, attempt, route,
-              {purpose,projectId,family,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
+              {purpose,projectId,family,freeTier,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
                 switched = lastDispatchedAccount !== null && lastDispatchedAccount !== selected.account.id;
                 if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'dispatched'});
                 lastDispatchedAccount = selected.account.id;
@@ -768,11 +771,11 @@ export class AccountPoolHub {
             );
             const heldUntil = this.options.now() + waitMs;
             this.observe(trace,{event:'hold',attempt,accountId:selected.account.id,status:429,holdSource:'upstream429',heldUntil,retryAfterMs:waitMs,retryAfterSupplied:response.headers.has('retry-after'),quotaEvidence:false});
-            this.options.quotas.put({
+            if (!freeTier) this.options.quotas.put({
               ...observed,
               heldUntil,
             });
-            if (!paced && waitMs <= MAX_INLINE_HOLD_MS) {
+            if (!freeTier && !paced && waitMs <= MAX_INLINE_HOLD_MS) {
               paced = true;
               pacing = {
                 heldUntil,
@@ -858,7 +861,7 @@ export class AccountPoolHub {
               const quota = this.options.quotas.get(selected.account.id);
               const heldUntil=Math.max(quota.heldUntil ?? 0, this.options.now() + 60_000);
               this.observe(trace,{event:'hold',attempt,accountId:selected.account.id,status:403,holdSource:'upstream403',errorClass:'upstream403-hold',heldUntil});
-              this.options.quotas.put({ ...quota, error: null, heldUntil });
+              if (!freeTier) this.options.quotas.put({ ...quota, error: null, heldUntil });
             } else if (response.status === 401 || response.status === 403) {
               await this.markAuthError(
                 selected.account,
@@ -1004,7 +1007,7 @@ export class AccountPoolHub {
     }
   }
 
-  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number, purpose?: "autopilot") {
+  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number, purpose?: "autopilot", freeTier?: boolean) {
     const settings = this.options.getSettings();
     const threshold = settings.switchThreshold;
     const workWeek = { restDays: settings.restDays, offsetMinutes: -new Date(now).getTimezoneOffset() };
@@ -1019,13 +1022,13 @@ export class AccountPoolHub {
           quota: this.options.quotas.get(account.id),
         }))
         .filter(({ quota }) => quota.error === null)
-        .filter(({ account, quota }) => !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
+        .filter(({ account, quota }) => freeTier || !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
     );
     const available = scopedEntries.flatMap(entry => gateMembership(
       [entry], now, settings.reserveDrainHours * 3600000, workWeek,
     ));
     const eligible = available.filter(
-      ({ account, quota }) => !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
+      ({ account, quota }) => freeTier || !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
     );
     return { available, eligible };
   }
@@ -1124,6 +1127,7 @@ export class AccountPoolHub {
     projectId: string | null,
     signal: AbortSignal,
     purpose?: "autopilot",
+    freeTier?: boolean,
   ): Promise<SelectedAccount | null> {
     const accounts = (await this.routingAccounts()).sort(
       (left, right) => left.priority - right.priority,
@@ -1137,13 +1141,14 @@ export class AccountPoolHub {
       restDays: settings.restDays,
       offsetMinutes: -new Date(now).getTimezoneOffset(),
     };
-    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose);
+    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose, freeTier);
     const unattempted = eligible.filter(
       ({ account }) =>
         candidateIds.has(account.id) && !attempted.has(account.id),
     );
-    const ready = unattempted.filter(({ quota }) => quota.heldUntil === null || quota.heldUntil <= now);
-    const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (a.quota.heldUntil ?? 0) - (b.quota.heldUntil ?? 0)).slice(0,1);
+    const requestHold = (accountId: string) => freeTier ? null : unattempted.find(e => e.account.id === accountId)?.quota.heldUntil ?? null;
+    const ready = unattempted.filter(({ account }) => { const hold = requestHold(account.id); return hold === null || hold <= now; });
+    const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (requestHold(a.account.id) ?? 0) - (requestHold(b.account.id) ?? 0)).slice(0,1);
     let binding =
       affinityKey === null ? undefined : this.affinityBindings.get(affinityKey);
     const boundAccountId =
@@ -1458,12 +1463,14 @@ export class AccountPoolHub {
     secret: AccountSecret,
     adapter: ProviderAdapter,
     trace: Trace, attempt: number, route:AccountRoute,
-    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;deadline:number;onDispatch?:()=>void},
+    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;deadline:number;onDispatch?:()=>void},
   ): Promise<UpstreamResult> {
     const admissionSignal = AbortSignal.any([request.signal, this.stopped.signal]);
     const deadline = admission.deadline;
     const cooldown = () => {
-      const hold = this.options.quotas.get(account.id).heldUntil;
+      const hold = admission.freeTier
+        ? null
+        : this.options.quotas.get(account.id).heldUntil;
       const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id) : null;
       return hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
     };
@@ -1519,7 +1526,7 @@ export class AccountPoolHub {
             if (waited) {const previous=phase;phase='cooldown';try{await check();}finally{phase=previous;}}
             const started = await this.options.accounts.withSnapshot(accounts => {
               const current = this.eligibleEntries(adapter.provider, admission.projectId,
-                accounts, admission.family, this.options.now(), admission.purpose).eligible;
+                accounts, admission.family, this.options.now(), admission.purpose, admission.freeTier).eligible;
               if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
               // Metadata serialization can outlast admission: never start new work after its deadline.
               if (this.options.now() >= deadline) throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
@@ -1817,12 +1824,16 @@ export function createHub(options: {
         upstreamName: "OpenCode Go",
         mountPrefix: OPENCODE_GO_MOUNT_PREFIX,
         upstreamBaseUrl: (settings) => settings.opencodeGoUpstreamBaseUrl,
+        freeUpstreamBaseUrl: (settings) => settings.opencodeFreeUpstreamBaseUrl,
+        freeUpstreamBody: isOpenCodeGoFreeModelBody,
         usagesUrl:
           options.opencodeGoUsagesUrl ?? DEFAULT_OPENCODE_GO_USAGES_URL,
         allowedHeaderPrefixes: ["x-opencode-", "anthropic-"],
         normalizeUpstreamPathSuffix: opencodeGoUpstreamPathSuffix,
         // Anthropic clients authenticate with x-api-key, not Bearer.
         inboundToken: (headers) => headers.get("x-api-key"),
+        // The Go Messages wire authenticates upstream the Anthropic way too.
+        upstreamApiKeyHeader: "x-api-key",
         parseUsages: opencodeGoQuotaFromUsages,
       }),
     ],

@@ -138,6 +138,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
     zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
     opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+    opencodeFreeUpstreamBaseUrl: "https://opencode.ai/inference/openai/v1",
     neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
     cursorUpstreamBaseUrl: "https://api2.cursor.sh",
     devinUpstreamBaseUrl: "https://server.codeium.com",

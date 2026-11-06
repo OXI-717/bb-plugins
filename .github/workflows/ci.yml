@@ -65,7 +65,7 @@ jobs:
       - name: Collector tests
         if: matrix.plugin == 'automation-catalog'
         working-directory: plugins/automation-catalog/scripts
-        run: python3 -m unittest test_catalog_collect test_catalog_history test_catalog_sync
+        run: python3 -m unittest discover -p 'test_catalog*.py'
       - name: Build with the published BB CLI
         if: matrix.plugin != 'vpn-guard' && matrix.plugin != 'oxi-projects' && matrix.plugin != 'model-connections' && matrix.plugin != 'federation-pilot' && matrix.plugin != 'pool-maintenance'
         working-directory: plugins/${{ matrix.plugin }}
