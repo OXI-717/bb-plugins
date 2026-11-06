@@ -15,12 +15,12 @@ const route = {
 };
 const context = {projectId: route.projectId, threadId: 'example-thread'};
 
-function setup(t, overrides = {}, callHost, send) {
+function setup(t, overrides = {}, callHost, send, listInteractions = async () => []) {
   const host = createFakePluginHost({
     pluginId: 'oxi-op', settings: {routes: JSON.stringify([{...route, ...overrides}])},
     sdk: {
       projects: {get: async ({projectId}) => ({id: projectId, name: 'Example workspace'})},
-      threads: {get: async ({threadId}) => ({id: threadId, projectId: route.projectId, title: 'Example session'}), send: send ?? (async () => ({delivery: 'sent'}))},
+      threads: {get: async ({threadId}) => ({id: threadId, projectId: route.projectId, title: 'Example session'}), send: send ?? (async () => ({delivery: 'sent'})), interactions: {list: listInteractions}},
       hosts: {get: async ({hostId}) => ({id: hostId, name: 'Example machine'})},
     },
     experimental_callHostRpc: callHost ?? (({method}) => method === 'store'
@@ -30,6 +30,24 @@ function setup(t, overrides = {}, callHost, send) {
   t.after(() => host.harness.lifecycle.dispose());
   return host.harness;
 }
+
+test('display diagnostics record rendering without granting or contacting a credential host', async t => {
+  let h;
+  h = setup(t, {}, undefined, undefined, async () => h.inspection.pendingInteractions.map(x => ({id:x.id,origin:{kind:'plugin',pluginId:'oxi-op'}})));
+  const pending = h.behavior.runCli(['display-test'], context);
+  await setImmediate();
+  const form = h.inspection.pendingInteractions[0];
+  assert(form);
+  await h.behavior.callRpc('formReceipt', {threadId:context.threadId,interactionId:form.id,visible:true});
+  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+  const rows=JSON.parse((await h.behavior.runCli(['display-status'],context)).stdout);
+  assert.equal(rows[0].visibleEver,true);
+  await assert.rejects(h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:'other-form',visible:true}));
+  await assert.rejects(h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:form.id,visible:true,password:'synthetic-sensitive-value'}));
+  h.behavior.cancelInteraction(form.id);
+  await pending;
+  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+});
 
 test('native intake keeps the password out of interaction metadata and tool result', async t => {
   const h = setup(t);
@@ -216,8 +234,8 @@ test('critical operations wait for explicit approval and reject unconfigured com
   assert.equal(payload.title, 'Check server access');
   assert.equal(payload.secrets[0].item, 'Example server');
   assert.equal(payload.secrets[0].reference, 'op://example-vault/example-server/password');
-  const app = await loadPluginApp(() => import('./dist/test/app.js'));
-  const html = renderToStaticMarkup(React.createElement(app.pendingInteractions[0].component, {
+  const {CredentialForm} = await import('./dist/test/app.js');
+  const html = renderToStaticMarkup(React.createElement(CredentialForm, {
     interaction: {payload}, submit: async () => {}, cancel: () => {},
   }));
   for (const value of [context.projectId, context.threadId, payload.purpose, payload.secrets[0].reference, route.hostId, route.vaultId]) assert(html.includes(value));

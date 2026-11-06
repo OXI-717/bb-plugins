@@ -5,8 +5,7 @@ import {renderToStaticMarkup} from 'react-dom/server';
 import {loadPluginApp} from '@get-bb/plugin-sdk/testing/app';
 
 // Render the actual interaction component with synthetic metadata only.
-const app = await loadPluginApp(() => import('./dist/test/app.js'));
-const component = app.pendingInteractions[0].component;
+const {CredentialForm: component} = await import('./dist/test/app.js');
 const output = process.argv[2] ?? 'dist/form-preview';
 mkdirSync(output, {recursive: true});
 for (const mode of ['store', 'approve']) {

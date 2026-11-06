@@ -1,10 +1,22 @@
-import { useState } from 'react';
-import { definePluginApp } from '@get-bb/plugin-sdk/app';
-export default definePluginApp(app => {
-    app.slots.pendingInteraction({ id: 'credential', component: function Credential({ interaction, submit, cancel }) {
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { definePluginApp, useRpc, type PluginPendingInteractionProps } from '@get-bb/plugin-sdk/app';
+import type {deliveryContract} from './server.js';
+export function CredentialForm({interaction,submit,cancel,reportDelivery}: PluginPendingInteractionProps & {reportDelivery?:(visible:boolean)=>void}) {
             const [password, setPassword] = useState('');
             const [busy, setBusy] = useState(false);
             const [failed, setFailed] = useState(false);
+            const formRef=useRef<HTMLFormElement>(null);
+            useEffect(()=>{
+                const element=formRef.current;
+                if(!element||!reportDelivery)return;
+                const report=reportDelivery;
+                report(false);
+                const observer=new IntersectionObserver(entries=>report(entries.some(x=>x.isIntersecting)&&document.visibilityState==='visible'));
+                observer.observe(element);
+                const changed=()=>{const r=element.getBoundingClientRect();report(document.visibilityState==='visible'&&r.width>0&&r.height>0&&r.bottom>0&&r.top<window.innerHeight);};
+                document.addEventListener('visibilitychange',changed);
+                return ()=>{observer.disconnect();document.removeEventListener('visibilitychange',changed);};
+            },[reportDelivery,interaction.id,interaction.threadId]);
             const payload = interaction.payload as {
                 mode: string;
                 title: string;
@@ -23,7 +35,7 @@ export default definePluginApp(app => {
                 secrets: {variable?: string; reference?: string; item?: string; field?: string}[];
             };
             const storing = payload.mode === 'store';
-            return <form onSubmit={async (e) => { e.preventDefault(); setBusy(true); setFailed(false); try {
+            return <form ref={formRef} onSubmit={async (e) => { e.preventDefault(); setBusy(true); setFailed(false); try {
                 await submit(storing ? { password } : { approved: true });
                 setPassword('');
             }
@@ -56,5 +68,11 @@ export default definePluginApp(app => {
    {failed && <span role="alert">Не удалось отправить. Повторите попытку.</span>}
    <div style={{display: 'flex', gap: 8, flexWrap: 'wrap'}}><button type="submit" disabled={busy || (storing && !password)}>{busy ? 'Отправка…' : storing ? 'Сохранить и проверить' : 'Разрешить эту операцию'}</button><button type="button" onClick={() => { setPassword(''); cancel(); }} disabled={busy}>Отмена</button></div>
   </form>;
-        } });
+}
+export default definePluginApp(app=>{
+ app.slots.pendingInteraction({id:'credential',component:function Credential(props){
+  const rpc=useRpc<typeof deliveryContract>();
+  const report=useCallback((visible:boolean)=>{void rpc.call('formReceipt',{threadId:props.interaction.threadId,interactionId:props.interaction.id,visible}).catch(()=>{});},[rpc,props.interaction.id,props.interaction.threadId]);
+  return <CredentialForm {...props} reportDelivery={report}/>;
+ }});
 });

@@ -1,14 +1,27 @@
-import { defineCli, cliCommand, type BbPluginApi } from '@get-bb/plugin-sdk';
+import { defineCli, cliCommand, defineRpcContract, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { contract, resolveRoute, type Route } from './contract.js';
 import {createJournal} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal};
 const approvalTimeoutMs = 60_000;
+export const deliveryContract = defineRpcContract({formReceipt: {input: z.object({threadId:z.string().min(1).max(100),interactionId:z.string().min(1).max(100),visible:z.boolean()}).strict(),output:z.object({recorded:z.literal(true)})}});
 export default function plugin(bb: BbPluginApi) {
     const settings = bb.settings.define({ routes: { type: 'string', label: 'Project vault routes (JSON)', default: '[]', experimental_multiline: true }, serviceAccountToken: { type: 'string', label: 'Legacy scoped service account token', secret: true, default: '' }, projectServiceAccounts: {type: 'string', label: 'Project and profile service accounts (encrypted JSON)', secret: true, default: '{}'} });
     const host = bb.hosts.experimental_client({ contract });
     const credentialHost = (route: Route) => route.credentialHostId ?? route.hostId;
     const journal = createJournal(bb.storage.kv);
+    type Receipt = {interactionId:string;mountedAt:string;lastSeenAt:string;visibleEver:boolean};
+    const receiptPrefix = (projectId:string,threadId:string) => 'display:'+encodeURIComponent(projectId)+':'+encodeURIComponent(threadId)+':';
+    bb.rpc.register(deliveryContract,{async formReceipt({threadId,interactionId,visible}) {
+        const requests = await bb.sdk.threads.interactions.list({threadId});
+        if (!requests.some(r => r.id===interactionId && r.origin?.kind==='plugin' && r.origin.pluginId===bb.pluginId)) throw new Error('This form is not pending for this plugin');
+        const thread=await bb.sdk.threads.get({threadId});
+        const key=receiptPrefix(thread.projectId,threadId)+interactionId;
+        const previous=await bb.storage.kv.get<Receipt>(key);
+        const now=new Date().toISOString();
+        await bb.storage.kv.set(key,{interactionId,mountedAt:previous?.mountedAt??now,lastSeenAt:now,visibleEver:visible||previous?.visibleEver===true});
+        return {recorded:true as const};
+    }});
     // BB resumes an idle agent for a fulfilled tool result, including a reported failure.
     const toolOutcome = async (work: () => Promise<string>) => {
         try {return await work();}
@@ -127,6 +140,14 @@ export default function plugin(bb: BbPluginApi) {
         return result;
     }
     bb.cli.register(defineCli({ name: 'oxi-op', summary: 'Project-scoped 1Password operations', commands: {
+            'display-status':cliCommand({summary:'Read form rendering receipts for this session; never contacts 1Password',async run(_,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const keys=await bb.storage.kv.list(receiptPrefix(ctx.projectId,ctx.threadId));const rows=await Promise.all(keys.map(k=>bb.storage.kv.get<Receipt>(k)));return {exitCode:0,stdout:JSON.stringify(rows.filter(Boolean).sort((a,b)=>b!.mountedAt.localeCompare(a!.mountedAt)).slice(0,20))};}}),
+            'display-test':cliCommand({summary:'Show a diagnostic form without reading or using any credentials',options:{profile:{type:'string',description:'Configured profile used for display names only',default:'default'}},async run(input,ctx){
+                if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');
+                const {route}=await accessFor(ctx.projectId,input.options.profile);
+                const display=await displayContext({...route,hostId:credentialHost(route)},{projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal});
+                const decision=await bb.ui.requestInput({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Проверка отображения формы — без доступа к секретам',payload:{mode:'approve',title:'Проверка отображения формы',purpose:'Только проверка интерфейса BB. 1Password не вызывается, пароли не читаются. Нажимать разрешение не требуется.',profile:route.profile,projectId:ctx.projectId,threadId:ctx.threadId,label:'Диагностика интерфейса',hostId:credentialHost(route),...display,vaultId:route.vaultId,vaultLabel:route.vaultLabel??'Не используется',secrets:[]},describeSubmission:()=>({title:'Display test submitted; no credentials accessed'})},{signal:ctx.signal});
+                return {exitCode:0,stdout:JSON.stringify({submitted:decision.outcome==='submitted',credentialCalls:0})};
+            }}),
             history: cliCommand({summary: 'Recover operation states and safe results for this project and session without contacting op', async run(_, ctx) {if (!ctx.threadId || !ctx.projectId) throw new Error('Run from a BB thread'); return {exitCode: 0, stdout: JSON.stringify(await journal.list({threadId: ctx.threadId, projectId: ctx.projectId}))};}}),
             inventory: cliCommand({summary: 'Approve reading a service vault registry before invoking desktop op', options: {notify: notifyOption, profile: {type: 'string', description: 'Owner-configured registry profile', default: 'default'}, title: {type: 'string', description: 'Registry item title', required: true}}, async run(input, ctx) {
                 if (!ctx.threadId || !ctx.projectId) throw new Error('Run from a BB thread');
