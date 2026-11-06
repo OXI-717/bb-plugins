@@ -10,6 +10,42 @@ const acquire=(executorId='mac-official',sessionId=randomUUID())=>({action:'acqu
 const poll=(leaseId:string)=>({action:'poll',leaseId});
 const release=(leaseId:string)=>({action:'release',leaseId,stopped:true});
 
+describe('prepared native execution binding',()=>{
+  const execution={runtimeId:'runtime-one',gatewayId:'gateway-one',runtimeSha256:'a'.repeat(64),profile:{id:'fixture-exit',version:1}};
+  it('requires explicit server preparation and returns an immutable account/host/runtime/profile/lease authority',async()=>{
+    const unsupported=new NativeSessions(storage());await unsupported.initialize();
+    await expect(unsupported.configure({...executor,execution})).rejects.toThrow('native-execution-unprepared');
+    let allowed=true;
+    const sessions=new NativeSessions(storage(),()=>1000,async()=>{},e=>{if(!allowed||e.execution?.profile.version!==1)throw Error('unprepared');});
+    await sessions.initialize();await sessions.configure({...executor,execution});await sessions.setManaged(true);
+    const input=acquire(),first=await sessions.request(caller,input);
+    expect(first.binding).toEqual({schema:'bb-account-pool/native-execution/1',leaseId:first.leaseId,sessionId:input.sessionId,
+      executorId:executor.id,accountId:executor.accountId,hostId:executor.hostId,kind:'task',caller,...execution});
+    first.binding!.profile.version=99;
+    expect((await sessions.request(caller,poll(first.leaseId!))).binding!.profile.version).toBe(1);
+    await expect(sessions.configure({...executor,execution:{...execution,profile:{...execution.profile,version:2}}})).rejects.toThrow();
+    allowed=false;await expect(sessions.request(caller,poll(first.leaseId!))).rejects.toThrow('unprepared');
+    expect((await sessions.snapshot()).leases).toHaveLength(1);
+    await sessions.request(caller,release(first.leaseId!));
+  });
+  it('keeps catalog authority separate and quarantines a prepared active lease after expiry/restart',async()=>{
+    const kv=storage();let now=1000;
+    const sessions=new NativeSessions(kv,()=>now,async()=>{},()=>{});await sessions.initialize();
+    await sessions.configure({...executor,execution,catalogCallerIds:['catalog-one']});await sessions.setManaged(true);
+    const catalog={hostId:'catalog-one',projectId:'project-one'};
+    const first=await sessions.request(catalog,{...acquire(),kind:'catalog'});
+    expect(first.binding!.kind).toBe('catalog');
+    await expect(sessions.request(catalog,acquire())).rejects.toThrow('native-executor-denied');
+    await expect(sessions.request(caller,{...acquire(),execution})).rejects.toThrow();
+    now+=NATIVE_LEASE_MS+1;
+    await expect(sessions.request(catalog,poll(first.leaseId!))).rejects.toThrow('native-stop-unconfirmed');
+    const restarted=new NativeSessions(kv,()=>now,async()=>{},()=>{});await restarted.initialize();
+    expect((await restarted.snapshot()).leases[0].state).toBe('uncertain');
+    await expect(restarted.request(catalog,{action:'release',leaseId:first.leaseId!,completed:true})).rejects.toThrow('native-stop-unconfirmed');
+    await restarted.request(catalog,release(first.leaseId!));
+  });
+});
+
 describe('official native session admission',()=>{
   it('starts disabled with unknown budgets, no implicit executor or identity discovery',async()=>{
     const sessions=new NativeSessions(storage());await sessions.initialize();

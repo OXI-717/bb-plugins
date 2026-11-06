@@ -60,6 +60,10 @@ export class AccountEgress {
   snapshot(){return structuredClone(this.state);}
   /** Only assigned pins constrain account selection; ordinary affinity may fail over. */
   pinnedAccount(sessionKey:string):string|null{return this.state.pins[sessionKey]?.accountId??null;}
+  validateNativeProfile(ref:{id:string;version:number},hostId:string):void{
+    const profile=this.state.profiles.find(p=>p.id===ref.id&&p.version===ref.version);
+    if(!profile||!profile.hostIds.includes(hostId))throw new EgressUnavailable();
+  }
   private update(change:()=>Promise<void>){
     const next=this.mutation.then(change);this.mutation=next.catch(()=>undefined);return next;
   }

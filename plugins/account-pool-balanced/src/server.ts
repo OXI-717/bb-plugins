@@ -145,7 +145,8 @@ export function createAccountPoolPlugin(
           await bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal}),hostId))('agy');
       }else if(currentSettings.vpnOnlyProviders.includes('agy'))throw Error('Native protected host requires its Guard decision');
       if(caller.threadId&&await routing.isBypassed(caller.threadId))throw new NativeSessionError(403,'native-thread-bypassed');
-    });
+    },executor=>{if(executor.execution){try{egress.validateNativeProfile(executor.execution.profile,executor.hostId);}
+      catch{throw new NativeSessionError(503,'native-execution-unprepared');}}});
     await nativeSessions.initialize();
     const hubTokens = new HubTokenStore(secretDir, now);
     await hubTokens.initialize();

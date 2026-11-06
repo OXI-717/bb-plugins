@@ -6,6 +6,29 @@ import {randomUUID} from 'node:crypto';
 import {it,expect,vi} from 'vitest';
 import {createAccountPoolPlugin} from './server.js';
 
+it('authenticates prepared runtime grants against the server profile registry before a native task',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  const upstream=vi.fn(async()=>new Response('{}'));
+  try{
+    await createAccountPoolPlugin({fetch:upstream})(host.bb);
+    const execution={runtimeId:'runtime-one',gatewayId:'gateway-one',runtimeSha256:'a'.repeat(64),profile:{id:'fixture-exit',version:1}};
+    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true,execution};
+    const configure=()=>host.harness.behavior.runCli(['native','configure',JSON.stringify(executor)]);
+    expect((await configure()).exitCode).toBe(1);
+    const profile={id:'fixture-exit',version:1,label:'Fixture',node:'node-one',hostIds:['host-one'],transport:'ssh-connect',endpoint:'http://127.0.0.1:19081',dns:'remote',ipv4:true,ipv6:false,failure:'closed',expectedExit:['192.0.2.1'],assurance:'proxy-enforced'};
+    expect((await host.harness.behavior.runCli(['egress','configure',JSON.stringify(profile)])).exitCode).toBe(0);
+    expect((await configure()).exitCode).toBe(0);
+    expect((await host.harness.behavior.runCli(['native','mode','managed'])).exitCode).toBe(0);
+    const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
+    const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
+    const sessionId=randomUUID();
+    const response=await host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${token}`},body:JSON.stringify({action:'acquire',executorId:'native-one',sessionId})});
+    expect(response.status).toBe(200);
+    expect((await response.json()).binding).toMatchObject({...execution,schema:'bb-account-pool/native-execution/1',sessionId,accountId:'subscription-one',hostId:'host-one',kind:'task',caller:{hostId:'host-one',projectId:'project-one',threadId:'thread-one'}});
+    expect(upstream).not.toHaveBeenCalled();
+  }finally{await host.harness.lifecycle.dispose();}
+});
+
 it('real registration binds CLI, BB env, authenticated HTTP and forbids the old model/OAuth path',async()=>{
   const dataDir=await mkdtemp(path.join(tmpdir(),'native-pool-'));
   const upstream=vi.fn(async()=>new Response('{}'));
