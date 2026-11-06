@@ -93,16 +93,27 @@ test('an unconfigured project cannot request a form or call a host', async t => 
 });
 
 test('owner registry setup shows a BB approval before any desktop CLI call', async t => {
-  const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined});
+  const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined, credentialHostId: 'example-credential-host'});
   const pending = h.behavior.runCli(['inventory', '--title', 'Example registry'], context);
   await setImmediate();
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
   const interaction = h.inspection.pendingInteractions[0];
   assert.equal(interaction.payload.title, 'Сверка служебных сейфов');
+  assert.equal(interaction.payload.hostId, 'example-credential-host');
   assert.equal(interaction.payload.secrets[0].item, 'Example registry');
   h.behavior.cancelInteraction(interaction.id);
   await pending;
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+});
+
+test('intake identifies the credential machine rather than a separate execution machine', async t => {
+  const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined, credentialHostId: 'example-credential-host'});
+  const pending = h.behavior.callAgentTool('oxi_op_store', {title: 'Example'}, context);
+  await setImmediate();
+  assert.equal(h.inspection.pendingInteractions[0].payload.hostId, 'example-credential-host');
+  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {password: 'synthetic-sensitive-value'});
+  await pending;
+  assert.equal(h.inspection.experimental_hostRpcCalls[0].hostId, 'example-credential-host');
 });
 
 test('completed intake is recoverable without retaining the submitted password', async t => {
