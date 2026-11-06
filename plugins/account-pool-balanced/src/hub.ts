@@ -1795,8 +1795,10 @@ export function createHub(options: {
         upstreamBaseUrl: (settings) => settings.opencodeGoUpstreamBaseUrl,
         usagesUrl:
           options.opencodeGoUsagesUrl ?? DEFAULT_OPENCODE_GO_USAGES_URL,
-        allowedHeaderPrefixes: ["x-opencode-"],
+        allowedHeaderPrefixes: ["x-opencode-", "anthropic-"],
         normalizeUpstreamPathSuffix: opencodeGoUpstreamPathSuffix,
+        // Anthropic clients authenticate with x-api-key, not Bearer.
+        inboundToken: (headers) => headers.get("x-api-key"),
         parseUsages: opencodeGoQuotaFromUsages,
       }),
     ],

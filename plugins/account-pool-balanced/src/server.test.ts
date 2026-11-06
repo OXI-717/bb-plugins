@@ -1624,6 +1624,37 @@ describe("Account Pool plugin", () => {
       expect(requests[0]?.url).toBe("https://upstream.example/messages");
     });
 
+    it("I7c: an Anthropic client token in x-api-key authenticates /messages", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "msg-two", type: "message" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/messages",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": fixture.key,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model: "minimax-m3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/messages");
+      expect(requests[0]?.headers.get("x-api-key")).toBeNull();
+      expect(requests[0]?.headers.get("authorization")).toBe(
+        "Bearer sk-go-subscription",
+      );
+      expect(requests[0]?.headers.get("anthropic-version")).toBe("2023-06-01");
+    });
+
     it("I8: zai /responses is never rewritten to chat/completions", async () => {
       const requests: Request[] = [];
       const fixture = await createFixture({

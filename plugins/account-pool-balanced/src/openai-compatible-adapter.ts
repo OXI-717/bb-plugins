@@ -80,6 +80,7 @@ export interface OpenAiCompatibleAdapterOptions {
     body: Uint8Array,
   ) => string;
   guardRequestBody?: (suffix: string, body: Uint8Array) => string | null;
+  inboundToken?: (headers: Headers) => string | null;
   parseUsages: (
     accountId: string,
     payload: unknown,
@@ -94,6 +95,7 @@ export function createOpenAiCompatibleAdapter(
   return {
     provider: options.provider,
     upstreamName: options.upstreamName,
+    inboundToken: (headers) => options.inboundToken?.(headers) ?? null,
     async importAccount() {
       throw new Error(
         `${options.upstreamName} accounts carry no local login to import; add them with --api-key-stdin.`,
