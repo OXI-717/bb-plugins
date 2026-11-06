@@ -27,6 +27,34 @@ const ALLOWED_REQUEST_HEADERS = new Set([
 ]);
 const ALLOWED_REQUEST_HEADER_PREFIXES = ["x-stainless-"];
 
+export const OPENCODE_GO_FREE_MODELS = new Set([
+  "beam-free",
+  "big-pickle",
+  "crouton-alpha-free",
+  "deepseek-v4.1-flash-free",
+  "flint-40b-free",
+  "glm-5.3-flash-free",
+  "iceman-contributor-free",
+  "jev-1.13-free",
+  "mimo-v2.6-flash-free",
+  "nemotron-3.5-lightning-free",
+  "nemotron-3.5-super-vl-free",
+  "pulse-alpha-free",
+]);
+
+export function isOpenCodeGoFreeModelBody(body: Uint8Array): boolean {
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(body));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return false;
+    }
+    const model = (parsed as Record<string, unknown>).model;
+    return typeof model === "string" && OPENCODE_GO_FREE_MODELS.has(model);
+  } catch {
+    return false;
+  }
+}
+
 export function isChatCompletionsBody(body: Uint8Array): boolean {
   try {
     const parsed: unknown = JSON.parse(new TextDecoder().decode(body));
@@ -82,6 +110,8 @@ export interface OpenAiCompatibleAdapterOptions {
   guardRequestBody?: (suffix: string, body: Uint8Array) => string | null;
   inboundToken?: (headers: Headers) => string | null;
   upstreamApiKeyHeader?: string;
+  freeUpstreamBaseUrl?: (settings: AccountPoolConfig) => string;
+  freeUpstreamBody?: (body: Uint8Array) => boolean;
   parseUsages: (
     accountId: string,
     payload: unknown,
@@ -115,7 +145,10 @@ export function createOpenAiCompatibleAdapter(
     upstreamUrl: (request, settings, body) =>
       mountedUpstreamUrl(
         request,
-        options.upstreamBaseUrl(settings),
+        options.freeUpstreamBaseUrl &&
+          options.freeUpstreamBody?.(body ?? new Uint8Array())
+          ? options.freeUpstreamBaseUrl(settings)
+          : options.upstreamBaseUrl(settings),
         `${options.mountPrefix}v1/`,
         options.normalizeUpstreamPathSuffix
           ? (upstreamPath) =>
