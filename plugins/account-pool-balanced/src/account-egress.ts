@@ -26,7 +26,15 @@ export const egressStateSchema = z.object({schema:z.literal(1),profiles:z.array(
   // Absence of a profile is also an immutable route decision. Keep it per
   // account so unassigned providers retain their existing selection policy.
   unassigned:z.record(z.string().max(2048),z.array(z.string().uuid()).min(1).max(128)).default({}),
+  assignmentBlocked:z.boolean().default(false),
 }).strict();
+const MAX_REGISTRY_BYTES=240*1024; // Reserve space below the SDK's 256 KiB value bound.
+const registryBytes=(state:unknown)=>Buffer.byteLength(JSON.stringify(state),'utf8');
+const decisionCount=(state:z.infer<typeof egressStateSchema>)=>Object.keys(state.pins).length+
+  Object.values(state.unassigned).reduce((n,accounts)=>n+accounts.length,0);
+function requireRegistrySpace(state:unknown){
+  if(registryBytes(state)>MAX_REGISTRY_BYTES)throw Error('Egress registry byte capacity reached.');
+}
 export class EgressUnavailable extends Error {
   readonly code = 'POOL_EGRESS_UNAVAILABLE';
   constructor(){super('Assigned account egress unavailable; no fallback or replay.');}
@@ -39,13 +47,16 @@ export interface AccountRoute {
 
 /** Server-owned selection, never read from client headers or model names. */
 export class AccountEgress {
-  private state:z.infer<typeof egressStateSchema> = {schema:1,profiles:[],bindings:{},pins:{},unassigned:{}};
+  private state:z.infer<typeof egressStateSchema> = {schema:1,profiles:[],bindings:{},pins:{},unassigned:{},assignmentBlocked:false};
   private readonly agents = new Map<string,ProxyAgent>();
   private readonly sessions = new Map<string,{accountId:string;route:AccountRoute}>();
   private mutation:Promise<unknown> = Promise.resolve();
   constructor(private readonly kv:PoolKvStorage,private readonly hostId:()=>Promise<string>,
     private readonly accountExists:(id:string)=>Promise<boolean>){}
-  async initialize(){const stored=await this.kv.get('account-egress-v1');if(stored!==undefined)this.state=egressStateSchema.parse(stored);}
+  async initialize(){
+    const stored=await this.kv.get('account-egress-v1');if(stored!==undefined)this.state=egressStateSchema.parse(stored);
+    if(decisionCount(this.state)>=4096 || registryBytes(this.state)>=MAX_REGISTRY_BYTES)this.state.assignmentBlocked=true;
+  }
   snapshot(){return structuredClone(this.state);}
   private update(change:()=>Promise<void>){
     const next=this.mutation.then(change);this.mutation=next.catch(()=>undefined);return next;
@@ -56,6 +67,7 @@ export class AccountEgress {
     if(old && JSON.stringify(old)!==JSON.stringify(profile))throw new Error('Egress versions are immutable.');
     if(old)return;
     const next=egressStateSchema.parse({...this.state,profiles:[...this.state.profiles,profile]});
+    requireRegistrySpace(next);
     await this.kv.set('account-egress-v1',next);this.state=next;
   });}
   bind(accountId:string,ref:z.infer<typeof refSchema>|null){return this.update(async()=>{
@@ -63,11 +75,14 @@ export class AccountEgress {
     if(!await this.accountExists(accountId))throw Error('Account unavailable or its native transport is not supported.');
     const bindings={...this.state.bindings};
     if(ref===null)delete bindings[accountId];else{
+      if(this.state.assignmentBlocked)throw Error('Egress tracking capacity reached; new assignments require a coordinated drain/reset.');
       const parsed=refSchema.parse(ref);
       if(!this.state.profiles.some(p=>p.id===parsed.id&&p.version===parsed.version))throw Error('Configure the egress version first.');
       bindings[accountId]=parsed;
     }
     const next=egressStateSchema.parse({...this.state,bindings});
+    // An old larger snapshot may still be safely reduced during rollback.
+    if(ref!==null || registryBytes(next)>=registryBytes(this.state) || registryBytes(next)>256*1024)requireRegistrySpace(next);
     await this.kv.set('account-egress-v1',next);this.state=next;
   });}
   async acquire(accountId:string,sessionKey?:string|null):Promise<AccountRoute>{
@@ -101,12 +116,18 @@ export class AccountEgress {
         const prior=this.state.pins[sessionKey];
         if(prior && (prior.accountId!==accountId || prior.ref?.id!==ref?.id || prior.ref?.version!==ref?.version))throw new EgressUnavailable();
         const unassigned=this.state.unassigned[sessionKey]??[];
+        if(!ref && this.state.assignmentBlocked)return;
         if(!prior && (ref || !unassigned.includes(accountId))){
-          const count=Object.keys(this.state.pins).length+Object.values(this.state.unassigned).reduce((n,accounts)=>n+accounts.length,0);
-          if(count>=4096 || !ref && unassigned.length>=128)throw new EgressUnavailable();
           const next=ref
             ? {...this.state,pins:{...this.state.pins,[sessionKey]:{accountId,ref}}}
             : {...this.state,unassigned:{...this.state.unassigned,[sessionKey]:[...unassigned,accountId]}};
+          if(decisionCount(this.state)>=4096 || !ref && unassigned.length>=128 || registryBytes(next)>MAX_REGISTRY_BYTES){
+            if(ref)throw new EgressUnavailable();
+            // Preserve ordinary service. Stop new bindings before forgetting
+            // an unassigned route, rather than evicting a warm decision.
+            const blocked={...this.state,assignmentBlocked:true};
+            await this.kv.set('account-egress-v1',blocked);this.state=blocked;return;
+          }
           await this.kv.set('account-egress-v1',next);this.state=next;
         }
         if(ref)this.sessions.set(sessionKey,{accountId,route});
