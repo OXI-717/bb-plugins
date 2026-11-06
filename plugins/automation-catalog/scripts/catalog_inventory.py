@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import subprocess
 import time
 
@@ -79,8 +80,21 @@ def discover(run=command, system=None, home=None, etc=None):
             content = result.stdout
         else:
             content = run(['crontab', '-l'])
-        return ['entry:' + hashlib.sha256(line.strip().encode()).hexdigest()[:24] for line in content.splitlines()
-                if line.strip() and not line.lstrip().startswith('#') and (' ' in line.strip()) and not line.split()[0].count('=')]
+        ids = set()
+        timezone = 'host timezone'
+        for raw in content.splitlines():
+            line=raw.strip()
+            if line.startswith('CRON_TZ='):
+                timezone=line.split('=',1)[1].strip().strip('"\'')
+            if not line or line.startswith('#') or re.match(r'^\w+\s*=', line):
+                continue
+            parts=line.split(None,1 if line.startswith('@') else 5)
+            if len(parts) not in (2,6):
+                continue
+            digest=hashlib.sha256((timezone+'\n'+line).encode()).hexdigest()[:24]
+            marker=re.search(r'# bb-catalog-task=(cron:[a-f0-9]{24});name=([A-Za-z0-9_.-]+)$',line)
+            ids.add(marker[1] if marker and 'catalog_receipt_run.py' in line else 'cron:'+digest)
+        return sorted(ids)
     probe('cron', 'user', cron)
     if os.geteuid() != 0:
         coverage.append(dict(scheduler='cron', scope='root', ok=False))

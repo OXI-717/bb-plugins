@@ -34,3 +34,13 @@ class ExportTests(unittest.TestCase):
         data=json.loads(output.getvalue())
         self.assertGreaterEqual(data['observedAt'],before)
         self.assertLessEqual(data['observedAt'],int(time.time()*1000))
+
+class CronIdentityTests(unittest.TestCase):
+    def test_observed_and_collector_cron_identities_match(self):
+        from catalog_collect import cron_tasks
+        from tempfile import TemporaryDirectory
+        content='CRON_TZ=UTC\n5 * * * * /usr/bin/example --argument=value\n'
+        with TemporaryDirectory() as root:
+            data=discover(lambda argv:content if argv[0]=='crontab' else '',system='Linux',etc=root)
+        ids=[r['unit'] for r in data['observations'] if r['scheduler']=='cron']
+        self.assertEqual(ids,[t['id'] for t in cron_tasks(content,'sample','operator')])

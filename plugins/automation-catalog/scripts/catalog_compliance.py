@@ -66,12 +66,17 @@ def coverage_blocks(old, failed):
         return False
     try:
         origin = json.loads(old['identity'])
-        missing = json.loads(failed['identity'])
-        if isinstance(origin, list) and isinstance(missing, list):
-            return origin[:3] == missing[:3] or missing[1] == 'host' and origin[0] == missing[0]
     except ValueError:
-        pass
-    return old.get('host') == failed.get('host')
+        origin = None
+    try:
+        missing = json.loads(failed['identity'])
+    except ValueError:
+        missing = None
+    if isinstance(origin, list) and isinstance(missing, list):
+        return origin[:3] == missing[:3] or missing[1] == 'host' and origin[0] == missing[0]
+    if isinstance(origin, list):
+        return failed['identity'] == failed.get('host') and origin[0] == failed.get('host')
+    return old['identity'] == failed['identity']
 
 
 def snapshot(config, findings, previous, now):
@@ -86,7 +91,7 @@ def snapshot(config, findings, previous, now):
         old = previous.get(key)
         if item is None and old:
             # A missing host/source is not evidence that its old problems recovered.
-            if old.get('active') and old['finding']['kind'] != 'coverage' and any(coverage_blocks(old['finding'], f) for f in findings.values()):
+            if old.get('active') and any(coverage_blocks(old['finding'], f) for f in findings.values()):
                 item = dict(old['finding'], unresolved=True)
             elif budget > 0 and old.get('active'):
                 runs.append(dict(taskId=key, host=old['finding'].get('host', config['host']), id=f'{key}:{now}:recovered', status='succeeded',

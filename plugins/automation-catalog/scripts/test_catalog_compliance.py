@@ -66,3 +66,13 @@ class RegressionTests(ComplianceTests):
         self.inv['sample']['coverage'].append(dict(scheduler='cron',scope='root',ok=False))
         result,_=snapshot(self.cfg,evaluate(self.cfg,self.inv,self.sources,1001),state,1001)
         self.assertTrue(any(r['status']=='succeeded' for r in result['runs']))
+
+class CoverageEscalationTests(ComplianceTests):
+    def test_scheduler_to_host_loss_never_recovers_scheduler(self):
+        self.inv['sample']['coverage'][0]['ok']=False
+        self.inv['sample']['observations']=[]
+        f=evaluate(self.cfg,self.inv,self.sources,1000)
+        _,state=snapshot(self.cfg,f,{},1000)
+        lost=evaluate(self.cfg,{},self.sources,1001)
+        result,_=snapshot(self.cfg,lost,state,1001)
+        self.assertFalse(any(r['status']=='succeeded' for r in result['runs']))
