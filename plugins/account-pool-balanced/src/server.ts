@@ -190,6 +190,7 @@ export function createAccountPoolPlugin(
     await registerAgyModels((await bb.storage.kv.get<string[]>('agy-model-ids-v1'))??[]);
     const hub = createHub({
       accountRoute:(accountId,sessionKey)=>egress.acquire(accountId,sessionKey),
+      pinnedRouteAccount:sessionKey=>egress.pinnedAccount(sessionKey),
       nativeAgyManaged:()=>nativeSessions.managed(),
       agyModels:registerAgyModels,
       route: hubBasePath(bb.pluginId),

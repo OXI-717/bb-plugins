@@ -8645,6 +8645,32 @@ describe("cached provider readiness", () => {
 
 describe('server-owned account egress dispatch',()=>{
   const routeProfile={id:'exit-one',version:1,label:'Test exit',node:'node-one',hostIds:['host-one'],transport:'ssh-connect',endpoint:'http://127.0.0.1:19081',dns:'remote',ipv4:true,ipv6:false,failure:'closed',expectedExit:['192.0.2.1'],assurance:'proxy-enforced'};
+  it('wires persisted assigned pins into selection before expired affinity with a different active account',async()=>{
+    let clock=1900000000000;
+    const direct=vi.fn(async()=>Response.json({id:'fixture-direct'}));
+    const fixture=await createFixture({upstreamUrl:'https://model.example',apiKey:'fixture-a',options:{now:()=>clock,fetch:direct}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}));
+    await addApiAccount(fixture,'fixture-b',200);
+    await fixture.host.harness.behavior.callRpc('egress.configure',routeProfile);
+    await fixture.host.harness.behavior.callRpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
+    const routed=vi.spyOn(globalThis,'fetch').mockImplementation(async(_input,init)=>{
+      expect(new Headers(init?.headers).get('x-api-key')).toBe('fixture-a');
+      expect((init as any).dispatcher).toBeDefined(); return Response.json({id:'fixture-assigned'});
+    });
+    const send=async(token:string)=>{
+      const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{
+        headers:authHeaders(token),body:JSON.stringify({model:'claude-supported-fixture',messages:[],metadata:{user_id:JSON.stringify({session_id:token===fixture.key?'original':'ordinary'})}}),
+      });
+      await response.text(); expect(response.status).toBe(200);
+    };
+    await send(fixture.key);
+    await fixture.host.harness.behavior.callRpc('account.disable',{id:fixture.account.id});
+    await send(await resolveToken(fixture.host,'host-one','other-thread'));
+    await fixture.host.harness.behavior.callRpc('account.enable',{id:fixture.account.id});
+    expect(direct).toHaveBeenCalledOnce(); direct.mockClear();
+    clock+=30*60*1000+1; await send(fixture.key);
+    expect(routed).toHaveBeenCalledTimes(2); expect(direct).not.toHaveBeenCalled();
+  });
   it('binds model and usage after account selection, ignores client profile headers, and never replays 429',async()=>{
     const direct=vi.fn(async()=>Response.json({direct:true}));
     const fixture=await createFixture({upstreamUrl:'https://model.example',source:'import',options:{fetch:direct,importCredentials:async()=>importedCredentials(),usageUrl:'https://usage.example'}});

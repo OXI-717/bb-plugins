@@ -114,6 +114,7 @@ const DROPPED_RESPONSE_HEADERS = new Set([
 
 interface HubOptions {
   accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  pinnedRouteAccount?: (sessionKey:string)=>string|null;
   nativeAgyManaged?:()=>boolean;
   journal?: RequestJournal;
   route: string;
@@ -626,7 +627,10 @@ export class AccountPoolHub {
       affinityKey === null || parsed.parentAffinityId === null
         ? null
         : JSON.stringify([adapter.provider, affinityHost, parsed.parentAffinityId]);
+    const routeSessionKey=threadId===null?affinityKey:JSON.stringify([hostId,projectId,threadId,adapter.provider]);
     try {
+      const pinnedRouteAccountId=routeSessionKey===null?null:this.options.pinnedRouteAccount?.(routeSessionKey)??null;
+      if(pinnedRouteAccountId!==null && !candidateIds.has(pinnedRouteAccountId))throw new EgressUnavailable();
       while (attempted.size < candidateIds.size) {
         signal.throwIfAborted();
         const selected = await this.select(
@@ -642,9 +646,10 @@ export class AccountPoolHub {
           signal,
           purpose,
           freeTier,
+          pinnedRouteAccountId,
         );
         if (selected === null) break;
-        const route=await this.acquireRoute(selected.account,threadId===null?affinityKey:JSON.stringify([hostId,projectId,threadId,adapter.provider]));
+        const route=await this.acquireRoute(selected.account,routeSessionKey);
         lastAccount=selected.account.id;
         let pacing: PacingFlight | null = null;
         previousAccountId = selected.account.id;
@@ -1128,6 +1133,7 @@ export class AccountPoolHub {
     signal: AbortSignal,
     purpose?: "autopilot",
     freeTier?: boolean,
+    pinnedRouteAccountId: string | null = null,
   ): Promise<SelectedAccount | null> {
     const accounts = (await this.routingAccounts()).sort(
       (left, right) => left.priority - right.priority,
@@ -1146,6 +1152,10 @@ export class AccountPoolHub {
       ({ account }) =>
         candidateIds.has(account.id) && !attempted.has(account.id),
     );
+    // The persisted route pin outlives ordinary affinity. Reuse the same policy
+    // predicate, never an arbitrary account lookup or a different candidate.
+    const pinned=pinnedRouteAccountId===null?undefined:unattempted.find(({account})=>account.id===pinnedRouteAccountId);
+    if(pinnedRouteAccountId!==null && pinned===undefined)throw new EgressUnavailable();
     const requestHold = (accountId: string) => freeTier ? null : unattempted.find(e => e.account.id === accountId)?.quota.heldUntil ?? null;
     const ready = unattempted.filter(({ account }) => { const hold = requestHold(account.id); return hold === null || hold <= now; });
     const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (requestHold(a.account.id) ?? 0) - (requestHold(b.account.id) ?? 0)).slice(0,1);
@@ -1205,7 +1215,7 @@ export class AccountPoolHub {
             preferredCandidates.find((candidate) => candidate.account.id === account.id),
           )
           .find((candidate) => candidate !== undefined);
-    const selected =
+    const selected = pinned ?? (
       bound !== undefined && unattempted.includes(bound) && (candidates.length === 0 || tier(bound) <= bestTier)
         ? bound
         : ((inherited && (candidates.length === 0 || tier(inherited) <= bestTier) ? inherited : undefined) ??
@@ -1216,10 +1226,10 @@ export class AccountPoolHub {
           candidates.includes(activeAccount) && tier(activeAccount) <= bestTier
             ? activeAccount
             : next) ??
-          null);
+          null));
     if (selected === null) return null;
     if (routing.active === null)
-      routing.pinnedAccountId = boundAccountId ?? inherited?.account.id ?? null;
+      routing.pinnedAccountId = pinnedRouteAccountId ?? boundAccountId ?? inherited?.account.id ?? null;
     if (affinityKey !== null && binding === undefined) {
       binding = { accountId: selected.account.id, lastUsedAt: now };
       this.affinityBindings.set(affinityKey, binding);
@@ -1750,6 +1760,7 @@ export class AccountPoolHub {
 
 export function createHub(options: {
   accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  pinnedRouteAccount?: (sessionKey:string)=>string|null;
   nativeAgyManaged?:()=>boolean;
   route: string;
   agyModels?:(ids:string[])=>Promise<void>;
@@ -1874,7 +1885,7 @@ export function createHub(options: {
     vpnPayload: options.vpnPayload,
     guardCheck: options.guardCheck,
     adapters,
-    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,
+    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,pinnedRouteAccount:options.pinnedRouteAccount,
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),

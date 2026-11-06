@@ -58,6 +58,8 @@ export class AccountEgress {
     if(decisionCount(this.state)>=4096 || registryBytes(this.state)>=MAX_REGISTRY_BYTES)this.state.assignmentBlocked=true;
   }
   snapshot(){return structuredClone(this.state);}
+  /** Only assigned pins constrain account selection; ordinary affinity may fail over. */
+  pinnedAccount(sessionKey:string):string|null{return this.state.pins[sessionKey]?.accountId??null;}
   private update(change:()=>Promise<void>){
     const next=this.mutation.then(change);this.mutation=next.catch(()=>undefined);return next;
   }
@@ -90,7 +92,7 @@ export class AccountEgress {
     if(old){if(old.accountId!==accountId || old.route.profile && !old.route.profile.hostIds.includes(await this.hostId()))throw new EgressUnavailable();return old.route;}
     const pin=sessionKey?this.state.pins[sessionKey]:undefined;
     if(pin && pin.accountId!==accountId)throw new EgressUnavailable();
-    const previousUnassigned=sessionKey && this.state.unassigned[sessionKey]?.includes(accountId);
+    const previousUnassigned=sessionKey && this.state.unassigned[sessionKey]!==undefined;
     const ref=pin?.ref??(previousUnassigned?undefined:this.state.bindings[accountId]);
     let route:AccountRoute={assigned:false,profile:null,fetch:()=>undefined};
     if(ref){
