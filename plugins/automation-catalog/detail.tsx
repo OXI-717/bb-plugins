@@ -1,4 +1,5 @@
 import { attentionFingerprint } from "./lib/operations";
+import { externalStopIntent } from "./lib/stop-intent";
 import { AutomationDefinition } from "./definition";
 import { AuditPanel } from "./audit";
 import { modelLabel, projectLabel } from "./lib/execution";
@@ -409,7 +410,11 @@ export function CatalogDetailView({
                 <Button size="sm" variant="outline" disabled={actionPending || detail.task.state === "active"} onClick={() => performAction("resume")}>Включить</Button>
                 <Button size="sm" variant="destructive" disabled={actionPending} onClick={() => setConfirmAction("delete")}>Удалить из BB</Button>
               </div>
-            ) : <p className="text-sm text-muted-foreground">Прямое управление этим планировщиком не подключено. Откройте исходную систему.</p>}
+            ) : <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">Прямое управление этим планировщиком не подключено. Можно подготовить поручение на обратимое отключение в исходной системе.</p>
+              <Button size="sm" variant="outline" disabled={!externalStopIntent(detail)} onClick={() => setCompose(externalStopIntent(detail))}>Подготовить отключение</Button>
+              <p className="text-xs text-muted-foreground">Кнопка открывает черновик. Служба не остановится и агент не запустится до отправки. {!externalStopIntent(detail) && "В этой записи нет точной исходной единицы для отключения."}</p>
+            </div>}
             {confirmAction && <div role="alertdialog" aria-label="Подтверждение удаления" className="space-y-2 rounded-md border border-destructive/40 p-3 text-sm">
               <p>{confirmAction === "forget" ? `Удалить карточку «${detail.task.name}» и историю запусков из каталога? Исходный планировщик не изменится.` : `Безвозвратно удалить «${detail.task.name}» из BB? Отменить действие нельзя.`} Журнал проверок и решений сохранится.</p>
               <div className="flex gap-2">
