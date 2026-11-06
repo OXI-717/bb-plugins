@@ -1,3 +1,4 @@
+import { AccountEgress } from "./account-egress.js";
 import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
 import {NativeSessions,NativeSessionError,nativeHttp} from './native-sessions.js';
 import {AgyOAuthLogin,readNativeAgyConfig,type AgyAppConfig} from "./agy-oauth-login.js";
@@ -166,6 +167,9 @@ export function createAccountPoolPlugin(
     const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
     await journal.initialize();
     bb.onDispose(()=>journal.close());
+    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';});
+    await egress.initialize();
+    bb.onDispose(()=>egress.close());
     const transport =
       options.fetch === undefined ? createUpstreamTransport() : null;
     const upstreamFetch = options.fetch ?? transport?.fetch;
@@ -185,6 +189,7 @@ export function createAccountPoolPlugin(
     };
     await registerAgyModels((await bb.storage.kv.get<string[]>('agy-model-ids-v1'))??[]);
     const hub = createHub({
+      accountRoute:(accountId,sessionKey)=>egress.acquire(accountId,sessionKey),
       nativeAgyManaged:()=>nativeSessions.managed(),
       agyModels:registerAgyModels,
       route: hubBasePath(bb.pluginId),
@@ -342,9 +347,9 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url)),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions);
+    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress);
     registerUsageSource(bb, hub);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);

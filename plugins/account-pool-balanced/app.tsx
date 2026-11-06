@@ -1,3 +1,4 @@
+import {AccountEgressForm} from "./account-egress-form";
 import {AccountEmailForm} from './account-email-form';
 import { AccountSettingsStyle } from './account-settings-style';
 import type { AccountProjects } from "./src/contracts.js";
@@ -2433,6 +2434,7 @@ function AccountDialog({
         <p className="pool-settings-help">Для клиентов с назначением «автопилот». Ограничения проектов и квот сохраняются; ручная работа не меняется.</p>
         {autopilotError && <p role="alert">{autopilotError}</p>}
       </section>
+      <AccountEgressForm accountId={account.id} provider={account.provider} />
       <AccountProjectsForm account={account} loadProjects={loadProjects} save={saveProjects} onUnsavedChange={setProjectsUnsaved} />
       <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
       <section className="pool-settings-section">
