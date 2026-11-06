@@ -282,6 +282,7 @@ async function createFixture(args: {
     kimiUpstreamBaseUrl: args.upstreamUrl,
     zaiUpstreamBaseUrl: args.upstreamUrl,
     opencodeGoUpstreamBaseUrl: args.upstreamUrl,
+    opencodeFreeUpstreamBaseUrl: "https://free-upstream.example",
     neuraldeepUpstreamBaseUrl: args.upstreamUrl,
     cursorUpstreamBaseUrl: args.upstreamUrl,
     devinUpstreamBaseUrl: args.upstreamUrl,
@@ -1655,6 +1656,60 @@ describe("Account Pool plugin", () => {
         "Bearer sk-go-subscription",
       );
       expect(requests[0]?.headers.get("anthropic-version")).toBe("2023-06-01");
+    });
+
+    it("I7d: free-tier model IDs route to the free upstream", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "free-one" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": fixture.key,
+          },
+          body: JSON.stringify({
+            model: "flint-40b-free",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://free-upstream.example/chat/completions",
+      );
+    });
+
+    it("I7e: subscription models stay on the Go upstream", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "sub-one" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: JSON.stringify({
+            model: "glm-5.3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://upstream.example/chat/completions",
+      );
     });
 
     it("I8: zai /responses is never rewritten to chat/completions", async () => {

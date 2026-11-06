@@ -37,6 +37,7 @@ import {
   createOpenAiCompatibleAdapter,
   isChatCompletionsBody,
   opencodeGoUpstreamPathSuffix,
+  isOpenCodeGoFreeModelBody,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
@@ -1793,6 +1794,8 @@ export function createHub(options: {
         upstreamName: "OpenCode Go",
         mountPrefix: OPENCODE_GO_MOUNT_PREFIX,
         upstreamBaseUrl: (settings) => settings.opencodeGoUpstreamBaseUrl,
+        freeUpstreamBaseUrl: (settings) => settings.opencodeFreeUpstreamBaseUrl,
+        freeUpstreamBody: isOpenCodeGoFreeModelBody,
         usagesUrl:
           options.opencodeGoUsagesUrl ?? DEFAULT_OPENCODE_GO_USAGES_URL,
         allowedHeaderPrefixes: ["x-opencode-", "anthropic-"],
