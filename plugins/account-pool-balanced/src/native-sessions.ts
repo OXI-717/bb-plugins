@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
+export const nativeExecutionSchema=z.object({
+  runtimeId:id, gatewayId:id, runtimeSha256:z.string().regex(/^[a-f0-9]{64}$/),
+  profile:z.object({id,version:z.number().int().positive()}).strict(),
+}).strict();
 export const nativeExecutorSchema = z.object({
   id, accountId: id, hostId: id,
   // These are server-authenticated callers, never a host/project header.
@@ -10,9 +14,14 @@ export const nativeExecutorSchema = z.object({
   projectIds: z.array(id).min(1).max(32),
   autopilotAllowed: z.boolean().default(false),
   enabled: z.boolean().default(false),
+  execution:nativeExecutionSchema.optional(),
 }).strict();
 type Executor = z.infer<typeof nativeExecutorSchema>;
 export interface NativeCaller { hostId: string; projectId: string | null; threadId?: string; purpose?: 'autopilot' }
+interface NativeReply {
+  released?:boolean;leaseId?:string;state?:'queued'|'active';ttlMs?:number;heartbeatMs?:number;accountId?:string;hostId?:string;
+  binding?:z.infer<typeof nativeExecutionSchema>&{schema:'bb-account-pool/native-execution/1';leaseId:string;sessionId:string;executorId:string;accountId:string;hostId:string;kind:'task'|'catalog';caller:NativeCaller};
+}
 function sameCaller(a:NativeCaller,b:NativeCaller){return a.hostId===b.hostId&&a.projectId===b.projectId&&a.threadId===b.threadId&&a.purpose===b.purpose;}
 const leaseSchema = z.object({
   id: z.string().uuid(), sessionId: z.string().uuid(), executor: nativeExecutorSchema,
@@ -46,7 +55,8 @@ export class NativeSessions {
   private state:State={managed:false,executors:[],leases:[],events:[]};
   private tail:Promise<unknown>=Promise.resolve();
   private failed=false;
-  constructor(private storage:Storage,private now=Date.now,private admit: (hostId:string,caller:NativeCaller)=>Promise<void>=async()=>{}){}
+  constructor(private storage:Storage,private now=Date.now,private admit: (hostId:string,caller:NativeCaller)=>Promise<void>=async()=>{},
+    private validateExecution:(executor:Executor)=>void=executor=>{if(executor.execution)throw new NativeSessionError(503,'native-execution-unprepared');}){}
   async initialize(){
     const stored=await this.storage.get(KEY);
     this.state=stored==null?this.state:stateSchema.parse(stored);
@@ -93,6 +103,7 @@ export class NativeSessions {
     return matches.length===1?matches[0].id:null;
   });}
   async configure(value:unknown){const executor=nativeExecutorSchema.parse(value);return this.serial(()=>{
+    this.validateExecution(executor);
     const existing=this.state.executors.findIndex(e=>e.id===executor.id);
     if(this.state.leases.some(l=>l.executor.id===executor.id))throw new NativeSessionError(409,'native-executor-busy');
     if(existing<0){if(this.state.executors.length>=32)throw new NativeSessionError(409,'native-executor-limit');this.state.executors.push(executor);}
@@ -108,7 +119,7 @@ export class NativeSessions {
     if(!lease||lease.state!=='uncertain')throw new NativeSessionError(409,'native-not-uncertain');
     this.event(lease,'attested-stopped');this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
   });}
-  async request(caller:NativeCaller,raw:unknown){const input=nativeRequestSchema.parse(raw);
+  async request(caller:NativeCaller,raw:unknown):Promise<NativeReply>{const input=nativeRequestSchema.parse(raw);
     let checkedHost:string|undefined;
     if(input.action!=='release'){
       if(!this.state.managed)throw new NativeSessionError(503,'native-not-managed');
@@ -145,11 +156,16 @@ export class NativeSessions {
     if(lease.state==='uncertain')throw new NativeSessionError(409,'native-stop-unconfirmed');
     const executor=this.state.executors.find(e=>e.id===lease.executor.id);
     if(!executor||executor.hostId!==checkedHost||!this.allowed(executor,caller,lease.kind))throw new NativeSessionError(403,'native-executor-denied');
+    this.validateExecution(lease.executor);
+    if(JSON.stringify(executor)!==JSON.stringify(lease.executor))throw new NativeSessionError(409,'native-executor-changed');
     const same=this.state.leases.filter(l=>l.executor.accountId===lease.executor.accountId);
     // One common account lane across all machines and purposes. Never preempt.
     if(lease.state==='queued'&&!same.some(l=>l.state!=='queued')&&same.find(l=>l.state==='queued')===lease){lease.state='active';this.event(lease,'active');}
     lease.deadline=this.now()+NATIVE_LEASE_MS;
-    return {leaseId:lease.id,state:lease.state,ttlMs:NATIVE_LEASE_MS,heartbeatMs:5000,accountId:executor.accountId,hostId:executor.hostId};
+    return {leaseId:lease.id,state:lease.state,ttlMs:NATIVE_LEASE_MS,heartbeatMs:5000,accountId:lease.executor.accountId,hostId:lease.executor.hostId,
+      ...(lease.executor.execution?{binding:{schema:'bb-account-pool/native-execution/1' as const,
+        leaseId:lease.id,sessionId:lease.sessionId,executorId:lease.executor.id,accountId:lease.executor.accountId,
+        hostId:lease.executor.hostId,kind:lease.kind,caller:structuredClone(lease.caller),...structuredClone(lease.executor.execution)}}:{})};
   });}
   private owned(caller:NativeCaller,leaseId:string){
     const lease=this.state.leases.find(l=>l.id===leaseId);
