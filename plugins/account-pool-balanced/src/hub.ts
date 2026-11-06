@@ -194,7 +194,6 @@ export class AccountPoolHub {
   // that RPC serializers or diagnostics could expose.
   private readonly authorizationFailures = new WeakMap<AccountAuthorizationRequiredError, AccountSecret>();
   private readonly refreshBackoffs = new Map<string, RefreshBackoff>();
-  private readonly freeHoldsByAccount = new Map<string, number>();
   private readonly pacingByAccount = new Map<string, PacingFlight>();
   private affinityBindings = new Map<string, AccountBinding>();
   private activeAccounts = new Map<string, ActiveAccount>();
@@ -675,7 +674,7 @@ export class AccountPoolHub {
           signal.throwIfAborted();
           if (purpose === "autopilot") {
             const current = this.eligibleEntries(adapter.provider, projectId,
-              await this.options.accounts.list(), family, this.options.now(), purpose).eligible;
+              await this.options.accounts.list(), family, this.options.now(), purpose, freeTier).eligible;
             if (!current.some(entry => entry.account.id === selected.account.id)) break;
           }
           let upstream: UpstreamResult;
@@ -752,8 +751,7 @@ export class AccountPoolHub {
             );
             const heldUntil = this.options.now() + waitMs;
             this.observe(trace,{event:'hold',attempt,accountId:selected.account.id,status:429,holdSource:'upstream429',heldUntil,retryAfterMs:waitMs,retryAfterSupplied:response.headers.has('retry-after'),quotaEvidence:false});
-            if (freeTier) this.freeHoldsByAccount.set(selected.account.id, heldUntil);
-            else this.options.quotas.put({
+            if (!freeTier) this.options.quotas.put({
               ...observed,
               heldUntil,
             });
@@ -843,8 +841,7 @@ export class AccountPoolHub {
               const quota = this.options.quotas.get(selected.account.id);
               const heldUntil=Math.max(quota.heldUntil ?? 0, this.options.now() + 60_000);
               this.observe(trace,{event:'hold',attempt,accountId:selected.account.id,status:403,holdSource:'upstream403',errorClass:'upstream403-hold',heldUntil});
-              if (freeTier) this.freeHoldsByAccount.set(selected.account.id, heldUntil);
-              else this.options.quotas.put({ ...quota, error: null, heldUntil });
+              if (!freeTier) this.options.quotas.put({ ...quota, error: null, heldUntil });
             } else if (response.status === 401 || response.status === 403) {
               await this.markAuthError(
                 selected.account,
@@ -989,7 +986,7 @@ export class AccountPoolHub {
     }
   }
 
-  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number, purpose?: "autopilot") {
+  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number, purpose?: "autopilot", freeTier?: boolean) {
     const settings = this.options.getSettings();
     const threshold = settings.switchThreshold;
     const workWeek = { restDays: settings.restDays, offsetMinutes: -new Date(now).getTimezoneOffset() };
@@ -1004,13 +1001,13 @@ export class AccountPoolHub {
           quota: this.options.quotas.get(account.id),
         }))
         .filter(({ quota }) => quota.error === null)
-        .filter(({ account, quota }) => !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
+        .filter(({ account, quota }) => freeTier || !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
     );
     const available = scopedEntries.flatMap(entry => gateMembership(
       [entry], now, settings.reserveDrainHours * 3600000, workWeek,
     ));
     const eligible = available.filter(
-      ({ account, quota }) => !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
+      ({ account, quota }) => freeTier || !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
     );
     return { available, eligible };
   }
@@ -1123,12 +1120,12 @@ export class AccountPoolHub {
       restDays: settings.restDays,
       offsetMinutes: -new Date(now).getTimezoneOffset(),
     };
-    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose);
+    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose, freeTier);
     const unattempted = eligible.filter(
       ({ account }) =>
         candidateIds.has(account.id) && !attempted.has(account.id),
     );
-    const requestHold = (accountId: string) => freeTier ? (this.freeHoldsByAccount.get(accountId) ?? null) : unattempted.find(e => e.account.id === accountId)?.quota.heldUntil ?? null;
+    const requestHold = (accountId: string) => freeTier ? null : unattempted.find(e => e.account.id === accountId)?.quota.heldUntil ?? null;
     const ready = unattempted.filter(({ account }) => { const hold = requestHold(account.id); return hold === null || hold <= now; });
     const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (requestHold(a.account.id) ?? 0) - (requestHold(b.account.id) ?? 0)).slice(0,1);
     let binding =
@@ -1449,7 +1446,7 @@ export class AccountPoolHub {
     const deadline = admission.deadline;
     const cooldown = () => {
       const hold = admission.freeTier
-        ? (this.freeHoldsByAccount.get(account.id) ?? null)
+        ? null
         : this.options.quotas.get(account.id).heldUntil;
       const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id) : null;
       return hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
@@ -1506,7 +1503,7 @@ export class AccountPoolHub {
             if (waited) {const previous=phase;phase='cooldown';try{await check();}finally{phase=previous;}}
             const started = await this.options.accounts.withSnapshot(accounts => {
               const current = this.eligibleEntries(adapter.provider, admission.projectId,
-                accounts, admission.family, this.options.now(), admission.purpose).eligible;
+                accounts, admission.family, this.options.now(), admission.purpose, admission.freeTier).eligible;
               if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
               // Metadata serialization can outlast admission: never start new work after its deadline.
               if (this.options.now() >= deadline) throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
