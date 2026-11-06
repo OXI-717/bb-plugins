@@ -1554,11 +1554,11 @@ describe("Account Pool plugin", () => {
       expect(requests[0]?.headers.has("x-unrelated-header")).toBe(false);
     });
 
-    it("I6: Responses body on /responses is refused with 400 unsupported_wire_protocol and never forwarded", async () => {
+    it("I6: genuine Responses body keeps the native /responses wire upstream", async () => {
       const requests: Request[] = [];
       const fixture = await opencodeGoFixture(async (input, init) => {
         requests.push(new Request(input, init));
-        return Response.json({ id: "must-not-happen" });
+        return Response.json({ id: "responses-one" });
       });
       const response = await fixture.host.harness.behavior.fetchHttp(
         "POST",
@@ -1571,21 +1571,17 @@ describe("Account Pool plugin", () => {
           body: RESPONSES_BODY,
         },
       );
-      expect(response.status).toBe(400);
-      const payload = (await response.json()) as {
-        error: { type: string; code: string; message: string };
-      };
-      expect(payload.error.code).toBe("unsupported_wire_protocol");
-      expect(payload.error.type).toBe("invalid_request_error");
-      expect(payload.error.message).toContain("chat/completions");
-      expect(requests).toHaveLength(0);
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/responses");
+      expect(await requests[0]?.text()).toBe(RESPONSES_BODY);
     });
 
-    it("I7: ambiguous body on /responses fails closed (400, never forwarded)", async () => {
+    it("I7: ambiguous body on /responses is forwarded to the Responses wire", async () => {
       const requests: Request[] = [];
       const fixture = await opencodeGoFixture(async (input, init) => {
         requests.push(new Request(input, init));
-        return Response.json({ id: "must-not-happen" });
+        return Response.json({ id: "responses-two" });
       });
       const response = await fixture.host.harness.behavior.fetchHttp(
         "POST",
@@ -1598,12 +1594,34 @@ describe("Account Pool plugin", () => {
           body: AMBIGUOUS_BODY,
         },
       );
-      expect(response.status).toBe(400);
-      const payload = (await response.json()) as {
-        error: { code: string };
-      };
-      expect(payload.error.code).toBe("unsupported_wire_protocol");
-      expect(requests).toHaveLength(0);
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/responses");
+    });
+
+    it("I7b: Anthropic Messages wire reaches the upstream /messages path", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "msg-one", type: "message" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/messages",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: JSON.stringify({
+            model: "minimax-m3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/messages");
     });
 
     it("I8: zai /responses is never rewritten to chat/completions", async () => {
@@ -7972,7 +7990,7 @@ describe('trusted automation account admission', () => {
     codex:['/v1/responses','/v1/images/generations','/v1/images/edits','/v1/alpha/search','/v1/models'],
     kimi:['/kimi/v1/messages','/kimi/v1/messages/count_tokens'],
     zai:['/zai/v1/chat/completions','/zai/v1/responses','/zai/v1/models'],
-    'opencode-go':['/opencode-go/v1/chat/completions','/opencode-go/v1/responses','/opencode-go/v1/models'],
+    'opencode-go':['/opencode-go/v1/chat/completions','/opencode-go/v1/responses','/opencode-go/v1/messages','/opencode-go/v1/models'],
     cursor:CURSOR_PROXIED_PATHS.filter(p=>p!=='auth/exchange_user_api_key').map(p=>`/cursor/${p}`),
     devin:DEVIN_PROXIED_PATHS.map(p=>`/devin/${p}`),
   };
@@ -7991,7 +8009,6 @@ describe('trusted automation account admission', () => {
     outbound.mockClear();
     for(const route of routes[provider]) {
       const response=await request(token,route);
-      if(provider==='opencode-go' && route.endsWith('/responses')) {expect(response.status).toBe(400);await response.text();continue;}
       expect(response.status,route).toBe(403);
       expect(response.headers.get('x-bb-pool-error')).toBe('POOL_ACCOUNT_POLICY');
       await response.text();
