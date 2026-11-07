@@ -5,7 +5,7 @@ type Storage = {get<T>(key: string): Promise<T | undefined>; set(key: string, va
 type Context = {projectId: string; threadId: string};
 type Kind = 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
 type State = 'preparing' | 'awaiting-approval' | 'running' | 'completed' | 'cancelled' | 'failed' | 'needs-review' | 'interrupted';
-type Record = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; result?: unknown};
+type Record = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; result?: unknown};
 export type Progress = (state: 'awaiting-approval' | 'running', approved?: boolean) => Promise<void>;
 
 // Persist only these metadata shapes; never persist form input or raw errors.
@@ -18,6 +18,11 @@ const results = {
     check: z.object({authorized: z.literal(true)}).strict(),
     verify: z.object({verified: z.literal(true), cleaned: z.literal(true), at: z.string().optional()}).strict(),
 };
+const cancelReasonSchema = z.enum(['user','timeout','request-aborted','thread-stopped','thread-deleted','plugin-disposed','server-restarted','invalid-submission']);
+export function cancelledOutcome(result: {outcome: string; reason?: string}) {
+    const parsed = cancelReasonSchema.safeParse(result.outcome === 'cancelled' ? result.reason : 'invalid-submission');
+    return 'Cancelled' + (parsed.success ? ': ' + parsed.data : '');
+}
 export function createJournal(storage: Storage) {
     const instance = randomUUID();
     const prefix = (ctx: Context) => 'action:' + encodeURIComponent(ctx.projectId) + ':' + encodeURIComponent(ctx.threadId) + ':';
@@ -43,7 +48,11 @@ export function createJournal(storage: Storage) {
                     if (approved) row.approvedAt = new Date().toISOString();
                     await save();
                 });
-                if (value.startsWith('Cancelled')) row.state = 'cancelled';
+                if (value.startsWith('Cancelled')) {
+                    row.state = 'cancelled';
+                    const reason = cancelReasonSchema.safeParse(value.slice('Cancelled: '.length));
+                    if (reason.success) row.cancelReason = reason.data;
+                }
                 else {row.result = results[kind].parse(JSON.parse(value)); row.state = 'completed';}
                 await save();
                 return value;

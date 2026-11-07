@@ -1,7 +1,7 @@
 import { defineCli, cliCommand, defineRpcContract, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { contract, routeSchema, resolveRoute, type Route } from './contract.js';
-import {createJournal} from './journal.js';
+import {createJournal, cancelledOutcome} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal};
 const approvalTimeoutMs = 60_000;
 export const deliveryContract = defineRpcContract({formReceipt: {input: z.object({threadId:z.string().min(1).max(100),interactionId:z.string().min(1).max(100),visible:z.boolean()}).strict(),output:z.object({recorded:z.literal(true)})}});
@@ -60,7 +60,7 @@ export default function plugin(bb: BbPluginApi) {
         await progress('awaiting-approval');
         const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Сохранить пароль: ' + title, payload: { mode: 'store', title, username, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Создать запись и проверить сохранённый пароль', secrets: [{field: 'password', item: title}] }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal });
         if (result.outcome !== 'submitted')
-            return 'Cancelled; no credential stored';
+            return cancelledOutcome(result);
         const value = z.object({ password: z.string().min(1).max(16000) }).strict().parse(result.value);
         await progress('running', true);
         return JSON.stringify(await host.call('store', { ...access, title, username, password: value.password }, { hostId: credentialHost(route), signal: ctx.signal }));
@@ -81,7 +81,7 @@ export default function plugin(bb: BbPluginApi) {
             return await journal.run('connect', profile, ctx, async progress => {
                 await progress('awaiting-approval');
                 const decision = await bb.ui.requestInput({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Подключить хранилище: '+project.name,payload:{mode:'approve',title:'Подключить проект '+project.name,profile,projectId:ctx.projectId,threadId:ctx.threadId,label:project.name+' — защищённое хранилище',hostId:credentialHost(route),...display,vaultId:'new-project-vault',vaultLabel:project.name,purpose:'Создать отдельный сейф «'+project.name+'» и сохранить привязку проекта в Oxi Op. Существующий одноимённый сейф используется только при точном совпадении метки этого BB-проекта. Пароли не читаются, автоматический доступ не выдаётся.',secrets:[]},describeSubmission:()=>({title:'Project vault setup approved (no credential values)'})},{signal:ctx.signal});
-                if (decision.outcome !== 'submitted' || !z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success) return 'Cancelled';
+                if (decision.outcome !== 'submitted' || !z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
                 await progress('running', true);
                 const vault = await host.call('provisionVault',{route,projectId,name:project.name},{hostId:credentialHost(route),signal:ctx.signal});
                 const latest = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
@@ -115,7 +115,7 @@ export default function plugin(bb: BbPluginApi) {
             return await journal.run('connect-many',profile,ctx,async progress=>{
                 await progress('awaiting-approval');
                 const decision=await bb.ui.requestInput({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Подключить хранилища проектов',payload:{mode:'approve',title:'Подключить '+pending.length+' проектов',profile,projectId:ctx.projectId,threadId:ctx.threadId,label:pending.map(p=>p.name).join(', '),hostId:credentialHost(route),...display,vaultId:'project-vaults',vaultLabel:'Отдельный сейф каждого проекта',purpose:pending.map(p=>p.name+': '+(p.existingVaultId?'подключить существующий сейф по точному ID':'создать или восстановить сейф с меткой проекта')).join('\n')+'\nСохранить привязки по умолчанию. Пароли не читаются; автоматический доступ не выдаётся. Уже настроенные проекты пропускаются.',secrets:[]},describeSubmission:()=>({title:'Project vault connections approved (no credential values)'})},{signal:ctx.signal});
-                if(decision.outcome!=='submitted'||!z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success)return 'Cancelled';
+                if(decision.outcome!=='submitted'||!z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success)return cancelledOutcome(decision);
                 await progress('running',true);
                 for(const project of pending){
                     if(ctx.signal?.aborted)throw new Error('Project setup interrupted');
@@ -151,7 +151,7 @@ export default function plugin(bb: BbPluginApi) {
                 await progress('awaiting-approval');
                 const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Использовать секрет: ' + (configured.label ?? configured.purpose ?? operation), payload: { mode: 'approve', title: configured.label ?? configured.purpose ?? operation, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose, secrets: Object.entries(configured.references).map(([variable, reference]) => ({variable, reference, item: configured.referenceLabels?.[variable]?.item ?? 'Название записи не настроено', field: configured.referenceLabels?.[variable]?.field ?? reference.split('/').at(-1) ?? 'Поле не указано'})) }, describeSubmission: () => ({ title: 'Credential use approved' }) }, { signal: ctx.signal });
                 if (result.outcome !== 'submitted' || z.object({ approved: z.literal(true) }).strict().safeParse(result.value).success === false)
-                    return 'Cancelled';
+                    return cancelledOutcome(result);
             }
             await progress('running', route.requireApproval);
             if (route.credentialHostId) {
@@ -177,7 +177,7 @@ export default function plugin(bb: BbPluginApi) {
                 const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
                 await progress('awaiting-approval');
                 const decision = await bb.ui.requestInput({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Настройка 1Password: ' + title.toLowerCase(), payload: {mode: 'approve', title, purpose, profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', secrets: registryTitle ? [{item: registryTitle, field: 'Служебная заметка'}] : []}, describeSubmission: () => ({title: 'Vault operation approved (no credential values)'})}, {signal: ctx.signal});
-                if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return 'Cancelled';
+                if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
             }
             await progress('running', approval);
             if (kind === 'inventory') return JSON.stringify(await host.call('inventory', {route, registryTitle: registryTitle!}, {hostId: credentialHost(route), signal: ctx.signal}));
@@ -202,7 +202,7 @@ export default function plugin(bb: BbPluginApi) {
             try {
                 const thread = await bb.sdk.threads.get({threadId: ctx.threadId, signal: ctx.signal});
                 if (thread.id !== ctx.threadId || thread.projectId !== ctx.projectId || thread.archivedAt != null || thread.deletedAt != null || ctx.signal?.aborted) return result;
-                await bb.sdk.threads.send({threadId: ctx.threadId, mode: 'queue-if-active', input: [{type: 'text', text: 'Oxi Op: the requested interactive CLI operation has finished. Inspect oxi_op_history or bb oxi-op history for its confirmed outcome before continuing. Completion can mean success, cancellation or failure. Do not repeat the request or an uncertain write automatically. No credential values are included in this notice.', mentions: []}]});
+                await bb.sdk.threads.send({threadId: ctx.threadId, mode: 'queue-if-active', input: [{type: 'text', text: result.stdout === 'Cancelled: timeout' ? 'Oxi Op: запрос отменён по истечении 60 секунд. Это не отказ пользователя и не подтверждение показа формы. Проверьте журнал; не открывайте запрос повторно автоматически. Значения секретов не передавались в уведомлении.' : result.stdout.startsWith('Cancelled') ? 'Oxi Op: запрос отменён. Причина сохранена в журнале. Проверьте oxi_op_history или bb oxi-op history перед продолжением; автоматически не повторяйте запрос. Значений секретов в уведомлении нет.' : 'Oxi Op: обработка интерактивной операции завершена. Проверьте oxi_op_history или bb oxi-op history: завершение обработки не означает успех всех действий. Не повторяйте неопределённую запись автоматически. Значений секретов в уведомлении нет.', mentions: []}]});
             } catch {result.stderr = 'Completion notice could not be delivered; inspect oxi-op history. The credential operation was not retried.';}
         }
         return result;

@@ -6,7 +6,7 @@ import {loadPluginApp} from '@get-bb/plugin-sdk/testing/app';
 import React from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import plugin from './dist/test/server.js';
-import {createJournal} from './dist/test/journal.js';
+import {createJournal, cancelledOutcome} from './dist/test/journal.js';
 
 const route = {
   projectId: 'example-project', hostId: 'example-host', vaultId: 'example-vault',
@@ -86,7 +86,8 @@ test('intake shows its BB form before any op authentication and cancellation doe
 test('native and CLI forms expire at one minute without contacting either credential host', async t => {
   t.mock.timers.enable({apis: ['setTimeout']});
   for (const mode of ['native', 'cli']) {
-    const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined, credentialHostId: 'example-credential-host'});
+    const notices=[];
+    const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined, credentialHostId: 'example-credential-host'}, undefined, async input=>{notices.push(input);return {delivery:'sent'};});
     let settled = false;
     const pending = (mode === 'native'
       ? h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context)
@@ -100,6 +101,8 @@ test('native and CLI forms expire at one minute without contacting either creden
     assert.equal(h.inspection.pendingInteractions.length, 0);
     assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
     assert.equal(JSON.parse((await h.behavior.runCli(['history'], context)).stdout)[0].state, 'cancelled');
+    assert.equal(JSON.parse((await h.behavior.runCli(['history'], context)).stdout)[0].cancelReason, 'timeout');
+    if(mode==='cli')assert(notices[0].input[0].text.includes('отменён по истечении 60 секунд'));
   }
 });
 
@@ -434,4 +437,22 @@ test('batch connection gates all writes once, preserves partial progress and ski
  assert.equal(h.inspection.experimental_hostRpcCalls.length,before);
  assert.equal(h.inspection.pendingInteractions.length,0);
  assert.equal((await h.behavior.runCli(['connect-many','--projects',JSON.stringify([targets[0],targets[0]]),'--profile','default'],context)).exitCode,1);
+});
+
+test('explicit cancellation is recorded separately from timeout without storing input',async t=>{
+ const h=setup(t);
+ const work=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);
+ await setImmediate();h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);await work;
+ const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
+ assert.equal(row.state,'cancelled');assert.equal(row.cancelReason,'user');
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+});
+
+test('unknown cancellation reasons never enter the journal or completion text',async()=>{
+ assert.equal(cancelledOutcome({outcome:'cancelled',reason:'synthetic-sensitive-value'}),'Cancelled');
+ assert.equal(cancelledOutcome({outcome:'submitted'}),'Cancelled: invalid-submission');
+ const data=new Map();const storage={get:async k=>data.get(k),set:async(k,v)=>data.set(k,structuredClone(v)),list:async prefix=>[...data.keys()].filter(k=>k.startsWith(prefix))};
+ const journal=createJournal(storage);
+ await journal.run('run','default',context,async()=>cancelledOutcome({outcome:'cancelled',reason:'synthetic-sensitive-value'}));
+ const rows=await journal.list(context);assert.equal(rows[0].state,'cancelled');assert.equal(rows[0].cancelReason,undefined);assert(!JSON.stringify(rows).includes('synthetic-sensitive-value'));
 });
