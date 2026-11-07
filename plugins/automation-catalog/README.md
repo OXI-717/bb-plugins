@@ -166,3 +166,7 @@ launchd uninstall placeholders without Label, Program or ProgramArguments are no
 jobs; executable but incomplete definitions still require investigation. Exact
 application/package exclusions and registered local jobs remain operator-reviewed
 registry data, never a blanket prefix inferred from a friendly display name.
+An explicit complete registry entry or scoped exclusion resolves a prior unknown
+identity even during a host outage. This is recorded as a registry decision,
+separately from runtime recovery; the outage remains visible. Unclassified jobs
+and incomplete registry entries retain their prior finding during lost coverage.

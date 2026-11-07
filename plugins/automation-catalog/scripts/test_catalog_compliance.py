@@ -76,3 +76,14 @@ class CoverageEscalationTests(ComplianceTests):
         lost=evaluate(self.cfg,{},self.sources,1001)
         result,_=snapshot(self.cfg,lost,state,1001)
         self.assertFalse(any(r['status']=='succeeded' for r in result['runs']))
+
+class ExplicitRegistrationDuringOutageTests(unittest.TestCase):
+    def test_registry_decision_is_not_reopened_by_source_outage(self):
+        from catalog_compliance import snapshot, identity
+        config={'staleAfterMs':60000,'host':'test-host','hosts':['test-host'],'sourceId':'test','name':'test','owner':'owner','registry':[dict(host='test-host',scheduler='systemd',scope='user',unit='known.service',name='known',owner='owner',project='project',purpose='purpose',source='source',limits='limits',stop='stop',rollback='rollback')],'exclusions':[]}
+        ident=identity('test-host','systemd','user','known.service')
+        old={'old':{'active':True,'lastEvent':1,'finding':{'kind':'unregistered','identity':ident,'summary':'not registered','host':'test-host'}}}
+        failure={'coverage':{'kind':'coverage','identity':'test-host','summary':'offline','host':'test-host'}}
+        result,state=snapshot(config,failure,old,100)
+        self.assertFalse(state['old']['active'])
+        self.assertTrue(any(t['state']=='blocked' for t in result['tasks']))
