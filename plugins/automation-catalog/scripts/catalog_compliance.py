@@ -72,6 +72,11 @@ def explicitly_classified(config, finding):
     for row in config.get('registry', []):
         if (row['host'], row['scheduler'], row['scope'], row['unit']) == (host, scheduler, scope, unit):
             return all(row.get(field) for field in REQUIRED)
+    # Past evidence can settle a historical finding while offline. This is
+    # never an observation exclusion: a fresh real job still alerts in evaluate.
+    if any(d.get('identity') == finding['identity'] and d.get('evidence') and d.get('checkedAt')
+           for d in config.get('nonJobDecisions', [])):
+        return True
     return any(e['host'] == host and e['scheduler'] == scheduler and e['scope'] == scope
                and e.get('reason') and (unit in e.get('units', []) or any(unit.startswith(p) for p in e.get('prefixes', [])))
                for e in config.get('exclusions', []))
