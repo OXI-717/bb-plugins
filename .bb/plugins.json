@@ -34,6 +34,10 @@
     {
       "name": "pool-maintenance",
       "source": "./plugins/pool-maintenance"
+    },
+    {
+      "name": "oxi-op",
+      "source": "./plugins/oxi-op"
     }
   ]
 }

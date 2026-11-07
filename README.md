@@ -2,6 +2,10 @@
 
 Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory and versioned release tags. GitHub Release immutability is enabled for releases published after 0.3.0; the earlier 0.3.0 release is not protected retroactively. This repository ships **Account Pool Balanced**. **Automation Catalog** adds a unified view across schedulers.
 
+## 1Password
+
+Native credential intake and configured secret use for BB agents, with separate routine and administrative access profiles. See [OXI OP setup](plugins/oxi-op/README.md).
+
 ## BB Projects
 
 Tasks, repositories and agent sessions for each BB project. GitHub accounts are

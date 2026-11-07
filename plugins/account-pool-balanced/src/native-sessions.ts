@@ -15,12 +15,15 @@ export const nativeExecutorSchema = z.object({
   autopilotAllowed: z.boolean().default(false),
   enabled: z.boolean().default(false),
   execution:nativeExecutionSchema.optional(),
+  unlock:z.object({profile:id,operation:z.literal('prepared-native-keyring-unlock')}).strict().optional(),
 }).strict();
 type Executor = z.infer<typeof nativeExecutorSchema>;
 export interface NativeCaller { hostId: string; projectId: string | null; threadId?: string; purpose?: 'autopilot' }
 interface NativeReply {
   released?:boolean;leaseId?:string;state?:'queued'|'active';ttlMs?:number;heartbeatMs?:number;accountId?:string;hostId?:string;
   binding?:z.infer<typeof nativeExecutionSchema>&{schema:'bb-account-pool/native-execution/1';leaseId:string;sessionId:string;executorId:string;accountId:string;hostId:string;kind:'task'|'catalog';caller:NativeCaller};
+  unlock?:{mode:'automatic';state:string;requestId?:string;deadline?:number};
+  requestId?:string;deadline?:number;stopped?:boolean;
 }
 function sameCaller(a:NativeCaller,b:NativeCaller){return a.hostId===b.hostId&&a.projectId===b.projectId&&a.threadId===b.threadId&&a.purpose===b.purpose;}
 const leaseSchema = z.object({
@@ -28,6 +31,7 @@ const leaseSchema = z.object({
   kind: z.enum(['task','catalog']).default('task'),
   caller: z.object({hostId:id,projectId:id.nullable(),threadId:id.optional(),purpose:z.literal('autopilot').optional()}).strict(),
   state: z.enum(['queued','active','uncertain']), deadline: z.number(), createdAt: z.number(),
+  unlock:z.object({requestId:z.string().uuid(),deadline:z.number(),state:z.enum(['issued','consumed','completed','uncertain'])}).strict().optional(),
 }).strict();
 type Lease = z.infer<typeof leaseSchema>;
 const eventSchema = z.object({at:z.number(),event:z.enum(['queued','active','uncertain','released','cancelled','attested-stopped']),executorId:id,accountId:id,hostId:id,projectId:id.nullable()});
@@ -42,6 +46,8 @@ export const NATIVE_LEASE_MS=30_000;
 export const nativeRequestSchema=z.discriminatedUnion('action',[
   z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid(),kind:z.enum(['task','catalog']).default('task')}).strict(),
   z.object({action:z.literal('poll'),leaseId:z.string().uuid()}).strict(),
+  z.object({action:z.literal('unlock-start'),leaseId:z.string().uuid()}).strict(),
+  z.object({action:z.literal('unlock-cancel'),leaseId:z.string().uuid()}).strict(),
   z.object({action:z.literal('release'),leaseId:z.string().uuid(),stopped:z.literal(true).optional(),completed:z.literal(true).optional()}).strict()
     .refine(value=>(value.stopped===true)!==(value.completed===true)),
 ]);
@@ -55,8 +61,10 @@ export class NativeSessions {
   private state:State={managed:false,executors:[],leases:[],events:[]};
   private tail:Promise<unknown>=Promise.resolve();
   private failed=false;
+  private unlockJobs=new Map<string,{abort:AbortController;done:Promise<void>}>();
   constructor(private storage:Storage,private now=Date.now,private admit: (hostId:string,caller:NativeCaller)=>Promise<void>=async()=>{},
-    private validateExecution:(executor:Executor)=>void=executor=>{if(executor.execution)throw new NativeSessionError(503,'native-execution-unprepared');}){}
+    private validateExecution:(executor:Executor)=>void=executor=>{if(executor.execution)throw new NativeSessionError(503,'native-execution-unprepared');},
+    private launchUnlock:(requestId:string,signal:AbortSignal)=>Promise<void>=async()=>{throw new NativeSessionError(503,'native-unlock-unavailable');}){}
   async initialize(){
     const stored=await this.storage.get(KEY);
     this.state=stored==null?this.state:stateSchema.parse(stored);
@@ -103,6 +111,7 @@ export class NativeSessions {
     return matches.length===1?matches[0].id:null;
   });}
   async configure(value:unknown){const executor=nativeExecutorSchema.parse(value);return this.serial(()=>{
+    if(executor.unlock&&!executor.execution)throw new NativeSessionError(400,'native-unlock-unprepared');
     this.validateExecution(executor);
     const existing=this.state.executors.findIndex(e=>e.id===executor.id);
     if(this.state.leases.some(l=>l.executor.id===executor.id))throw new NativeSessionError(409,'native-executor-busy');
@@ -120,6 +129,8 @@ export class NativeSessions {
     this.event(lease,'attested-stopped');this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
   });}
   async request(caller:NativeCaller,raw:unknown):Promise<NativeReply>{const input=nativeRequestSchema.parse(raw);
+    if(input.action==='unlock-start')return this.startUnlock(caller,input.leaseId);
+    if(input.action==='unlock-cancel')return this.cancelUnlock(caller,input.leaseId);
     let checkedHost:string|undefined;
     if(input.action!=='release'){
       if(!this.state.managed)throw new NativeSessionError(503,'native-not-managed');
@@ -133,6 +144,7 @@ export class NativeSessions {
     return this.serial(()=>{
     if(input.action==='release'){
       const lease=this.owned(caller,input.leaseId);
+      if(lease.unlock&&lease.unlock.state!=='completed')throw new NativeSessionError(409,'native-unlock-stop-unconfirmed');
       if(lease.state==='uncertain'&&!input.stopped)throw new NativeSessionError(409,'native-stop-unconfirmed');
       this.event(lease,lease.state==='queued'?'cancelled':'released');
       this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
@@ -163,10 +175,84 @@ export class NativeSessions {
     if(lease.state==='queued'&&!same.some(l=>l.state!=='queued')&&same.find(l=>l.state==='queued')===lease){lease.state='active';this.event(lease,'active');}
     lease.deadline=this.now()+NATIVE_LEASE_MS;
     return {leaseId:lease.id,state:lease.state,ttlMs:NATIVE_LEASE_MS,heartbeatMs:5000,accountId:lease.executor.accountId,hostId:lease.executor.hostId,
+      ...(lease.executor.unlock?{unlock:{mode:'automatic' as const,state:lease.unlock?.state??'idle',...(lease.unlock?{requestId:lease.unlock.requestId,deadline:lease.unlock.deadline}:{})}}:{}),
       ...(lease.executor.execution?{binding:{schema:'bb-account-pool/native-execution/1' as const,
         leaseId:lease.id,sessionId:lease.sessionId,executorId:lease.executor.id,accountId:lease.executor.accountId,
         hostId:lease.executor.hostId,kind:lease.kind,caller:structuredClone(lease.caller),...structuredClone(lease.executor.execution)}}:{})};
   });}
+  private currentUnlock(requestId:string){
+    const lease=this.state.leases.find(l=>l.unlock?.requestId===requestId);
+    const executor=lease&&this.state.executors.find(e=>e.id===lease.executor.id);
+    if(!this.state.managed||!lease||lease.state!=='active'||lease.kind!=='task'||!lease.executor.execution||!lease.executor.unlock||
+      !executor||!this.allowed(executor,lease.caller)||JSON.stringify(executor)!==JSON.stringify(lease.executor)||lease.unlock!.deadline<=this.now())
+      throw new NativeSessionError(403,'native-unlock-denied');
+    this.validateExecution(executor);return lease;
+  }
+  private async startUnlock(caller:NativeCaller,leaseId:string){
+    await this.request(caller,{action:'poll',leaseId}); // Same admission/Guard checks, no new authority.
+    const issued=await this.serial(()=>{
+      const lease=this.owned(caller,leaseId);
+      if(!this.state.managed||lease.state!=='active'||lease.kind!=='task'||!lease.executor.execution||!lease.executor.unlock)
+        throw new NativeSessionError(403,'native-unlock-denied');
+      const executor=this.state.executors.find(e=>e.id===lease.executor.id);
+      if(!executor||!this.allowed(executor,caller)||JSON.stringify(executor)!==JSON.stringify(lease.executor))
+        throw new NativeSessionError(403,'native-unlock-denied');
+      this.validateExecution(executor);
+      if(lease.unlock)throw new NativeSessionError(409,'native-unlock-already-issued');
+      lease.unlock={requestId:randomUUID(),deadline:Math.min(lease.deadline,this.now()+25_000),state:'issued'};
+      return structuredClone(lease.unlock);
+    });
+    const abort=new AbortController();
+    const timer=setTimeout(()=>abort.abort(),Math.max(1,issued.deadline-this.now()));
+    const done=(async()=>{
+      let completed=false;
+      try{
+        await Promise.race([this.launchUnlock(issued.requestId,abort.signal),new Promise<never>((_,reject)=>{
+          abort.signal.addEventListener('abort',()=>reject(new Error('native-unlock-cancelled')),{once:true});
+        })]);completed=!abort.signal.aborted;
+      }catch{/* No raw operation errors or credentials enter storage. */}
+      finally{
+        clearTimeout(timer);
+        await this.serial(()=>{
+          const lease=this.state.leases.find(l=>l.id===leaseId);
+          if(!lease?.unlock)return;
+          if(completed&&lease.state==='active'&&lease.unlock.state==='consumed'&&lease.unlock.deadline>this.now())lease.unlock.state='completed';
+          else{lease.unlock.state='uncertain';if(lease.state!=='uncertain')this.uncertain(lease);}
+        });
+        this.unlockJobs.delete(leaseId);
+      }
+    })();
+    this.unlockJobs.set(leaseId,{abort,done});void done.catch(()=>{});
+    return {requestId:issued.requestId,deadline:issued.deadline};
+  }
+  /** Called only through the verified Oxi Op plugin RPC; locators are not authorization. */
+  async claimUnlock(requestId:string){
+    const before=this.currentUnlock(requestId);await this.admit(before.executor.hostId,before.caller);
+    return this.serial(()=>{
+      const lease=this.currentUnlock(requestId);
+      if(lease.unlock!.state!=='issued')throw new NativeSessionError(409,'native-unlock-consumed');
+      lease.unlock!.state='consumed';
+      return {requestId,deadline:lease.unlock!.deadline,profile:lease.executor.unlock!.profile,operation:lease.executor.unlock!.operation,
+        binding:{schema:'bb-account-pool/native-execution/1' as const,leaseId:lease.id,sessionId:lease.sessionId,
+          executorId:lease.executor.id,accountId:lease.executor.accountId,hostId:lease.executor.hostId,kind:'task' as const,
+          caller:structuredClone(lease.caller),...structuredClone(lease.executor.execution!)}};
+    });
+  }
+  private async cancelUnlock(caller:NativeCaller,leaseId:string){
+    this.owned(caller,leaseId);
+    const job=this.unlockJobs.get(leaseId);job?.abort.abort();
+    if(job)await this.waitJobs([job.done]);
+    return this.serial(()=>({stopped:this.owned(caller,leaseId).unlock?.state==='completed'}));
+  }
+  async close(){
+    const jobs=[...this.unlockJobs.values()];for(const job of jobs)job.abort.abort();
+    await this.waitJobs(jobs.map(j=>j.done));
+  }
+  private async waitJobs(jobs:Promise<void>[]){
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{await Promise.race([Promise.allSettled(jobs),new Promise(resolve=>{timer=setTimeout(resolve,3000);})]);}
+    finally{clearTimeout(timer);}
+  }
   private owned(caller:NativeCaller,leaseId:string){
     const lease=this.state.leases.find(l=>l.id===leaseId);
     if(!lease||!sameCaller(lease.caller,caller))throw new NativeSessionError(403,'native-lease-denied');

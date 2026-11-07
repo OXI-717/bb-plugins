@@ -159,3 +159,14 @@ existing `catalog_sync.py` configuration. Keep settings, selections and snapshot
 outside the source checkout. If a host has no publisher, an explicitly configured
 script task may invoke that same synchronizer; do not create a second schedule for
 the underlying cleanup. The synchronizer respects `enabled: false`.
+
+Inventory comparison omits inert `not-found inactive dead` dependency references when no unit
+file backs them. Real transient units and error-state units remain visible. Empty
+launchd uninstall placeholders without Label, Program or ProgramArguments are not
+jobs; executable but incomplete definitions still require investigation. Exact
+application/package exclusions and registered local jobs remain operator-reviewed
+registry data, never a blanket prefix inferred from a friendly display name.
+An explicit complete registry entry or scoped exclusion resolves a prior unknown
+identity even during a host outage. This is recorded as a registry decision,
+separately from runtime recovery; the outage remains visible. Unclassified jobs
+and incomplete registry entries retain their prior finding during lost coverage.
