@@ -87,16 +87,3 @@ class ExplicitRegistrationDuringOutageTests(unittest.TestCase):
         result,state=snapshot(config,failure,old,100)
         self.assertFalse(state['old']['active'])
         self.assertTrue(any(t['state']=='blocked' for t in result['tasks']))
-
-    def test_prior_nonjob_decision_does_not_hide_a_fresh_real_job(self):
-        config=dict(host='sample',hosts=['sample'],registry=[],exclusions=[],sources=[],staleAfterMs=60000,sourceId='test',name='test',owner='owner')
-        ident=identity('sample','systemd','user','new.service')
-        config['nonJobDecisions']=[dict(identity=ident,evidence='verified inert artifact receipt',checkedAt=1)]
-        inv={'sample':dict(observedAt=100,coverage=[dict(scheduler='systemd',scope='user',ok=True)],observations=[dict(scheduler='systemd',scope='user',unit='new.service')])}
-        findings=evaluate(config,inv,{},100)
-        self.assertTrue(any(x['kind']=='unregistered' for x in findings.values()))
-        old={'old':dict(active=True,lastEvent=1,finding=dict(kind='unregistered',identity=ident,host='sample',summary='old'))}
-        offline={'coverage':dict(kind='coverage',identity='sample',host='sample',summary='offline')}
-        result,state=snapshot(config,offline,old,100)
-        self.assertFalse(state['old']['active'])
-        self.assertTrue(any(t['state']=='blocked' for t in result['tasks']))

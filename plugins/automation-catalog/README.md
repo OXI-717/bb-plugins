@@ -170,7 +170,3 @@ An explicit complete registry entry or scoped exclusion resolves a prior unknown
 identity even during a host outage. This is recorded as a registry decision,
 separately from runtime recovery; the outage remains visible. Unclassified jobs
 and incomplete registry entries retain their prior finding during lost coverage.
-Historical non-job receipts may carry exact identity, checkedAt and evidence in
-`nonJobDecisions`. These settle only a retained old finding during lost coverage;
-they never exclude a fresh observation. If that identity later becomes a real
-unregistered job it alerts again. No scheduler state is changed by a receipt.
