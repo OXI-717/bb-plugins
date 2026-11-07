@@ -1,3 +1,4 @@
+import {guardProbeSchema,type GuardProbeInput, type runGuardProbe} from './guard-server.js';
 import type { AccountEgress } from "./account-egress.js";
 import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
 import { setTimeout as wait } from "node:timers/promises";
@@ -72,6 +73,7 @@ const HELP = [
   '  bb pool native mode <managed|off>',
   '  bb pool native attest-stopped <lease-id> --confirmed',
   "  bb pool observations [--json]",
+  "  bb pool guard-probe --provider cursor [--delay-stage guard-rpc] [--delay-ms 4100] [--delay-attempts first|all] [--json]",
   "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> [--off]",
   "  bb pool config",
@@ -358,6 +360,7 @@ export function registerPoolCli(
   browser?: ReturnType<typeof createBrowserRouter>,
   nativeSessions?: NativeSessions,
   egress?: AccountEgress,
+  guardProbe?:(input:GuardProbeInput)=>ReturnType<typeof runGuardProbe>,
 ): void {
   bb.cli.register({
     name: "pool",
@@ -424,6 +427,7 @@ export function registerPoolCli(
         usage: "bb pool account refresh <id>",
       },
       { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json]" },
+      { name:"guard-probe", summary:"Rehearse read-only Guard admission, optionally delaying only this probe", usage:"bb pool guard-probe --provider cursor [--delay-stage server-host|guard-rpc|server-host-recheck] [--delay-ms 0..4500] [--delay-attempts first|all] [--json]" },
       { name:"observations", summary:"Inspect bounded request metadata and retained-event minute counts", usage:"bb pool observations [--json]" },
       { name:"history", summary:"Inspect bounded fourteen-day hourly account and client counters", usage:"bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]" },
       {
@@ -801,6 +805,15 @@ export function registerPoolCli(
           const projectId = providerReadinessSchema.shape.projectId.parse(flags.values.get("project") ?? null);
           const entries = await operations.readiness(projectId);
           return {exitCode:0, stdout:flags.booleans.has("json") ? json(entries) : entries.map(entry => `${entry.provider}: ${entry.ready ? "ready" : entry.reason}`).join("\n")+"\n"};
+        }
+        if(argv[0]==='guard-probe'){
+          const flags=parseFlags(argv.slice(1),['json'],['provider','delay-stage','delay-ms','delay-attempts']);
+          if(!guardProbe)throw Error('Guard probe unavailable');
+          const rawDelay=flags.values.get('delay-ms');
+          if(rawDelay!==undefined&&!/^\d+$/.test(rawDelay))throw Error('--delay-ms requires an integer 0..4500');
+          const input=guardProbeSchema.parse({provider:flags.values.get('provider'),delayStage:flags.values.get('delay-stage'),
+            delayMs:rawDelay===undefined?undefined:Number(rawDelay),delayAttempts:flags.values.get('delay-attempts')});
+          return {exitCode:0,stdout:json(await guardProbe(input))};
         }
         if (argv[0] === "observations") {
           parseFlags(argv.slice(1), ['json'], []);

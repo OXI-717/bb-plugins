@@ -1,3 +1,4 @@
+import {serverGuardRead,runGuardProbe,type GuardServerAccess} from './guard-server.js';
 import { AccountEgress } from "./account-egress.js";
 import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
 import {NativeSessions,NativeSessionError,nativeHttp} from './native-sessions.js';
@@ -189,6 +190,10 @@ export function createAccountPoolPlugin(
       await bb.storage.kv.set('agy-model-ids-v1',[...agyModels]);
     };
     await registerAgyModels((await bb.storage.kv.get<string[]>('agy-model-ids-v1'))??[]);
+    const guardAccess:GuardServerAccess={
+      serverHost:async(signal)=>(await bb.sdk.system.config({signal})).primaryHostId,
+      decision:(hostId,provider,signal)=>bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal}),
+    };
     const hub = createHub({
       accountRoute:(accountId,sessionKey)=>egress.acquire(accountId,sessionKey),
       pinnedRouteAccount:sessionKey=>egress.pinnedAccount(sessionKey),
@@ -203,13 +208,9 @@ export function createAccountPoolPlugin(
       getSettings: () => currentSettings,
       fetch: upstreamFetch,fetchIpv4:options.fetchIpv4??transport?.fetchIpv4,
       vpnPayload: options.vpnPayload,
-      guardCheck:createGuardNetworkCheck(async (provider,signal)=>{
-        const hostId=(await bb.sdk.system.config({signal})).primaryHostId;
-        if(!hostId) throw new Error("Pool server machine unknown");
-        const decision=await bb.sdk.plugins.callRpc({pluginId:"vpn-guard",method:"networkDecisionV2",input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal});
-        // Rebind after I/O: migration during the RPC cannot grant another host's egress.
-        if((await bb.sdk.system.config({signal})).primaryHostId!==hostId)throw Error('Pool server machine changed');
-        return bindGuardNetworkDecision(decision,hostId);
+      guardCheck:createGuardNetworkCheck(serverGuardRead(guardAccess),undefined,event=>{
+        if(event.attempt===1&&(event.outcome==='allowed'||event.outcome==='direct'))return;
+        bb.log.warn('Account Pooler Guard permission '+JSON.stringify(event));
       }),
       now,
       refreshUrl: options.refreshUrl,
@@ -351,7 +352,7 @@ export function createAccountPoolPlugin(
         return { opened: true };
       }, agyLogin, url=>browser.openAgyLogin(url),egress),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress);
+    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input));
     registerUsageSource(bb, hub);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
