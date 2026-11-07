@@ -15,13 +15,13 @@ const route = {
 };
 const context = {projectId: route.projectId, threadId: 'example-thread'};
 
-function setup(t, overrides = {}, callHost, send, listInteractions = async () => []) {
+function setup(t, overrides = {}, callHost, send, listInteractions = async () => [], hostStatus = 'connected') {
   const host = createFakePluginHost({
     pluginId: 'oxi-op', settings: {routes: JSON.stringify([{...route, ...overrides}])},
     sdk: {
       projects: {get: async ({projectId}) => ({id: projectId, name: 'Example workspace'})},
       threads: {get: async ({threadId}) => ({id: threadId, projectId: route.projectId, title: 'Example session'}), send: send ?? (async () => ({delivery: 'sent'})), interactions: {list: listInteractions}},
-      hosts: {get: async ({hostId}) => ({id: hostId, name: 'Example machine'})},
+      hosts: {get: async ({hostId}) => ({id: hostId, name: 'Example machine', status: typeof hostStatus === 'function' ? hostStatus(hostId) : hostStatus})},
     },
     experimental_callHostRpc: callHost ?? (({method}) => method === 'store'
       ? {itemId: 'example-item', verified: true} : method === 'check' ? {authorized: true} : {completed: true}),
@@ -255,7 +255,7 @@ test('unavailable BB names are explicit and never replaced with opaque IDs', asy
   h.sdk.stub('projects.get', async () => {throw Error('unavailable');});
   h.sdk.stub('threads.get', async () => ({id: 'other-thread', projectId: route.projectId, title: 'Wrong session'}));
   h.sdk.stub('hosts.get', async () => ({id: 'other-host', name: 'Wrong machine'}));
-  const pending = h.behavior.callAgentTool('oxi_op_store', {title: 'Example'}, context);
+  const pending = h.behavior.runCli(['display-test'], context);
   await setImmediate();
   const payload = h.inspection.pendingInteractions[0].payload;
   assert.equal(payload.projectName, 'Название проекта недоступно');
@@ -455,4 +455,31 @@ test('unknown cancellation reasons never enter the journal or completion text',a
  const journal=createJournal(storage);
  await journal.run('run','default',context,async()=>cancelledOutcome({outcome:'cancelled',reason:'synthetic-sensitive-value'}));
  const rows=await journal.list(context);assert.equal(rows[0].state,'cancelled');assert.equal(rows[0].cancelReason,undefined);assert(!JSON.stringify(rows).includes('synthetic-sensitive-value'));
+});
+
+test('offline credential host fails before intake without requesting a password',async t=>{
+ const h=setup(t,{authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,credentialHostId:'credential-host'},undefined,undefined,undefined,id=>id==='credential-host'?'disconnected':'connected');
+ const pending=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ const unexpected=h.inspection.pendingInteractions[0];if(unexpected)h.behavior.cancelInteraction(unexpected.id);
+ const result=JSON.parse(await pending);
+ assert.equal(result.completed,false);assert.equal(result.code,'credential_host_offline');
+ assert.equal(h.inspection.pendingInteractions.length,0);assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ const rows=JSON.parse((await h.behavior.runCli(['history'],context)).stdout);
+ assert.equal(rows[0].state,'failed');assert.equal(rows[0].failureCode,'credential_host_offline');
+});
+
+test('host loss while a form is open stops submission before any credential host call',async t=>{
+ let online=true;
+ const h=setup(t,{},undefined,undefined,undefined,()=>online?'connected':'disconnected');
+ const work=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ online=false;h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{password:'synthetic-value'});
+ const result=JSON.parse(await work);assert.equal(result.code,'credential_host_offline');
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];assert.equal(row.state,'failed');assert(row.approvedAt);
+});
+test('diagnostics identify offline desktop dependency without forms or op calls',async t=>{
+ const h=setup(t,{authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,credentialHostId:'credential-host'},undefined,undefined,undefined,id=>id==='credential-host'?'disconnected':'connected');
+ const result=JSON.parse((await h.behavior.runCli(['diagnose'],context)).stdout);
+ assert.equal(result.credentialHost.status,'disconnected');assert.equal(result.executionHost.status,'connected');assert.equal(result.credentialCalls,0);assert.equal(result.serviceTokenConfigured,false);
+ assert.equal(h.inspection.pendingInteractions.length,0);assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
 });

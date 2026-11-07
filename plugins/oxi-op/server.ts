@@ -1,7 +1,7 @@
 import { defineCli, cliCommand, defineRpcContract, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 import { contract, routeSchema, resolveRoute, type Route } from './contract.js';
-import {createJournal, cancelledOutcome} from './journal.js';
+import {createJournal, cancelledOutcome, OperationFailure} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal};
 const approvalTimeoutMs = 60_000;
 export const deliveryContract = defineRpcContract({formReceipt: {input: z.object({threadId:z.string().min(1).max(100),interactionId:z.string().min(1).max(100),visible:z.boolean()}).strict(),output:z.object({recorded:z.literal(true)})}});
@@ -25,7 +25,7 @@ export default function plugin(bb: BbPluginApi) {
     // BB resumes an idle agent for a fulfilled tool result, including a reported failure.
     const toolOutcome = async (work: () => Promise<string>) => {
         try {return await work();}
-        catch {return JSON.stringify({completed: false, message: 'Operation failed. Inspect oxi_op_history before retrying; no secret values are included.'});}
+        catch (error) {if(error instanceof OperationFailure)return JSON.stringify({completed:false,code:error.code,message:error.message});return JSON.stringify({completed: false, message: 'Operation failed. Inspect oxi_op_history before retrying; no secret values are included.'});}
     };
     const accessFor = async (projectId: string, profile: string) => {
         const values = await settings.get();
@@ -40,6 +40,14 @@ export default function plugin(bb: BbPluginApi) {
         }
         return {route, ...(route.tokenSetting ? {serviceAccountToken: values.serviceAccountToken} : {})};
     };
+    async function requireHost(hostId: string, kind: 'credential' | 'execution', ctx: OperationContext) {
+        let machine;
+        try {machine = await bb.sdk.hosts.get({hostId, signal: ctx.signal});}
+        catch {throw new OperationFailure('host_status_unavailable');}
+        if (machine.id !== hostId) throw new OperationFailure('host_status_unavailable');
+        if (machine.status !== 'connected') throw new OperationFailure(kind === 'credential' ? 'credential_host_offline' : 'execution_host_offline');
+    }
+    const requireCredentialHost = (route: Route, ctx: OperationContext) => requireHost(credentialHost(route), 'credential', ctx);
     async function displayContext(route: Route, ctx: {projectId: string; threadId: string; signal?: AbortSignal}) {
         const [project, thread, machine] = await Promise.allSettled([
             bb.sdk.projects.get({projectId: ctx.projectId, signal: ctx.signal}),
@@ -57,11 +65,14 @@ export default function plugin(bb: BbPluginApi) {
         const { route } = access;
         const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
         return journal.run('store', profile, ctx, async progress => {
+        await requireCredentialHost(route,ctx);
         await progress('awaiting-approval');
         const result = await bb.ui.requestInput({ threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Сохранить пароль: ' + title, payload: { mode: 'store', title, username, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Создать запись и проверить сохранённый пароль', secrets: [{field: 'password', item: title}] }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal });
         if (result.outcome !== 'submitted')
             return cancelledOutcome(result);
         const value = z.object({ password: z.string().min(1).max(16000) }).strict().parse(result.value);
+        await progress('awaiting-approval',true);
+        await requireCredentialHost(route,ctx);
         await progress('running', true);
         return JSON.stringify(await host.call('store', { ...access, title, username, password: value.password }, { hostId: credentialHost(route), signal: ctx.signal }));
         }, title);
@@ -146,6 +157,8 @@ export default function plugin(bb: BbPluginApi) {
             const authorization = route.credentialHostId ? await displayContext({...route, hostId: route.credentialHostId}, ctx) : undefined;
             const purpose = (configured.purpose ?? configured.name) + (authorization ? '\nАвторизация 1Password: ' + authorization.hostLabel + '. Значение передаётся только настроенной команде на указанной машине.' : '');
             return journal.run('run', profile, ctx, async progress => {
+            await requireCredentialHost(route,ctx);
+            await requireHost(route.hostId,'execution',ctx);
             if (route.requireApproval) {
                 const display = await displayContext(route, ctx);
                 await progress('awaiting-approval');
@@ -153,6 +166,9 @@ export default function plugin(bb: BbPluginApi) {
                 if (result.outcome !== 'submitted' || z.object({ approved: z.literal(true) }).strict().safeParse(result.value).success === false)
                     return cancelledOutcome(result);
             }
+            if(route.requireApproval)await progress('awaiting-approval',true);
+            await requireCredentialHost(route,ctx);
+            await requireHost(route.hostId,'execution',ctx);
             await progress('running', route.requireApproval);
             if (route.credentialHostId) {
                 const {bindings} = await host.call('resolve', {route, operation}, {hostId: route.credentialHostId, signal: ctx.signal});
@@ -172,6 +188,7 @@ export default function plugin(bb: BbPluginApi) {
             ? 'Прочитать только служебный реестр и сопоставить названия и ID указанных в нём сейфов. Содержимое проектных и личных записей не читается; права не меняются.'
             : kind === 'verify' ? 'Создать одну случайную тестовую запись, независимо сравнить её поля и удалить только эту запись.' : 'Проверить доступ к настроенному сейфу без чтения его записей.';
         return journal.run(kind, profile, ctx, async progress => {
+            await requireCredentialHost(route,ctx);
             const approval = route.requireApproval || route.authentication === 'desktop';
             if (approval) {
                 const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
@@ -179,6 +196,8 @@ export default function plugin(bb: BbPluginApi) {
                 const decision = await bb.ui.requestInput({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Настройка 1Password: ' + title.toLowerCase(), payload: {mode: 'approve', title, purpose, profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', secrets: registryTitle ? [{item: registryTitle, field: 'Служебная заметка'}] : []}, describeSubmission: () => ({title: 'Vault operation approved (no credential values)'})}, {signal: ctx.signal});
                 if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
             }
+            if(approval)await progress('awaiting-approval',true);
+            await requireCredentialHost(route,ctx);
             await progress('running', approval);
             if (kind === 'inventory') return JSON.stringify(await host.call('inventory', {route, registryTitle: registryTitle!}, {hostId: credentialHost(route), signal: ctx.signal}));
             if (kind === 'check') return JSON.stringify(await host.call('check', access, {hostId: credentialHost(route), signal: ctx.signal}));
@@ -189,6 +208,19 @@ export default function plugin(bb: BbPluginApi) {
         }, title);
     }
     bb.agents.registerTool({name: 'oxi_op_inventory', description: 'Ask the owner to approve reading the configured service registry before desktop CLI authorization. Returns only vault metadata. Completion resumes this session through the native BB tool lifecycle.', parameters: z.object({profile: profileParameter, title: z.string().min(1).max(160)}).strict(), execute: ({profile, title}, ctx) => toolOutcome(() => inspectVault('inventory', profile, title, ctx))});
+    async function diagnose(projectId:string,profile:string) {
+        const values=await settings.get();
+        const route=resolveRoute(JSON.parse(values.routes),projectId,profile);
+        const source=await bb.sdk.hosts.get({hostId:credentialHost(route)});
+        const target=await bb.sdk.hosts.get({hostId:route.hostId});
+        let tokenConfigured:boolean|null=null;
+        if(route.tokenSetting==='serviceAccountToken')tokenConfigured=!!values.serviceAccountToken;
+        if(route.tokenSetting==='projectServiceAccounts'){
+            try {const tokens=z.record(z.string(),z.record(z.string(),z.string().min(1))).parse(JSON.parse(values.projectServiceAccounts));tokenConfigured=Object.hasOwn(tokens,projectId)&&Object.hasOwn(tokens[projectId],profile);}
+            catch {tokenConfigured=false;}
+        }
+        return {authentication:route.authentication,credentialHost:{name:source.name,status:source.status},executionHost:{name:target.name,status:target.status},requiresApproval:route.requireApproval,operationCount:route.operations.length,serviceTokenConfigured:route.authentication==='service-account'?tokenConfigured:false,credentialCalls:0};
+    }
     bb.agents.registerTool({name: 'oxi_op_history', description: 'Recover this project and session operation states after confirmation, interruption or restart. Contains no credential values. Running or needs-review does not prove that a write was undone; inspect before retrying.', parameters: z.object({}).strict(), execute: async (_, ctx) => JSON.stringify(await journal.list(ctx))});
     const notifyOption = {type: 'boolean' as const, description: 'Return a completion notice to this same BB session, including after it becomes idle', default: false};
     async function interactiveCli(ctx: OperationContext, notify: boolean, work: () => Promise<string>) {
@@ -208,6 +240,7 @@ export default function plugin(bb: BbPluginApi) {
         return result;
     }
     bb.cli.register(defineCli({ name: 'oxi-op', summary: 'Project-scoped 1Password operations', commands: {
+            diagnose:cliCommand({summary:'Inspect routing and machine availability without contacting 1Password',options:{profile:{type:'string',description:'Configured access profile',default:'default'}},async run(input,ctx){if(!ctx.projectId)throw new Error('Run in a BB project');return {exitCode:0,stdout:JSON.stringify(await diagnose(ctx.projectId,input.options.profile))};}}),
             'connect-many':cliCommand({summary:'Approve a bounded explicit list of project vault connections',options:{notify:notifyOption,projects:{type:'string',description:'JSON array of projectId and optional exact existingVaultId',required:true},profile:{type:'string',description:'Existing owner desktop setup profile',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectMany(input.options.projects,input.options.profile,context));}}),
             connect: cliCommand({summary:'Approve creating a dedicated vault and default project route',options:{notify:notifyOption,project:{type:'string',description:'Exact target BB project ID',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectProject(input.options.project,input.options.profile,context));}}),
             'display-status':cliCommand({summary:'Read form rendering receipts for this session; never contacts 1Password',async run(_,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const keys=await bb.storage.kv.list(receiptPrefix(ctx.projectId,ctx.threadId));const rows=await Promise.all(keys.map(k=>bb.storage.kv.get<Receipt>(k)));return {exitCode:0,stdout:JSON.stringify(rows.filter(Boolean).sort((a,b)=>b!.mountedAt.localeCompare(a!.mountedAt)).slice(0,20))};}}),
