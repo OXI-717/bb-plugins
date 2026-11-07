@@ -61,6 +61,22 @@ def evaluate(config, inventories, sources, now):
     return findings
 
 
+def explicitly_classified(config, finding):
+    """A registry decision resolves unknown identity, never host/runtime health."""
+    if finding.get('kind') != 'unregistered':
+        return False
+    try:
+        host, scheduler, scope, unit = json.loads(finding['identity'])
+    except (ValueError, TypeError):
+        return False
+    for row in config.get('registry', []):
+        if (row['host'], row['scheduler'], row['scope'], row['unit']) == (host, scheduler, scope, unit):
+            return all(row.get(field) for field in REQUIRED)
+    return any(e['host'] == host and e['scheduler'] == scheduler and e['scope'] == scope
+               and e.get('reason') and (unit in e.get('units', []) or any(unit.startswith(p) for p in e.get('prefixes', [])))
+               for e in config.get('exclusions', []))
+
+
 def coverage_blocks(old, failed):
     if failed['kind'] != 'coverage':
         return False
@@ -91,11 +107,11 @@ def snapshot(config, findings, previous, now):
         old = previous.get(key)
         if item is None and old:
             # A missing host/source is not evidence that its old problems recovered.
-            if old.get('active') and any(coverage_blocks(old['finding'], f) for f in findings.values()):
+            if old.get('active') and not explicitly_classified(config, old['finding']) and any(coverage_blocks(old['finding'], f) for f in findings.values()):
                 item = dict(old['finding'], unresolved=True)
             elif budget > 0 and old.get('active'):
                 runs.append(dict(taskId=key, host=old['finding'].get('host', config['host']), id=f'{key}:{now}:recovered', status='succeeded',
-                                 startedAt=now, finishedAt=now, exitCode=0, summary='Inventory finding no longer observed', evidence='execution'))
+                                 startedAt=now, finishedAt=now, exitCode=0, summary=('Identity classified by explicit registry decision; runtime coverage remains separate' if explicitly_classified(config, old['finding']) else 'Inventory finding no longer observed'), evidence='execution'))
                 state[key] = dict(old, active=False, lastEvent=now)
                 budget -= 1
         if item is None:
