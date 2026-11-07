@@ -9,6 +9,8 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
+import io
 
 WRAPPER = Path(__file__).resolve().parents[1] / "plugins/account-pool-balanced/scripts/cursor-route.py"
 spec = importlib.util.spec_from_file_location("cursor_route", WRAPPER)
@@ -133,6 +135,22 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end
 
 
 class AcpFailureNormalizationTest(unittest.TestCase):
+    def test_child_eof_stops_reader_while_parent_input_remains_open(self):
+        read_fd, write_fd = os.pipe()
+        before = set(threading.enumerate())
+        process = mock.Mock(stdin=io.BytesIO(), stdout=io.BytesIO())
+        incoming = os.fdopen(read_fd, 'rb')
+        try:
+            with mock.patch.object(sys, 'stdin', mock.Mock(buffer=incoming, fileno=incoming.fileno)):
+                route.relay_acp(process, route.AcpPoolFailures())
+                readers = [t for t in threading.enumerate() if t not in before]
+                self.assertEqual(readers, [], 'ACP reader survives child EOF')
+        finally:
+            os.close(write_fd)
+            for reader in set(threading.enumerate()) - before:
+                reader.join(timeout=1)
+            incoming.close()
+
     def test_local_model_failure_becomes_failed_prompt_not_successful_answer(self):
         state=route.AcpPoolFailures()
         state.client({"id":1,"method":"session/prompt","params":{"sessionId":"synthetic"}})

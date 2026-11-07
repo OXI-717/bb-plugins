@@ -24,7 +24,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/account-pool-balanced",
-          "range": "^0.4.57",
+          "range": "^0.4.63",
           "tagPrefix": "account-pool-balanced/"
         }
       }
@@ -48,7 +48,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/automation-catalog",
-          "range": "^0.1.16",
+          "range": "^0.1.17",
           "tagPrefix": "automation-catalog/"
         }
       }

@@ -1,4 +1,6 @@
+import { AccountEgress } from "./account-egress.js";
 import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
+import {NativeSessions,NativeSessionError,nativeHttp} from './native-sessions.js';
 import {AgyOAuthLogin,readNativeAgyConfig,type AgyAppConfig} from "./agy-oauth-login.js";
 import { RequestJournal } from "./request-journal.js";
 import {createGuardNetworkCheck,bindGuardNetworkDecision,hostGuardDecisionSchema} from "./guard-network.js";
@@ -135,6 +137,17 @@ export function createAccountPoolPlugin(
     const accounts = new AccountStore(bb.storage.kv, secretDir);
     await accounts.initialize();
     const now = options.now ?? Date.now;
+    const nativeSessions=new NativeSessions(bb.storage.kv,now,async(hostId,caller)=>{
+      if(!(await routing.isProviderEnabled('agy')))throw Error('Native AGY routing disabled');
+      if(!(await bb.sdk.hosts.list()).some(host=>host.id===hostId))throw Error('Native executor host not enrolled');
+      if(currentSettings.vpnGuardEnabled){
+        await createGuardNetworkCheck(async(provider,signal)=>bindGuardNetworkDecision(
+          await bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal}),hostId))('agy');
+      }else if(currentSettings.vpnOnlyProviders.includes('agy'))throw Error('Native protected host requires its Guard decision');
+      if(caller.threadId&&await routing.isBypassed(caller.threadId))throw new NativeSessionError(403,'native-thread-bypassed');
+    },executor=>{if(executor.execution){try{egress.validateNativeProfile(executor.execution.profile,executor.hostId);}
+      catch{throw new NativeSessionError(503,'native-execution-unprepared');}}});
+    await nativeSessions.initialize();
     const hubTokens = new HubTokenStore(secretDir, now);
     await hubTokens.initialize();
     const enrolledHosts = await bb.sdk.hosts.list();
@@ -155,6 +168,9 @@ export function createAccountPoolPlugin(
     const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
     await journal.initialize();
     bb.onDispose(()=>journal.close());
+    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';});
+    await egress.initialize();
+    bb.onDispose(()=>egress.close());
     const transport =
       options.fetch === undefined ? createUpstreamTransport() : null;
     const upstreamFetch = options.fetch ?? transport?.fetch;
@@ -174,6 +190,9 @@ export function createAccountPoolPlugin(
     };
     await registerAgyModels((await bb.storage.kv.get<string[]>('agy-model-ids-v1'))??[]);
     const hub = createHub({
+      accountRoute:(accountId,sessionKey)=>egress.acquire(accountId,sessionKey),
+      pinnedRouteAccount:sessionKey=>egress.pinnedAccount(sessionKey),
+      nativeAgyManaged:()=>nativeSessions.managed(),
       agyModels:registerAgyModels,
       route: hubBasePath(bb.pluginId),
       accounts,
@@ -270,7 +289,13 @@ export function createAccountPoolPlugin(
       profileUrl: options.oauthProfileUrl,
       addAccount: (authenticated, targetAccountId) => operations.addOAuth(authenticated, targetAccountId),
     });
-    const agyLogin=new AgyOAuthLogin({fetch:hub.outboundFetch("agy"),appConfig:options.agyAppConfig??readNativeAgyConfig,onModels:registerAgyModels,now});
+    const agyLogin=new AgyOAuthLogin({fetch:async(input,init)=>{
+      if(nativeSessions.managed())throw Error('Use the official Antigravity client login on its executor machine.');
+      return hub.outboundFetch('agy')(input,init);
+    },appConfig:async()=>{
+      if(nativeSessions.managed())throw Error('Use the official Antigravity client login on its executor machine.');
+      return (options.agyAppConfig??readNativeAgyConfig)();
+    },onModels:registerAgyModels,now});
     const codexLogin = new CodexDeviceLogin({
       fetch: hub.outboundFetch("codex"),
       now,
@@ -324,9 +349,9 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url)),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser);
+    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress);
     registerUsageSource(bb, hub);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
@@ -400,13 +425,32 @@ export function createAccountPoolPlugin(
       proxiedHealth("codex", context),
     );
     bb.http.route('GET','/agy/v1beta/models',context=>hub.handle(context.req.raw,'agy'),{auth:'none'});
+    bb.http.route('POST','/native/agy',context=>nativeHttp(context.req.raw,nativeSessions,
+      token=>combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token)),{auth:'none'});
     bb.providers.experimental_contributeEnv('acp-agy',async context=>{
+      if(nativeSessions.managed()){
+        const catalog=context.threadId===null;
+        const executorId=!(await operations.isRoutingEnabled('agy'))||await isThreadBypassed(context)?null:
+          catalog?await nativeSessions.catalogExecutorFor(context.hostId):await nativeSessions.executorFor(context);
+        // Missing admission never restores local fallback or old gateway auth.
+        return [{name:'OXI_AGY_NATIVE_REQUIRED',value:'1',reason:'Official native AGY managed by Pooler'},
+          {name:'OXI_AGY_NATIVE_EXECUTOR',value:executorId??'',reason:'Explicit host and project executor'},
+          {name:'OXI_AGY_NATIVE_URL',value:{serverPath:`${hubBasePath(bb.pluginId)}/native/agy`},reason:'Session admission only; no Google tokens'},
+          {name:'OXI_AGY_NATIVE_CATALOG_ONLY',value:catalog?'1':'0',reason:'Catalog admission never grants task access'},
+          {name:'OXI_AGY_NATIVE_TOKEN',value:catalog?'':await scopedHubToken(context),reason:'Task credential or explicit private catalog pointer; never sent to AGY'}];
+      }
       if(!(await operations.isRoutingEnabled('agy'))||await isThreadBypassed(context))return [];
       const token=await scopedHubToken(context);
       return [{name:'OXI_AGY_POOL_BASE_URL',value:{serverPath:`${hubBasePath(bb.pluginId)}/agy`},reason:'Native Antigravity gateway through Pooler'},
         {name:'OXI_AGY_POOL_AUTH_TOKEN',value:token,reason:'Pool credential only; Google OAuth remains server-side'}];
     });
-    bb.providers.experimental_contributeEnvHealth('acp-agy',context=>proxiedHealth('agy',context));
+    bb.providers.experimental_contributeEnvHealth('acp-agy',async context=>{
+      if(!nativeSessions.managed())return proxiedHealth('agy',context);
+      const projectId='projectId' in context&&typeof context.projectId==='string'?context.projectId:null;
+      const executor=projectId?await nativeSessions.executorFor({hostId:context.hostId,projectId}):await nativeSessions.catalogExecutorFor(context.hostId);
+      return executor?null:
+        {status:'unavailable' as const,label:'Account Pooler',statusMessage:'No unique enabled native executor for this host and project.'};
+    });
     const openAiCompatibleRoutes: ReadonlyArray<{
       provider: PoolProvider;
       mountPrefix: string;
@@ -532,7 +576,9 @@ export function createAccountPoolPlugin(
       );
     }
     for (const entry of openAiCompatibleRoutes) {
-      for (const route of (entry.provider === "neuraldeep" ? ["chat/completions", "models"] : ["chat/completions", "responses", "models"])) {
+      // OpenCode Go multiplexes Anthropic Messages next to Chat Completions
+      // and Responses on the same base URL — route all three wires through.
+      for (const route of (entry.provider === "neuraldeep" ? ["chat/completions", "models"] : entry.provider === "opencode-go" ? ["chat/completions", "responses", "messages", "models"] : ["chat/completions", "responses", "models"])) {
         bb.http.route(
           entry.provider === "neuraldeep" && route === "models" ? "GET" : "POST",
           `/${entry.mountPrefix}v1/${route}`,

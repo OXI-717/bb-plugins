@@ -1,5 +1,12 @@
 # Automation Catalog
 
+External service cards offer **Подготовить отключение**. This opens an editable,
+parent-bound request; it does not send the request, start a model or change a
+scheduler. The request requires fresh source identity and dependency checks,
+reversible source-side disabling and a durable audit. Inventory findings carry
+their underlying scheduler identity; coverage-only or missing records cannot be
+used as a stop target. Direct BB pause controls remain unchanged.
+
 An independent BB inventory and management-entry plugin. No BB fork or patched desktop application is required.
 
 ## Use the panel
@@ -124,3 +131,42 @@ Reuse the same idempotency key and payload after an uncertain response; a change
 payload with that key is rejected. Passed checks require evidence. Records are
 bounded to 32 KiB and 16 evidence references. Keep credentials and personal message
 contents out of notes; the journal has the same access boundary as the catalog.
+
+### Selected Linux systemd timers
+
+`catalog_collect.py systemd` reads only an explicit selection, for example:
+
+```json
+{"system:example-cleanup.timer": {"name": "Expired test data", "service": "example-cleanup.service", "projectId": "example-project"}}
+```
+
+Use `--selection selection.json --source-id linux-systemd --name 'Linux timers'`
+and optionally `--publish`. `user:` selects the current user manager; `system:`
+selects the system manager. Wildcards and arbitrary commands are rejected.
+Timer enabled/active state and next firing are separate from service execution.
+The latest retained service invocation supplies start/end, result and exit status;
+repeated snapshots preserve distinct invocation identities in catalog history.
+Earlier invocations between collections may be unavailable. Timer enablement alone
+never establishes execution success. All systemctl timestamps are requested in UTC.
+
+Journal reads are bounded to 500 entries and seven days. Only numeric counts from
+recognized cleanup JSON are exported, never paths or arbitrary stdout. Missing
+journal access is explicit; it does not erase the systemctl execution evidence.
+The collector never invokes sudo, changes unit permissions or starts a service.
+
+For periodic refresh, add `kind: "systemd"` with `--selection` in `options` to the
+existing `catalog_sync.py` configuration. Keep settings, selections and snapshots
+outside the source checkout. If a host has no publisher, an explicitly configured
+script task may invoke that same synchronizer; do not create a second schedule for
+the underlying cleanup. The synchronizer respects `enabled: false`.
+
+Inventory comparison omits inert `not-found inactive dead` dependency references when no unit
+file backs them. Real transient units and error-state units remain visible. Empty
+launchd uninstall placeholders without Label, Program or ProgramArguments are not
+jobs; executable but incomplete definitions still require investigation. Exact
+application/package exclusions and registered local jobs remain operator-reviewed
+registry data, never a blanket prefix inferred from a friendly display name.
+An explicit complete registry entry or scoped exclusion resolves a prior unknown
+identity even during a host outage. This is recorded as a registry decision,
+separately from runtime recovery; the outage remains visible. Unclassified jobs
+and incomplete registry entries retain their prior finding during lost coverage.

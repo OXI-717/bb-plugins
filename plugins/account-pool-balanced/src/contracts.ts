@@ -6,6 +6,7 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
   zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
   opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+  opencodeFreeUpstreamBaseUrl: "https://opencode.ai/inference/openai/v1",
   neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
   cursorUpstreamBaseUrl: "https://api2.cursor.sh",
   devinUpstreamBaseUrl: "https://server.codeium.com",
@@ -80,6 +81,9 @@ export const accountPoolConfigSchema = z
     opencodeGoUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.opencodeGoUpstreamBaseUrl,
     ),
+    opencodeFreeUpstreamBaseUrl: httpUrlSchema.default(
+      DEFAULT_ACCOUNT_POOL_CONFIG.opencodeFreeUpstreamBaseUrl,
+    ),
     neuraldeepUpstreamBaseUrl: httpUrlSchema.default(DEFAULT_ACCOUNT_POOL_CONFIG.neuraldeepUpstreamBaseUrl),
     cursorUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.cursorUpstreamBaseUrl,
@@ -116,6 +120,7 @@ export const accountPoolConfigSetInputSchema = z
     kimiUpstreamBaseUrl: httpUrlSchema.optional(),
     zaiUpstreamBaseUrl: httpUrlSchema.optional(),
     opencodeGoUpstreamBaseUrl: httpUrlSchema.optional(),
+    opencodeFreeUpstreamBaseUrl: httpUrlSchema.optional(),
     neuraldeepUpstreamBaseUrl: httpUrlSchema.optional(),
     cursorUpstreamBaseUrl: httpUrlSchema.optional(),
     devinUpstreamBaseUrl: httpUrlSchema.optional(),

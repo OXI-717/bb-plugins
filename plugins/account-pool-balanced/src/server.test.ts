@@ -282,6 +282,7 @@ async function createFixture(args: {
     kimiUpstreamBaseUrl: args.upstreamUrl,
     zaiUpstreamBaseUrl: args.upstreamUrl,
     opencodeGoUpstreamBaseUrl: args.upstreamUrl,
+    opencodeFreeUpstreamBaseUrl: "https://free-upstream.example",
     neuraldeepUpstreamBaseUrl: args.upstreamUrl,
     cursorUpstreamBaseUrl: args.upstreamUrl,
     devinUpstreamBaseUrl: args.upstreamUrl,
@@ -469,6 +470,7 @@ describe("Account Pool config schema", () => {
       kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+      opencodeFreeUpstreamBaseUrl: "https://opencode.ai/inference/openai/v1",
       neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
       devinUpstreamBaseUrl: "https://server.codeium.com",
@@ -549,6 +551,7 @@ describe("Account Pool plugin", () => {
       kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+      opencodeFreeUpstreamBaseUrl: "https://opencode.ai/inference/openai/v1",
       neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
       devinUpstreamBaseUrl: "https://server.codeium.com",
@@ -1554,11 +1557,11 @@ describe("Account Pool plugin", () => {
       expect(requests[0]?.headers.has("x-unrelated-header")).toBe(false);
     });
 
-    it("I6: Responses body on /responses is refused with 400 unsupported_wire_protocol and never forwarded", async () => {
+    it("I6: genuine Responses body keeps the native /responses wire upstream", async () => {
       const requests: Request[] = [];
       const fixture = await opencodeGoFixture(async (input, init) => {
         requests.push(new Request(input, init));
-        return Response.json({ id: "must-not-happen" });
+        return Response.json({ id: "responses-one" });
       });
       const response = await fixture.host.harness.behavior.fetchHttp(
         "POST",
@@ -1571,21 +1574,17 @@ describe("Account Pool plugin", () => {
           body: RESPONSES_BODY,
         },
       );
-      expect(response.status).toBe(400);
-      const payload = (await response.json()) as {
-        error: { type: string; code: string; message: string };
-      };
-      expect(payload.error.code).toBe("unsupported_wire_protocol");
-      expect(payload.error.type).toBe("invalid_request_error");
-      expect(payload.error.message).toContain("chat/completions");
-      expect(requests).toHaveLength(0);
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/responses");
+      expect(await requests[0]?.text()).toBe(RESPONSES_BODY);
     });
 
-    it("I7: ambiguous body on /responses fails closed (400, never forwarded)", async () => {
+    it("I7: ambiguous body on /responses is forwarded to the Responses wire", async () => {
       const requests: Request[] = [];
       const fixture = await opencodeGoFixture(async (input, init) => {
         requests.push(new Request(input, init));
-        return Response.json({ id: "must-not-happen" });
+        return Response.json({ id: "responses-two" });
       });
       const response = await fixture.host.harness.behavior.fetchHttp(
         "POST",
@@ -1598,12 +1597,168 @@ describe("Account Pool plugin", () => {
           body: AMBIGUOUS_BODY,
         },
       );
-      expect(response.status).toBe(400);
-      const payload = (await response.json()) as {
-        error: { code: string };
-      };
-      expect(payload.error.code).toBe("unsupported_wire_protocol");
-      expect(requests).toHaveLength(0);
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/responses");
+    });
+
+    it("I7b: Anthropic Messages wire reaches the upstream /messages path", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "msg-one", type: "message" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/messages",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: JSON.stringify({
+            model: "minimax-m3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/messages");
+    });
+
+    it("I7c: an Anthropic client token in x-api-key authenticates /messages", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "msg-two", type: "message" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/messages",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": fixture.key,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model: "minimax-m3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/messages");
+      // The subscription key reaches upstream as x-api-key (the Messages
+      // wire's auth scheme) — never the inbound pool token.
+      expect(requests[0]?.headers.get("x-api-key")).toBe("sk-go-subscription");
+      expect(requests[0]?.headers.get("authorization")).toBe(
+        "Bearer sk-go-subscription",
+      );
+      expect(requests[0]?.headers.get("anthropic-version")).toBe("2023-06-01");
+    });
+
+    it("I7d: free-tier model IDs route to the free upstream", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "free-one" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": fixture.key,
+          },
+          body: JSON.stringify({
+            model: "flint-40b-free",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://free-upstream.example/chat/completions",
+      );
+    });
+
+    it("I7e: subscription models stay on the Go upstream", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "sub-one" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: JSON.stringify({
+            model: "glm-5.3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://upstream.example/chat/completions",
+      );
+    });
+
+    it("I7f: a free-tier 429 does not hold the account for paid models", async () => {
+      const urls: string[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        const request = new Request(input, init);
+        urls.push(request.url);
+        if (request.url.includes("free-upstream")) {
+          return new Response("free quota", {
+            status: 429,
+            headers: { "retry-after": "120" },
+          });
+        }
+        return Response.json({ id: "paid-one" });
+      });
+      const freeResponse = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": fixture.key,
+          },
+          body: JSON.stringify({
+            model: "flint-40b-free",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(freeResponse.status).toBe(429);
+      const paidResponse = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: JSON.stringify({
+            model: "glm-5.3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(paidResponse.status).toBe(200);
+      expect(urls[0]).toBe("https://free-upstream.example/chat/completions");
+      expect(urls[1]).toBe("https://upstream.example/chat/completions");
     });
 
     it("I8: zai /responses is never rewritten to chat/completions", async () => {
@@ -7972,7 +8127,7 @@ describe('trusted automation account admission', () => {
     codex:['/v1/responses','/v1/images/generations','/v1/images/edits','/v1/alpha/search','/v1/models'],
     kimi:['/kimi/v1/messages','/kimi/v1/messages/count_tokens'],
     zai:['/zai/v1/chat/completions','/zai/v1/responses','/zai/v1/models'],
-    'opencode-go':['/opencode-go/v1/chat/completions','/opencode-go/v1/responses','/opencode-go/v1/models'],
+    'opencode-go':['/opencode-go/v1/chat/completions','/opencode-go/v1/responses','/opencode-go/v1/messages','/opencode-go/v1/models'],
     cursor:CURSOR_PROXIED_PATHS.filter(p=>p!=='auth/exchange_user_api_key').map(p=>`/cursor/${p}`),
     devin:DEVIN_PROXIED_PATHS.map(p=>`/devin/${p}`),
   };
@@ -7991,7 +8146,6 @@ describe('trusted automation account admission', () => {
     outbound.mockClear();
     for(const route of routes[provider]) {
       const response=await request(token,route);
-      if(provider==='opencode-go' && route.endsWith('/responses')) {expect(response.status).toBe(400);await response.text();continue;}
       expect(response.status,route).toBe(403);
       expect(response.headers.get('x-bb-pool-error')).toBe('POOL_ACCOUNT_POLICY');
       await response.text();
@@ -8486,5 +8640,71 @@ describe("cached provider readiness", () => {
     expect(entries).toHaveLength(9);
     expect(entries.find((x:{provider:string})=>x.provider==="agy")).toMatchObject({ready:false,reason:"no-enabled-account",projectId:"project-one"});
     expect(result.stdout).not.toContain("sk-account");
+  });
+});
+
+describe('server-owned account egress dispatch',()=>{
+  const routeProfile={id:'exit-one',version:1,label:'Test exit',node:'node-one',hostIds:['host-one'],transport:'ssh-connect',endpoint:'http://127.0.0.1:19081',dns:'remote',ipv4:true,ipv6:false,failure:'closed',expectedExit:['192.0.2.1'],assurance:'proxy-enforced'};
+  it('wires persisted assigned pins into selection before expired affinity with a different active account',async()=>{
+    let clock=1900000000000;
+    const direct=vi.fn(async()=>Response.json({id:'fixture-direct'}));
+    const fixture=await createFixture({upstreamUrl:'https://model.example',apiKey:'fixture-a',options:{now:()=>clock,fetch:direct}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}));
+    await addApiAccount(fixture,'fixture-b',200);
+    await fixture.host.harness.behavior.callRpc('egress.configure',routeProfile);
+    await fixture.host.harness.behavior.callRpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
+    const routed=vi.spyOn(globalThis,'fetch').mockImplementation(async(_input,init)=>{
+      expect(new Headers(init?.headers).get('x-api-key')).toBe('fixture-a');
+      expect((init as any).dispatcher).toBeDefined(); return Response.json({id:'fixture-assigned'});
+    });
+    const send=async(token:string)=>{
+      const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{
+        headers:authHeaders(token),body:JSON.stringify({model:'claude-supported-fixture',messages:[],metadata:{user_id:JSON.stringify({session_id:token===fixture.key?'original':'ordinary'})}}),
+      });
+      await response.text(); expect(response.status).toBe(200);
+    };
+    await send(fixture.key);
+    await fixture.host.harness.behavior.callRpc('account.disable',{id:fixture.account.id});
+    await send(await resolveToken(fixture.host,'host-one','other-thread'));
+    await fixture.host.harness.behavior.callRpc('account.enable',{id:fixture.account.id});
+    expect(direct).toHaveBeenCalledOnce(); direct.mockClear();
+    clock+=30*60*1000+1; await send(fixture.key);
+    expect(routed).toHaveBeenCalledTimes(2); expect(direct).not.toHaveBeenCalled();
+  });
+  it('binds model and usage after account selection, ignores client profile headers, and never replays 429',async()=>{
+    const direct=vi.fn(async()=>Response.json({direct:true}));
+    const fixture=await createFixture({upstreamUrl:'https://model.example',source:'import',options:{fetch:direct,importCredentials:async()=>importedCredentials(),usageUrl:'https://usage.example'}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}));
+    const rpc=fixture.host.harness.behavior.callRpc;
+    await rpc('egress.configure',routeProfile);
+    await rpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
+    const routed=vi.spyOn(globalThis,'fetch').mockImplementation(async(_input,init)=>{
+      expect((init as any).dispatcher).toBeDefined();
+      if(init?.body)expect(JSON.parse(Buffer.from(init.body as ArrayBuffer).toString()).model).toBe('claude-any-supported-model');
+      return Response.json({error:'synthetic quota'},{status:429});
+    });
+    direct.mockClear();
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(fixture.key),'x-bb-egress-profile':'untrusted'},body:JSON.stringify({model:'claude-any-supported-model',messages:[]})});
+    expect(response.status).toBe(429);await response.text();expect(routed).toHaveBeenCalledTimes(1);expect(direct).not.toHaveBeenCalled();
+    const after429=(await rpc('account.list',null) as any[]).find(a=>a.id===fixture.account.id);
+    expect(after429.heldUntil).not.toBeNull();
+    await expect(rpc('account.refreshUsage',{accountId:fixture.account.id})).rejects.toThrow('HTTP 429');
+    expect(routed.mock.calls.length).toBeGreaterThan(1);expect(direct).not.toHaveBeenCalled();
+    const status=await rpc('egress.status',null) as any;
+    expect(status.bindings[fixture.account.id]).toEqual({id:'exit-one',version:1});
+    expect((await rpc('account.list',null) as any[])[0].autopilotAllowed).toBe(false);
+  });
+  it('returns a route failure without a second account, direct request or model rewrite',async()=>{
+    const direct=vi.fn(async()=>Response.json({direct:true}));
+    const fixture=await createFixture({upstreamUrl:'https://model.example',options:{fetch:direct}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}));
+    await addApiAccount(fixture,'synthetic-other-account-key',200);
+    await fixture.host.harness.behavior.callRpc('egress.configure',routeProfile);
+    await fixture.host.harness.behavior.callRpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
+    direct.mockClear();
+    const routed=vi.spyOn(globalThis,'fetch').mockRejectedValue(new Error('transport down'));
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:JSON.stringify({model:'claude-any-supported-model',messages:[]})});
+    expect(response.status).toBe(503);expect(response.headers.get('x-bb-pool-error')).toBe('POOL_EGRESS_UNAVAILABLE');
+    await response.text();expect(routed).toHaveBeenCalledOnce();expect(direct).not.toHaveBeenCalled();
   });
 });

@@ -1,3 +1,4 @@
+import { EgressUnavailable, type AccountRoute } from "./account-egress.js";
 import { providerBudgetQuota, providerEvidenceFromUsage, PROVIDER_BUDGET_MAX_AGE_MS, NUMERIC_BUDGET_PROVIDERS } from './provider-budget.js';
 import {AccountStartPacing} from "./account-start-pacing.js";
 import { AccountAdmission, AdmissionUnavailable, ACCOUNT_QUEUE_MAX_WAIT_MS } from "./account-admission.js";
@@ -35,9 +36,9 @@ import { createDevinAdapter } from "./devin-adapter.js";
 import { createKimiAdapter } from "./kimi-adapter.js";
 import {
   createOpenAiCompatibleAdapter,
-  guardOpencodeGoRequestBody,
-  normalizeOpencodeGoUpstreamPathSuffix,
   isChatCompletionsBody,
+  opencodeGoUpstreamPathSuffix,
+  isOpenCodeGoFreeModelBody,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
@@ -112,6 +113,9 @@ const DROPPED_RESPONSE_HEADERS = new Set([
 ]);
 
 interface HubOptions {
+  accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  pinnedRouteAccount?: (sessionKey:string)=>string|null;
+  nativeAgyManaged?:()=>boolean;
   journal?: RequestJournal;
   route: string;
   agyModels?:(ids:string[])=>Promise<void>;
@@ -223,6 +227,14 @@ export class AccountPoolHub {
   private requiresIpv4(provider:PoolProvider):boolean {const settings=this.options.getSettings();return settings.vpnOnlyProviders.some(value=>value===provider)||(settings.vpnGuardEnabled&&provider!=="kimi"&&provider!=="zai");}
   async assertNetworkAllowed(provider: PoolProvider, observeGuard?: (result:import("./vpn-policy.js").GuardObservation)=>void): Promise<void> { await this.vpn.assert(provider,observeGuard);if(this.requiresIpv4(provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
 
+  private async acquireRoute(account:Account,sessionKey?:string|null):Promise<AccountRoute>{
+    return this.options.accountRoute?.(account.id,sessionKey) ?? {assigned:false,profile:null,fetch:()=>undefined};
+  }
+
+  private accountFetch(account:Account,route:AccountRoute):typeof fetch {
+    return (input,init)=>this.networkFlights.fetch(account.provider,input,init,false,undefined,undefined,route.fetch(this.requiresIpv4(account.provider)));
+  }
+
   outboundFetch(provider: PoolProvider): typeof fetch {
     return (input,init)=>this.networkFlights.fetch(provider,input,init);
   }
@@ -284,6 +296,7 @@ export class AccountPoolHub {
   }
   async handle(request: Request, provider: PoolProvider): Promise<Response> {
     const adapter = this.adapter(provider);
+    if(provider==='agy'&&this.options.nativeAgyManaged?.())return this.errorResponse(adapter,request,410,'Use the managed official Antigravity executor.');
     const token = this.requestToken(request, adapter);
     const context = this.options.hubTokens.authenticateContext
       ? await this.options.hubTokens.authenticateContext(token)
@@ -319,6 +332,7 @@ export class AccountPoolHub {
   async refreshUsage(accountId?: string, force = false, reportErrors = false): Promise<void> {
     const accounts = (await this.options.accounts.list()).filter(
       (account) =>
+        !(account.provider==='agy'&&this.options.nativeAgyManaged?.())&&
         (account.enabled || (force && accountId !== undefined)) &&
         (account.kind === "oauth" ||
           this.adapter(account.provider).refreshesApiKeyUsage === true) &&
@@ -374,6 +388,7 @@ export class AccountPoolHub {
   ): Promise<void> {
     await this.assertNetworkAllowed(account.provider);
     const adapter = this.adapter(account.provider);
+    const route=await this.acquireRoute(account);
     if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) {
       if (force) throw new Error("Аккаунт занят запросом. Повторите обновление квот после его завершения.");
       return;
@@ -396,13 +411,13 @@ export class AccountPoolHub {
         freshSecret: async (rejectedAccessToken) => {
           const secret = await this.freshSecret(account, adapter, rejectedAccessToken === undefined
             ? { kind: "normal" }
-            : { kind: "rejected", accessToken: rejectedAccessToken });
+            : { kind: "rejected", accessToken: rejectedAccessToken },route);
           usageSecret = secret;
           return secret;
         },
         accounts: this.options.accounts,
         quotas: this.options.quotas,
-        fetch: (input, init) => this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
+        fetch: (input, init) => this.accountFetch(account,route)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
         now: this.options.now,
       })
       .then(async () => { await this.settleDrain(account); })
@@ -592,6 +607,7 @@ export class AccountPoolHub {
     const affinityHost = purpose ? JSON.stringify([legacyAffinityHost, "purpose", purpose]) : legacyAffinityHost;
     const parsed = adapter.parseRequest(body, request.headers, request);
     const family = parsed.family;
+    const freeTier = adapter.provider === "opencode-go" && isOpenCodeGoFreeModelBody(body);
     const trace = newTrace(adapter.provider, hostId, projectId, threadId, parsed.model, family, request.headers.get("user-agent"));
     const startedAt = this.options.now();
     let attempt = 0;
@@ -611,7 +627,10 @@ export class AccountPoolHub {
       affinityKey === null || parsed.parentAffinityId === null
         ? null
         : JSON.stringify([adapter.provider, affinityHost, parsed.parentAffinityId]);
+    const routeSessionKey=threadId===null?affinityKey:JSON.stringify([hostId,projectId,threadId,adapter.provider]);
     try {
+      const pinnedRouteAccountId=routeSessionKey===null?null:this.options.pinnedRouteAccount?.(routeSessionKey)??null;
+      if(pinnedRouteAccountId!==null && !candidateIds.has(pinnedRouteAccountId))throw new EgressUnavailable();
       while (attempted.size < candidateIds.size) {
         signal.throwIfAborted();
         const selected = await this.select(
@@ -626,8 +645,11 @@ export class AccountPoolHub {
           projectId,
           signal,
           purpose,
+          freeTier,
+          pinnedRouteAccountId,
         );
         if (selected === null) break;
+        const route=await this.acquireRoute(selected.account,routeSessionKey);
         lastAccount=selected.account.id;
         let pacing: PacingFlight | null = null;
         previousAccountId = selected.account.id;
@@ -642,11 +664,12 @@ export class AccountPoolHub {
         try {
           signal.throwIfAborted();
           secret = await abortable(
-            this.freshSecret(selected.account, adapter, { kind: "normal" }),
+            this.freshSecret(selected.account, adapter, { kind: "normal" },route),
             signal,
           );
         } catch (error) {
-          if (error instanceof VpnRequiredError) throw error;
+          if (error instanceof EgressUnavailable || error instanceof VpnRequiredError) throw error;
+          if(route.assigned)throw new EgressUnavailable();
           if (pacing !== null) {
             this.releasePacing(selected.account.id, pacing);
             pacing = null;
@@ -669,7 +692,7 @@ export class AccountPoolHub {
           signal.throwIfAborted();
           if (purpose === "autopilot") {
             const current = this.eligibleEntries(adapter.provider, projectId,
-              await this.options.accounts.list(), family, this.options.now(), purpose).eligible;
+              await this.options.accounts.list(), family, this.options.now(), purpose, freeTier).eligible;
             if (!current.some(entry => entry.account.id === selected.account.id)) break;
           }
           let upstream: UpstreamResult;
@@ -683,8 +706,8 @@ export class AccountPoolHub {
               selected.account,
               secret,
               adapter,
-              trace, attempt,
-              {purpose,projectId,family,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
+              trace, attempt, route,
+              {purpose,projectId,family,freeTier,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
                 switched = lastDispatchedAccount !== null && lastDispatchedAccount !== selected.account.id;
                 if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'dispatched'});
                 lastDispatchedAccount = selected.account.id;
@@ -735,6 +758,13 @@ export class AccountPoolHub {
             this.releasePacing(selected.account.id, pacing);
             pacing = null;
           }
+          if(route.assigned && !response.ok){
+            if(response.status===429 && !adapter.isQuotaRejection(response.headers)){
+              const heldUntil=this.options.now()+retryAfterMilliseconds(response.headers.get('retry-after'),this.options.now());
+              this.options.quotas.put({...observed,heldUntil});
+            }
+            return result(this.clientResponse(upstream));
+          }
           if (response.status === 429) {
             if (adapter.isQuotaRejection(response.headers)) {
               await this.discardUpstream(upstream, false);
@@ -746,11 +776,11 @@ export class AccountPoolHub {
             );
             const heldUntil = this.options.now() + waitMs;
             this.observe(trace,{event:'hold',attempt,accountId:selected.account.id,status:429,holdSource:'upstream429',heldUntil,retryAfterMs:waitMs,retryAfterSupplied:response.headers.has('retry-after'),quotaEvidence:false});
-            this.options.quotas.put({
+            if (!freeTier) this.options.quotas.put({
               ...observed,
               heldUntil,
             });
-            if (!paced && waitMs <= MAX_INLINE_HOLD_MS) {
+            if (!freeTier && !paced && waitMs <= MAX_INLINE_HOLD_MS) {
               paced = true;
               pacing = {
                 heldUntil,
@@ -808,7 +838,7 @@ export class AccountPoolHub {
                   this.freshSecret(selected.account, adapter, {
                     kind: "rejected",
                     accessToken: secret.accessToken,
-                  }),
+                  },route),
                   signal,
                 );
               } catch (error) {
@@ -836,7 +866,7 @@ export class AccountPoolHub {
               const quota = this.options.quotas.get(selected.account.id);
               const heldUntil=Math.max(quota.heldUntil ?? 0, this.options.now() + 60_000);
               this.observe(trace,{event:'hold',attempt,accountId:selected.account.id,status:403,holdSource:'upstream403',errorClass:'upstream403-hold',heldUntil});
-              this.options.quotas.put({ ...quota, error: null, heldUntil });
+              if (!freeTier) this.options.quotas.put({ ...quota, error: null, heldUntil });
             } else if (response.status === 401 || response.status === 403) {
               await this.markAuthError(
                 selected.account,
@@ -865,6 +895,7 @@ export class AccountPoolHub {
             failure.headers,
           ));
     } catch (error) {
+      if (error instanceof EgressUnavailable)return result(this.errorResponse(adapter,request,503,error.message,{"x-bb-pool-error":error.code}));
       if (error instanceof AdmissionUnavailable) {
         this.observe(trace,{event:'queue-wait',attempt,accountId:lastAccount,status:503,errorClass:error.code==='POOL_QUEUE_FULL'?'queue-full':'queue-timeout',durationMs:Math.max(0,this.options.now()-startedAt)});
         return result(this.errorResponse(adapter, request, 503, error.message, {"x-bb-pool-error":error.code,"retry-after":"1"}));
@@ -981,7 +1012,7 @@ export class AccountPoolHub {
     }
   }
 
-  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number, purpose?: "autopilot") {
+  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number, purpose?: "autopilot", freeTier?: boolean) {
     const settings = this.options.getSettings();
     const threshold = settings.switchThreshold;
     const workWeek = { restDays: settings.restDays, offsetMinutes: -new Date(now).getTimezoneOffset() };
@@ -996,13 +1027,13 @@ export class AccountPoolHub {
           quota: this.options.quotas.get(account.id),
         }))
         .filter(({ quota }) => quota.error === null)
-        .filter(({ account, quota }) => !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
+        .filter(({ account, quota }) => freeTier || !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
     );
     const available = scopedEntries.flatMap(entry => gateMembership(
       [entry], now, settings.reserveDrainHours * 3600000, workWeek,
     ));
     const eligible = available.filter(
-      ({ account, quota }) => !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
+      ({ account, quota }) => freeTier || !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
     );
     return { available, eligible };
   }
@@ -1101,6 +1132,8 @@ export class AccountPoolHub {
     projectId: string | null,
     signal: AbortSignal,
     purpose?: "autopilot",
+    freeTier?: boolean,
+    pinnedRouteAccountId: string | null = null,
   ): Promise<SelectedAccount | null> {
     const accounts = (await this.routingAccounts()).sort(
       (left, right) => left.priority - right.priority,
@@ -1114,13 +1147,18 @@ export class AccountPoolHub {
       restDays: settings.restDays,
       offsetMinutes: -new Date(now).getTimezoneOffset(),
     };
-    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose);
+    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose, freeTier);
     const unattempted = eligible.filter(
       ({ account }) =>
         candidateIds.has(account.id) && !attempted.has(account.id),
     );
-    const ready = unattempted.filter(({ quota }) => quota.heldUntil === null || quota.heldUntil <= now);
-    const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (a.quota.heldUntil ?? 0) - (b.quota.heldUntil ?? 0)).slice(0,1);
+    // The persisted route pin outlives ordinary affinity. Reuse the same policy
+    // predicate, never an arbitrary account lookup or a different candidate.
+    const pinned=pinnedRouteAccountId===null?undefined:unattempted.find(({account})=>account.id===pinnedRouteAccountId);
+    if(pinnedRouteAccountId!==null && pinned===undefined)throw new EgressUnavailable();
+    const requestHold = (accountId: string) => freeTier ? null : unattempted.find(e => e.account.id === accountId)?.quota.heldUntil ?? null;
+    const ready = unattempted.filter(({ account }) => { const hold = requestHold(account.id); return hold === null || hold <= now; });
+    const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (requestHold(a.account.id) ?? 0) - (requestHold(b.account.id) ?? 0)).slice(0,1);
     let binding =
       affinityKey === null ? undefined : this.affinityBindings.get(affinityKey);
     const boundAccountId =
@@ -1177,7 +1215,7 @@ export class AccountPoolHub {
             preferredCandidates.find((candidate) => candidate.account.id === account.id),
           )
           .find((candidate) => candidate !== undefined);
-    const selected =
+    const selected = pinned ?? (
       bound !== undefined && unattempted.includes(bound) && (candidates.length === 0 || tier(bound) <= bestTier)
         ? bound
         : ((inherited && (candidates.length === 0 || tier(inherited) <= bestTier) ? inherited : undefined) ??
@@ -1188,10 +1226,10 @@ export class AccountPoolHub {
           candidates.includes(activeAccount) && tier(activeAccount) <= bestTier
             ? activeAccount
             : next) ??
-          null);
+          null));
     if (selected === null) return null;
     if (routing.active === null)
-      routing.pinnedAccountId = boundAccountId ?? inherited?.account.id ?? null;
+      routing.pinnedAccountId = pinnedRouteAccountId ?? boundAccountId ?? inherited?.account.id ?? null;
     if (affinityKey !== null && binding === undefined) {
       binding = { accountId: selected.account.id, lastUsedAt: now };
       this.affinityBindings.set(affinityKey, binding);
@@ -1264,7 +1302,9 @@ export class AccountPoolHub {
     account: Account,
     adapter: ProviderAdapter,
     use: SecretUse,
+    route?:AccountRoute,
   ): Promise<AccountSecret> {
+    route ??= await this.acquireRoute(account);
     while (true) {
       const existing = this.refreshes.get(account.id);
       if (existing !== undefined) {
@@ -1361,7 +1401,7 @@ export class AccountPoolHub {
                 quotas: this.options.quotas,
                 fetch: async (input, init) => {
                   refreshStarted = true;
-                  const response = await this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) });
+                  const response = await this.accountFetch(account,route)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) });
                   refreshStatus = response.status;
                   return response;
                 },
@@ -1432,13 +1472,15 @@ export class AccountPoolHub {
     account: Account,
     secret: AccountSecret,
     adapter: ProviderAdapter,
-    trace: Trace, attempt: number,
-    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;deadline:number;onDispatch?:()=>void},
+    trace: Trace, attempt: number, route:AccountRoute,
+    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;deadline:number;onDispatch?:()=>void},
   ): Promise<UpstreamResult> {
     const admissionSignal = AbortSignal.any([request.signal, this.stopped.signal]);
     const deadline = admission.deadline;
     const cooldown = () => {
-      const hold = this.options.quotas.get(account.id).heldUntil;
+      const hold = admission.freeTier
+        ? null
+        : this.options.quotas.get(account.id).heldUntil;
       const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id) : null;
       return hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
     };
@@ -1472,7 +1514,11 @@ export class AccountPoolHub {
     try {
       const upstreamBody = new ArrayBuffer(body.byteLength);
       new Uint8Array(upstreamBody).set(body);
-      const url = adapter.upstreamUrl(request, this.options.getSettings());
+      const url = adapter.upstreamUrl(
+          request,
+          this.options.getSettings(),
+          body,
+        );
       const headers = adapter.requestHeaders(request.headers, account, secret);
       const method=adapter.upstreamMethod?.(request)??request.method;
       let phase:'before-dispatch'|'after-headers'|'cooldown'='before-dispatch';
@@ -1490,7 +1536,7 @@ export class AccountPoolHub {
             if (waited) {const previous=phase;phase='cooldown';try{await check();}finally{phase=previous;}}
             const started = await this.options.accounts.withSnapshot(accounts => {
               const current = this.eligibleEntries(adapter.provider, admission.projectId,
-                accounts, admission.family, this.options.now(), admission.purpose).eligible;
+                accounts, admission.family, this.options.now(), admission.purpose, admission.freeTier).eligible;
               if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
               // Metadata serialization can outlast admission: never start new work after its deadline.
               if (this.options.now() >= deadline) throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
@@ -1504,9 +1550,9 @@ export class AccountPoolHub {
             });
             if (started.value !== null) return started.value.response;
           }
-        },check)
+        },check,route.fetch(this.requiresIpv4(account.provider)))
         .catch((cause: unknown) => {
-          if (cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
+          if (cause instanceof EgressUnavailable || cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
           throw new UpstreamConnectionError("Upstream connection failed.", {
             cause,
           });
@@ -1713,6 +1759,9 @@ export class AccountPoolHub {
 }
 
 export function createHub(options: {
+  accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  pinnedRouteAccount?: (sessionKey:string)=>string|null;
+  nativeAgyManaged?:()=>boolean;
   route: string;
   agyModels?:(ids:string[])=>Promise<void>;
   accounts: AccountStore;
@@ -1786,11 +1835,16 @@ export function createHub(options: {
         upstreamName: "OpenCode Go",
         mountPrefix: OPENCODE_GO_MOUNT_PREFIX,
         upstreamBaseUrl: (settings) => settings.opencodeGoUpstreamBaseUrl,
+        freeUpstreamBaseUrl: (settings) => settings.opencodeFreeUpstreamBaseUrl,
+        freeUpstreamBody: isOpenCodeGoFreeModelBody,
         usagesUrl:
           options.opencodeGoUsagesUrl ?? DEFAULT_OPENCODE_GO_USAGES_URL,
-        allowedHeaderPrefixes: ["x-opencode-"],
-        normalizeUpstreamPathSuffix: normalizeOpencodeGoUpstreamPathSuffix,
-        guardRequestBody: guardOpencodeGoRequestBody,
+        allowedHeaderPrefixes: ["x-opencode-", "anthropic-"],
+        normalizeUpstreamPathSuffix: opencodeGoUpstreamPathSuffix,
+        // Anthropic clients authenticate with x-api-key, not Bearer.
+        inboundToken: (headers) => headers.get("x-api-key"),
+        // The Go Messages wire authenticates upstream the Anthropic way too.
+        upstreamApiKeyHeader: "x-api-key",
         parseUsages: opencodeGoQuotaFromUsages,
       }),
     ],
@@ -1819,6 +1873,7 @@ export function createHub(options: {
     ["devin", createDevinAdapter()],
   ]);
   return new AccountPoolHub({
+    nativeAgyManaged: options.nativeAgyManaged,
     route: options.route,
     accounts: options.accounts,
     quotas: options.quotas,
@@ -1830,7 +1885,7 @@ export function createHub(options: {
     vpnPayload: options.vpnPayload,
     guardCheck: options.guardCheck,
     adapters,
-    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,
+    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,pinnedRouteAccount:options.pinnedRouteAccount,
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),

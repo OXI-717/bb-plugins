@@ -1,3 +1,4 @@
+import type { AccountEgress } from "./account-egress.js";
 import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
 import { setTimeout as wait } from "node:timers/promises";
 import {
@@ -31,6 +32,7 @@ import { listBrowserProfiles, openAccountBrowser } from "./browser-profiles.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
 import type { ExternalClients } from "./external-clients.js";
+import type {NativeSessions} from './native-sessions.js';
 
 interface ParsedFlags {
   booleans: Set<string>;
@@ -39,6 +41,10 @@ interface ParsedFlags {
 
 const HELP = [
   "Usage:",
+  "  bb pool egress status --json",
+  "  bb pool egress configure <profile-json>",
+  "  bb pool egress bind <account-id> <profile-id> <version>",
+  "  bb pool egress unbind <account-id>",
   "  bb pool account add --provider claude --import [--label <text>] [--priority <n>]",
   "  bb pool account add --provider codex --import [--label <text>] [--priority <n>]",
   "  bb pool account add --provider claude --login",
@@ -61,11 +67,15 @@ const HELP = [
   "  bb pool account refresh <id>",
   "  bb pool status [--json]",
   "  bb pool readiness [--project <id>] [--json]",
+  '  bb pool native status --json',
+  '  bb pool native configure <executor-json>',
+  '  bb pool native mode <managed|off>',
+  '  bb pool native attest-stopped <lease-id> --confirmed',
   "  bb pool observations [--json]",
   "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> [--off]",
   "  bb pool config",
-  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
   "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot]",
   "  bb pool client revoke <name>",
@@ -232,6 +242,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `kimiUpstreamBaseUrl: ${config.kimiUpstreamBaseUrl}`,
     `zaiUpstreamBaseUrl: ${config.zaiUpstreamBaseUrl}`,
     `opencodeGoUpstreamBaseUrl: ${config.opencodeGoUpstreamBaseUrl}`,
+    `opencodeFreeUpstreamBaseUrl: ${config.opencodeFreeUpstreamBaseUrl}`,
     `neuraldeepUpstreamBaseUrl: ${config.neuraldeepUpstreamBaseUrl}`,
     `cursorUpstreamBaseUrl: ${config.cursorUpstreamBaseUrl}`,
     `devinUpstreamBaseUrl: ${config.devinUpstreamBaseUrl}`,
@@ -280,6 +291,11 @@ function parseConfigUpdate(
     });
   }
   if (key === "neuraldeepUpstreamBaseUrl") return accountPoolConfigSetInputSchema.parse({ neuraldeepUpstreamBaseUrl: value });
+  if (key === "opencodeFreeUpstreamBaseUrl") {
+    return {
+      opencodeFreeUpstreamBaseUrl: value,
+    };
+  }
   if (key === "opencodeGoUpstreamBaseUrl") {
     return accountPoolConfigSetInputSchema.parse({
       opencodeGoUpstreamBaseUrl: value,
@@ -324,7 +340,7 @@ function parseConfigUpdate(
     });
   }
   throw new Error(
-    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, or vpnGuardEnabled.",
+    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, opencodeFreeUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, or vpnGuardEnabled.",
   );
 }
 
@@ -340,12 +356,15 @@ export function registerPoolCli(
   config: AccountPoolConfigController,
   externalClients?: ExternalClients,
   browser?: ReturnType<typeof createBrowserRouter>,
+  nativeSessions?: NativeSessions,
+  egress?: AccountEgress,
 ): void {
   bb.cli.register({
     name: "pool",
     summary:
       "Manage Claude and Codex accounts and inspect the Account Pooler hub",
     commands: [
+      {name:"egress",summary:"Manage server-owned account egress profiles",usage:"bb pool egress <status|configure|bind|unbind>"},
       {
         name: "account-add",
         summary:
@@ -426,7 +445,7 @@ export function registerPoolCli(
         name: "config-set",
         summary: "Update one Account Pooler routing configuration value",
         usage:
-          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
       },
       {
         name: "token-rotate",
@@ -452,6 +471,25 @@ export function registerPoolCli(
     ],
     async run(argv, ctx): Promise<PluginCliResult> {
       try {
+        if(argv[0]==='egress'){
+          if(!egress)throw Error('Egress management unavailable.');
+          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')return {exitCode:0,stdout:JSON.stringify(egress.snapshot(),null,2)+'\n'};
+          if(argv[1]==='configure'&&argv.length===3)await egress.configure(JSON.parse(argv[2]!));
+          else if(argv[1]==='bind'&&argv.length===5)await egress.bind(argv[2]!,{id:argv[3]!,version:Number(argv[4])});
+          else if(argv[1]==='unbind'&&argv.length===3)await egress.bind(argv[2]!,null);
+          else throw Error('Invalid egress operation.');
+          return {exitCode:0,stdout:'Account egress configured for new sessions; existing sessions stay pinned.\n'};
+        }
+        if(argv[0]==='native'){
+          if(!nativeSessions)throw Error('Native executor management unavailable.');
+          let result:object;
+          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=await nativeSessions.snapshot();
+          else if(argv[1]==='configure'&&argv.length===3)result=await nativeSessions.configure(JSON.parse(argv[2]!));
+          else if(argv[1]==='mode'&&argv.length===3&&['managed','off'].includes(argv[2]!))result=await nativeSessions.setManaged(argv[2]==='managed');
+          else if(argv[1]==='attest-stopped'&&argv.length===4&&argv[3]==='--confirmed')result=await nativeSessions.attestStopped(argv[2]!);
+          else throw Error(HELP);
+          return {exitCode:0,stdout:json(result)};
+        }
         if (argv.includes("--help") || argv.includes("-h")) {
           return { exitCode: 0, stdout: `${HELP}\n` };
         }
