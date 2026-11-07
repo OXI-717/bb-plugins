@@ -62,3 +62,40 @@ Upgrade Pooler 0.4.21 and Guard 0.1.6 together when linked. A mixed-version pair
 When Follow VPN Guard is enabled, only Kimi and Z.ai bypass Guard admission. Codex, Claude, Cursor, Devin and OpenCode Go ask Guard before provider calls, including maintenance. Go therefore requires Guard with Go network-decision support; an older Guard refuses locally. The linked protected transport uses IPv4, matching the proof coverage. VPN-only provider settings still govern independent VPN checks; a connected VPN does not itself mean the manual Guard block is off.
 
 A timed-out state-file result is discarded before the next read. At most 16 underlying file operations may remain outstanding; timeouts never free an underlying operation's capacity until that operation settles. This prevents unbounded resource growth while allowing a later healthy read after an isolated stall.
+
+
+A Guard permission read that times out after four seconds is retried once with
+fresh server-host binding and a new abort signal, before any provider request.
+The total permission-read budget is eight seconds. An explicit denial, invalid
+decision or RPC failure is never retried. A second timeout still denies traffic;
+no previous permission is cached and no provider operation is replayed.
+
+
+## Guard refusal diagnostics and rehearsal
+
+Pooler logs every failed permission attempt and recovery on the second attempt
+with `Account Pooler Guard permission`. Fields contain a check ID shared by
+both attempts, provider, validated server host ID, current stage, per-stage
+milliseconds, outcome and deadline overrun. The overrun is a timing symptom,
+not proof of an event-loop stall. Normal first-attempt successes are not logged.
+Raw RPC errors, prompts, headers and credentials are never included. Use
+`bb plugin logs account-pool-balanced` to read these persistent BB logs;
+retention follows the server log rotation, independently of request observations.
+
+`bb pool guard-probe --provider cursor --json` reads the real Guard through the
+same server-host binding and retry path, without an upstream model request.
+To inject a delay into this probe only:
+
+```sh
+bb pool guard-probe --provider cursor --delay-stage guard-rpc --delay-ms 4100 --json
+bb pool guard-probe --provider cursor --delay-stage guard-rpc --delay-ms 4100 --delay-attempts all --json
+```
+
+Stages are `server-host`, `guard-rpc` and `server-host-recheck`. Delay is bounded
+to 4500 ms and aborts with that attempt. The default delays only the first read;
+`all` delays both reads and should refuse with a timeout. A healthy second read
+may still refuse if real Guard policy denies it. These probe results include
+all attempts in their own response; injected delays are never installed in the
+live Guard policy or used by other clients. This rehearses admission, not model
+availability. An aborted host lookup cannot proceed to a later SDK call even if
+its underlying operation returns late.
