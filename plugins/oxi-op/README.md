@@ -117,3 +117,4 @@ manager, private Unix channel and existing native supervisor. Set
 `OXI_TEST_OP_SOURCE` to this prepared source directory for that optional test after
 normal TypeScript test compilation. Root ownership and the loopback test CA are
 explicit fixture seams. There is no installed-manager/grant/Google or Mac claim.
+`bb oxi-op diagnose --profile <profile>` inspects configuration and both machine statuses without contacting 1Password or opening a form. It distinguishes the credential machine from the execution machine; seeing the latter connected does not establish credential availability. Token configuration is not a provider authorization check; host-environment token presence is unknown until use. Intake, checks and execution verify machine availability before a form and again after submission. Known pre-dispatch failures carry a fixed failure code; a host transport failure after dispatch remains uncertain and must be inspected before retrying.

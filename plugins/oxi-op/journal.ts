@@ -5,7 +5,7 @@ type Storage = {get<T>(key: string): Promise<T | undefined>; set(key: string, va
 type Context = {projectId: string; threadId: string};
 type Kind = 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
 type State = 'preparing' | 'awaiting-approval' | 'running' | 'completed' | 'cancelled' | 'failed' | 'needs-review' | 'interrupted';
-type Record = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; result?: unknown};
+type Record = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; failureCode?: string; result?: unknown};
 export type Progress = (state: 'awaiting-approval' | 'running', approved?: boolean) => Promise<void>;
 
 // Persist only these metadata shapes; never persist form input or raw errors.
@@ -22,6 +22,11 @@ const cancelReasonSchema = z.enum(['user','timeout','request-aborted','thread-st
 export function cancelledOutcome(result: {outcome: string; reason?: string}) {
     const parsed = cancelReasonSchema.safeParse(result.outcome === 'cancelled' ? result.reason : 'invalid-submission');
     return 'Cancelled' + (parsed.success ? ': ' + parsed.data : '');
+}
+export class OperationFailure extends Error {
+    constructor(readonly code: 'credential_host_offline' | 'execution_host_offline' | 'host_status_unavailable') {
+        super(code === 'credential_host_offline' ? 'The credential host is offline. No credential request was sent.' : code === 'execution_host_offline' ? 'The execution host is offline. No operation was started.' : 'Host availability could not be verified. No credential request was sent.');
+    }
 }
 export function createJournal(storage: Storage) {
     const instance = randomUUID();
@@ -56,9 +61,11 @@ export function createJournal(storage: Storage) {
                 else {row.result = results[kind].parse(JSON.parse(value)); row.state = 'completed';}
                 await save();
                 return value;
-            } catch {
+            } catch (error) {
+                if (error instanceof OperationFailure) row.failureCode = error.code;
                 row.state = row.state === 'running' ? 'needs-review' : 'failed';
                 await save();
+                if (error instanceof OperationFailure) throw error;
                 throw new Error('1Password operation did not complete. Inspect oxi-op history before retrying; an interrupted write may need recovery.');
             }
         },
