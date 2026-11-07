@@ -90,3 +90,37 @@ test('explicit existing project vault IDs are verified without creation or item 
  await assert.rejects(provisionProjectVault(run,{},'target','Other project',undefined,'existing-vault'));
  await assert.rejects(provisionProjectVault(run,{},'target','Example Project',undefined,'different-vault'));
 });
+
+// Real inherited pipes and a non-detached descendant exercise the credential
+// operation tree; a mocked runner cannot expose an orphan or missing close.
+for (const mode of ['abort', 'deadline']) test('ordinary operation collects descendants on '+mode, async t => {
+ if (!['linux','darwin'].includes(process.platform)) return t.skip('POSIX host operations only');
+ const {mkdtemp,readFile,rm}=await import('node:fs/promises');
+ const {tmpdir}=await import('node:os'); const {join}=await import('node:path');
+ const realTimer=globalThis.setTimeout;
+ const delay=ms=>new Promise(resolve=>realTimer(resolve,ms));
+ const directory=await mkdtemp(join(tmpdir(),'oxi-op-lifetime-')),file=join(directory,'descendant.pid');
+ const controller=new AbortController();let pid;
+ const running=async()=>{
+  try{process.kill(pid,0);}catch{return false;}
+  if(process.platform==='linux'){
+   try{if((await readFile('/proc/'+pid+'/stat','utf8')).split(' ')[2]==='Z')return false;}catch{return false;}
+  }
+  return true;
+ };
+ try{
+  if(mode==='deadline')t.mock.timers.enable({apis:['setTimeout']});
+  const source=`const {spawn}=require('node:child_process');const fs=require('node:fs');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});fs.writeFileSync(${JSON.stringify(file)},String(child.pid));setInterval(()=>{},1000);`;
+  const pending=runProcess(process.execPath,['-e',source],{},undefined,controller.signal).then(()=> 'fulfilled',()=> 'rejected');
+  for(let i=0;i<200;i++){try{const raw=await readFile(file,'utf8');if(/^[1-9][0-9]*$/.test(raw)){pid=Number(raw);break;}}catch{}await delay(5);}
+  assert(pid,'operation descendant startup');
+  if(mode==='abort')controller.abort();else t.mock.timers.tick(90_000);
+  assert.equal(await Promise.race([pending,delay(1500).then(()=> 'hung')]),'rejected','credential operation must settle after termination');
+  for(let i=0;i<100&&await running();i++)await delay(5);
+  assert.equal(await running(),false,'credential descendant must not keep running');
+ }finally{
+  if(pid){try{process.kill(pid,'SIGKILL');}catch{}}
+  controller.abort();if(mode==='deadline')t.mock.timers.reset();
+  await rm(directory,{recursive:true,force:true});
+ }
+});

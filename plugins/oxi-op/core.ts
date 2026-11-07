@@ -7,28 +7,54 @@ export const runProcess: Runner = (binary, args, env, input, signal) => new Prom
         reject(new Error('Operation cancelled'));
         return;
     }
-    const child = spawn(binary, args, { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    if (process.platform !== 'linux' && process.platform !== 'darwin') {
+        reject(new Error('Credential operation requires a supported POSIX host'));
+        return;
+    }
+    // The configured operation and its ordinary descendants own one group.
+    // Killing only the leader can retain both credentials and inherited pipes.
+    const child = spawn(binary, args, { env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let output = '';
     let exceeded = false;
-    const kill = () => child.kill('SIGKILL');
-    const timer = setTimeout(kill, 90000);
+    let expired = false;
+    let cleanupFailed = false;
+    let finished = false;
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+        finished = true;
+        clearTimeout(timer); clearTimeout(cleanupTimer);
+        signal?.removeEventListener('abort', kill);
+    };
+    const kill = () => {
+        if (finished) return;
+        try {if (child.pid) process.kill(-child.pid, 'SIGKILL');}
+        catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ESRCH') cleanupFailed = true;}
+        // Even an unsupported self-detaching process retaining a pipe must not
+        // make the RPC unbounded. It is never reported as successful cleanup.
+        cleanupTimer ??= setTimeout(() => {
+            child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
+            finish(); reject(new Error('Credential operation cleanup unconfirmed'));
+        }, 1000);
+    };
+    const timer = setTimeout(() => {expired = true; kill();}, 90000);
     signal?.addEventListener('abort', kill, { once: true });
-    const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', kill); };
-    child.stdout.on('data', chunk => { if (output.length + chunk.length > 1048576) {
-        exceeded = true;
-        kill();
-    }
-    else
-        output += chunk; });
+    child.stdout.on('data', chunk => {
+        if (output.length + chunk.length > 1048576) {exceeded = true; kill();}
+        else output += chunk;
+    });
     child.stderr.resume();
-    child.on('error', () => { finish(); reject(new Error('Credential process could not start')); });
-    child.on('close', code => { finish();
-    if (code !== 0 || exceeded || signal?.aborted)
-        reject(new CredentialProcessError('process exit ' + code + '; output suppressed'));
-    else
-        resolve(output); });
-    child.stdin.on('error', () => { });
+    child.on('exit', kill); // A successful leader cannot leave its group behind.
+    child.on('error', () => {kill(); finish(); reject(new Error('Credential process could not start'));});
+    child.on('close', code => {
+        if (finished) return;
+        finish();
+        if (code !== 0 || exceeded || expired || cleanupFailed || signal?.aborted)
+            reject(new CredentialProcessError('process exit ' + code + '; output suppressed'));
+        else resolve(output);
+    });
+    child.stdin.on('error', () => {});
     child.stdin.end(input);
+    if (signal?.aborted) kill();
 });
 export async function storeCredential(run: Runner, env: NodeJS.ProcessEnv, vault: string, title: string, username: string, password: string, signal?: AbortSignal) {
     const op = async (args: string[], input?: unknown) => { try {
