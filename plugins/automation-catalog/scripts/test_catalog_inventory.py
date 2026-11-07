@@ -44,3 +44,33 @@ class CronIdentityTests(unittest.TestCase):
             data=discover(lambda argv:content if argv[0]=='crontab' else '',system='Linux',etc=root)
         ids=[r['unit'] for r in data['observations'] if r['scheduler']=='cron']
         self.assertEqual(ids,[t['id'] for t in cron_tasks(content,'sample','operator')])
+
+class LoadedDependencyTests(unittest.TestCase):
+    def test_missing_dependency_is_not_an_installed_service(self):
+        def run(argv):
+            if 'list-unit-files' in argv:
+                return 'present.service disabled enabled\n'
+            if 'list-units' in argv:
+                return ('missing.service not-found inactive dead Missing dependency\n'
+                        'transient.service loaded active running Actual transient\n'
+                        'broken.service error inactive dead Broken unit\n'
+                        'orphan-running.service not-found active running Retained process\n'
+                        'orphan-failed.service not-found failed failed Retained failure\n')
+            return ''
+        with tempfile.TemporaryDirectory() as root:
+            data=discover(run,system='Linux',etc=root)
+        names={r['unit'] for r in data['observations']}
+        self.assertNotIn('missing.service',names)
+        self.assertIn('present.service',names)
+        self.assertIn('transient.service',names)
+        self.assertIn('broken.service',names)
+        self.assertIn('orphan-running.service',names)
+        self.assertIn('orphan-failed.service',names)
+
+class InertPlistTests(unittest.TestCase):
+    def test_empty_vendor_placeholder_is_not_a_service(self):
+        from catalog_inventory import launchd_label
+        self.assertIsNone(launchd_label({}, 'vendor-placeholder'))
+        self.assertEqual(launchd_label({'Label':'sample','Program':'/bin/true'},'file'), 'sample')
+        # Executable but incomplete definitions stay visible for diagnosis.
+        self.assertEqual(launchd_label({'Program':'/bin/true'},'broken'), 'broken')
