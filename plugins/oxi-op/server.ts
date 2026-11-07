@@ -94,6 +94,46 @@ export default function plugin(bb: BbPluginApi) {
             }, 'Подключить проект '+project.name);
         } finally {connecting=false;}
     }
+    const targetsSchema = z.array(z.object({projectId:z.string().min(1),existingVaultId:z.string().min(1).optional()}).strict()).min(1).max(50).refine(xs=>new Set(xs.map(x=>x.projectId)).size===xs.length,'Duplicate target projects');
+    async function connectMany(raw: string, profile: string, ctx: OperationContext) {
+        if (connecting) throw new Error('Project setup is already pending');
+        connecting=true;
+        try {
+            const targets=targetsSchema.parse(JSON.parse(raw));
+            const {route}=await accessFor(ctx.projectId,profile);
+            if(route.authentication!=='desktop'||!route.requireApproval)throw new Error('Project setup requires approved desktop access');
+            const projects=await Promise.all(targets.map(async target=>{
+                const project=await bb.sdk.projects.get({projectId:target.projectId,signal:ctx.signal});
+                if(project.id!==target.projectId||!project.name?.trim())throw new Error('Target identity differs');
+                return {...target,name:project.name};
+            }));
+            const routes=z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
+            const pending=projects.filter(p=>!routes.some(r=>r.projectId===p.projectId&&r.profile==='default'));
+            const rows:{projectId:string;state:'configured'|'already-configured'|'needs-review';vaultId?:string}[]=projects.filter(p=>!pending.includes(p)).map(p=>({projectId:p.projectId,state:'already-configured'}));
+            if(!pending.length)return JSON.stringify({projects:rows});
+            const display=await displayContext({...route,hostId:credentialHost(route)},ctx);
+            return await journal.run('connect-many',profile,ctx,async progress=>{
+                await progress('awaiting-approval');
+                const decision=await bb.ui.requestInput({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Подключить хранилища проектов',payload:{mode:'approve',title:'Подключить '+pending.length+' проектов',profile,projectId:ctx.projectId,threadId:ctx.threadId,label:pending.map(p=>p.name).join(', '),hostId:credentialHost(route),...display,vaultId:'project-vaults',vaultLabel:'Отдельный сейф каждого проекта',purpose:pending.map(p=>p.name+': '+(p.existingVaultId?'подключить существующий сейф по точному ID':'создать или восстановить сейф с меткой проекта')).join('\n')+'\nСохранить привязки по умолчанию. Пароли не читаются; автоматический доступ не выдаётся. Уже настроенные проекты пропускаются.',secrets:[]},describeSubmission:()=>({title:'Project vault connections approved (no credential values)'})},{signal:ctx.signal});
+                if(decision.outcome!=='submitted'||!z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success)return 'Cancelled';
+                await progress('running',true);
+                for(const project of pending){
+                    if(ctx.signal?.aborted)throw new Error('Project setup interrupted');
+                    try{
+                        const vault=await host.call('provisionVault',{route,projectId:project.projectId,name:project.name,...(project.existingVaultId?{existingVaultId:project.existingVaultId}:{})},{hostId:credentialHost(route),signal:ctx.signal});
+                        const latest=z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
+                        if(latest.some(r=>r.projectId===project.projectId&&r.profile==='default'))throw new Error('Routing changed during setup');
+                        if(ctx.signal?.aborted)throw new Error('Project setup interrupted');
+                        const target=routeSchema.parse({projectId:project.projectId,profile:'default',label:project.name,hostId:route.hostId,credentialHostId:credentialHost(route),vaultId:vault.vaultId,vaultLabel:vault.name,opBinary:route.opBinary,authentication:'desktop',accountId:route.accountId,requireApproval:true,operations:[]});
+                        await settings.experimental_set({routes:JSON.stringify([...latest,target])});
+                        if(resolveRoute(JSON.parse((await settings.get()).routes),project.projectId).vaultId!==vault.vaultId)throw new Error('Saved route differs');
+                        rows.push({projectId:project.projectId,state:'configured',vaultId:vault.vaultId});
+                    }catch{rows.push({projectId:project.projectId,state:'needs-review'});}
+                }
+                return JSON.stringify({projects:rows});
+            },'Подключение хранилищ проектов');
+        }finally{connecting=false;}
+    }
     const profileParameter = z.string().min(1).max(80).default('default');
     bb.agents.registerTool({ name: 'oxi_op_store', description: 'Request a credential in a private BB form and save it to the current project vault and configured access profile. Passwords must never be supplied in tool arguments. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ title: z.string().min(1).max(160), username: z.string().max(200).default(''), profile: profileParameter }).strict(), execute: ({ title, username, profile }, ctx) => toolOutcome(() => store(title, username, profile, ctx)) });
     async function runConfigured(operation: string, profile: string, ctx: OperationContext) {
@@ -168,6 +208,7 @@ export default function plugin(bb: BbPluginApi) {
         return result;
     }
     bb.cli.register(defineCli({ name: 'oxi-op', summary: 'Project-scoped 1Password operations', commands: {
+            'connect-many':cliCommand({summary:'Approve a bounded explicit list of project vault connections',options:{notify:notifyOption,projects:{type:'string',description:'JSON array of projectId and optional exact existingVaultId',required:true},profile:{type:'string',description:'Existing owner desktop setup profile',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectMany(input.options.projects,input.options.profile,context));}}),
             connect: cliCommand({summary:'Approve creating a dedicated vault and default project route',options:{notify:notifyOption,project:{type:'string',description:'Exact target BB project ID',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectProject(input.options.project,input.options.profile,context));}}),
             'display-status':cliCommand({summary:'Read form rendering receipts for this session; never contacts 1Password',async run(_,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const keys=await bb.storage.kv.list(receiptPrefix(ctx.projectId,ctx.threadId));const rows=await Promise.all(keys.map(k=>bb.storage.kv.get<Receipt>(k)));return {exitCode:0,stdout:JSON.stringify(rows.filter(Boolean).sort((a,b)=>b!.mountedAt.localeCompare(a!.mountedAt)).slice(0,20))};}}),
             'display-test':cliCommand({summary:'Show a diagnostic form without reading or using any credentials',options:{profile:{type:'string',description:'Configured profile used for display names only',default:'default'}},async run(input,ctx){

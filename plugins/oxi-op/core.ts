@@ -109,9 +109,15 @@ export async function executeOperationBindings(run: Runner, env: NodeJS.ProcessE
 }
 
 // Recover only vaults carrying this exact project marker; never adopt a namesake.
-export async function provisionProjectVault(run: Runner, env: NodeJS.ProcessEnv, projectId: string, name: string, signal?: AbortSignal) {
+export async function provisionProjectVault(run: Runner, env: NodeJS.ProcessEnv, projectId: string, name: string, signal?: AbortSignal, existingVaultId?: string) {
     const description = 'Managed by Oxi Op for BB project ' + projectId;
     const op = async (args: string[]) => JSON.parse(await run('op', args, env, undefined, signal));
+    if (existingVaultId) {
+        const verified = await op(['vault', 'get', existingVaultId, '--format=json']);
+        const normalized = (value: string) => value.toLowerCase().replace(/[\s_-]+/g, '');
+        if (verified.id !== existingVaultId || typeof verified.name !== 'string' || normalized(verified.name) !== normalized(name)) throw new Error('Existing vault identity differs; no route configured');
+        return {vaultId: existingVaultId, name: verified.name as string};
+    }
     const vaults = await op(['vault', 'list', '--format=json']);
     if (!Array.isArray(vaults)) throw new Error('Invalid vault list');
     const matches = vaults.filter((v: {name: string}) => v.name === name);

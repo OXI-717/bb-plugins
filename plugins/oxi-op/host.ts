@@ -25,10 +25,10 @@ export default experimental_defineHostEntry({ contract, handlers: {
             await executeOperationBindings(runProcess, process.env, route, operation, bindings, ctx.signal);
             return {completed: true as const};
         },
-        provisionVault: async ({route, projectId, name}, ctx) => {
+        provisionVault: async ({route, projectId, name, existingVaultId}, ctx) => {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Project setup requires owner desktop approval');
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
-            return provisionProjectVault(runner, await environment(route, ctx.signal), projectId, name, ctx.signal);
+            return provisionProjectVault(runner, await environment(route, ctx.signal), projectId, name, ctx.signal, existingVaultId);
         },
         inventory: async ({route, registryTitle}, ctx) => {
             if (route.authentication !== 'desktop') throw new Error('Registry inventory requires explicit owner desktop access');

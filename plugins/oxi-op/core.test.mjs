@@ -81,3 +81,12 @@ test('a new project vault is independently read before returning its identity',a
  assert.deepEqual(calls.map(x=>x[1]),['list','create','get']);
  await assert.rejects(provisionProjectVault(async()=>JSON.stringify([{name:'Example project'},{name:'Example project'}]),{},'target','Example project'));
 });
+
+test('explicit existing project vault IDs are verified without creation or item reads',async()=>{
+ const calls=[];
+ const run=async(_binary,args)=>{calls.push(args);return JSON.stringify({id:'existing-vault',name:'Example Project'});};
+ assert.deepEqual(await provisionProjectVault(run,{},'target','Example-Project',undefined,'existing-vault'),{vaultId:'existing-vault',name:'Example Project'});
+ assert.deepEqual(calls,[['vault','get','existing-vault','--format=json']]);
+ await assert.rejects(provisionProjectVault(run,{},'target','Other project',undefined,'existing-vault'));
+ await assert.rejects(provisionProjectVault(run,{},'target','Example Project',undefined,'different-vault'));
+});

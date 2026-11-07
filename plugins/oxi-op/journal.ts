@@ -3,13 +3,14 @@ import {z} from 'zod';
 
 type Storage = {get<T>(key: string): Promise<T | undefined>; set(key: string, value: unknown): Promise<void>; list(prefix?: string): Promise<string[]>};
 type Context = {projectId: string; threadId: string};
-type Kind = 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
+type Kind = 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
 type State = 'preparing' | 'awaiting-approval' | 'running' | 'completed' | 'cancelled' | 'failed' | 'needs-review' | 'interrupted';
 type Record = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; result?: unknown};
 export type Progress = (state: 'awaiting-approval' | 'running', approved?: boolean) => Promise<void>;
 
 // Persist only these metadata shapes; never persist form input or raw errors.
 const results = {
+    'connect-many': z.object({projects: z.array(z.object({projectId:z.string(),state:z.enum(['configured','already-configured','needs-review']),vaultId:z.string().optional()}).strict())}).strict(),
     connect: z.object({configured: z.literal(true), projectId: z.string(), vaultId: z.string()}).strict(),
     store: z.object({itemId: z.string(), verified: z.literal(true)}).strict(),
     run: z.object({completed: z.literal(true)}).strict(),

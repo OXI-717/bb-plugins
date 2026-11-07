@@ -409,3 +409,29 @@ test('service account routing cannot bootstrap a desktop project connection',asy
  assert.equal((await h.behavior.runCli(['connect','--project','target-project','--profile','default'],context)).exitCode,1);
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);assert.equal(h.inspection.pendingInteractions.length,0);
 });
+
+test('batch connection gates all writes once, preserves partial progress and skips configured projects',async t=>{
+ const h=setup(t,{authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined},({input})=>{
+  if(input.projectId==='failed-project')throw new Error('sensitive provider details');
+  return {vaultId:'vault-'+input.projectId,name:'Example workspace'};
+ });
+ const targets=[{projectId:'target-one',existingVaultId:'existing-vault'},{projectId:'failed-project'},{projectId:'target-two'}];
+ const args=['connect-many','--projects',JSON.stringify(targets),'--profile','default'];
+ const cancelled=h.behavior.runCli(args,context);await setImmediate();
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ assert.equal(h.inspection.pendingInteractions[0].timeoutMs,60_000);
+ h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);await cancelled;
+ const work=h.behavior.runCli(args,context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ const result=JSON.parse((await work).stdout);
+ assert.deepEqual(result.projects.map(p=>p.state),['configured','needs-review','configured']);
+ assert.equal(h.inspection.experimental_hostRpcCalls[0].input.existingVaultId,'existing-vault');
+ assert(!JSON.stringify(result).includes('sensitive'));
+ assert.equal(JSON.parse((await h.behavior.runCli(['status'],{...context,projectId:'target-two'})).stdout).configured,true);
+ const before=h.inspection.experimental_hostRpcCalls.length;
+ const skip=await h.behavior.runCli(['connect-many','--projects',JSON.stringify([targets[0],targets[2]]),'--profile','default'],context);
+ assert(JSON.parse(skip.stdout).projects.every(p=>p.state==='already-configured'));
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,before);
+ assert.equal(h.inspection.pendingInteractions.length,0);
+ assert.equal((await h.behavior.runCli(['connect-many','--projects',JSON.stringify([targets[0],targets[0]]),'--profile','default'],context)).exitCode,1);
+});
