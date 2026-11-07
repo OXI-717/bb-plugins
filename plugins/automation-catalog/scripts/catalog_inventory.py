@@ -52,7 +52,7 @@ def discover(run=command, system=None, home=None, etc=None):
                         first = fields[0] if fields else ''
                         # Dependency references with no backing unit are not jobs.
                         # Keep malformed/error units visible and retain real transients.
-                        if action == 'list-units' and len(fields) > 1 and fields[1] == 'not-found':
+                        if action == 'list-units' and len(fields) > 3 and fields[1:4] == ['not-found', 'inactive', 'dead']:
                             continue
                         if first.endswith(('.service', '.timer')):
                             names.add(first)

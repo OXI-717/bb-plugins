@@ -160,7 +160,7 @@ outside the source checkout. If a host has no publisher, an explicitly configure
 script task may invoke that same synchronizer; do not create a second schedule for
 the underlying cleanup. The synchronizer respects `enabled: false`.
 
-Inventory comparison omits loaded `not-found` dependency references when no unit
+Inventory comparison omits inert `not-found inactive dead` dependency references when no unit
 file backs them. Real transient units and error-state units remain visible. Empty
 launchd uninstall placeholders without Label, Program or ProgramArguments are not
 jobs; executable but incomplete definitions still require investigation. Exact

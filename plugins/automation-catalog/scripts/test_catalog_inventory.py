@@ -53,7 +53,9 @@ class LoadedDependencyTests(unittest.TestCase):
             if 'list-units' in argv:
                 return ('missing.service not-found inactive dead Missing dependency\n'
                         'transient.service loaded active running Actual transient\n'
-                        'broken.service error inactive dead Broken unit\n')
+                        'broken.service error inactive dead Broken unit\n'
+                        'orphan-running.service not-found active running Retained process\n'
+                        'orphan-failed.service not-found failed failed Retained failure\n')
             return ''
         with tempfile.TemporaryDirectory() as root:
             data=discover(run,system='Linux',etc=root)
@@ -62,6 +64,8 @@ class LoadedDependencyTests(unittest.TestCase):
         self.assertIn('present.service',names)
         self.assertIn('transient.service',names)
         self.assertIn('broken.service',names)
+        self.assertIn('orphan-running.service',names)
+        self.assertIn('orphan-failed.service',names)
 
 class InertPlistTests(unittest.TestCase):
     def test_empty_vendor_placeholder_is_not_a_service(self):
