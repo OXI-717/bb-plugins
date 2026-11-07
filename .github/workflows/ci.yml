@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['account-pool-balanced/v*', 'automation-catalog/v*', 'vpn-guard/v*', 'oxi-projects/v*', 'model-connections/v*', 'auto-archive/v*', 'federation-pilot/v*', 'pool-maintenance/v*']
+    tags: ['account-pool-balanced/v*', 'automation-catalog/v*', 'vpn-guard/v*', 'oxi-projects/v*', 'model-connections/v*', 'auto-archive/v*', 'federation-pilot/v*', 'pool-maintenance/v*', 'oxi-op/v*']
   pull_request:
   workflow_dispatch:
 
@@ -137,4 +137,28 @@ jobs:
         working-directory: plugins/auto-archive
       - run: npm exec --yes --package=bb-app@0.46.1 -- bb plugin build .
         working-directory: plugins/auto-archive
+      - run: git diff --exit-code
+
+  oxi-op:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: plugins/oxi-op/package-lock.json
+      - run: npm ci
+        working-directory: plugins/oxi-op
+      - run: npm run typecheck
+        working-directory: plugins/oxi-op
+      - run: npm test
+        working-directory: plugins/oxi-op
+      - run: npm exec --yes --package=bb-app@0.48.1 -- bb plugin build .
+        working-directory: plugins/oxi-op
       - run: git diff --exit-code
