@@ -19,6 +19,13 @@ def command(argv):
     return result.stdout
 
 
+def launchd_label(data, fallback):
+    # Empty application-uninstaller placeholders do not define a runnable job.
+    if not data.get('Label') and not data.get('Program') and not data.get('ProgramArguments'):
+        return None
+    return data.get('Label', fallback)
+
+
 def discover(run=command, system=None, home=None, etc=None):
     """Return identities only; command arguments and environment never leave host."""
     home = Path(home or Path.home())
@@ -41,7 +48,12 @@ def discover(run=command, system=None, home=None, etc=None):
                 names = set()
                 for action in ('list-unit-files', 'list-units'):
                     for line in run(prefix + [action, '--type=service,timer', '--all', '--no-legend', '--no-pager', '--plain']).splitlines():
-                        first = line.split()[0] if line.split() else ''
+                        fields = line.split()
+                        first = fields[0] if fields else ''
+                        # Dependency references with no backing unit are not jobs.
+                        # Keep malformed/error units visible and retain real transients.
+                        if action == 'list-units' and len(fields) > 1 and fields[1] == 'not-found':
+                            continue
                         if first.endswith(('.service', '.timer')):
                             names.add(first)
                 return names
@@ -54,7 +66,9 @@ def discover(run=command, system=None, home=None, etc=None):
                 names = []
                 for p in folder.glob('*.plist'):
                     data = plistlib.loads(p.read_bytes())
-                    names.append(data.get('Label', p.stem))
+                    label = launchd_label(data, p.stem)
+                    if label is not None:
+                        names.append(label)
                 return names
             probe('launchd', scope, read)
     else:
