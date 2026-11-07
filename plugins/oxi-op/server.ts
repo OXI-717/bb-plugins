@@ -1,5 +1,6 @@
 import { defineCli, cliCommand, defineRpcContract, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
+import {taskContract,assignmentSchema} from './task-contract.js';
 import { contract, routeSchema, resolveRoute, type Route } from './contract.js';
 import {createJournal, cancelledOutcome} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal};
@@ -40,6 +41,24 @@ export default function plugin(bb: BbPluginApi) {
         }
         return {route, ...(route.tokenSetting ? {serviceAccountToken: values.serviceAccountToken} : {})};
     };
+    bb.rpc.register(taskContract,{async runPreparedTask({requestId},ctx){
+        if(ctx.experimental_signal.aborted)throw new Error('Prepared task cancelled');
+        if(ctx.experimental_caller.kind!=='plugin'||ctx.experimental_caller.pluginId!=='account-pool-balanced')
+            throw new Error('Only Account Pooler may start a prepared native task');
+        const assignment=await bb.sdk.plugins.callRpc({pluginId:'account-pool-balanced',method:'claimNativeUnlock',
+            input:{requestId},outputSchema:assignmentSchema,signal:ctx.experimental_signal});
+        if(assignment.deadline<=Date.now()||ctx.experimental_signal.aborted)throw new Error('Prepared task expired or cancelled');
+        const access=await accessFor(assignment.binding.caller.projectId,assignment.profile);
+        const {route}=access;
+        if(route.hostId!==assignment.binding.hostId||route.authentication!=='service-account'||route.requireApproval||
+           route.tokenSetting!=='projectServiceAccounts'||!access.serviceAccountToken||route.credentialHostId)
+            throw new Error('Prepared task requires its explicit unattended project route');
+        const configured=route.operations.filter(op=>op.name===assignment.operation);
+        if(configured.length!==1||Object.keys(configured[0].references).length!==0)
+            throw new Error('Prepared task requires one fixed operation without caller references');
+        return host.call('runPrepared',{...access,serviceAccountToken:access.serviceAccountToken,assignment},
+            {hostId:assignment.binding.hostId,signal:ctx.experimental_signal});
+    }});
     async function displayContext(route: Route, ctx: {projectId: string; threadId: string; signal?: AbortSignal}) {
         const [project, thread, machine] = await Promise.allSettled([
             bb.sdk.projects.get({projectId: ctx.projectId, signal: ctx.signal}),

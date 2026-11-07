@@ -1,3 +1,4 @@
+import {registerNativeUnlockRpc} from "./native-unlock-rpc.js";
 import { AccountEgress } from "./account-egress.js";
 import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
 import {NativeSessions,NativeSessionError,nativeHttp} from './native-sessions.js';
@@ -146,8 +147,13 @@ export function createAccountPoolPlugin(
       }else if(currentSettings.vpnOnlyProviders.includes('agy'))throw Error('Native protected host requires its Guard decision');
       if(caller.threadId&&await routing.isBypassed(caller.threadId))throw new NativeSessionError(403,'native-thread-bypassed');
     },executor=>{if(executor.execution){try{egress.validateNativeProfile(executor.execution.profile,executor.hostId);}
-      catch{throw new NativeSessionError(503,'native-execution-unprepared');}}});
+      catch{throw new NativeSessionError(503,'native-execution-unprepared');}}},async(requestId,signal)=>{
+      await bb.sdk.plugins.callRpc({pluginId:'oxi-op',method:'runPreparedTask',input:{requestId},
+        outputSchema:z.object({completed:z.literal(true)}).strict(),signal});
+    });
     await nativeSessions.initialize();
+    registerNativeUnlockRpc(bb,nativeSessions);
+    bb.onDispose(()=>nativeSessions.close());
     const hubTokens = new HubTokenStore(secretDir, now);
     await hubTokens.initialize();
     const enrolledHosts = await bb.sdk.hosts.list();

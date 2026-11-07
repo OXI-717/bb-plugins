@@ -57,3 +57,63 @@ Run `npm ci`, `npm run typecheck`, `npm test` and `bb plugin build .` in this di
 Owner-requested project onboarding uses `bb oxi-op connect --project <project-id> --profile <desktop-setup-profile>` from an already configured setup session. It shows a 60-second BB approval before desktop authorization, creates one project vault with an exact project marker, independently reads it back, and adds a default desktop route. Existing routes are preserved; an existing default or an unmarked namesake fails closed. No automatic read operations or service tokens are granted. After interruption, inspect history and settings before retrying; a created vault may remain and can be recovered by its exact marker. Use `--notify` in a persistent terminal when native tool lifecycle is unavailable.
 
 For an owner-approved batch, use `bb oxi-op connect-many --projects '<JSON-array>' --profile <desktop-setup-profile>`. Each target has `projectId` and optionally `existingVaultId` from a verified service inventory. One 60-second BB approval lists every pending project. Existing default routes are skipped; successful routes persist even if a later project fails. Inspect every returned project state and settings after interruption; `needs-review` is not success and must not trigger automatic retries. Existing vault IDs require matching project names and an independent vault read. This configures intake only; it does not grant unattended access, reactivate projects, or automatically onboard future projects.
+
+## Prepared native tasks (optional, Linux, default off)
+
+The ordinary `run` tool/CLI still requires its real BB thread. A prepared native
+executor instead uses the existing Account Pooler admission endpoint. There is
+no fabricated thread ID and no new daemon. BB must supply verified plugin RPC
+attribution and cancellation context (BB 0.48.1+); an older runtime refuses this
+optional path. Ordinary operations retain their existing policy.
+
+Only Account Pooler's server plugin can invoke `runPreparedTask({requestId})`.
+Oxi Op calls back through the SDK to `claimNativeUnlock`; only Oxi Op's verified
+plugin caller can consume it. Account Pooler rechecks the actual admission,
+Guard, project, purpose, executor and prepared route, then **persists** one consume
+before returning the immutable host/executor/account/runtime/profile/version/
+lease/session/caller tuple. A request ID is a locator, never a bearer capability.
+Catalog leases cannot issue a request. The deadline is at most 25 seconds and
+never beyond the issuing lease. Restart, failure and cancellation retain an
+uncertain occupied lease; there is no automatic replay, alternate route or release.
+
+An owner must explicitly prepare all three matching configurations later:
+
+- Pooler executor `unlock: {"profile":"example-unlock","operation":"prepared-native-keyring-unlock"}` alongside its existing prepared `execution`.
+- Oxi Op route for that exact admitted project and access profile, exact execution
+  host, `authentication: "service-account"`, `tokenSetting: "projectServiceAccounts"`,
+  `requireApproval: false`, no credential host, and exactly one named operation
+  with empty `references`. Its fixed argv is the installed Python path, `-I`, the
+  installed `native_unlock.py` path and `--automatic`.
+- Root-owned Fleet unlock authority with matching `automaticProfile`, pinned
+  manager binary digest, fixed vault/item and existing prepared runtime identity.
+  The new field is absent by default. It does not enable any account or executor.
+
+The encrypted project/profile token needs an owner-created read grant for the
+single-purpose unlock vault; the route map cannot narrow a broad provider grant.
+Missing configuration refuses without using a desktop route, another project's
+mapping, `control-setup`, caller environment or arbitrary secret references. This
+source change creates no token, route, grant, root authority or installation.
+
+The actual host entry runs only that fixed operation through the pinned manager's
+`run --` interface. A bounded length-prefixed stdin frame conveys the assignment
+and expected wrapper PID; token context is confined to the operation chain.
+Neither stdout, tool results nor environment passed to the scoped model/tools
+contains the unlock value. The existing private Unix channel supplies it to the
+launcher, which waits for operation cleanup before launching the native child.
+The operation independently polls the real current consumed task before and
+throughout lookup. Manual waiting operations refuse an automatic grant.
+
+On Linux, the isolated bootstrap binds wrapper to host, operation to wrapper and
+lookup to operation using kernel parent-death signals plus expected-parent checks.
+Privileged/capability-bearing manager exec is refused. Abort/deadline also kills
+the owned process group. This does not cover arbitrary self-detaching descendants
+or same-UID hostile processes. An incompatible installed manager process topology
+refuses; its real compatibility still needs a separately approved test window.
+
+`task.test.mjs` exercises actual SDK validation/attribution, Pooler consumption and
+Oxi Op server dispatch with synthetic host calls. The companion Fleet integration
+uses `test/native-task-host.mjs` to dispatch the **actual host handler**, fake
+manager, private Unix channel and existing native supervisor. Set
+`OXI_TEST_OP_SOURCE` to this prepared source directory for that optional test after
+normal TypeScript test compilation. Root ownership and the loopback test CA are
+explicit fixture seams. There is no installed-manager/grant/Google or Mac claim.

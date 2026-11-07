@@ -1,5 +1,6 @@
 import { defineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
+import {assignmentSchema} from './task-contract.js';
 export const operationSchema = z.object({ name: z.string().min(1), label: z.string().min(1).max(160).optional(), purpose: z.string().min(1).max(500).optional(), argv: z.array(z.string()).min(1).max(100), references: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string().startsWith('op://')), referenceLabels: z.record(z.string(), z.object({item: z.string().min(1).max(160), field: z.string().min(1).max(160)}).strict()).optional() }).strict();
 export const routeSchema = z.object({
     projectId: z.string().min(1),
@@ -31,6 +32,7 @@ export function resolveRoute(routes: unknown, projectId: string, profile = 'defa
     return matches[0];
 }
 export const contract = defineRpcContract({
+    runPrepared: {input:z.object({route:routeSchema,serviceAccountToken:z.string(),assignment:assignmentSchema}).strict(),output:z.object({completed:z.literal(true)}).strict()},
     provisionVault: {input: z.object({route: routeSchema, projectId: z.string().min(1), name: z.string().min(1).max(160), existingVaultId: z.string().min(1).optional()}).strict(), output: z.object({vaultId: z.string(), name: z.string()}).strict()},
     resolve: {input: z.object({route: routeSchema, operation: z.string()}).strict(), output: z.object({bindings: z.record(z.string(), z.string())}).strict()},
     execute: {input: z.object({route: routeSchema, operation: z.string(), bindings: z.record(z.string(), z.string())}).strict(), output: z.object({completed: z.literal(true)}).strict()},

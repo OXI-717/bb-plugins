@@ -1,3 +1,4 @@
+import {runTaskProcess} from './task-process.js';
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
 import { contract, type Route } from './contract.js';
@@ -94,6 +95,13 @@ export default experimental_defineHostEntry({ contract, handlers: {
             finally {
                 pending.delete(key);
             }
+        },
+        runPrepared: async ({route,assignment,serviceAccountToken},ctx) => {
+            if(route.authentication!=='service-account'||route.requireApproval||route.tokenSetting!=='projectServiceAccounts'||
+               route.hostId!==assignment.binding.hostId||route.projectId!==assignment.binding.caller.projectId||route.profile!==assignment.profile)
+                throw new Error('Prepared operation route changed');
+            await runTaskProcess(route,assignment,serviceAccountToken,ctx.signal);
+            return {completed:true as const};
         },
         run: async ({ route, operation, serviceAccountToken }, ctx) => {
             const matches = route.operations.filter(x => x.name === operation);

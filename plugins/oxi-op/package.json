@@ -52,6 +52,6 @@
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsc --outDir dist/test --noEmit false && node --test core.test.mjs server.test.mjs"
+    "test": "tsc --outDir dist/test --noEmit false && node --test core.test.mjs server.test.mjs task.test.mjs"
   }
 }
