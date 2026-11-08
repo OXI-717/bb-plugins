@@ -1,7 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
+import {readFileSync} from 'node:fs';
+// Item templates arrive on stdin on macOS and through a private file on Linux.
+const templateOf=(args,input)=>{const path=args[args.indexOf('--template')+1];return JSON.parse(path==='/dev/stdin'?input:readFileSync(path,'utf8'));};
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
  assert.throws(()=>resolveRoute([route],'other'));
@@ -16,7 +19,7 @@ test('missing profile explains same-project configuration without leaking other 
 });
 test('password is stdin only and separate get verifies it',async()=>{
  let stored;const calls=[];
- const runner=async(bin,args,env,input)=>{calls.push({args,input});if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({category:'LOGIN',fields:[{id:'username',label:'username',type:'STRING',purpose:'USERNAME'},{id:'password',label:'password',type:'CONCEALED',purpose:'PASSWORD'}]});if(args[1]==='create'){stored=JSON.parse(input);assert.equal(stored.fields[1].purpose,'PASSWORD');return JSON.stringify({id:'example-item'});}return JSON.stringify(stored);};
+ const runner=async(bin,args,env,input)=>{calls.push({args,input});if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({category:'LOGIN',fields:[{id:'username',label:'username',type:'STRING',purpose:'USERNAME'},{id:'password',label:'password',type:'CONCEALED',purpose:'PASSWORD'}]});if(args[1]==='create'){stored=templateOf(args,input);assert.equal(stored.fields[1].purpose,'PASSWORD');return JSON.stringify({id:'example-item'});}return JSON.stringify(stored);};
  assert.equal((await storeCredential(runner,{},'example-vault','Example','user','synthetic-value')).verified,true);
  assert.equal(calls.length,4);assert(!JSON.stringify(calls.map(x=>x.args)).includes('synthetic-value'));assert(calls[3].args.includes('--reveal'));
 });
@@ -123,4 +126,181 @@ for (const mode of ['abort', 'deadline']) test('ordinary operation collects desc
   controller.abort();if(mode==='deadline')t.mock.timers.reset();
   await rm(directory,{recursive:true,force:true});
  }
+});
+
+function fakeAccount(options={}){
+ const items=new Map(options.items??[]);const calls=[];let next=0;
+ const vault={id:'automation-vault',name:'Example — Automation',description:'Managed by Oxi Op for BB project target'};
+ const run=async(_b,args,_env,input)=>{
+  calls.push({args,input});
+  const [group,action]=args;
+  if(group==='vault')return JSON.stringify(action==='list'?[]:vault);
+  if(group==='service-account'){if(options.failCreate)throw new Error('synthetic provider failure');return 'synthetic-token-'+(++next)+'\n';}
+  if(action==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));
+  if(action==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});
+  if(action==='create'){if(options.failBackup)throw new Error('synthetic backup failure');const t=templateOf(args,input);const id='item-'+items.size;items.set(id,{title:t.title,created_at:options.createdAt??new Date().toISOString(),fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id});}
+  if(action==='edit'){const it=items.get(args[2]);it.title=args[args.indexOf('--title')+1];return '{}';}
+  if(action==='get')return JSON.stringify(items.get(args[2]));
+  throw new Error('unexpected');
+ };
+ return {run,calls,items};
+}
+const accounts=[{profile:'routine',name:'Example pipeline reader',permissions:['read_items']},{profile:'intake',name:'Example secret intake',permissions:['read_items','write_items']}];
+test('service accounts are issued once, scoped to one vault, backed up through stdin before use',async()=>{
+ const f=fakeAccount();
+ const result=await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ assert.equal(result.vaultId,'automation-vault');
+ assert.deepEqual(result.accounts.map(a=>[a.profile,a.token,a.recovered]),[['routine','synthetic-token-1',false],['intake','synthetic-token-2',false]]);
+ const creates=f.calls.filter(c=>c.args[0]==='service-account').map(c=>c.args);
+ assert.deepEqual(creates,[
+  ['service-account','create','Example pipeline reader','--vault','automation-vault:read_items','--expires-in','90d','--raw'],
+  ['service-account','create','Example secret intake','--vault','automation-vault:read_items,write_items','--expires-in','90d','--raw'],
+ ]);
+ assert(!creates.flat().some(a=>a.includes('can-create-vaults')||a.includes('share_items')));
+ assert(!JSON.stringify(f.calls.map(c=>c.args)).includes('synthetic-token'));
+ assert(f.calls.filter(c=>c.args[1]==='create'&&c.args[0]==='item').every(c=>c.args.includes('backup-vault')));
+ assert.equal(f.items.size,2);
+});
+test('a retried issue recovers backed-up tokens instead of creating another service account',async()=>{
+ const f=fakeAccount();
+ await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ const before=f.calls.filter(c=>c.args[0]==='service-account').length;
+ const again=await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ assert.equal(f.calls.filter(c=>c.args[0]==='service-account').length,before);
+ assert.deepEqual(again.accounts.map(a=>[a.token,a.recovered]),[['synthetic-token-1',true],['synthetic-token-2',true]]);
+});
+test('issue failures never disclose provider output or tokens',async()=>{
+ await assert.rejects(issueServiceAccounts(fakeAccount({failCreate:true}).run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts}),e=>!e.message.includes('synthetic'));
+ await assert.rejects(issueServiceAccounts(fakeAccount({failBackup:true}).run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts}),e=>!e.message.includes('synthetic')&&e.message.includes('owner review'));
+});
+test('scope probe requires exactly one visible vault and reports a refused write',async()=>{
+ const calls=[];
+ const reader=async(_b,args)=>{calls.push(args);if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});throw new Error('denied');};
+ assert.deepEqual(await probeServiceScope(reader,{},'automation-vault'),{vaultIds:['automation-vault'],writable:false,writeFailure:'create'});
+ await assert.rejects(probeServiceScope(async()=>JSON.stringify([{id:'automation-vault'},{id:'other-vault'}]),{},'automation-vault'),/scope/);
+ await assert.rejects(probeServiceScope(async(_b,args)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);throw new Error('offline');},{},'automation-vault'),/read/);
+ const items=new Map();
+ const writer=async(_b,args,_e,input)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create'){const t=templateOf(args,input);items.set('probe',{title:t.title,fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id:'probe'});}if(args[1]==='get')return JSON.stringify(items.get('probe'));if(args[1]==='delete'){items.delete(args[2]);return '';}throw new Error('unexpected');};
+ assert.deepEqual(await probeServiceScope(writer,{},'automation-vault'),{vaultIds:['automation-vault'],writable:true});
+ assert.equal(items.size,0);
+});
+
+test('agent commands get only requested keys, never the service token, and output is concealed',async()=>{
+ const reads=[];
+ const run=async(_b,args,env)=>{reads.push(args);assert.equal(env.OP_SERVICE_ACCOUNT_TOKEN,'synthetic-token');return 'synthetic-key-value';};
+ let childEnv,childArgs;
+ const command=async(bin,args,env,cwd,timeout)=>{childEnv=env;childArgs=[bin,...args,cwd,timeout];return {exitCode:0,output:'start synthetic-key-value end',truncated:false};};
+ const result=await execWithKeys(run,command,{OP_SERVICE_ACCOUNT_TOKEN:'synthetic-token'},'automation-vault',['deploy','--check'],{API_KEY:{item:'Example API',field:'credential'}},'/work/project',5000);
+ assert.deepEqual(reads,[['read','--no-newline','op://automation-vault/Example API/credential']]);
+ assert.equal(childEnv.API_KEY,'synthetic-key-value');
+ assert(!Object.keys(childEnv).some(k=>k.startsWith('OP_')));
+ assert.deepEqual(childArgs,['deploy','--check','/work/project',5000]);
+ assert.equal(result.output,'start <concealed> end');
+ await assert.rejects(execWithKeys(run,command,{},'v',['x'],{OP_SERVICE_ACCOUNT_TOKEN:{item:'a',field:'b'}},undefined,1000));
+ await assert.rejects(execWithKeys(run,command,{},'v',['x'],{K:{item:'../other',field:'b'}},undefined,1000));
+ await assert.rejects(execWithKeys(async()=>{throw new Error('synthetic-provider-detail');},command,{},'v',['x'],{K:{item:'a',field:'b'}},undefined,1000),e=>!e.message.includes('synthetic-provider-detail'));
+});
+test('a real child process receives the key and the returned output conceals it',async()=>{
+ const result=await execWithKeys(async()=>'synthetic-live-value',runCommand,{OP_SERVICE_ACCOUNT_TOKEN:'synthetic-token'},'v',[process.execPath,'-e','console.log(process.env.K, typeof process.env.OP_SERVICE_ACCOUNT_TOKEN); process.exit(3)'],{K:{item:'a',field:'b'}},undefined,10000);
+ assert.equal(result.exitCode,3);
+ assert.equal(result.output.trim(),'<concealed> undefined');
+});
+test('key listing returns titles and field labels only',async()=>{
+ const run=async(_b,args)=>args[1]==='list'?JSON.stringify([{id:'i1',title:'Example API'}]):JSON.stringify({fields:[{label:'credential',value:'synthetic-hidden'},{label:'notesPlain',value:''}]});
+ const result=await listVaultKeys(run,{},'automation-vault');
+ assert.deepEqual(result,{items:[{item:'Example API',fields:['credential','notesPlain']}]});
+ assert(!JSON.stringify(result).includes('synthetic-hidden'));
+});
+test('on Linux the item template goes through a private file that is removed afterwards',async()=>{
+ const {statSync,existsSync,readFileSync}=await import('node:fs');
+ let seen;
+ const result=await withTemplateFile('{"title":"synthetic"}','linux',async(path,input)=>{
+  assert.equal(input,undefined);assert.notEqual(path,'/dev/stdin');
+  assert.equal(statSync(path).mode&0o777,0o600);assert.equal(statSync(path.replace(/\/item\.json$/,'')).mode&0o777,0o700);
+  assert.equal(readFileSync(path,'utf8'),'{"title":"synthetic"}');seen=path;return 'created';
+ });
+ assert.equal(result,'created');assert(!existsSync(seen));
+ await assert.rejects(withTemplateFile('{}','linux',async path=>{seen=path;throw new Error('synthetic failure');}));
+ assert(!existsSync(seen));
+ assert.deepEqual(await withTemplateFile('{"a":1}','darwin',async(path,input)=>[path,input]),['/dev/stdin',{a:1}]);
+});
+test('a Linux store never passes the password in arguments',async()=>{
+ const calls=[];let stored;
+ const runner=async(_b,args,_e,input)=>{calls.push(args);if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create'){assert.equal(input,undefined);const {readFileSync}=await import('node:fs');stored=JSON.parse(readFileSync(args[args.indexOf('--template')+1],'utf8'));return JSON.stringify({id:'item'});}return JSON.stringify({fields:stored.fields.map(f=>({label:f.label,value:f.value}))});};
+ assert.equal((await storeCredential(runner,{},'vault','Example','user','synthetic-linux-value',undefined,'linux')).verified,true);
+ assert(!JSON.stringify(calls).includes('synthetic-linux-value'));
+});
+test('an agent command timeout ends descendants that hold keys',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ const {mkdtemp,readFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const directory=await mkdtemp(join(tmpdir(),'oxi-op-agent-'));const file=join(directory,'pid');
+ const source=`const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(file)},String(c.pid));setInterval(()=>{},1000);`;
+ let pid;
+ try{
+  const result=await execWithKeys(async()=>'synthetic-key',runCommand,{},'v',[process.execPath,'-e',source],{K:{item:'a',field:'b'}},undefined,700);
+  assert.equal(result.timedOut,true);
+  pid=Number(await readFile(file,'utf8'));
+  const running=async()=>{try{process.kill(pid,0);}catch{return false;}if(process.platform==='linux'){try{if((await readFile('/proc/'+pid+'/stat','utf8')).split(' ')[2]==='Z')return false;}catch{return false;}}return true;};
+  let alive=true;for(let i=0;i<100&&(alive=await running());i++)await new Promise(r=>setTimeout(r,10));
+  assert.equal(alive,false,'descendant with the key must not survive');
+ }finally{if(pid){try{process.kill(pid,'SIGKILL');}catch{}}await rm(directory,{recursive:true,force:true});}
+});
+test('a backup near its 90-day expiry is set aside and a new account is issued',async()=>{
+ const f=fakeAccount({createdAt:new Date(Date.now()-85*86400000).toISOString()});
+ await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ const again=await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ assert.deepEqual(again.accounts.map(a=>a.recovered),[false,false]);
+ assert.equal(f.calls.filter(c=>c.args[0]==='service-account').length,4);
+ assert.equal([...f.items.values()].filter(x=>/\(expired \d{4}-\d{2}-\d{2}\)$/.test(x.title)).length,2);
+ const fresh=fakeAccount();
+ await issueServiceAccounts(fresh.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ const recovered=await issueServiceAccounts(fresh.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ assert.deepEqual(recovered.accounts.map(a=>a.recovered),[true,true]);
+});
+test('concealment happens before the cut and a split value at the cut is hidden',()=>{
+ const value='SYNTHETICVALUE1234567890';
+ const big='x'.repeat(40000)+'\n'+'y'.repeat(10)+value+'\n'+'tail';
+ const r=concealOutput(big,[value],false);
+ assert(!r.output.includes(value));assert(r.output.includes('<concealed>'));assert.equal(r.truncated,true);
+ const split=value.slice(-12)+' rest';
+ const s=concealOutput(split,[value],true);
+ assert(!s.output.includes(value.slice(-12)));assert(s.output.startsWith('<concealed>'));
+});
+test('a leader that exits while an escaped descendant holds output does not hang the call',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ const source="const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setTimeout(()=>{},3000)'],{detached:true,stdio:['ignore','inherit','inherit']}).unref();";
+ const started=Date.now();
+ const result=await runCommand(process.execPath,['-e',source],{},undefined,20000);
+ assert.deepEqual([result.exitCode,result.escapedProcess,result.timedOut],[0,true,false]);
+ assert(Date.now()-started<2500);
+ const begun=Date.now();
+ await assert.rejects(runProcess(process.execPath,['-e',source],{}),/cleanup-unconfirmed/);
+ assert(Date.now()-begun<2500);
+});
+test('multibyte titles survive pipe chunk boundaries',async()=>{
+ const text='Oxi Op service account — Пример '.repeat(5000);
+ const out=await runProcess(process.execPath,['-e',"process.stdout.write('Oxi Op service account — Пример '.repeat(5000))"],{});
+ assert.equal(out,text);
+});
+test('a value cut at the end of stopped output is concealed',()=>{
+ const value='SYNTHETICVALUE1234567890';
+ const r=concealOutput('progress line\nkey='+value.slice(0,9),[value],true);
+ assert(!r.output.includes(value.slice(0,9)));assert(r.output.endsWith('<concealed>'));
+});
+test('key listing stops reading after the first failure',async()=>{
+ let gets=0;
+ const items=Array.from({length:40},(_,i)=>({id:'i'+i,title:'t'+i}));
+ const run=async(_b,args)=>{if(args[1]==='list')return JSON.stringify(items);const n=++gets;await new Promise(r=>setTimeout(r,2));if(n===2)throw new Error('rate limited');return JSON.stringify({fields:[]});};
+ await assert.rejects(listVaultKeys(run,{},'v'));
+ await new Promise(r=>setTimeout(r,50));
+ assert(gets<=6,'workers kept reading: '+gets);
+});
+test('codes survive a wrapping transport message',async()=>{
+ const {errorCode,CodedError}=await import('./dist/test/errors.js');
+ assert.equal(errorCode(new Error('Host call failed: '+new CodedError('backup-list-failed','x').message)),'backup-list-failed');
+ assert.equal(errorCode(new Error('plain')),undefined);
+});
+test('a write probe whose create succeeded but read-back failed is inconclusive, not a denial',async()=>{
+ const run=async(_b,args,_e,input)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create')return JSON.stringify({id:'probe'});throw new Error('transient read failure');};
+ await assert.rejects(probeServiceScope(run,{},'automation-vault'),e=>e.message.includes('[probe-inconclusive]'));
 });

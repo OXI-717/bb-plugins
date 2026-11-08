@@ -7,6 +7,7 @@ import React from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import plugin from './dist/test/server.js';
 import {createJournal, cancelledOutcome} from './dist/test/journal.js';
+import {routeSchema} from './dist/test/contract.js';
 
 const route = {
   projectId: 'example-project', hostId: 'example-host', vaultId: 'example-vault',
@@ -15,13 +16,13 @@ const route = {
 };
 const context = {projectId: route.projectId, threadId: 'example-thread'};
 
-function setup(t, overrides = {}, callHost, send, listInteractions = async () => []) {
+function setup(t, overrides = {}, callHost, send, listInteractions = async () => [], hostStatus = 'connected') {
   const host = createFakePluginHost({
     pluginId: 'oxi-op', settings: {routes: JSON.stringify([{...route, ...overrides}])},
     sdk: {
       projects: {get: async ({projectId}) => ({id: projectId, name: 'Example workspace'})},
       threads: {get: async ({threadId}) => ({id: threadId, projectId: route.projectId, title: 'Example session'}), send: send ?? (async () => ({delivery: 'sent'})), interactions: {list: listInteractions}},
-      hosts: {get: async ({hostId}) => ({id: hostId, name: 'Example machine'})},
+      hosts: {get: async ({hostId}) => ({id: hostId, name: 'Example machine', status: typeof hostStatus === 'function' ? hostStatus(hostId) : hostStatus})},
     },
     experimental_callHostRpc: callHost ?? (({method}) => method === 'store'
       ? {itemId: 'example-item', verified: true} : method === 'check' ? {authorized: true} : {completed: true}),
@@ -255,7 +256,7 @@ test('unavailable BB names are explicit and never replaced with opaque IDs', asy
   h.sdk.stub('projects.get', async () => {throw Error('unavailable');});
   h.sdk.stub('threads.get', async () => ({id: 'other-thread', projectId: route.projectId, title: 'Wrong session'}));
   h.sdk.stub('hosts.get', async () => ({id: 'other-host', name: 'Wrong machine'}));
-  const pending = h.behavior.callAgentTool('oxi_op_store', {title: 'Example'}, context);
+  const pending = h.behavior.runCli(['display-test'], context);
   await setImmediate();
   const payload = h.inspection.pendingInteractions[0].payload;
   assert.equal(payload.projectName, 'Название проекта недоступно');
@@ -455,4 +456,222 @@ test('unknown cancellation reasons never enter the journal or completion text',a
  const journal=createJournal(storage);
  await journal.run('run','default',context,async()=>cancelledOutcome({outcome:'cancelled',reason:'synthetic-sensitive-value'}));
  const rows=await journal.list(context);assert.equal(rows[0].state,'cancelled');assert.equal(rows[0].cancelReason,undefined);assert(!JSON.stringify(rows).includes('synthetic-sensitive-value'));
+});
+
+test('offline credential host fails before intake without requesting a password',async t=>{
+ const h=setup(t,{authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,credentialHostId:'credential-host'},undefined,undefined,undefined,id=>id==='credential-host'?'disconnected':'connected');
+ const pending=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ const unexpected=h.inspection.pendingInteractions[0];if(unexpected)h.behavior.cancelInteraction(unexpected.id);
+ const result=JSON.parse(await pending);
+ assert.equal(result.completed,false);assert.equal(result.code,'credential_host_offline');
+ assert.equal(h.inspection.pendingInteractions.length,0);assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ const rows=JSON.parse((await h.behavior.runCli(['history'],context)).stdout);
+ assert.equal(rows[0].state,'failed');assert.equal(rows[0].failureCode,'credential_host_offline');
+});
+
+test('host loss while a form is open stops submission before any credential host call',async t=>{
+ let online=true;
+ const h=setup(t,{},undefined,undefined,undefined,()=>online?'connected':'disconnected');
+ const work=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ online=false;h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{password:'synthetic-value'});
+ const result=JSON.parse(await work);assert.equal(result.code,'credential_host_offline');
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];assert.equal(row.state,'failed');assert(row.approvedAt);
+});
+test('diagnostics identify offline desktop dependency without forms or op calls',async t=>{
+ const h=setup(t,{authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,credentialHostId:'credential-host'},undefined,undefined,undefined,id=>id==='credential-host'?'disconnected':'connected');
+ const result=JSON.parse((await h.behavior.runCli(['diagnose'],context)).stdout);
+ assert.equal(result.credentialHost.status,'disconnected');assert.equal(result.executionHost.status,'connected');assert.equal(result.credentialCalls,0);assert.equal(result.serviceTokenConfigured,false);
+ assert.equal(h.inspection.pendingInteractions.length,0);assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+});
+
+const desktop={authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,credentialHostId:'example-credential-host'};
+const owner={authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,desktopHosts:[{hostId:'mac-air',opBinary:'/air/op'},{hostId:'mac-max',opBinary:'/max/op'}]};
+const sessionHosts={'linux-server':'/usr/bin/op','mac-max':'/max/op','mac-air':'/air/op'};
+function fleet(t,{offline=[],sessionHost='linux-server',environmentId='example-env',callHost,routes,tokens}={}){
+ const host=createFakePluginHost({
+  pluginId:'oxi-op',settings:{routes:JSON.stringify(routes),...(tokens?{projectServiceAccounts:JSON.stringify(tokens)}:{})},
+  sdk:{
+   projects:{get:async({projectId})=>({id:projectId,name:'Example '+projectId})},
+   threads:{get:async({threadId})=>({id:threadId,projectId:route.projectId,title:'Example session',environmentId}),send:async()=>({delivery:'sent'}),interactions:{list:async()=>[]}},
+   environments:{get:async({environmentId})=>({id:environmentId,hostId:sessionHost,path:'/work/example'})},
+   hosts:{get:async({hostId})=>({id:hostId,name:'Machine '+hostId,status:offline.includes(hostId)?'disconnected':'connected'})},
+  },
+  experimental_callHostRpc:callHost??(()=>({completed:true})),
+ });
+ plugin(host.bb);t.after(()=>host.harness.lifecycle.dispose());return host.harness;
+}
+const agentRoute={...route,profile:'routine',tokenEnvironment:undefined,tokenSetting:'projectServiceAccounts',requireApproval:false,allowAgentCommands:true,hostId:'linux-server',opBinary:'/usr/bin/op',vaultId:'automation-vault',sessionHosts,operations:[]};
+const agentTokens={[route.projectId]:{routine:'synthetic-reader-token'}};
+test('critical approval moves to the online owner Mac and keeps its own op path',async t=>{
+ const h=fleet(t,{offline:['mac-air'],routes:[{...route,...owner,hostId:'mac-max'}],callHost:()=>({itemId:'example-item',verified:true})});
+ const work=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ const form=h.inspection.pendingInteractions[0];
+ assert.equal(form.payload.hostId,'mac-max');assert.equal(form.payload.hostLabel,'Machine mac-max');
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ h.behavior.submitInteraction(form.id,{password:'synthetic-sensitive-value'});await work;
+ const call=h.inspection.experimental_hostRpcCalls[0];
+ assert.equal(call.hostId,'mac-max');assert.equal(call.input.route.opBinary,'/max/op');assert.equal(call.input.route.credentialHostId,'mac-max');
+});
+test('with every owner Mac offline no form opens and nothing is contacted',async t=>{
+ const h=fleet(t,{offline:['mac-air','mac-max'],routes:[{...route,...owner,hostId:'mac-max'}]});
+ const result=JSON.parse(await h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context));
+ assert.equal(result.code,'credential_host_offline');
+ assert.equal(h.inspection.pendingInteractions.length+h.inspection.experimental_hostRpcCalls.length,0);
+});
+test('agent keys run without approval on the session machine and never return values or the token',async t=>{
+ for(const [machine,op] of [['linux-server','/usr/bin/op'],['mac-max','/max/op']]){
+  const h=fleet(t,{sessionHost:machine,routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens,callHost:({method})=>method==='listKeys'?{items:[{item:'Example API',fields:['credential']}]}:{exitCode:0,output:'ok <concealed>',truncated:false,timedOut:false,escapedProcess:false}});
+  const keys=JSON.parse(await h.behavior.callAgentTool('oxi_op_keys',{},context));
+  assert.deepEqual(keys.items[0].fields,['credential']);
+  const result=JSON.parse(await h.behavior.callAgentTool('oxi_op_exec',{argv:['deploy','--check'],keys:{API_KEY:{item:'Example API',field:'credential'}}},context));
+  assert.equal(result.exitCode,0);assert.equal(result.output,'ok <concealed>');
+  assert.equal(h.inspection.pendingInteractions.length,0);
+  const calls=h.inspection.experimental_hostRpcCalls;
+  assert(calls.every(c=>c.hostId===machine&&c.input.route.opBinary===op));
+  assert.equal(calls[1].input.cwd,'/work/example');assert.equal(calls[1].input.serviceAccountToken,'synthetic-reader-token');
+  const history=(await h.behavior.runCli(['history'],context)).stdout;
+  assert(!history.includes('synthetic')&&!history.includes('ok <concealed>'));
+  assert.equal(JSON.parse(history)[0].result.exitCode,0);
+ }
+});
+test('agent keys refuse unlisted machines, critical vaults and reserved variables',async t=>{
+ const h=fleet(t,{sessionHost:'unknown-machine',routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens});
+ assert.equal(JSON.parse(await h.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'a',field:'b'}}},context)).code,'session_host_not_allowed');
+ const critical=JSON.parse(await h.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'a',field:'b'}},profile:'default'},context));
+ assert.equal(critical.completed,false);
+ await assert.rejects(h.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{OP_SERVICE_ACCOUNT_TOKEN:{item:'a',field:'b'}}},context));
+ await assert.rejects(h.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'../a',field:'b'}}},context));
+ const missing=fleet(t,{routes:[agentRoute],tokens:{}});
+ assert.equal(JSON.parse(await missing.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'a',field:'b'}}},context)).completed,false);
+ assert.equal(h.inspection.experimental_hostRpcCalls.length+missing.inspection.experimental_hostRpcCalls.length,0);
+ assert.throws(()=>routeSchema.parse({...route,...owner,allowAgentCommands:true}));
+ assert.throws(()=>routeSchema.parse({...agentRoute,requireApproval:true}));
+});
+function issuing({readerWritable=false,failProject}={}){
+ return ({method,input})=>{
+  if(method==='issueServiceAccounts'){if(input.projectId===failProject)throw new Error('synthetic provider detail');return {vaultId:'vault-'+input.projectId,vaultName:input.vaultName,accounts:input.accounts.map(a=>({profile:a.profile,token:'synthetic-'+input.projectId+'-'+a.profile,recovered:false}))};}
+  if(method==='probeScope')return {vaultIds:[input.route.vaultId],writable:input.route.profile==='intake'||readerWritable};
+  if(method==='verify')return {verified:true,cleaned:true};
+  throw new Error('unexpected '+method);
+ };
+}
+const projectRoutes=[{...route,...owner,hostId:'mac-max'},{...route,...owner,hostId:'mac-max',projectId:'p-one',vaultId:'p-one-default'},{...route,...owner,hostId:'mac-max',projectId:'p-two',vaultId:'p-two-default'}];
+const automateArgs=['automate','--projects','p-one,p-two','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)];
+test('one approval issues agent access for several projects and proves it before activation',async t=>{
+ const h=fleet(t,{offline:['mac-air'],routes:projectRoutes,callHost:issuing({failProject:'p-two'})});
+ const cancelled=h.behavior.runCli(automateArgs,context);await setImmediate();
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ const form=h.inspection.pendingInteractions[0];
+ assert.equal(form.timeoutMs,60_000);assert.equal(form.payload.hostId,'mac-max');
+ assert(form.payload.purpose.includes('read_items')&&form.payload.purpose.includes('90')&&form.payload.purpose.includes('Machine mac-max'));
+ h.behavior.cancelInteraction(form.id);await cancelled;
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ const work=h.behavior.runCli(automateArgs,context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ const out=(await work).stdout;assert(!out.includes('synthetic'));
+ assert.deepEqual(JSON.parse(out).projects.map(x=>x.state),['configured','needs-review']);
+ const failed=JSON.parse(out).projects[1];assert.equal(failed.stage,'issue');assert.equal(failed.reason,'unclassified');
+ const calls=h.inspection.experimental_hostRpcCalls;
+ const issue=calls.find(c=>c.method==='issueServiceAccounts');
+ assert.equal(issue.hostId,'mac-max');assert.equal(issue.input.route.opBinary,'/max/op');assert.equal(issue.input.backupVaultId,'p-one-default');assert.equal(issue.input.expiresIn,'90d');
+ assert.deepEqual(issue.input.accounts.map(a=>[a.profile,a.permissions.join(',')]),[['routine','read_items'],['intake','read_items,write_items']]);
+ assert(calls.filter(c=>c.method!=='issueServiceAccounts').every(c=>c.hostId==='linux-server'&&c.input.route.authentication==='service-account'));
+ const one={...context,projectId:'p-one'};
+ const routine=JSON.parse((await h.behavior.runCli(['status','--profile','routine'],one)).stdout);
+ assert.equal(routine.requireApproval,false);assert.equal(routine.vaultId,'vault-p-one');
+ assert.equal(JSON.parse((await h.behavior.runCli(['status','--profile','intake'],one)).stdout).requireApproval,true);
+ assert.equal((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-two'})).exitCode,1);
+ assert(!(await h.behavior.runCli(['history'],context)).stdout.includes('synthetic'));
+ const before=calls.length;
+ assert.equal((await h.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)],context)).exitCode,1);
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,before);
+});
+test('a reader that can write is never activated',async t=>{
+ const h=fleet(t,{routes:projectRoutes,callHost:issuing({readerWritable:true})});
+ const work=h.behavior.runCli(automateArgs,context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ const rows=JSON.parse((await work).stdout).projects;assert(rows.every(x=>x.state==='needs-review'&&x.stage==='probe-intake'&&x.reason==='reader-can-write'));
+ assert.equal((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-one'})).exitCode,1);
+});
+test('automatic access setup needs an online execution machine, desktop setup and project vaults',async t=>{
+ const offline=fleet(t,{offline:['linux-server'],routes:projectRoutes});
+ assert.equal((await offline.behavior.runCli(automateArgs,context)).exitCode,1);
+ const missing=fleet(t,{routes:[projectRoutes[0]]});
+ assert.equal((await missing.behavior.runCli(automateArgs,context)).exitCode,1);
+ const service=fleet(t,{routes:[route,...projectRoutes.slice(1)]});
+ assert.equal((await service.behavior.runCli(automateArgs,context)).exitCode,1);
+ const outsider=fleet(t,{routes:projectRoutes});
+ assert.equal((await outsider.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','other','--session-hosts',JSON.stringify(sessionHosts)],context)).exitCode,1);
+ for(const h of [offline,missing,service,outsider])assert.equal(h.inspection.experimental_hostRpcCalls.length+h.inspection.pendingInteractions.length,0);
+});
+test('tokens saved by an earlier approval are resumed on the server without a new card',async t=>{
+ let readerWritable=true;
+ const h=fleet(t,{offline:['mac-air'],routes:projectRoutes,callHost:x=>x.method==='describeScope'?{vaults:[{id:'vault-p-one',name:'Example p-one — Automation'}]}:issuing({readerWritable})(x)});
+ const args=['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)];
+ const first=h.behavior.runCli(args,context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ assert.equal(JSON.parse((await first).stdout).projects[0].reason,'reader-can-write');
+ readerWritable=false;
+ await h.behavior.setSettings({routes:JSON.stringify(projectRoutes)});
+ const before=h.inspection.experimental_hostRpcCalls.length;
+ const out=(await h.behavior.runCli([...args,'--resume-only'],context)).stdout;
+ assert.equal(h.inspection.pendingInteractions.length,0);
+ assert(!out.includes('synthetic'));
+ assert.deepEqual(JSON.parse(out).projects.map(x=>[x.state,x.resumed]),[['configured',true]]);
+ const calls=h.inspection.experimental_hostRpcCalls.slice(before);
+ assert(calls.every(c=>c.hostId==='linux-server'&&c.method!=='issueServiceAccounts'));
+ assert.deepEqual(calls.filter(c=>c.method==='describeScope').map(c=>c.input.serviceAccountToken).sort(),['synthetic-p-one-intake','synthetic-p-one-routine']);
+ assert.equal(JSON.parse((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-one'})).stdout).vaultId,'vault-p-one');
+});
+test('resume-only never opens an approval when no tokens were saved',async t=>{
+ const h=fleet(t,{routes:projectRoutes,callHost:issuing()});
+ const out=JSON.parse((await h.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts),'--resume-only'],context)).stdout);
+ assert.deepEqual(out.projects.map(x=>x.state),['not-issued']);
+ assert.equal(h.inspection.pendingInteractions.length+h.inspection.experimental_hostRpcCalls.length,0);
+});
+test('self-test stores one synthetic key, proves each machine and always removes the key',async t=>{
+ const {createHash}=await import('node:crypto');
+ let value;const intakeRoute={...agentRoute,profile:'intake',requireApproval:true,allowAgentCommands:false};
+ const call=({method,input,hostId})=>{
+  if(method==='store'){value=input.password;return {itemId:'i',verified:true};}
+  if(method==='listKeys')return {items:[{item:'other',fields:[]},{item:[...JSON.stringify(input)].length?'x':'x',fields:[]}].concat([{item:lastTitle,fields:['password']}])};
+  if(method==='exec'){if(hostId==='mac-max')throw new Error('synthetic failure');return {exitCode:0,output:createHash('sha256').update(value).digest('hex')+'  -\n<concealed>\n',truncated:false,timedOut:false,escapedProcess:false};}
+  if(method==='deleteSelftest'){assert.equal(input.title,lastTitle);return {deleted:1};}
+  throw new Error('unexpected '+method);
+ };
+ let lastTitle;
+ const h=fleet(t,{routes:[agentRoute,intakeRoute],tokens:{[route.projectId]:{routine:'r',intake:'i'}},callHost:x=>{if(x.method==='store')lastTitle=x.input.title;return call(x);}});
+ const out=await h.behavior.runCli(['selftest','--hosts','linux-server,mac-max'],context);
+ const result=JSON.parse(out.stdout);
+ assert.equal(out.exitCode,1);assert.equal(result.passed,false);
+ assert.deepEqual(result.machines[0],{hostId:'linux-server',keyListed:true,exitCode:0,valueMatched:true,valueConcealed:true});
+ assert.equal(result.machines[1].hostId,'mac-max');assert.equal(result.machines[2].cleanedUp,1);
+ assert(!out.stdout.includes(value));
+ assert.equal(h.inspection.pendingInteractions.length,0);
+ assert.equal((await h.behavior.runCli(['selftest','--hosts','unknown'],context)).exitCode,1);
+});
+test('self-test removes its key even when the store result is uncertain',async t=>{
+ const intakeRoute={...agentRoute,profile:'intake',requireApproval:true,allowAgentCommands:false};
+ const calls=[];
+ const h=fleet(t,{routes:[agentRoute,intakeRoute],tokens:{[route.projectId]:{routine:'r',intake:'i'}},callHost:x=>{calls.push(x.method);if(x.method==='store')throw new Error('uncertain');if(x.method==='deleteSelftest')return {deleted:1};throw new Error('unexpected');}});
+ const out=await h.behavior.runCli(['selftest','--hosts','linux-server'],context).catch(()=>({exitCode:1}));
+ assert.equal(out.exitCode,1);
+ assert.deepEqual(calls,['store','deleteSelftest']);
+});
+test('resume uses only the machines and op paths of an approved card',async t=>{
+ const base=issuing();
+ const tokens={'p-one':{routine:'synthetic-r',intake:'synthetic-i'}};
+ const describe=x=>x.method==='describeScope'?{vaults:[{id:'vault-p-one',name:'Example p-one — Automation'}]}:base(x);
+ const h=fleet(t,{routes:projectRoutes,tokens,callHost:describe});
+ const tampered=JSON.parse((await h.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify({...sessionHosts,'linux-server':'/tmp/other-op'}),'--resume-only'],context)).stdout).projects[0];
+ assert.equal(tampered.state,'not-issued');
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ const work=h.behavior.runCli(automateArgs.map(a=>a==='p-one,p-two'?'p-one':a),context);await setImmediate();
+ const form=h.inspection.pendingInteractions[0];
+ assert(form,'saved tokens without an approved plan go through the card');
+ assert(form.payload.purpose.includes('/usr/bin/op')&&form.payload.purpose.includes('/max/op'));
+ h.behavior.submitInteraction(form.id,{approved:true});
+ assert.equal(JSON.parse((await work).stdout).projects[0].state,'configured');
+ assert.equal(h.inspection.experimental_hostRpcCalls.filter(c=>c.method==='issueServiceAccounts').length,1);
 });
