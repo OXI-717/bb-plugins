@@ -565,7 +565,7 @@ test('one approval issues agent access for several projects and proves it before
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
  const form=h.inspection.pendingInteractions[0];
  assert.equal(form.timeoutMs,60_000);assert.equal(form.payload.hostId,'mac-max');
- assert(form.payload.purpose.includes('read_items')&&form.payload.purpose.includes('90')&&form.payload.purpose.includes('Machine mac-max'));
+ assert(form.payload.purpose.includes('read_items')&&form.payload.purpose.includes('без срока действия')&&form.payload.purpose.includes('Machine mac-max'));
  h.behavior.cancelInteraction(form.id);await cancelled;
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
  const work=h.behavior.runCli(automateArgs,context);await setImmediate();
@@ -575,7 +575,7 @@ test('one approval issues agent access for several projects and proves it before
  const failed=JSON.parse(out).projects[1];assert.equal(failed.stage,'issue');assert.equal(failed.reason,'unclassified');
  const calls=h.inspection.experimental_hostRpcCalls;
  const issue=calls.find(c=>c.method==='issueServiceAccounts');
- assert.equal(issue.hostId,'mac-max');assert.equal(issue.input.route.opBinary,'/max/op');assert.equal(issue.input.backupVaultId,'p-one-default');assert.equal(issue.input.expiresIn,'90d');
+ assert.equal(issue.hostId,'mac-max');assert.equal(issue.input.route.opBinary,'/max/op');assert.equal(issue.input.backupVaultId,'p-one-default');assert.equal(issue.input.expiresIn,undefined);
  assert.deepEqual(issue.input.accounts.map(a=>[a.profile,a.permissions.join(',')]),[['routine','read_items'],['intake','read_items,write_items']]);
  assert(calls.filter(c=>c.method!=='issueServiceAccounts').every(c=>c.hostId==='linux-server'&&c.input.route.authentication==='service-account'));
  const one={...context,projectId:'p-one'};
@@ -703,4 +703,26 @@ test('diagnostics list owner machines only for routes that need owner approval',
  const h=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens});
  assert.equal(JSON.parse((await h.behavior.runCli(['diagnose'],context)).stdout).ownerMachines.length,2);
  assert.deepEqual(JSON.parse((await h.behavior.runCli(['diagnose','--profile','routine'],context)).stdout).ownerMachines,[]);
+});
+test('a reissue keeps working access until the replacements prove their scope, then swaps them',async t=>{
+ let readerWritable=true;
+ const issued=[];
+ const h=fleet(t,{routes:[...projectRoutes,{...agentRoute,projectId:'p-one',vaultId:'old-vault'},{...agentRoute,projectId:'p-one',profile:'intake',requireApproval:true,allowAgentCommands:false,vaultId:'old-vault'}],tokens:{'p-one':{routine:'synthetic-old-r',intake:'synthetic-old-i'}},callHost:x=>{if(x.method==='issueServiceAccounts')issued.push(x.input);return issuing({readerWritable})(x);}});
+ const args=['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)];
+ assert.equal((await h.behavior.runCli(args,context)).exitCode,1,'configured access needs --reissue');
+ const first=h.behavior.runCli([...args,'--reissue'],context);await setImmediate();
+ assert(h.inspection.pendingInteractions[0].title.startsWith('Перевыпуск'));assert(h.inspection.pendingInteractions[0].payload.title.startsWith('Перевыпустить'));
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ assert.equal(JSON.parse((await first).stdout).projects[0].reason,'reader-can-write');
+ const p1={...context,projectId:'p-one'};
+ assert.equal(JSON.parse((await h.behavior.runCli(['status','--profile','routine'],p1)).stdout).vaultId,'old-vault','failed proof keeps the old access');
+ readerWritable=false;
+ const second=h.behavior.runCli([...args,'--reissue'],context);await setImmediate();await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ assert.equal(JSON.parse((await second).stdout).projects[0].state,'configured');
+ assert.equal(issued.length,2);assert(issued.every(x=>x.replaceExisting===true));
+ assert.equal(h.inspection.pendingInteractions.length,0);
+ assert.equal(JSON.parse((await h.behavior.runCli(['status','--profile','routine'],p1)).stdout).vaultId,'vault-p-one');
+ const routes=JSON.parse(JSON.parse(JSON.stringify((await h.behavior.runCli(['diagnose','--profile','routine'],p1)).stdout))).serviceTokenConfigured;
+ assert.equal(routes,true);
 });
