@@ -627,3 +627,24 @@ test('resume-only never opens an approval when no tokens were saved',async t=>{
  assert.deepEqual(out.projects.map(x=>x.state),['not-issued']);
  assert.equal(h.inspection.pendingInteractions.length+h.inspection.experimental_hostRpcCalls.length,0);
 });
+test('self-test stores one synthetic key, proves each machine and always removes the key',async t=>{
+ const {createHash}=await import('node:crypto');
+ let value;const intakeRoute={...agentRoute,profile:'intake',requireApproval:true,allowAgentCommands:false};
+ const call=({method,input,hostId})=>{
+  if(method==='store'){value=input.password;return {itemId:'i',verified:true};}
+  if(method==='listKeys')return {items:[{item:'other',fields:[]},{item:[...JSON.stringify(input)].length?'x':'x',fields:[]}].concat([{item:lastTitle,fields:['password']}])};
+  if(method==='exec'){if(hostId==='mac-max')throw new Error('synthetic failure');return {exitCode:0,output:createHash('sha256').update(value).digest('hex')+'  -\n<concealed>\n',truncated:false};}
+  if(method==='deleteSelftest'){assert.equal(input.title,lastTitle);return {deleted:1};}
+  throw new Error('unexpected '+method);
+ };
+ let lastTitle;
+ const h=fleet(t,{routes:[agentRoute,intakeRoute],tokens:{[route.projectId]:{routine:'r',intake:'i'}},callHost:x=>{if(x.method==='store')lastTitle=x.input.title;return call(x);}});
+ const out=await h.behavior.runCli(['selftest','--project',route.projectId,'--hosts','linux-server,mac-max'],context);
+ const result=JSON.parse(out.stdout);
+ assert.equal(out.exitCode,1);assert.equal(result.passed,false);
+ assert.deepEqual(result.machines[0],{hostId:'linux-server',keyListed:true,exitCode:0,valueMatched:true,valueConcealed:true});
+ assert.equal(result.machines[1].hostId,'mac-max');assert.equal(result.machines[2].cleanedUp,1);
+ assert(!out.stdout.includes(value));
+ assert.equal(h.inspection.pendingInteractions.length,0);
+ assert.equal((await h.behavior.runCli(['selftest','--project',route.projectId,'--hosts','unknown'],context)).exitCode,1);
+});

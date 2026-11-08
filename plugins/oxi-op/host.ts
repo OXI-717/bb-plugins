@@ -56,6 +56,15 @@ export default experimental_defineHostEntry({ contract, handlers: {
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(opBinary, args, env, input, signal);
             return probeWriteMethods(runner, serviceEnvironment(serviceAccountToken), vaultId, ctx.signal);
         },
+        deleteSelftest: async ({route, serviceAccountToken, title}, ctx) => {
+            if (route.authentication !== 'service-account') throw new Error('Self-test cleanup requires a service account');
+            const env = await environment(route, ctx.signal, serviceAccountToken);
+            const op = async (args: string[]) => runProcess(route.opBinary, args, env, undefined, ctx.signal);
+            const items = JSON.parse(await op(['item', 'list', '--vault', route.vaultId, '--format=json'])).filter((x: {title: string}) => x.title === title);
+            for (const item of items) await op(['item', 'delete', item.id, '--vault', route.vaultId]);
+            if (JSON.parse(await op(['item', 'list', '--vault', route.vaultId, '--format=json'])).some((x: {title: string}) => x.title === title)) throw new Error('Self-test cleanup could not be confirmed');
+            return {deleted: items.length};
+        },
         probeScope: async ({route, serviceAccountToken}, ctx) => {
             if (route.authentication !== 'service-account') throw new Error('Scope probes require a service account');
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, args, env, input, signal);

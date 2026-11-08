@@ -1,5 +1,6 @@
 import { defineCli, cliCommand, defineRpcContract, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
+import { createHash, randomUUID } from 'node:crypto';
 import { contract, routeSchema, resolveRoute, keyReferenceSchema, type Route } from './contract.js';
 import {createJournal, cancelledOutcome, OperationFailure} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal};
@@ -433,6 +434,34 @@ export default function plugin(bb: BbPluginApi) {
                 const scope=await host.call('describeScope',{opBinary:input.options['op-binary'],serviceAccountToken:token},{hostId:input.options.host,signal:ctx.signal});
                 if(scope.vaults.length!==1)throw new Error('Intake scope differs from one vault');
                 return {exitCode:0,stdout:JSON.stringify(await host.call('probeWriteMethods',{opBinary:input.options['op-binary'],serviceAccountToken:token,vaultId:scope.vaults[0].id},{hostId:input.options.host,signal:ctx.signal}))};
+            }}),
+            selftest:cliCommand({summary:'Prove agent keys end to end on listed machines with one synthetic key; never opens a form',options:{project:{type:'string',description:'Exact target BB project ID',required:true},hosts:{type:'string',description:'Comma-separated machine IDs from the agent route',required:true}},async run(input,ctx){
+                const projectId=input.options.project;
+                const values=await settings.get();const routes=JSON.parse(values.routes);
+                const reader=resolveRoute(routes,projectId,'routine');const intake=resolveRoute(routes,projectId,'intake');
+                const tokens=tokenMapSchema.parse(JSON.parse(values.projectServiceAccounts))[projectId]??{};
+                if(!tokens.routine||!tokens.intake||!reader.allowAgentCommands||!reader.sessionHosts)throw new Error('Agent access is not configured for this project');
+                const hosts=input.options.hosts.split(',').map(x=>x.trim()).filter(Boolean);
+                if(!hosts.length||hosts.some(h=>!Object.hasOwn(reader.sessionHosts!,h)))throw new Error('List machines from the agent route');
+                const title='OXI OP selftest '+randomUUID();const value=randomUUID()+randomUUID();
+                const expected=createHash('sha256').update(value).digest('hex');
+                const rows:Record<string,unknown>[]=[];
+                await host.call('store',{route:intake,serviceAccountToken:tokens.intake,title,username:'synthetic-selftest',password:value},{hostId:intake.hostId,signal:ctx.signal});
+                try{
+                    for(const hostId of hosts){
+                        const route={...reader,hostId,opBinary:reader.sessionHosts![hostId]};
+                        try{
+                            const listed=await host.call('listKeys',{route,serviceAccountToken:tokens.routine},{hostId,signal:ctx.signal});
+                            const result=await host.call('exec',{route,serviceAccountToken:tokens.routine,argv:['/bin/sh','-c','test -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" || exit 7; if command -v sha256sum >/dev/null; then printf %s "$K" | sha256sum; else printf %s "$K" | shasum -a 256; fi; printf "%s\\n" "$K"'],keys:{K:{item:title,field:'password'}},timeoutSeconds:60},{hostId,signal:ctx.signal});
+                            rows.push({hostId,keyListed:listed.items.some(x=>x.item===title&&x.fields.includes('password')),exitCode:result.exitCode,valueMatched:result.output.includes(expected),valueConcealed:!result.output.includes(value)&&result.output.includes('<concealed>')});
+                        }catch(error){rows.push({hostId,failed:failureReason(error)});}
+                    }
+                }finally{
+                    const cleanup=await host.call('deleteSelftest',{route:intake,serviceAccountToken:tokens.intake,title},{hostId:intake.hostId,signal:ctx.signal});
+                    rows.push({cleanedUp:cleanup.deleted});
+                }
+                const ok=rows.filter(r=>'hostId' in r).every(r=>r.keyListed===true&&r.exitCode===0&&r.valueMatched===true&&r.valueConcealed===true);
+                return {exitCode:ok?0:1,stdout:JSON.stringify({passed:ok,machines:rows})};
             }}),
             'connect-many':cliCommand({summary:'Approve a bounded explicit list of project vault connections',options:{notify:notifyOption,projects:{type:'string',description:'JSON array of projectId and optional exact existingVaultId',required:true},profile:{type:'string',description:'Existing owner desktop setup profile',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectMany(input.options.projects,input.options.profile,context));}}),
             connect: cliCommand({summary:'Approve creating a dedicated vault and default project route',options:{notify:notifyOption,project:{type:'string',description:'Exact target BB project ID',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectProject(input.options.project,input.options.profile,context));}}),
