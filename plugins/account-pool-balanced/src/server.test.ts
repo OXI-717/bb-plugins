@@ -870,6 +870,29 @@ describe("Account Pool plugin", () => {
     }
   });
 
+  it.each([true,false])("admits Cursor control RPCs alongside streams (dynamic=%s)", async dynamic => {
+    const seen:string[]=[];
+    const fixture=await createFixture({upstreamUrl:"https://upstream.example",provider:"cursor",source:"api-key",options:{cursorExchangeUrl:"https://exchange.example/token",cursorUsageUrl:"https://usage.example/usage",fetch:async(input,init)=>{
+      const r=new Request(input,init);
+      if(r.url.startsWith("https://exchange.example/"))return Response.json({accessToken:"synthetic-access"});
+      if(r.url.startsWith("https://usage.example/"))return Response.json({planUsage:{totalPercentUsed:10}});
+      seen.push(new URL(r.url).pathname);
+      return r.url.endsWith("/RunSSE")?new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array([1]));}})):Response.json({ok:true});
+    }}});
+    const call=(rpc:string)=>fixture.host.harness.behavior.fetchHttp("POST",dynamic?"/cursor/rpc":`/cursor/${rpc}`,{headers:{authorization:`Bearer ${fixture.key}`,"content-type":"application/connect+proto",...(dynamic?{"x-bb-cursor-rpc-path":rpc}:{})},body:"synthetic"});
+    const streams=await Promise.all([call("agent.v1.AgentService/RunSSE"),call("agent.v1.AgentService/RunSSE")]);
+    try {
+      const append=call("aiserver.v1.BidiService/BidiAppend"),metadata=call("aiserver.v1.AiService/GetUsableModels");
+      await vi.waitFor(()=>{expect(seen).toContain("/aiserver.v1.BidiService/BidiAppend");expect(seen).toContain("/aiserver.v1.AiService/GetUsableModels");},{timeout:500});
+      await(await append).json();await(await metadata).json();
+      let extraStarted=false;
+      const extra=call("agent.v1.AgentService/RunSSE").then(r=>{extraStarted=true;return r;});
+      await new Promise(r=>setTimeout(r,30));expect(extraStarted).toBe(false);
+      await streams[0]!.body?.cancel();
+      await (await extra).body?.cancel();
+    }finally{for(const stream of streams)await stream.body?.cancel();}
+  });
+
   it.each(["agent.v1.AgentService/RunSSE", "aiserver.v2.FutureService/NewToolPermission"])("mints and isolates Cursor authorization for %s", async (rpcPath) => {
     const requests: Request[] = [];
     let exchanges = 0;
