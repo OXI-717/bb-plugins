@@ -74,3 +74,18 @@ class InertPlistTests(unittest.TestCase):
         self.assertEqual(launchd_label({'Label':'sample','Program':'/bin/true'},'file'), 'sample')
         # Executable but incomplete definitions stay visible for diagnosis.
         self.assertEqual(launchd_label({'Program':'/bin/true'},'broken'), 'broken')
+
+class DanglingLaunchdTests(unittest.TestCase):
+    def test_only_absent_file_and_confirmed_absent_service_is_inert(self):
+        from catalog_inventory import inert_launchd_link
+        from pathlib import Path
+        from subprocess import CompletedProcess, TimeoutExpired
+        with tempfile.TemporaryDirectory() as root:
+            link=Path(root)/'vendor.plist';link.symlink_to(Path(root)/'missing.plist')
+            absent=lambda argv:CompletedProcess(argv,113,'','Could not find service "vendor" in domain for system')
+            self.assertTrue(inert_launchd_link(link,'system',absent))
+            self.assertFalse(inert_launchd_link(link,'system',lambda a:CompletedProcess(a,0,'loaded','')))
+            self.assertFalse(inert_launchd_link(link,'system',lambda a:CompletedProcess(a,1,'','Operation not permitted')))
+            self.assertFalse(inert_launchd_link(link,'system',lambda a:CompletedProcess(a,113,'','Could not find domain')))
+            (Path(root)/'missing.plist').write_text('broken content')
+            self.assertFalse(inert_launchd_link(link,'system',absent))

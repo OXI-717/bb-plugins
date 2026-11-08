@@ -170,3 +170,7 @@ An explicit complete registry entry or scoped exclusion resolves a prior unknown
 identity even during a host outage. This is recorded as a registry decision,
 separately from runtime recovery; the outage remains visible. Unclassified jobs
 and incomplete registry entries retain their prior finding during lost coverage.
+A dangling launchd plist link is omitted only when its target is absent and a
+read-only launchctl probe confirms that the exact service is absent in the same
+domain. Loaded jobs, permission failures, unavailable domains, malformed existing
+files and timeouts preserve unknown coverage. No link or service is modified.

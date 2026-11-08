@@ -26,6 +26,16 @@ def launchd_label(data, fallback):
     return data.get('Label', fallback)
 
 
+def inert_launchd_link(path, scope, query=None):
+    """Only a missing symlink target AND absent live service prove an inert link."""
+    if not path.is_symlink() or path.exists():
+        return False
+    domain = 'system' if scope == 'system' else 'gui/' + str(os.getuid())
+    argv = ['launchctl', 'print', domain + '/' + path.stem]
+    result = query(argv) if query else subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    return result.returncode == 113 and 'Could not find service' in result.stderr
+
+
 def discover(run=command, system=None, home=None, etc=None):
     """Return identities only; command arguments and environment never leave host."""
     home = Path(home or Path.home())
@@ -60,12 +70,17 @@ def discover(run=command, system=None, home=None, etc=None):
             probe('systemd', scope, read)
     elif system == 'Darwin':
         for folder, scope in ((home/'Library/LaunchAgents', 'user'), (Path('/Library/LaunchAgents'), 'global-user'), (Path('/Library/LaunchDaemons'), 'system')):
-            def read(folder=folder):
+            def read(folder=folder, scope=scope):
                 if not folder.exists():
                     return []
                 names = []
                 for p in folder.glob('*.plist'):
-                    data = plistlib.loads(p.read_bytes())
+                    try:
+                        data = plistlib.loads(p.read_bytes())
+                    except FileNotFoundError:
+                        if inert_launchd_link(p, scope):
+                            continue
+                        raise
                     label = launchd_label(data, p.stem)
                     if label is not None:
                         names.append(label)
