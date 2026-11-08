@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
@@ -177,4 +177,31 @@ test('scope probe requires exactly one visible vault and reports a refused write
  const writer=async(_b,args,_e,input)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create'){const t=JSON.parse(input);items.set('probe',{title:t.title,fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id:'probe'});}if(args[1]==='get')return JSON.stringify(items.get('probe'));if(args[1]==='delete'){items.delete(args[2]);return '';}throw new Error('unexpected');};
  assert.deepEqual(await probeServiceScope(writer,{},'automation-vault'),{vaultIds:['automation-vault'],writable:true});
  assert.equal(items.size,0);
+});
+
+test('agent commands get only requested keys, never the service token, and output is concealed',async()=>{
+ const reads=[];
+ const run=async(_b,args,env)=>{reads.push(args);assert.equal(env.OP_SERVICE_ACCOUNT_TOKEN,'synthetic-token');return 'synthetic-key-value';};
+ let childEnv,childArgs;
+ const command=async(bin,args,env,cwd,timeout)=>{childEnv=env;childArgs=[bin,...args,cwd,timeout];return {exitCode:0,output:'start synthetic-key-value end',truncated:false};};
+ const result=await execWithKeys(run,command,{OP_SERVICE_ACCOUNT_TOKEN:'synthetic-token'},'automation-vault',['deploy','--check'],{API_KEY:{item:'Example API',field:'credential'}},'/work/project',5000);
+ assert.deepEqual(reads,[['read','--no-newline','op://automation-vault/Example API/credential']]);
+ assert.equal(childEnv.API_KEY,'synthetic-key-value');
+ assert(!Object.keys(childEnv).some(k=>k.startsWith('OP_')));
+ assert.deepEqual(childArgs,['deploy','--check','/work/project',5000]);
+ assert.equal(result.output,'start <concealed> end');
+ await assert.rejects(execWithKeys(run,command,{},'v',['x'],{OP_SERVICE_ACCOUNT_TOKEN:{item:'a',field:'b'}},undefined,1000));
+ await assert.rejects(execWithKeys(run,command,{},'v',['x'],{K:{item:'../other',field:'b'}},undefined,1000));
+ await assert.rejects(execWithKeys(async()=>{throw new Error('synthetic-provider-detail');},command,{},'v',['x'],{K:{item:'a',field:'b'}},undefined,1000),e=>!e.message.includes('synthetic-provider-detail'));
+});
+test('a real child process receives the key and the returned output conceals it',async()=>{
+ const result=await execWithKeys(async()=>'synthetic-live-value',runCommand,{OP_SERVICE_ACCOUNT_TOKEN:'synthetic-token'},'v',[process.execPath,'-e','console.log(process.env.K, typeof process.env.OP_SERVICE_ACCOUNT_TOKEN); process.exit(3)'],{K:{item:'a',field:'b'}},undefined,10000);
+ assert.equal(result.exitCode,3);
+ assert.equal(result.output.trim(),'<concealed> undefined');
+});
+test('key listing returns titles and field labels only',async()=>{
+ const run=async(_b,args)=>args[1]==='list'?JSON.stringify([{id:'i1',title:'Example API'}]):JSON.stringify({fields:[{label:'credential',value:'synthetic-hidden'},{label:'notesPlain',value:''}]});
+ const result=await listVaultKeys(run,{},'automation-vault');
+ assert.deepEqual(result,{items:[{item:'Example API',fields:['credential','notesPlain']}]});
+ assert(!JSON.stringify(result).includes('synthetic-hidden'));
 });
