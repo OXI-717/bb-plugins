@@ -25,14 +25,19 @@ export default function plugin(bb: BbPluginApi) {
         await bb.storage.kv.set(key,{interactionId,mountedAt:previous?.mountedAt??now,lastSeenAt:now,visibleEver:visible||previous?.visibleEver===true});
         return {recorded:true as const};
     }});
-    // A one-minute card is easy to miss when the owner looks at another session. Every card is
-    // announced on the owner's notification channels with a link to its session; a failed
-    // notification never blocks or retries the request. Only the card title is sent.
-    const requestApproval: typeof bb.ui.requestInput = async (request, options) => {
-        try {
-            await bb.sdk.plugins.callRpc({pluginId: 'push-notifications', method: 'notifications.send', input: {title: 'Oxi Op: нужно подтверждение', body: request.title + ' — карточка в BB, 60 секунд', threadId: request.threadId}, outputSchema: z.object({ok: z.literal(true), channels: z.array(z.string())}).passthrough(), signal: options?.signal});
-        } catch {}
-        return bb.ui.requestInput(request, options);
+    // A one-minute card is easy to miss when the owner looks at another session. Every approval
+    // card is announced on the owner's notification channels with a link to its session. The card
+    // opens first; the notice runs alongside it, bounded to 10 seconds, and its failure never
+    // blocks or repeats the request. The notice carries no item, vault or project names, since it
+    // can reach lock screens and external push providers. A card the owner is already looking at
+    // still gets a notice: a duplicate is cheaper than a missed approval.
+    const requestApproval: typeof bb.ui.requestInput = (request, options) => {
+        const card = bb.ui.requestInput(request, options);
+        setImmediate(() => {
+            const seconds = Math.round((request.timeoutMs ?? approvalTimeoutMs) / 1000);
+            void Promise.resolve().then(() => bb.sdk.plugins.callRpc({pluginId: 'push-notifications', method: 'notifications.send', input: {title: 'Oxi Op: нужно подтверждение', body: 'Откройте сессию: карточка подтверждения действует ' + seconds + ' секунд.', threadId: request.threadId}, outputSchema: z.object({ok: z.literal(true), channels: z.array(z.string())}).passthrough(), signal: AbortSignal.timeout(10_000)})).catch(() => {});
+        });
+        return card;
     };
     // BB resumes an idle agent for a fulfilled tool result, including a reported failure.
     const toolOutcome = async (work: () => Promise<string>) => {
@@ -490,7 +495,7 @@ export default function plugin(bb: BbPluginApi) {
                 if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');
                 const {route}=await accessFor(ctx.projectId,input.options.profile);
                 const display=await displayContext({...route,hostId:credentialHost(route)},{projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal});
-                const decision=await requestApproval({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Проверка отображения формы — без доступа к секретам',payload:{mode:'approve',title:'Проверка отображения формы',purpose:'Только проверка интерфейса BB. 1Password не вызывается, пароли не читаются. Нажимать разрешение не требуется.',profile:route.profile,projectId:ctx.projectId,threadId:ctx.threadId,label:'Диагностика интерфейса',hostId:credentialHost(route),...display,vaultId:route.vaultId,vaultLabel:route.vaultLabel??'Не используется',secrets:[]},describeSubmission:()=>({title:'Display test submitted; no credentials accessed'})},{signal:ctx.signal});
+                const decision=await bb.ui.requestInput({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Проверка отображения формы — без доступа к секретам',payload:{mode:'approve',title:'Проверка отображения формы',purpose:'Только проверка интерфейса BB. 1Password не вызывается, пароли не читаются. Нажимать разрешение не требуется.',profile:route.profile,projectId:ctx.projectId,threadId:ctx.threadId,label:'Диагностика интерфейса',hostId:credentialHost(route),...display,vaultId:route.vaultId,vaultLabel:route.vaultLabel??'Не используется',secrets:[]},describeSubmission:()=>({title:'Display test submitted; no credentials accessed'})},{signal:ctx.signal});
                 return {exitCode:0,stdout:JSON.stringify({submitted:decision.outcome==='submitted',credentialCalls:0})};
             }}),
             history: cliCommand({summary: 'Recover operation states and safe results for this project and session without contacting op', async run(_, ctx) {if (!ctx.threadId || !ctx.projectId) throw new Error('Run from a BB thread'); return {exitCode: 0, stdout: JSON.stringify(await journal.list({threadId: ctx.threadId, projectId: ctx.projectId}))};}}),

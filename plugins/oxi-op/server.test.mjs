@@ -676,17 +676,31 @@ test('resume uses only the machines and op paths of an approved card',async t=>{
  assert.equal(JSON.parse((await work).stdout).projects[0].state,'configured');
  assert.equal(h.inspection.experimental_hostRpcCalls.filter(c=>c.method==='issueServiceAccounts').length,1);
 });
-test('every approval card is announced to the owner without secrets, and a failed notice still opens the card',async t=>{
+test('every approval card is announced to the owner without names or secrets, and a stuck notice never holds the card',async t=>{
  const notices=[];
  const h=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'}],notify:async x=>{notices.push(x);return {ok:true,channels:['desktop']};},callHost:()=>({itemId:'example-item',verified:true})});
- const work=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ const work=h.behavior.callAgentTool('oxi_op_store',{title:'Example client database'},context);await setImmediate();await setImmediate();
+ assert.equal(h.inspection.pendingInteractions.length,1);
  assert.equal(notices.length,1);
  assert.equal(notices[0].pluginId,'push-notifications');assert.equal(notices[0].method,'notifications.send');
- assert.equal(notices[0].input.threadId,context.threadId);assert(notices[0].input.body.includes('Сохранить пароль: Example'));
+ assert.equal(notices[0].input.threadId,context.threadId);assert(notices[0].input.body.includes('60 секунд'));
+ assert(!JSON.stringify(notices).includes('Example client database')&&!JSON.stringify(notices).includes('Example workspace'));
  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{password:'synthetic-sensitive-value'});await work;
  assert(!JSON.stringify(notices).includes('synthetic-sensitive-value'));
- const quiet=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'}]});
- const pending=quiet.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
- assert.equal(quiet.inspection.pendingInteractions.length,1);
- quiet.behavior.cancelInteraction(quiet.inspection.pendingInteractions[0].id);await pending;
+ for(const notify of [undefined,()=>new Promise(()=>{})]){
+  const quiet=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'}],notify});
+  const pending=quiet.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+  assert.equal(quiet.inspection.pendingInteractions.length,1,'card opens even when the notice fails or hangs');
+  quiet.behavior.cancelInteraction(quiet.inspection.pendingInteractions[0].id);await pending;
+ }
+ const silent=[];
+ const diag=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'}],notify:async x=>{silent.push(x);return {ok:true,channels:[]};}});
+ const test=diag.behavior.runCli(['display-test'],context);await setImmediate();await setImmediate();
+ assert.equal(silent.length,0,'the display diagnostic needs no approval and sends no notice');
+ diag.behavior.cancelInteraction(diag.inspection.pendingInteractions[0].id);await test;
+});
+test('diagnostics list owner machines only for routes that need owner approval',async t=>{
+ const h=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens});
+ assert.equal(JSON.parse((await h.behavior.runCli(['diagnose'],context)).stdout).ownerMachines.length,2);
+ assert.deepEqual(JSON.parse((await h.behavior.runCli(['diagnose','--profile','routine'],context)).stdout).ownerMachines,[]);
 });
