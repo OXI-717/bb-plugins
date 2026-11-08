@@ -206,12 +206,14 @@ export default function plugin(bb: BbPluginApi) {
         ['existing token backup could not be read', 'backup-read-failed'], ['existing token backup is incomplete', 'backup-incomplete'],
         ['did not confirm service account creation', 'create-unconfirmed'], ['unexpected service account response', 'create-unexpected'],
         ['created but its token backup failed', 'backup-failed-after-create'], ['scope differs from the automation vault', 'scope-differs'],
-        ['could not read the automation vault', 'scope-unreadable'], ['permissions differ from the approved scope', 'permissions-differ'],
+        ['could not read the automation vault', 'scope-unreadable'], ['reader can write', 'reader-can-write'], ['permissions differ from the approved scope', 'permissions-differ'],
         ['Duplicate vault names', 'duplicate-vaults'], ['Vault identity differs', 'vault-identity'], ['Missing vault identifier', 'vault-missing-id'],
         ['Issued accounts differ', 'accounts-differ'], ['Saved service tokens differ', 'tokens-not-saved'], ['Routing changed during setup', 'routes-changed'],
         ['Verification', 'intake-verification'], ['1Password item', 'intake-write'], ['process exit', 'op-exit'],
     ];
+    class ProbeFailure extends Error {constructor(readonly code: string) {super('probe');}}
     const failureReason = (error: unknown) => {
+        if (error instanceof ProbeFailure && /^[a-z0-9-]{1,40}$/.test(error.code)) return error.code;
         const message = error instanceof Error ? error.message : '';
         return failureReasons.find(([fragment]) => message.includes(fragment))?.[1] ?? (error instanceof OperationFailure ? error.code : 'unclassified');
     };
@@ -253,7 +255,8 @@ export default function plugin(bb: BbPluginApi) {
                 const readerScope = await host.call('probeScope', {route: reader, serviceAccountToken: tokens.get('routine')!}, {hostId: executionHostId, signal: ctx.signal});
                 setStage('probe-intake');
                 const intakeScope = await host.call('probeScope', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
-                if (readerScope.writable || !intakeScope.writable) throw new Error('Issued permissions differ from the approved scope');
+                if (readerScope.writable) throw new Error('Issued permissions differ from the approved scope: reader can write');
+                if (!intakeScope.writable) throw new ProbeFailure('intake-' + (intakeScope.writeFailure ?? 'unknown'));
                 setStage('verify-intake');
                 await host.call('verify', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
                 setStage('save-routes');
