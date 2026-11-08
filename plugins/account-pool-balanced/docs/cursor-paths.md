@@ -47,3 +47,15 @@ The tests exercise a synthetic future RPC, authorization isolation, binary bodie
 streaming through a local fake CLI. CI runs the wrapper checks on Linux and macOS.
 For a live check, launch a fresh pooled thread and ask it to run `echo pool-ok` and read
 one local file. Model replies alone do not prove that tool setup RPCs work.
+
+
+### Request admission
+
+Cursor inference RPCs (`Run`, `RunSSE`, `RunPoll`) retain the configured per-account
+request limit. Known control RPCs, including `BidiAppend` and startup metadata,
+use a separate bounded per-account lane with the same limit and queue bounds.
+Two long-lived inference streams must not block the append requests needed to
+advance those streams or the metadata needed to start a session. Unknown methods
+retain ordinary admission. Account selection, quota cooldown, authentication and
+VPN Guard checks still apply to both lanes. Total in-flight requests can therefore
+reach twice the configured limit for Cursor; inference capacity does not increase.
