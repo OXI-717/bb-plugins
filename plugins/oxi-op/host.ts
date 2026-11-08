@@ -96,11 +96,11 @@ export default experimental_defineHostEntry({ contract, handlers: {
                 const items = JSON.parse(await runner('op', ['item', 'list', '--vault', route.vaultId, '--format=json'], env));
                 const matches = items.filter((item: {title: string}) => item.title === title);
                 if (matches.length === 0 && !itemId) throw failure ?? new CodedError('verify-not-created', 'Verification did not create an item; no cleanup needed');
-                if (matches.length !== 1) throw new Error('Verification cleanup needs owner review: ' + title);
+                if (matches.length !== 1) throw new CodedError('verify-cleanup-review', 'Verification cleanup needs owner review: ' + title);
                 const candidate = matches[0].id;
                 const stored = JSON.parse(await runner('op', ['item', 'get', candidate, '--vault', route.vaultId, '--format=json', '--reveal'], env));
                 const fields = new Map(stored.fields.map((field: {label: string; value: string}) => [field.label, field.value]));
-                if (stored.title !== title || fields.get('username') !== username || fields.get('password') !== password || (itemId && itemId !== candidate)) throw new Error('Verification item differs; cleanup declined: ' + title);
+                if (stored.title !== title || fields.get('username') !== username || fields.get('password') !== password || (itemId && itemId !== candidate)) throw new CodedError('verify-differs', 'Verification item differs; cleanup declined: ' + title);
                 await runner('op', ['item', 'delete', candidate, '--vault', route.vaultId], env);
                 const remaining = JSON.parse(await runner('op', ['item', 'list', '--vault', route.vaultId, '--format=json'], env));
                 if (remaining.some((item: {id: string}) => item.id === candidate)) throw new CodedError('verify-cleanup-unconfirmed', 'Verification cleanup could not be confirmed');

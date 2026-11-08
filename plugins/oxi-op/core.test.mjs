@@ -267,11 +267,33 @@ test('a leader that exits while an escaped descendant holds output does not hang
  if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
  const source="const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setTimeout(()=>{},3000)'],{detached:true,stdio:['ignore','inherit','inherit']}).unref();";
  const started=Date.now();
- await assert.rejects(runCommand(process.execPath,['-e',source],{},undefined,20000),/cleanup unconfirmed/);
+ const result=await runCommand(process.execPath,['-e',source],{},undefined,20000);
+ assert.deepEqual([result.exitCode,result.escapedProcess,result.timedOut],[0,true,false]);
  assert(Date.now()-started<2500);
+ const begun=Date.now();
+ await assert.rejects(runProcess(process.execPath,['-e',source],{}),/cleanup-unconfirmed/);
+ assert(Date.now()-begun<2500);
 });
 test('multibyte titles survive pipe chunk boundaries',async()=>{
  const text='Oxi Op service account — Пример '.repeat(5000);
  const out=await runProcess(process.execPath,['-e','process.stdout.write(process.argv[1])',text],{});
  assert.equal(out,text);
+});
+test('a value cut at the end of stopped output is concealed',()=>{
+ const value='SYNTHETICVALUE1234567890';
+ const r=concealOutput('progress line\nkey='+value.slice(0,9),[value],true);
+ assert(!r.output.includes(value.slice(0,9)));assert(r.output.endsWith('<concealed>'));
+});
+test('key listing stops reading after the first failure',async()=>{
+ let gets=0;
+ const items=Array.from({length:40},(_,i)=>({id:'i'+i,title:'t'+i}));
+ const run=async(_b,args)=>{if(args[1]==='list')return JSON.stringify(items);const n=++gets;await new Promise(r=>setTimeout(r,2));if(n===2)throw new Error('rate limited');return JSON.stringify({fields:[]});};
+ await assert.rejects(listVaultKeys(run,{},'v'));
+ await new Promise(r=>setTimeout(r,50));
+ assert(gets<=6,'workers kept reading: '+gets);
+});
+test('codes survive a wrapping transport message',async()=>{
+ const {errorCode,CodedError}=await import('./dist/test/errors.js');
+ assert.equal(errorCode(new Error('Host call failed: '+new CodedError('backup-list-failed','x').message)),'backup-list-failed');
+ assert.equal(errorCode(new Error('plain')),undefined);
 });

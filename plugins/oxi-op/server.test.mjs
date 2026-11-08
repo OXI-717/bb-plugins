@@ -521,7 +521,7 @@ test('with every owner Mac offline no form opens and nothing is contacted',async
 });
 test('agent keys run without approval on the session machine and never return values or the token',async t=>{
  for(const [machine,op] of [['linux-server','/usr/bin/op'],['mac-max','/max/op']]){
-  const h=fleet(t,{sessionHost:machine,routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens,callHost:({method})=>method==='listKeys'?{items:[{item:'Example API',fields:['credential']}]}:{exitCode:0,output:'ok <concealed>',truncated:false,timedOut:false}});
+  const h=fleet(t,{sessionHost:machine,routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens,callHost:({method})=>method==='listKeys'?{items:[{item:'Example API',fields:['credential']}]}:{exitCode:0,output:'ok <concealed>',truncated:false,timedOut:false,escapedProcess:false}});
   const keys=JSON.parse(await h.behavior.callAgentTool('oxi_op_keys',{},context));
   assert.deepEqual(keys.items[0].fields,['credential']);
   const result=JSON.parse(await h.behavior.callAgentTool('oxi_op_exec',{argv:['deploy','--check'],keys:{API_KEY:{item:'Example API',field:'credential'}}},context));
@@ -636,7 +636,7 @@ test('self-test stores one synthetic key, proves each machine and always removes
  const call=({method,input,hostId})=>{
   if(method==='store'){value=input.password;return {itemId:'i',verified:true};}
   if(method==='listKeys')return {items:[{item:'other',fields:[]},{item:[...JSON.stringify(input)].length?'x':'x',fields:[]}].concat([{item:lastTitle,fields:['password']}])};
-  if(method==='exec'){if(hostId==='mac-max')throw new Error('synthetic failure');return {exitCode:0,output:createHash('sha256').update(value).digest('hex')+'  -\n<concealed>\n',truncated:false,timedOut:false};}
+  if(method==='exec'){if(hostId==='mac-max')throw new Error('synthetic failure');return {exitCode:0,output:createHash('sha256').update(value).digest('hex')+'  -\n<concealed>\n',truncated:false,timedOut:false,escapedProcess:false};}
   if(method==='deleteSelftest'){assert.equal(input.title,lastTitle);return {deleted:1};}
   throw new Error('unexpected '+method);
  };
@@ -665,11 +665,13 @@ test('resume uses only the machines and op paths of an approved card',async t=>{
  const describe=x=>x.method==='describeScope'?{vaults:[{id:'vault-p-one',name:'Example p-one — Automation'}]}:base(x);
  const h=fleet(t,{routes:projectRoutes,tokens,callHost:describe});
  const tampered=JSON.parse((await h.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify({...sessionHosts,'linux-server':'/tmp/other-op'}),'--resume-only'],context)).stdout).projects[0];
- assert.deepEqual([tampered.state,tampered.reason],['needs-review','plan-mismatch']);
+ assert.equal(tampered.state,'not-issued');
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
- await h.behavior.setSettings({projectServiceAccounts:'{}'});
  const work=h.behavior.runCli(automateArgs.map(a=>a==='p-one,p-two'?'p-one':a),context);await setImmediate();
  const form=h.inspection.pendingInteractions[0];
+ assert(form,'saved tokens without an approved plan go through the card');
  assert(form.payload.purpose.includes('/usr/bin/op')&&form.payload.purpose.includes('/max/op'));
- h.behavior.submitInteraction(form.id,{approved:true});await work;
+ h.behavior.submitInteraction(form.id,{approved:true});
+ assert.equal(JSON.parse((await work).stdout).projects[0].state,'configured');
+ assert.equal(h.inspection.experimental_hostRpcCalls.filter(c=>c.method==='issueServiceAccounts').length,1);
 });

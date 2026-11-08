@@ -7,16 +7,16 @@ import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type {Route} from './contract.js';
-class CredentialProcessError extends Error {}
+class CredentialProcessError extends CodedError {constructor(message: string) {super('op-exit', message);}}
 
 export type Runner = (binary: string, args: string[], env: NodeJS.ProcessEnv, input?: string, signal?: AbortSignal) => Promise<string>;
-export type GroupResult = {code: number | null; output: Buffer; truncated: boolean; expired: boolean};
+export type GroupResult = {code: number | null; output: Buffer; truncated: boolean; expired: boolean; escaped: boolean};
 // One process group per operation: the command and every ordinary descendant end together.
 // Killing only the leader could leave descendants holding credentials and inherited pipes.
 // Output is kept as bytes so multibyte characters split across pipe chunks stay intact.
-export function spawnGroup(binary: string, args: string[], options: {env: NodeJS.ProcessEnv; cwd?: string; input?: string; timeoutMs: number; maxBytes: number; overflow: 'fail' | 'keep-tail'; includeStderr: boolean; signal?: AbortSignal}) {
+export function spawnGroup(binary: string, args: string[], options: {env: NodeJS.ProcessEnv; cwd?: string; input?: string; timeoutMs: number; maxBytes: number; overflow: 'fail' | 'keep-tail'; includeStderr: boolean; onEscape?: 'reject' | 'report'; signal?: AbortSignal}) {
     return new Promise<GroupResult>((resolve, reject) => {
-        if (options.signal?.aborted) {reject(new Error('Operation cancelled')); return;}
+        if (options.signal?.aborted) {reject(new CodedError('cancelled', 'Operation cancelled')); return;}
         if (process.platform !== 'linux' && process.platform !== 'darwin') {reject(new Error('Operation requires a supported POSIX host')); return;}
         const child = spawn(binary, args, {env: options.env, cwd: options.cwd, detached: true, stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']});
         const chunks: Buffer[] = [];
@@ -27,10 +27,16 @@ export function spawnGroup(binary: string, args: string[], options: {env: NodeJS
         let cleanupFailed = false;
         let finished = false;
         let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+        let leaderCode: number | null = null;
         const finish = () => {finished = true; clearTimeout(timer); clearTimeout(cleanupTimer); options.signal?.removeEventListener('abort', kill);};
+        let leaderExited = false;
+        // After the leader has exited, macOS answers EPERM for a group that holds only zombies.
         const killGroup = () => {
             try {if (child.pid) process.kill(-child.pid, 'SIGKILL');}
-            catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ESRCH') cleanupFailed = true;}
+            catch (error) {
+                const code = (error as NodeJS.ErrnoException).code;
+                if (code !== 'ESRCH' && !(code === 'EPERM' && leaderExited)) cleanupFailed = true;
+            }
         };
         // A process that left the group and keeps our pipes open must not hold the call open.
         const kill = () => {
@@ -38,7 +44,11 @@ export function spawnGroup(binary: string, args: string[], options: {env: NodeJS
             killGroup();
             cleanupTimer ??= setTimeout(() => {
                 child.stdout?.destroy(); child.stderr?.destroy(); child.stdin?.destroy();
-                finish(); reject(new Error('Process cleanup unconfirmed: a process kept running outside its group'));
+                finish();
+                // An agent command that completed is reported with what it printed; the escape is
+                // flagged rather than hidden behind a failure that could invite a repeated run.
+                if (options.onEscape === 'report' && !expired && !options.signal?.aborted) resolve({code: leaderCode ?? 137, output: Buffer.concat(chunks).subarray(-options.maxBytes), truncated, expired, escaped: true});
+                else reject(new CodedError('cleanup-unconfirmed', 'Process cleanup unconfirmed: a process kept running outside its group'));
             }, 1000);
         };
         const timer = setTimeout(() => {expired = true; kill();}, options.timeoutMs);
@@ -52,7 +62,7 @@ export function spawnGroup(binary: string, args: string[], options: {env: NodeJS
         };
         child.stdout!.on('data', collect);
         if (options.includeStderr) child.stderr!.on('data', collect); else child.stderr!.resume();
-        child.on('exit', kill); // the leader's exit ends its group
+        child.on('exit', code => {leaderCode = code; leaderExited = true; kill();}); // the leader's exit ends its group
         child.on('error', () => {kill(); finish(); reject(new Error('Process could not start'));});
         child.on('close', code => {
             if (finished) return;
@@ -61,7 +71,7 @@ export function spawnGroup(binary: string, args: string[], options: {env: NodeJS
             if (exceeded || cleanupFailed) {reject(new CredentialProcessError('process exit ' + code + '; output suppressed')); return;}
             let output = Buffer.concat(chunks);
             if (output.length > options.maxBytes) output = output.subarray(output.length - options.maxBytes);
-            resolve({code, output, truncated, expired});
+            resolve({code, output, truncated, expired, escaped: false});
         });
         child.stdin?.on('error', () => {});
         child.stdin?.end(options.input);
@@ -107,7 +117,7 @@ export async function storeCredential(run: Runner, env: NodeJS.ProcessEnv, vault
         template.title = title;
         for (const [id, value] of [['username', username], ['password', password]]) {
             const field = template.fields?.find((field: {id: string}) => field.id === id);
-            if (!field) throw new Error('Login template is missing a required field');
+            if (!field) throw new CodedError('template-fields', 'Login template is missing a required field');
             field.value = value;
         }
         const item = await withTemplateFile(JSON.stringify(template), platform, (path, input) => op(['item', 'create', '--template', path, '--vault', vault, '--format=json'], input));
@@ -230,7 +240,7 @@ export async function issueServiceAccounts(run: Runner, env: NodeJS.ProcessEnv, 
 // Fixed codes only: our storeCredential messages carry no provider output, but keep to a whitelist.
 function writeFailureCode(error: unknown) {
     const code = errorCode(error);
-    const step = code?.startsWith('op-item-') ? code.slice('op-item-'.length) : code === 'item-differs' ? 'readback-differs' : 'unknown';
+    const step = code?.startsWith('op-item-') ? code.slice('op-item-'.length) : code === 'item-differs' ? 'readback-differs' : code ?? 'unknown';
     const exit = /process exit (\d{1,3})/.exec(error instanceof Error ? error.message : '')?.[1];
     return step + (exit ? '-exit-' + exit : '');
 }
@@ -256,26 +266,30 @@ export async function listVaultKeys(run: Runner, env: NodeJS.ProcessEnv, vaultId
     const entries = items.slice(0, 200).filter(entry => typeof entry?.id === 'string' && typeof entry?.title === 'string');
     const result: {item: string; fields: string[]}[] = new Array(entries.length);
     let next = 0;
-    // A few requests at a time: one per item is unavoidable, a serial chain is not.
+    let failed = false;
+    // A few requests at a time: one per item is unavoidable, a serial chain is not. The first
+    // failure stops the other workers so a rate limit is not hammered further.
     const worker = async () => {
-        while (next < entries.length) {
+        while (next < entries.length && !failed && !signal?.aborted) {
             const index = next++;
-            const item = JSON.parse(await run('op', ['item', 'get', entries[index].id, '--vault', vaultId, '--format=json'], env, undefined, signal));
+            let item;
+            try {item = JSON.parse(await run('op', ['item', 'get', entries[index].id, '--vault', vaultId, '--format=json'], env, undefined, signal));}
+            catch (error) {failed = true; throw error;}
             const fields = Array.isArray(item.fields) ? item.fields.map((field: {label?: unknown}) => field.label).filter((label: unknown): label is string => typeof label === 'string' && label.length > 0 && !label.includes('/')) : [];
             result[index] = {item: entries[index].title, fields: [...new Set(fields as string[])]};
         }
     };
-    await Promise.all(Array.from({length: Math.min(6, entries.length)}, worker));
+    await Promise.all(Array.from({length: Math.min(4, entries.length)}, worker));
     return {items: result};
 }
-export type CommandResult = {exitCode: number; output: string; truncated: boolean; timedOut: boolean};
+export type CommandResult = {exitCode: number; output: string; truncated: boolean; timedOut: boolean; escapedProcess: boolean};
 export type CommandRunner = (binary: string, args: string[], env: NodeJS.ProcessEnv, cwd: string | undefined, timeoutMs: number, signal?: AbortSignal) => Promise<CommandResult>;
 const outputLimit = 32768;
 // Keep enough raw output to conceal key values before the final cut to the returned size.
 const commandCaptureBytes = 1048576;
 export const runCommand: CommandRunner = async (binary, args, env, cwd, timeoutMs, signal) => {
-    const result = await spawnGroup(binary, args, {env, cwd, timeoutMs, maxBytes: commandCaptureBytes, overflow: 'keep-tail', includeStderr: true, signal});
-    return {exitCode: result.code ?? 137, output: result.output.toString('utf8'), truncated: result.truncated, timedOut: result.expired};
+    const result = await spawnGroup(binary, args, {env, cwd, timeoutMs, maxBytes: commandCaptureBytes, overflow: 'keep-tail', includeStderr: true, onEscape: 'report', signal});
+    return {exitCode: result.code ?? 137, output: result.output.toString('utf8'), truncated: result.truncated, timedOut: result.expired, escapedProcess: result.escaped};
 };
 // Replace exact key values in the full captured text first, then cut to the returned size.
 // A cut can still split a value: the retained head of the output is dropped up to the next
@@ -292,6 +306,10 @@ export function concealOutput(raw: string, values: string[], alreadyTruncated: b
         output = newline >= 0 && newline < 4096 ? output.slice(newline + 1) : output;
         for (const value of secrets) for (let length = Math.min(value.length - 1, output.length); length >= 4; length--) {
             if (output.startsWith(value.slice(-length))) {output = '<concealed>' + output.slice(length); break;}
+        }
+        // A command stopped mid-print can end with the beginning of a value.
+        for (const value of secrets) for (let length = Math.min(value.length - 1, output.length); length >= 4; length--) {
+            if (output.endsWith(value.slice(0, length))) {output = output.slice(0, -length) + '<concealed>'; break;}
         }
     }
     return {output, truncated};
@@ -311,7 +329,7 @@ export async function execWithKeys(run: Runner, command: CommandRunner, env: Nod
     Object.assign(childEnv, values);
     try {
         const result = await command(argv[0], argv.slice(1), childEnv, cwd, timeoutMs, signal);
-        return {...result, ...concealOutput(result.output, Object.values(values), result.truncated)};
+        return {...result, ...concealOutput(result.output, Object.values(values), result.truncated || result.timedOut)};
     } finally {for (const key of Object.keys(values)) delete values[key];}
 }
 

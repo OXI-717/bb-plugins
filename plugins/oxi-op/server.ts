@@ -264,7 +264,10 @@ export default function plugin(bb: BbPluginApi) {
             const planKey = (projectId: string) => 'automation-plan:' + encodeURIComponent(projectId);
             const plan = JSON.stringify({executionHostId, sessionHosts: Object.fromEntries(Object.entries(sessionHosts).sort(([a], [b]) => a.localeCompare(b)))});
             const saved = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts));
-            const resumable = projects.filter(p => p.accounts.every(a => !!saved[p.projectId]?.[a.profile]));
+            // Saved tokens without a matching approved plan go through the card again; issuance
+            // then recovers the backed-up tokens instead of creating new accounts.
+            const plans = new Map(await Promise.all(projects.map(async p => [p.projectId, (await bb.storage.kv.get<{plan: string}>(planKey(p.projectId)))?.plan] as const)));
+            const resumable = projects.filter(p => p.accounts.every(a => !!saved[p.projectId]?.[a.profile]) && plans.get(p.projectId) === plan);
             const fresh = projects.filter(p => !resumable.includes(p));
             const resumedRows: {projectId: string; state: 'configured' | 'needs-review'; vaultId?: string; resumed?: boolean; stage?: AutomationStage; reason?: string}[] = [];
             if (resumable.length) {
@@ -273,7 +276,6 @@ export default function plugin(bb: BbPluginApi) {
                     for (const project of resumable) {
                         let stage: AutomationStage = 'resume-scope';
                         try {
-                            if ((await bb.storage.kv.get<{plan: string}>(planKey(project.projectId)))?.plan !== plan) throw new CodedError('plan-mismatch', 'Resume parameters differ from the approved card');
                             const tokens = new Map(project.accounts.map(a => [a.profile, saved[project.projectId][a.profile]]));
                             const scopes = await Promise.all(project.accounts.map(a => host.call('describeScope', {opBinary: sessionHosts[executionHostId], serviceAccountToken: tokens.get(a.profile)!}, {hostId: executionHostId, signal: ctx.signal})));
                             const vault = scopes[0].vaults[0];
@@ -466,7 +468,7 @@ export default function plugin(bb: BbPluginApi) {
                         }catch(error){rows.push({hostId,failed:failureReason(error)});}
                     }
                 }finally{
-                    const cleanup=await host.call('deleteSelftest',{route:intake,serviceAccountToken:tokens.intake,title},{hostId:intake.hostId,signal:ctx.signal});
+                    const cleanup=await host.call('deleteSelftest',{route:intake,serviceAccountToken:tokens.intake,title},{hostId:intake.hostId,signal:AbortSignal.timeout(120_000)}); // cleanup must outlive a cancelled run
                     rows.push({cleanedUp:cleanup.deleted});
                 }
                 const ok=rows.filter(r=>'hostId' in r).every(r=>r.keyListed===true&&r.exitCode===0&&r.valueMatched===true&&r.valueConcealed===true);
