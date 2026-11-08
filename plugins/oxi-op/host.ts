@@ -1,6 +1,7 @@
 import {runTaskProcess} from './task-process.js';
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
+import { probeWriteMethods } from './core.js';
 import { contract, type Route } from './contract.js';
 import { runProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand } from './core.js';
 const pending = new Set<string>();
@@ -51,6 +52,10 @@ export default experimental_defineHostEntry({ contract, handlers: {
             const vaults = JSON.parse(await runProcess(opBinary, ['vault', 'list', '--format=json'], serviceEnvironment(serviceAccountToken), undefined, ctx.signal));
             if (!Array.isArray(vaults) || vaults.length > 20) throw new Error('Service account scope differs from the automation vault');
             return {vaults: vaults.map((v: {id: unknown; name: unknown}) => ({id: String(v.id), name: String(v.name)}))};
+        },
+        probeWriteMethods: async ({opBinary, serviceAccountToken, vaultId}, ctx) => {
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(opBinary, args, env, input, signal);
+            return probeWriteMethods(runner, serviceEnvironment(serviceAccountToken), vaultId, ctx.signal);
         },
         probeScope: async ({route, serviceAccountToken}, ctx) => {
             if (route.authentication !== 'service-account') throw new Error('Scope probes require a service account');
