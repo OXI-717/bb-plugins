@@ -11,7 +11,7 @@ export class NetworkFlights {
       }
     }
   }
-  async fetch(provider:PoolProvider,input:RequestInfo|URL,init?:RequestInit,drainable=false,admit?: (send:()=>Promise<Response>)=>Promise<Response>,requestCheck?:()=>Promise<void>, accountFetch?:typeof fetch):Promise<Response> {
+  async fetch(provider:PoolProvider,input:RequestInfo|URL,init?:RequestInit,drainable=false,admit?: (send:()=>Promise<Response>)=>Promise<Response>,requestCheck?:()=>Promise<void>, accountFetch?:typeof fetch,onBodyError?:(error:unknown,bytesRead:number)=>void):Promise<Response> {
     const check=requestCheck??(()=>this.check(provider));
     await check();
     const owner=new AbortController();
@@ -20,10 +20,13 @@ export class NetworkFlights {
     this.active.set(owner,provider);
     let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
     let downstream:ReadableStreamDefaultController<Uint8Array>|undefined;
-    let finished=false;
+    let finished=false,bytesRead=0;
+    const report=(error:unknown)=>{try{onBodyError?.(error,bytesRead);}catch{/* Diagnostics cannot change forwarding. */}};
     const release=()=>{this.active.delete(owner);signal.removeEventListener('abort',abort);};
     const abort=()=>{
-      if(finished)return;finished=true;
+      if(finished)return;
+      if(reader&&owner.signal.aborted)report(signal.reason);
+      finished=true;
       downstream?.error(signal.reason);
       void reader?.cancel(signal.reason).catch(()=>undefined);
       release();
@@ -43,8 +46,8 @@ export class NetworkFlights {
         async pull(controller){
           try {
             const next=await reader!.read();if(finished)return;
-            if(next.done){finished=true;release();controller.close();}else controller.enqueue(next.value);
-          } catch(error){if(!finished){finished=true;release();controller.error(error);}}
+            if(next.done){finished=true;release();controller.close();}else {bytesRead+=next.value.byteLength;controller.enqueue(next.value);}
+          } catch(error){if(!finished){report(error);finished=true;release();controller.error(error);}}
         },
         async cancel(reason){finished=true;release();owner.abort(reason);await reader!.cancel(reason);},
       });

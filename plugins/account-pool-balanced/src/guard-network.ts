@@ -30,8 +30,8 @@ export type GuardRead=(provider:PoolProvider,signal:AbortSignal,trace:GuardReadT
 // Budget is per fresh read. A timeout permits one more read, never an upstream replay.
 export const GUARD_CHECK_TIMEOUT_MS=4000;
 export function createGuardNetworkCheck(read:GuardRead,timeoutMs=GUARD_CHECK_TIMEOUT_MS,observe?:(event:GuardDiagnostic)=>void) {
-  return async(provider:PoolProvider)=>{
-    if(!requiresGuardCheck(provider))return;
+  const pending=new Map<PoolProvider,Promise<void|'direct'>>();
+  const check=async(provider:PoolProvider)=>{
     const checkId=randomUUID();
     const checkOnce=async(attempt:1|2)=>{
       const started=performance.now();let stageStarted=started;
@@ -71,5 +71,13 @@ export function createGuardNetworkCheck(read:GuardRead,timeoutMs=GUARD_CHECK_TIM
       if(!(error instanceof GuardRequiredError)||error.failureReason!=='timeout')throw error;
       return checkOnce(2);
     }
+  };
+  return (provider:PoolProvider):Promise<void|'direct'>=>{
+    if(!requiresGuardCheck(provider))return Promise.resolve();
+    const current=pending.get(provider);if(current)return current;
+    // Share only work still in progress. No completed permission is retained,
+    // and new waiters cannot extend the original two-attempt deadline.
+    const result=check(provider).finally(()=>{pending.delete(provider);});
+    pending.set(provider,result);return result;
   };
 }
