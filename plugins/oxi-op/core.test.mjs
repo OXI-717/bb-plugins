@@ -2,6 +2,9 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
+import {readFileSync} from 'node:fs';
+// Item templates arrive on stdin on macOS and through a private file on Linux.
+const templateOf=(args,input)=>{const path=args[args.indexOf('--template')+1];return JSON.parse(path==='/dev/stdin'?input:readFileSync(path,'utf8'));};
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
  assert.throws(()=>resolveRoute([route],'other'));
@@ -16,7 +19,7 @@ test('missing profile explains same-project configuration without leaking other 
 });
 test('password is stdin only and separate get verifies it',async()=>{
  let stored;const calls=[];
- const runner=async(bin,args,env,input)=>{calls.push({args,input});if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({category:'LOGIN',fields:[{id:'username',label:'username',type:'STRING',purpose:'USERNAME'},{id:'password',label:'password',type:'CONCEALED',purpose:'PASSWORD'}]});if(args[1]==='create'){stored=JSON.parse(input);assert.equal(stored.fields[1].purpose,'PASSWORD');return JSON.stringify({id:'example-item'});}return JSON.stringify(stored);};
+ const runner=async(bin,args,env,input)=>{calls.push({args,input});if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({category:'LOGIN',fields:[{id:'username',label:'username',type:'STRING',purpose:'USERNAME'},{id:'password',label:'password',type:'CONCEALED',purpose:'PASSWORD'}]});if(args[1]==='create'){stored=templateOf(args,input);assert.equal(stored.fields[1].purpose,'PASSWORD');return JSON.stringify({id:'example-item'});}return JSON.stringify(stored);};
  assert.equal((await storeCredential(runner,{},'example-vault','Example','user','synthetic-value')).verified,true);
  assert.equal(calls.length,4);assert(!JSON.stringify(calls.map(x=>x.args)).includes('synthetic-value'));assert(calls[3].args.includes('--reveal'));
 });
@@ -135,7 +138,7 @@ function fakeAccount(options={}){
   if(group==='service-account'){if(options.failCreate)throw new Error('synthetic provider failure');return 'synthetic-token-'+(++next)+'\n';}
   if(action==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));
   if(action==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});
-  if(action==='create'){if(options.failBackup)throw new Error('synthetic backup failure');const t=JSON.parse(input);const id='item-'+items.size;items.set(id,{title:t.title,created_at:options.createdAt??new Date().toISOString(),fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id});}
+  if(action==='create'){if(options.failBackup)throw new Error('synthetic backup failure');const t=templateOf(args,input);const id='item-'+items.size;items.set(id,{title:t.title,created_at:options.createdAt??new Date().toISOString(),fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id});}
   if(action==='edit'){const it=items.get(args[2]);it.title=args[args.indexOf('--title')+1];return '{}';}
   if(action==='get')return JSON.stringify(items.get(args[2]));
   throw new Error('unexpected');
@@ -177,7 +180,7 @@ test('scope probe requires exactly one visible vault and reports a refused write
  await assert.rejects(probeServiceScope(async()=>JSON.stringify([{id:'automation-vault'},{id:'other-vault'}]),{},'automation-vault'),/scope/);
  await assert.rejects(probeServiceScope(async(_b,args)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);throw new Error('offline');},{},'automation-vault'),/read/);
  const items=new Map();
- const writer=async(_b,args,_e,input)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create'){const t=JSON.parse(input);items.set('probe',{title:t.title,fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id:'probe'});}if(args[1]==='get')return JSON.stringify(items.get('probe'));if(args[1]==='delete'){items.delete(args[2]);return '';}throw new Error('unexpected');};
+ const writer=async(_b,args,_e,input)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create'){const t=templateOf(args,input);items.set('probe',{title:t.title,fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id:'probe'});}if(args[1]==='get')return JSON.stringify(items.get('probe'));if(args[1]==='delete'){items.delete(args[2]);return '';}throw new Error('unexpected');};
  assert.deepEqual(await probeServiceScope(writer,{},'automation-vault'),{vaultIds:['automation-vault'],writable:true});
  assert.equal(items.size,0);
 });
@@ -276,7 +279,7 @@ test('a leader that exits while an escaped descendant holds output does not hang
 });
 test('multibyte titles survive pipe chunk boundaries',async()=>{
  const text='Oxi Op service account — Пример '.repeat(5000);
- const out=await runProcess(process.execPath,['-e','process.stdout.write(process.argv[1])',text],{});
+ const out=await runProcess(process.execPath,['-e',"process.stdout.write('Oxi Op service account — Пример '.repeat(5000))"],{});
  assert.equal(out,text);
 });
 test('a value cut at the end of stopped output is concealed',()=>{
