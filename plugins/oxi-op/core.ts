@@ -1,5 +1,9 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, writeFile, rm, chmod } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type {Route} from './contract.js';
 class CredentialProcessError extends Error {}
 export type Runner = (binary: string, args: string[], env: NodeJS.ProcessEnv, input?: string, signal?: AbortSignal) => Promise<string>;
@@ -31,7 +35,20 @@ export const runProcess: Runner = (binary, args, env, input, signal) => new Prom
     child.stdin.on('error', () => { });
     child.stdin.end(input);
 });
-export async function storeCredential(run: Runner, env: NodeJS.ProcessEnv, vault: string, title: string, username: string, password: string, signal?: AbortSignal) {
+// op on Linux rejects a template read from /dev/stdin (exit 9); macOS accepts it. On Linux the
+// template goes to a 0600 file in a private 0700 directory, memory-backed (XDG_RUNTIME_DIR or /dev/shm)
+// when available, removed immediately after the call.
+export async function withTemplateFile<T>(json: string, platform: NodeJS.Platform, use: (path: string, input?: unknown) => Promise<T>) {
+    if (platform !== 'linux') return use('/dev/stdin', JSON.parse(json));
+    const directory = await mkdtemp(join(process.env.XDG_RUNTIME_DIR || (existsSync('/dev/shm') ? '/dev/shm' : tmpdir()), 'oxi-op-'));
+    try {
+        await chmod(directory, 0o700);
+        const path = join(directory, 'item.json');
+        await writeFile(path, json, {mode: 0o600, flag: 'wx'});
+        return await use(path);
+    } finally {await rm(directory, {recursive: true, force: true});}
+}
+export async function storeCredential(run: Runner, env: NodeJS.ProcessEnv, vault: string, title: string, username: string, password: string, signal?: AbortSignal, platform: NodeJS.Platform = process.platform) {
     const op = async (args: string[], input?: unknown) => { try {
         return JSON.parse(await run('op', args, env, input === undefined ? undefined : JSON.stringify(input), signal));
     }
@@ -55,7 +72,7 @@ export async function storeCredential(run: Runner, env: NodeJS.ProcessEnv, vault
             if (!field) throw new Error('Login template is missing a required field');
             field.value = value;
         }
-        const item = await op(['item', 'create', '--template', '/dev/stdin', '--vault', vault, '--format=json'], template);
+        const item = await withTemplateFile(JSON.stringify(template), platform, (path, input) => op(['item', 'create', '--template', path, '--vault', vault, '--format=json'], input));
         itemId = item.id;
     }
     if (typeof itemId !== 'string' || !itemId)
@@ -239,4 +256,31 @@ export async function execWithKeys(run: Runner, command: CommandRunner, env: Nod
         for (const value of Object.values(values).filter(Boolean).sort((a, b) => b.length - a.length)) output = output.split(value).join('<concealed>');
         return {...result, output};
     } finally {for (const key of Object.keys(values)) delete values[key];}
+}
+
+// Diagnostic: compare item-creation methods with synthetic random values only, then remove them.
+export async function probeWriteMethods(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, signal?: AbortSignal) {
+    const prefix = 'OXI OP method probe ' + randomUUID() + ' ';
+    const code = (error: unknown) => {const exit = /process exit (\d{1,3}|null)/.exec(error instanceof Error ? error.message : '')?.[1]; return 'failed' + (exit ? '-exit-' + exit : '');};
+    const results: Record<string, string> = {};
+    let template: {title?: string; fields?: {id: string; value?: string}[]};
+    try {template = JSON.parse(await run('op', ['item', 'template', 'get', 'Login', '--format=json'], env, undefined, signal)); results.template = 'ok';}
+    catch (error) {return {results: {template: code(error)}};}
+    const filled = (title: string) => ({...template, title, fields: (template.fields ?? []).map(f => f.id === 'username' ? {...f, value: 'synthetic-probe'} : f.id === 'password' ? {...f, value: randomUUID()} : f)});
+    const attempts: [string, string[], string | undefined][] = [
+        ['template-dev-stdin', ['item', 'create', '--template', '/dev/stdin', '--vault', vaultId, '--format=json'], JSON.stringify(filled(prefix + 'a'))],
+        ['piped-json', ['item', 'create', '--vault', vaultId, '--format=json'], JSON.stringify(filled(prefix + 'b'))],
+        ['assignment', ['item', 'create', '--category', 'Login', '--title', prefix + 'c', '--vault', vaultId, '--format=json', 'username=synthetic-probe', 'password=' + randomUUID()], undefined],
+    ];
+    for (const [name, args, input] of attempts) {
+        try {await run('op', args, env, input, signal); results[name] = 'ok';}
+        catch (error) {results[name] = code(error);}
+    }
+    try {
+        const items = JSON.parse(await run('op', ['item', 'list', '--vault', vaultId, '--format=json'], env, undefined, signal));
+        for (const item of items.filter((x: {title: string}) => x.title.startsWith(prefix))) await run('op', ['item', 'delete', item.id, '--vault', vaultId], env, undefined, signal);
+        const left = JSON.parse(await run('op', ['item', 'list', '--vault', vaultId, '--format=json'], env, undefined, signal));
+        results.cleanup = left.some((x: {title: string}) => x.title.startsWith(prefix)) ? 'incomplete' : 'ok';
+    } catch (error) {results.cleanup = code(error);}
+    return {results};
 }

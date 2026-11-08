@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
@@ -172,4 +172,23 @@ test('key listing returns titles and field labels only',async()=>{
  const result=await listVaultKeys(run,{},'automation-vault');
  assert.deepEqual(result,{items:[{item:'Example API',fields:['credential','notesPlain']}]});
  assert(!JSON.stringify(result).includes('synthetic-hidden'));
+});
+test('on Linux the item template goes through a private file that is removed afterwards',async()=>{
+ const {statSync,existsSync,readFileSync}=await import('node:fs');
+ let seen;
+ const result=await withTemplateFile('{"title":"synthetic"}','linux',async(path,input)=>{
+  assert.equal(input,undefined);assert.notEqual(path,'/dev/stdin');
+  assert.equal(statSync(path).mode&0o777,0o600);assert.equal(statSync(path.replace(/\/item\.json$/,'')).mode&0o777,0o700);
+  assert.equal(readFileSync(path,'utf8'),'{"title":"synthetic"}');seen=path;return 'created';
+ });
+ assert.equal(result,'created');assert(!existsSync(seen));
+ await assert.rejects(withTemplateFile('{}','linux',async path=>{seen=path;throw new Error('synthetic failure');}));
+ assert(!existsSync(seen));
+ assert.deepEqual(await withTemplateFile('{"a":1}','darwin',async(path,input)=>[path,input]),['/dev/stdin',{a:1}]);
+});
+test('a Linux store never passes the password in arguments',async()=>{
+ const calls=[];let stored;
+ const runner=async(_b,args,_e,input)=>{calls.push(args);if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create'){assert.equal(input,undefined);const {readFileSync}=await import('node:fs');stored=JSON.parse(readFileSync(args[args.indexOf('--template')+1],'utf8'));return JSON.stringify({id:'item'});}return JSON.stringify({fields:stored.fields.map(f=>({label:f.label,value:f.value}))});};
+ assert.equal((await storeCredential(runner,{},'vault','Example','user','synthetic-linux-value',undefined,'linux')).verified,true);
+ assert(!JSON.stringify(calls).includes('synthetic-linux-value'));
 });
