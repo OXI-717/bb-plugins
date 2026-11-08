@@ -1,3 +1,4 @@
+import {CURSOR_RPC_PATH_HEADER} from './cursor-rpc.js';
 import { EgressUnavailable, type AccountRoute } from "./account-egress.js";
 import { providerBudgetQuota, providerEvidenceFromUsage, PROVIDER_BUDGET_MAX_AGE_MS, NUMERIC_BUDGET_PROVIDERS } from './provider-budget.js';
 import {AccountStartPacing} from "./account-start-pacing.js";
@@ -31,7 +32,7 @@ import {
   DEFAULT_CODEX_REFRESH_URL,
   DEFAULT_CODEX_USAGE_URL,
 } from "./codex-adapter.js";
-import { createCursorAdapter } from "./cursor-adapter.js";
+import { CURSOR_PROXIED_PATHS, createCursorAdapter } from "./cursor-adapter.js";
 import { createDevinAdapter } from "./devin-adapter.js";
 import { createKimiAdapter } from "./kimi-adapter.js";
 import {
@@ -208,10 +209,12 @@ export class AccountPoolHub {
   private readonly vpn;
   private readonly networkFlights:NetworkFlights;
   private readonly admission: AccountAdmission;
+  private readonly cursorControlAdmission: AccountAdmission;
   private readonly claudeStarts: AccountStartPacing;
   constructor(private readonly options: HubOptions) {
     this.claudeStarts = new AccountStartPacing(() => options.getSettings().claudeRequestStartIntervalMs, options.now);
     this.admission = new AccountAdmission(() => options.getSettings().maxConcurrentRequestsPerAccount, options.now);
+    this.cursorControlAdmission = new AccountAdmission(() => options.getSettings().maxConcurrentRequestsPerAccount, options.now);
     this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnPayload,options.guardCheck);
     this.networkFlights = new NetworkFlights(options.fetch, () => this.stopped.signal,
       provider => this.assertNetworkAllowed(provider), (provider, drainable) => {
@@ -239,7 +242,7 @@ export class AccountPoolHub {
     return (input,init)=>this.networkFlights.fetch(provider,input,init);
   }
 
-  admissionLimitsChanged(): void { this.admission.limitsChanged(); }
+  admissionLimitsChanged(): void { this.admission.limitsChanged(); this.cursorControlAdmission.limitsChanged(); }
   async enforceNetworkPolicy():Promise<void>{await this.networkFlights.enforce();}
 
   async start(signal: AbortSignal): Promise<void> {
@@ -567,7 +570,7 @@ export class AccountPoolHub {
           successfulRequests: this.options.quotas.successfulRequests(account.id),
           resetCredits: account.provider === "codex" || account.provider === "claude" ? this.options.quotas.resetCredits(account.id) : null,
           inFlight: this.inFlightByAccount.get(account.id) ?? 0,
-          queuedRequests: this.admission.waiting(account.id) + Math.max(0, this.admission.reserved(account.id) - (this.inFlightByAccount.get(account.id) ?? 0)),
+          queuedRequests: this.admission.waiting(account.id) + this.cursorControlAdmission.waiting(account.id) + Math.max(0, this.admission.reserved(account.id) + this.cursorControlAdmission.reserved(account.id) - (this.inFlightByAccount.get(account.id) ?? 0)),
           concurrencyLimit: settings.maxConcurrentRequestsPerAccount,
           capLimit: limit,
           eligible: eligibleIds.has(account.id),
@@ -1484,9 +1487,19 @@ export class AccountPoolHub {
       const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id) : null;
       return hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
     };
+    // Cursor streams depend on append and startup RPCs. Sharing their capacity
+    // lets two open streams prevent the requests needed to make either finish.
+    // Only known control methods use the separate bounded lane; unknown RPCs
+    // retain ordinary admission, and every lane shares policy/cooldown checks.
+    const rpc = request.headers.get(CURSOR_RPC_PATH_HEADER)
+      ?? new URL(request.url).pathname.split('/cursor/')[1];
+    const control = account.provider === 'cursor' && rpc !== undefined && rpc !== null
+      && CURSOR_PROXIED_PATHS.includes(rpc)
+      && !['agent.v1.AgentService/Run','agent.v1.AgentService/RunSSE','agent.v1.AgentService/RunPoll'].includes(rpc);
+    const gate = control ? this.cursorControlAdmission : this.admission;
     const queuedAt = this.options.now();
-    const waiting = this.admission.waiting(account.id)>0 || this.admission.reserved(account.id)>=this.options.getSettings().maxConcurrentRequestsPerAccount || (cooldown() ?? 0)>queuedAt;
-    const slotRelease = await this.admission.acquire(account.id, admissionSignal, cooldown, deadline);
+    const waiting = gate.waiting(account.id)>0 || gate.reserved(account.id)>=this.options.getSettings().maxConcurrentRequestsPerAccount || (cooldown() ?? 0)>queuedAt;
+    const slotRelease = await gate.acquire(account.id, admissionSignal, cooldown, deadline);
     if (waiting) this.observe(trace,{event:'queue-wait',attempt,accountId:account.id,durationMs:Math.max(0,this.options.now()-queuedAt)});
     const controller = new AbortController();
     const abortFromRequest = () => controller.abort(request.signal.reason);
