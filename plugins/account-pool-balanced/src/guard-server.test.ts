@@ -49,7 +49,7 @@ it('diagnostic failures cannot grant or deny permission',async()=>{
  await expect(createGuardNetworkCheck(serverGuardRead(a),10,()=>{throw Error('log failed');})('cursor')).rejects.toMatchObject({code:'VPN_GUARD_BLOCKED'});
  expect(a.decision).toHaveBeenCalledTimes(1);
 });
-it('isolates parallel timeouts, fresh host binding, and diagnostics per call',async()=>{
+it('shares parallel timeouts while retaining fresh host binding and one diagnostic per read',async()=>{
  vi.useFakeTimers();
  try{
   const a=access(),calls=new Map<AbortSignal,number>();
@@ -62,9 +62,9 @@ it('isolates parallel timeouts, fresh host binding, and diagnostics per call',as
   const results=Array.from({length:32},()=>check('cursor'));
   await vi.advanceTimersByTimeAsync(10);
   expect(await Promise.all(results)).toEqual(Array(32).fill('direct'));
-  expect(calls.size).toBe(64);expect(events).toHaveLength(64);
-  expect(new Set(events.map(e=>e.checkId)).size).toBe(32);
-  expect(a.decision).toHaveBeenCalledTimes(32);
+  expect(calls.size).toBe(2);expect(events).toHaveLength(2);
+  expect(new Set(events.map(e=>e.checkId)).size).toBe(1);
+  expect(a.decision).toHaveBeenCalledTimes(1);
   expect(vi.getTimerCount()).toBe(0);
  }finally{vi.useRealTimers();}
 });

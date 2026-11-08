@@ -126,3 +126,74 @@ it('ignores a late first permission while the fresh check denies traffic',async(
   expect(read).toHaveBeenCalledTimes(2);
  }finally{vi.useRealTimers();}
 });
+
+
+it('shares only a pending read per provider and reads fresh after settlement',async()=>{
+ let finish:(value:unknown)=>void=()=>{};
+ const read=vi.fn(()=>new Promise(resolve=>{finish=resolve;}));
+ const check=createGuardNetworkCheck(read);
+ const batch=Array.from({length:12},()=>check('cursor'));
+ await Promise.resolve();
+ expect(read).toHaveBeenCalledTimes(1);
+ finish({schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'observe'});
+ await Promise.all(batch);
+ const fresh=check('cursor');await Promise.resolve();
+ expect(read).toHaveBeenCalledTimes(2);
+ finish({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'});
+ await expect(fresh).rejects.toMatchObject({code:'VPN_GUARD_BLOCKED'});
+});
+
+it('shares the two-attempt deadline without extending it for later waiters',async()=>{
+ vi.useFakeTimers();
+ try {
+  const read=vi.fn(()=>new Promise(()=>{}));const check=createGuardNetworkCheck(read);
+  const first=check('cursor').catch(e=>e);
+  await vi.advanceTimersByTimeAsync(7000);
+  const later=Array.from({length:12},()=>check('cursor').catch(e=>e));
+  await vi.advanceTimersByTimeAsync(1000);
+  for(const error of await Promise.all([first,...later]))expect(error).toMatchObject({failureReason:'timeout'});
+  expect(read).toHaveBeenCalledTimes(2);expect(vi.getTimerCount()).toBe(0);
+  const fresh=check('cursor').catch(e=>e);await vi.advanceTimersByTimeAsync(8000);await fresh;
+  expect(read).toHaveBeenCalledTimes(4);
+ }finally{vi.useRealTimers();}
+});
+
+it('isolates pending permissions by provider and checker instance',async()=>{
+ let finish:(value:unknown)=>void=()=>{};
+ const read=vi.fn((provider:string)=>provider==='cursor'?new Promise(resolve=>{finish=resolve;}):Promise.resolve({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}));
+ const check=createGuardNetworkCheck(read);const cursor=check('cursor');await Promise.resolve();
+ await expect(check('claude')).rejects.toMatchObject({code:'VPN_GUARD_BLOCKED'});
+ await expect(createGuardNetworkCheck(async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}))('cursor')).rejects.toMatchObject({code:'VPN_GUARD_BLOCKED'});
+ await check('kimi');await check('zai');expect(read).toHaveBeenCalledTimes(2);
+ finish({schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'observe'});await cursor;
+});
+
+it.each([
+ [{schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'},'VPN_GUARD_BLOCKED'],
+ [{allowed:true},'VPN_GUARD_UNAVAILABLE'],
+])('shares a denial without retry or a retained result',async(value,code)=>{
+ const read=vi.fn(async()=>value);const check=createGuardNetworkCheck(read);
+ const batch=Array.from({length:12},()=>check('cursor').catch(e=>e));
+ for(const error of await Promise.all(batch))expect(error.code).toBe(code);
+ expect(read).toHaveBeenCalledTimes(1);
+ await expect(check('cursor')).rejects.toMatchObject({code});expect(read).toHaveBeenCalledTimes(2);
+});
+
+it('keeps concurrent host/RPC/host reads within a serialized SDK budget',async()=>{
+ vi.useFakeTimers();
+ try {
+  let tail=Promise.resolve();
+  const rpc=(signal:AbortSignal)=>{
+   const result=tail.then(async()=>{signal.throwIfAborted();await new Promise(resolve=>setTimeout(resolve,20));signal.throwIfAborted();});
+   tail=result.catch(()=>{});return result;
+  };
+  const read=vi.fn(async(_provider,signal:AbortSignal)=>{
+   await rpc(signal);await rpc(signal);await rpc(signal);
+   return {schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'observe'};
+  });
+  const check=createGuardNetworkCheck(read,100);
+  const results=Promise.all(Array.from({length:12},()=>check('cursor').then(()=>true,()=>false)));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(await results).toEqual(Array(12).fill(true));expect(read).toHaveBeenCalledTimes(1);
+ }finally{vi.useRealTimers();}
+});
