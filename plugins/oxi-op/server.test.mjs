@@ -488,7 +488,7 @@ test('diagnostics identify offline desktop dependency without forms or op calls'
 const desktop={authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,credentialHostId:'example-credential-host'};
 const owner={authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,desktopHosts:[{hostId:'mac-air',opBinary:'/air/op'},{hostId:'mac-max',opBinary:'/max/op'}]};
 const sessionHosts={'linux-server':'/usr/bin/op','mac-max':'/max/op','mac-air':'/air/op'};
-function fleet(t,{offline=[],sessionHost='linux-server',environmentId='example-env',callHost,routes,tokens}={}){
+function fleet(t,{offline=[],sessionHost='linux-server',environmentId='example-env',callHost,routes,tokens,notify}={}){
  const host=createFakePluginHost({
   pluginId:'oxi-op',settings:{routes:JSON.stringify(routes),...(tokens?{projectServiceAccounts:JSON.stringify(tokens)}:{})},
   sdk:{
@@ -496,6 +496,7 @@ function fleet(t,{offline=[],sessionHost='linux-server',environmentId='example-e
    threads:{get:async({threadId})=>({id:threadId,projectId:route.projectId,title:'Example session',environmentId}),send:async()=>({delivery:'sent'}),interactions:{list:async()=>[]}},
    environments:{get:async({environmentId})=>({id:environmentId,hostId:sessionHost,path:'/work/example'})},
    hosts:{get:async({hostId})=>({id:hostId,name:'Machine '+hostId,status:offline.includes(hostId)?'disconnected':'connected'})},
+   plugins:{callRpc:notify??(async()=>{throw new Error('push-notifications is not installed');})},
   },
   experimental_callHostRpc:callHost??(()=>({completed:true})),
  });
@@ -674,4 +675,18 @@ test('resume uses only the machines and op paths of an approved card',async t=>{
  h.behavior.submitInteraction(form.id,{approved:true});
  assert.equal(JSON.parse((await work).stdout).projects[0].state,'configured');
  assert.equal(h.inspection.experimental_hostRpcCalls.filter(c=>c.method==='issueServiceAccounts').length,1);
+});
+test('every approval card is announced to the owner without secrets, and a failed notice still opens the card',async t=>{
+ const notices=[];
+ const h=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'}],notify:async x=>{notices.push(x);return {ok:true,channels:['desktop']};},callHost:()=>({itemId:'example-item',verified:true})});
+ const work=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ assert.equal(notices.length,1);
+ assert.equal(notices[0].pluginId,'push-notifications');assert.equal(notices[0].method,'notifications.send');
+ assert.equal(notices[0].input.threadId,context.threadId);assert(notices[0].input.body.includes('Сохранить пароль: Example'));
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{password:'synthetic-sensitive-value'});await work;
+ assert(!JSON.stringify(notices).includes('synthetic-sensitive-value'));
+ const quiet=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'}]});
+ const pending=quiet.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ assert.equal(quiet.inspection.pendingInteractions.length,1);
+ quiet.behavior.cancelInteraction(quiet.inspection.pendingInteractions[0].id);await pending;
 });
