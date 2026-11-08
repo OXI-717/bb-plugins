@@ -246,19 +246,31 @@ export type CommandRunner = (binary: string, args: string[], env: NodeJS.Process
 const outputLimit = 32768;
 export const runCommand: CommandRunner = (binary, args, env, cwd, timeoutMs, signal) => new Promise((resolve, reject) => {
     if (signal?.aborted) {reject(new Error('Operation cancelled')); return;}
-    const child = spawn(binary, args, {env, cwd, stdio: ['ignore', 'pipe', 'pipe']});
+    if (process.platform !== 'linux' && process.platform !== 'darwin') {reject(new Error('Agent commands require a supported POSIX host')); return;}
+    // The command and its descendants own one process group: they carry key values in their
+    // environment, so a timeout or cancellation must not leave any of them running.
+    const child = spawn(binary, args, {env, cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe']});
     let output = '';
     let truncated = false;
-    const kill = () => child.kill('SIGKILL');
+    let finished = false;
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {finished = true; clearTimeout(timer); clearTimeout(cleanupTimer); signal?.removeEventListener('abort', kill);};
+    const kill = () => {
+        if (finished) return;
+        try {if (child.pid) process.kill(-child.pid, 'SIGKILL');} catch {}
+        cleanupTimer ??= setTimeout(() => {child.stdout.destroy(); child.stderr.destroy(); finish(); reject(new Error('Agent command cleanup unconfirmed'));}, 1000);
+    };
     const timer = setTimeout(() => {truncated = true; kill();}, timeoutMs);
     signal?.addEventListener('abort', kill, {once: true});
     const collect = (chunk: Buffer) => {output += chunk.toString('utf8'); if (output.length > outputLimit * 2) {output = output.slice(-outputLimit); truncated = true;}};
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
-    child.on('error', () => {clearTimeout(timer); reject(new Error('Command could not start'));});
+    child.on('exit', () => {try {if (child.pid) process.kill(-child.pid, 'SIGKILL');} catch {}}); // the leader's exit ends its group
+    child.on('error', () => {kill(); finish(); reject(new Error('Command could not start'));});
     child.on('close', code => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', kill);
+        if (finished) return;
+        finish();
+        if (signal?.aborted) {reject(new Error('Operation cancelled')); return;}
         if (output.length > outputLimit) {output = output.slice(-outputLimit); truncated = true;}
         resolve({exitCode: code ?? 137, output, truncated});
     });

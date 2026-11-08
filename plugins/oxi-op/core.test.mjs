@@ -123,6 +123,8 @@ for (const mode of ['abort', 'deadline']) test('ordinary operation collects desc
   controller.abort();if(mode==='deadline')t.mock.timers.reset();
   await rm(directory,{recursive:true,force:true});
  }
+});
+
 function fakeAccount(options={}){
  const items=new Map(options.items??[]);const calls=[];let next=0;
  const vault={id:'automation-vault',name:'Example — Automation',description:'Managed by Oxi Op for BB project target'};
@@ -223,4 +225,19 @@ test('a Linux store never passes the password in arguments',async()=>{
  const runner=async(_b,args,_e,input)=>{calls.push(args);if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create'){assert.equal(input,undefined);const {readFileSync}=await import('node:fs');stored=JSON.parse(readFileSync(args[args.indexOf('--template')+1],'utf8'));return JSON.stringify({id:'item'});}return JSON.stringify({fields:stored.fields.map(f=>({label:f.label,value:f.value}))});};
  assert.equal((await storeCredential(runner,{},'vault','Example','user','synthetic-linux-value',undefined,'linux')).verified,true);
  assert(!JSON.stringify(calls).includes('synthetic-linux-value'));
+});
+test('an agent command timeout ends descendants that hold keys',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ const {mkdtemp,readFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const directory=await mkdtemp(join(tmpdir(),'oxi-op-agent-'));const file=join(directory,'pid');
+ const source=`const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(file)},String(c.pid));setInterval(()=>{},1000);`;
+ let pid;
+ try{
+  const result=await execWithKeys(async()=>'synthetic-key',runCommand,{},'v',[process.execPath,'-e',source],{K:{item:'a',field:'b'}},undefined,700);
+  assert.equal(result.truncated,true);
+  pid=Number(await readFile(file,'utf8'));
+  const running=async()=>{try{process.kill(pid,0);}catch{return false;}if(process.platform==='linux'){try{if((await readFile('/proc/'+pid+'/stat','utf8')).split(' ')[2]==='Z')return false;}catch{return false;}}return true;};
+  let alive=true;for(let i=0;i<100&&(alive=await running());i++)await new Promise(r=>setTimeout(r,10));
+  assert.equal(alive,false,'descendant with the key must not survive');
+ }finally{if(pid){try{process.kill(pid,'SIGKILL');}catch{}}await rm(directory,{recursive:true,force:true});}
 });
