@@ -591,7 +591,7 @@ test('a reader that can write is never activated',async t=>{
  const h=fleet(t,{routes:projectRoutes,callHost:issuing({readerWritable:true})});
  const work=h.behavior.runCli(automateArgs,context);await setImmediate();
  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
- const rows=JSON.parse((await work).stdout).projects;assert(rows.every(x=>x.state==='needs-review'&&x.stage==='probe-intake'&&x.reason==='permissions-differ'));
+ const rows=JSON.parse((await work).stdout).projects;assert(rows.every(x=>x.state==='needs-review'&&x.stage==='probe-intake'&&x.reason==='reader-can-write'));
  assert.equal((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-one'})).exitCode,1);
 });
 test('automatic access setup needs an online execution machine, desktop setup and project vaults',async t=>{

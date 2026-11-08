@@ -163,6 +163,13 @@ export async function issueServiceAccounts(run: Runner, env: NodeJS.ProcessEnv, 
     }
     return {vaultId, vaultName, accounts};
 }
+// Fixed codes only: our storeCredential messages carry no provider output, but keep to a whitelist.
+function writeFailureCode(error: unknown) {
+    const message = error instanceof Error ? error.message : '';
+    const step = /^1Password item (list|template|create|get) failed/.exec(message)?.[1] ?? (message.includes('differs') ? 'readback-differs' : message.includes('template is missing') ? 'template-fields' : 'unknown');
+    const exit = /process exit (\d{1,3})/.exec(message)?.[1];
+    return step + (exit ? '-exit-' + exit : '');
+}
 // Prove what a service account can actually do: it must see exactly one vault, read it,
 // and report whether 1Password accepts a write there.
 export async function probeServiceScope(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, signal?: AbortSignal) {
@@ -172,7 +179,7 @@ export async function probeServiceScope(run: Runner, env: NodeJS.ProcessEnv, vau
     catch {throw new Error('Service account could not read the automation vault');}
     let itemId: string;
     try {itemId = (await storeCredential(run, env, vaultId, 'OXI OP write probe ' + randomUUID(), 'synthetic-probe', randomUUID(), signal)).itemId;}
-    catch {return {vaultIds: [vaultId], writable: false};}
+    catch (error) {return {vaultIds: [vaultId], writable: false, writeFailure: writeFailureCode(error)};}
     await run('op', ['item', 'delete', itemId, '--vault', vaultId], env, undefined, signal);
     return {vaultIds: [vaultId], writable: true};
 }
