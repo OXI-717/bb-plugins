@@ -11,7 +11,7 @@ export type Progress = (state: 'awaiting-approval' | 'running', approved?: boole
 // Persist only these metadata shapes; never persist form input or raw errors.
 const results = {
     exec: z.object({exitCode: z.number().int(), truncated: z.boolean()}),
-    automate: z.object({projects: z.array(z.object({projectId: z.string(), state: z.enum(['configured', 'needs-review']), vaultId: z.string().optional(), recoveredTokens: z.number().int().optional()}).strict())}).strict(),
+    automate: z.object({projects: z.array(z.object({projectId: z.string(), state: z.enum(['configured', 'needs-review']), vaultId: z.string().optional(), recoveredTokens: z.number().int().optional(), stage: z.enum(['issue', 'save-tokens', 'probe-reader', 'probe-intake', 'verify-intake', 'save-routes']).optional(), reason: z.string().regex(/^[a-z_-]{1,40}$/).optional()}).strict())}).strict(),
     'connect-many': z.object({projects: z.array(z.object({projectId:z.string(),state:z.enum(['configured','already-configured','needs-review']),vaultId:z.string().optional()}).strict())}).strict(),
     connect: z.object({configured: z.literal(true), projectId: z.string(), vaultId: z.string()}).strict(),
     store: z.object({itemId: z.string(), verified: z.literal(true)}).strict(),

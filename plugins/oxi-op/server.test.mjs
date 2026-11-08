@@ -571,6 +571,7 @@ test('one approval issues agent access for several projects and proves it before
  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
  const out=(await work).stdout;assert(!out.includes('synthetic'));
  assert.deepEqual(JSON.parse(out).projects.map(x=>x.state),['configured','needs-review']);
+ const failed=JSON.parse(out).projects[1];assert.equal(failed.stage,'issue');assert.equal(failed.reason,'unclassified');
  const calls=h.inspection.experimental_hostRpcCalls;
  const issue=calls.find(c=>c.method==='issueServiceAccounts');
  assert.equal(issue.hostId,'mac-max');assert.equal(issue.input.route.opBinary,'/max/op');assert.equal(issue.input.backupVaultId,'p-one-default');assert.equal(issue.input.expiresIn,'90d');
@@ -590,7 +591,7 @@ test('a reader that can write is never activated',async t=>{
  const h=fleet(t,{routes:projectRoutes,callHost:issuing({readerWritable:true})});
  const work=h.behavior.runCli(automateArgs,context);await setImmediate();
  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
- assert(JSON.parse((await work).stdout).projects.every(x=>x.state==='needs-review'));
+ const rows=JSON.parse((await work).stdout).projects;assert(rows.every(x=>x.state==='needs-review'&&x.stage==='probe-intake'&&x.reason==='permissions-differ'));
  assert.equal((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-one'})).exitCode,1);
 });
 test('automatic access setup needs an online execution machine, desktop setup and project vaults',async t=>{

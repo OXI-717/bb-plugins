@@ -180,6 +180,22 @@ export default function plugin(bb: BbPluginApi) {
     // write-capable intake account for a dedicated automation vault. A project's routes become
     // active only after both scopes are proven from the default execution machine; tokens live
     // only in encrypted settings and in the project's owner-approved backup item.
+    // Only fixed codes are recorded: raw errors can quote provider output, including tokens.
+    type AutomationStage = 'issue' | 'save-tokens' | 'probe-reader' | 'probe-intake' | 'verify-intake' | 'save-routes';
+    const failureReasons: [string, string][] = [
+        ['token backup vault could not be listed', 'backup-list-failed'], ['Duplicate token backups', 'duplicate-backups'],
+        ['existing token backup could not be read', 'backup-read-failed'], ['existing token backup is incomplete', 'backup-incomplete'],
+        ['did not confirm service account creation', 'create-unconfirmed'], ['unexpected service account response', 'create-unexpected'],
+        ['created but its token backup failed', 'backup-failed-after-create'], ['scope differs from the automation vault', 'scope-differs'],
+        ['could not read the automation vault', 'scope-unreadable'], ['permissions differ from the approved scope', 'permissions-differ'],
+        ['Duplicate vault names', 'duplicate-vaults'], ['Vault identity differs', 'vault-identity'], ['Missing vault identifier', 'vault-missing-id'],
+        ['Issued accounts differ', 'accounts-differ'], ['Saved service tokens differ', 'tokens-not-saved'], ['Routing changed during setup', 'routes-changed'],
+        ['Verification', 'intake-verification'], ['1Password item', 'intake-write'], ['process exit', 'op-exit'],
+    ];
+    const failureReason = (error: unknown) => {
+        const message = error instanceof Error ? error.message : '';
+        return failureReasons.find(([fragment]) => message.includes(fragment))?.[1] ?? (error instanceof OperationFailure ? error.code : 'unclassified');
+    };
     const sessionHostsSchema = z.record(z.string().min(1), z.string().regex(/^\/[^\0]*$/)).refine(x => Object.keys(x).length > 0 && Object.keys(x).length <= 6, 'List one to six machines');
     async function automate(projectIds: string[], profile: string, executionHostId: string, sessionHosts: Record<string, string>, ctx: OperationContext) {
         if (connecting) throw new Error('Project setup is already pending');
@@ -216,31 +232,37 @@ export default function plugin(bb: BbPluginApi) {
                 await requireCredentialHost(route, ctx);
                 await requireHost(executionHostId, 'execution', ctx);
                 await progress('running', true);
-                const rows: {projectId: string; state: 'configured' | 'needs-review'; vaultId?: string; recoveredTokens?: number}[] = [];
+                const rows: {projectId: string; state: 'configured' | 'needs-review'; vaultId?: string; recoveredTokens?: number; stage?: AutomationStage; reason?: string}[] = [];
                 for (const project of projects) {
                     if (ctx.signal?.aborted) throw new Error('Automatic access setup interrupted');
+                    let stage: AutomationStage = 'issue';
                     try {
                         const vaultName = project.name + ' — Automation';
                         const issued = await host.call('issueServiceAccounts', {route, projectId: project.projectId, vaultName, backupVaultId: project.backup.vaultId, expiresIn: '90d', accounts: project.accounts}, {hostId: credentialHost(route), signal: ctx.signal});
                         const tokens = new Map(issued.accounts.map(a => [a.profile, a.token]));
                         if (project.accounts.some(a => !tokens.get(a.profile)) || tokens.size !== project.accounts.length) throw new Error('Issued accounts differ from the request');
                         const targets = project.accounts.map(a => routeSchema.parse({projectId: project.projectId, profile: a.profile, label: project.name + (a.profile === 'routine' ? ' — ключи агентов' : ' — приём ключей'), hostId: executionHostId, vaultId: issued.vaultId, vaultLabel: issued.vaultName, opBinary: sessionHosts[executionHostId], authentication: 'service-account', tokenSetting: 'projectServiceAccounts', requireApproval: a.profile !== 'routine', allowAgentCommands: a.profile === 'routine', sessionHosts, operations: []}));
+                        stage = 'save-tokens';
                         const stored = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts));
                         await settings.experimental_set({projectServiceAccounts: JSON.stringify({...stored, [project.projectId]: {...(stored[project.projectId] ?? {}), ...Object.fromEntries(tokens)}})});
                         const saved = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts))[project.projectId] ?? {};
                         if (project.accounts.some(a => saved[a.profile] !== tokens.get(a.profile))) throw new Error('Saved service tokens differ');
                         const [reader, intake] = targets;
+                        stage = 'probe-reader';
                         const readerScope = await host.call('probeScope', {route: reader, serviceAccountToken: tokens.get('routine')!}, {hostId: executionHostId, signal: ctx.signal});
+                        stage = 'probe-intake';
                         const intakeScope = await host.call('probeScope', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
                         if (readerScope.writable || !intakeScope.writable) throw new Error('Issued permissions differ from the approved scope');
+                        stage = 'verify-intake';
                         await host.call('verify', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
+                        stage = 'save-routes';
                         const latest = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
                         if (latest.some(r => r.projectId === project.projectId && (r.profile === 'routine' || r.profile === 'intake'))) throw new Error('Routing changed during setup');
                         await settings.experimental_set({routes: JSON.stringify([...latest, ...targets])});
                         const current = JSON.parse((await settings.get()).routes);
                         if (targets.some(t => resolveRoute(current, project.projectId, t.profile).vaultId !== issued.vaultId)) throw new Error('Saved routes differ');
                         rows.push({projectId: project.projectId, state: 'configured', vaultId: issued.vaultId, recoveredTokens: issued.accounts.filter(a => a.recovered).length});
-                    } catch {rows.push({projectId: project.projectId, state: 'needs-review'});}
+                    } catch (error) {rows.push({projectId: project.projectId, state: 'needs-review', stage, reason: failureReason(error)});}
                 }
                 return JSON.stringify({projects: rows});
             }, 'Автоматический доступ агентов: ' + title);
