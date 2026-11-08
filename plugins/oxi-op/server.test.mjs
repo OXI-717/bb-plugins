@@ -483,3 +483,68 @@ test('diagnostics identify offline desktop dependency without forms or op calls'
  assert.equal(result.credentialHost.status,'disconnected');assert.equal(result.executionHost.status,'connected');assert.equal(result.credentialCalls,0);assert.equal(result.serviceTokenConfigured,false);
  assert.equal(h.inspection.pendingInteractions.length,0);assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
 });
+
+const desktop={authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,credentialHostId:'example-credential-host'};
+function automationSetup(t,{hostStatus='connected',readerWritable=false,issue}={}){
+ const h=setup(t,desktop,({method,input})=>{
+  if(method==='issueServiceAccounts')return issue?issue(input):{vaultId:'automation-vault',vaultName:'Example workspace — Automation',accounts:input.accounts.map(a=>({profile:a.profile,token:'synthetic-'+a.profile+'-token',recovered:false}))};
+  if(method==='probeScope')return {vaultIds:['automation-vault'],writable:input.serviceAccountToken==='synthetic-intake-token'||readerWritable};
+  if(method==='verify')return {verified:true,cleaned:true};
+  throw new Error('unexpected '+method);
+ },undefined,undefined,hostStatus);
+ return h;
+}
+const automateArgs=['automate','--project','target-project','--profile','default','--host','example-exec-host','--op-binary','/usr/bin/op'];
+test('automatic project access is issued after one approval and proven from the execution host',async t=>{
+ const h=automationSetup(t);
+ await h.behavior.setSettings({routes:JSON.stringify([{...route,...desktop},{...route,...desktop,projectId:'target-project',vaultId:'target-default-vault'}])});
+ const cancelled=h.behavior.runCli(automateArgs,context);await setImmediate();
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ const form=h.inspection.pendingInteractions[0];
+ assert.equal(form.timeoutMs,60_000);
+ assert(form.payload.purpose.includes('read_items')&&form.payload.purpose.includes('90'));
+ h.behavior.cancelInteraction(form.id);await cancelled;
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ const work=h.behavior.runCli(automateArgs,context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ const out=(await work).stdout;
+ assert(!out.includes('synthetic'));
+ const result=JSON.parse(out);
+ assert.equal(result.configured,true);assert.equal(result.readerWriteDenied,true);assert.equal(result.intakeVerified,true);
+ const calls=h.inspection.experimental_hostRpcCalls;
+ assert.deepEqual(calls[0].method,'issueServiceAccounts');assert.equal(calls[0].hostId,'example-credential-host');
+ assert.equal(calls[0].input.backupVaultId,'target-default-vault');assert.equal(calls[0].input.expiresIn,'90d');
+ assert.deepEqual(calls[0].input.accounts.map(a=>[a.profile,a.permissions.join(',')]),[['routine','read_items'],['intake','read_items,write_items']]);
+ assert(calls.slice(1).every(c=>c.hostId==='example-exec-host'&&c.input.route.opBinary==='/usr/bin/op'&&c.input.route.authentication==='service-account'));
+ const target={...context,projectId:'target-project'};
+ const routine=JSON.parse((await h.behavior.runCli(['status','--profile','routine'],target)).stdout);
+ assert.equal(routine.requireApproval,false);assert.equal(routine.vaultId,'automation-vault');assert.equal(routine.hostId,'example-exec-host');
+ assert.equal(JSON.parse((await h.behavior.runCli(['status','--profile','intake'],target)).stdout).requireApproval,true);
+ assert.equal(JSON.parse((await h.behavior.runCli(['diagnose','--profile','routine'],target)).stdout).serviceTokenConfigured,true);
+ assert(!(await h.behavior.runCli(['history'],context)).stdout.includes('synthetic'));
+ const before=calls.length;
+ assert.equal((await h.behavior.runCli(automateArgs,context)).exitCode,1);
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,before);
+});
+test('a reader that can write is never activated as automatic access',async t=>{
+ const h=automationSetup(t,{readerWritable:true});
+ await h.behavior.setSettings({routes:JSON.stringify([{...route,...desktop},{...route,...desktop,projectId:'target-project',vaultId:'target-default-vault'}])});
+ const work=h.behavior.runCli(automateArgs,context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ assert.equal((await work).exitCode,1);
+ assert.equal((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'target-project'})).exitCode,1);
+ assert.equal(JSON.parse((await h.behavior.runCli(['history'],context)).stdout).find(x=>x.kind==='automate').state,'needs-review');
+});
+test('automatic access setup needs an online execution host and an existing desktop project vault',async t=>{
+ const offline=automationSetup(t,{hostStatus:id=>id==='example-exec-host'?'disconnected':'connected'});
+ await offline.behavior.setSettings({routes:JSON.stringify([{...route,...desktop},{...route,...desktop,projectId:'target-project',vaultId:'target-default-vault'}])});
+ assert.equal((await offline.behavior.runCli(automateArgs,context)).exitCode,1);
+ assert.equal(offline.inspection.pendingInteractions.length,0);
+ const missing=automationSetup(t);
+ await missing.behavior.setSettings({routes:JSON.stringify([{...route,...desktop}])});
+ assert.equal((await missing.behavior.runCli(automateArgs,context)).exitCode,1);
+ const service=automationSetup(t);
+ await service.behavior.setSettings({routes:JSON.stringify([route,{...route,...desktop,projectId:'target-project',vaultId:'target-default-vault'}])});
+ assert.equal((await service.behavior.runCli(automateArgs,context)).exitCode,1);
+ for(const h of [missing,service])assert.equal(h.inspection.experimental_hostRpcCalls.length+h.inspection.pendingInteractions.length,0);
+});

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type {Route} from './contract.js';
 class CredentialProcessError extends Error {}
 export type Runner = (binary: string, args: string[], env: NodeJS.ProcessEnv, input?: string, signal?: AbortSignal) => Promise<string>;
@@ -153,4 +154,51 @@ export async function provisionProjectVault(run: Runner, env: NodeJS.ProcessEnv,
     const verified = await op(['vault', 'get', candidate.id, '--format=json']);
     if (verified.id !== candidate.id || verified.name !== name || verified.description !== description) throw new Error('Vault identity differs; no route was configured');
     return {vaultId: verified.id as string, name};
+}
+
+export type ServiceAccountRequest = {profile: string; name: string; permissions: ('read_items' | 'write_items')[]};
+export const serviceAccountBackupTitle = (name: string) => 'Oxi Op service account — ' + name;
+// A token is shown once by 1Password. Back it up before returning it, and recover the
+// backup on retry instead of issuing a duplicate service account.
+export async function issueServiceAccounts(run: Runner, env: NodeJS.ProcessEnv, request: {projectId: string; vaultName: string; backupVaultId: string; expiresIn: string; accounts: ServiceAccountRequest[]}, signal?: AbortSignal) {
+    const {vaultId, name: vaultName} = await provisionProjectVault(run, env, request.projectId, request.vaultName, signal);
+    const accounts: {profile: string; token: string; recovered: boolean}[] = [];
+    for (const account of request.accounts) {
+        const title = serviceAccountBackupTitle(account.name);
+        let items: {id: string; title: string}[];
+        try {items = JSON.parse(await run('op', ['item', 'list', '--vault', request.backupVaultId, '--format=json'], env, undefined, signal));}
+        catch {throw new Error('The token backup vault could not be listed; no service account was issued');}
+        const matches = items.filter(item => item.title === title);
+        if (matches.length > 1) throw new Error('Duplicate token backups need owner review');
+        if (matches.length === 1) {
+            let stored: {fields?: {label: string; value: string}[]};
+            try {stored = JSON.parse(await run('op', ['item', 'get', matches[0].id, '--vault', request.backupVaultId, '--reveal', '--format=json'], env, undefined, signal));}
+            catch {throw new Error('An existing token backup could not be read; owner review is required');}
+            const token = stored.fields?.find(field => field.label === 'password')?.value;
+            if (!token) throw new Error('An existing token backup is incomplete; owner review is required');
+            accounts.push({profile: account.profile, token, recovered: true});
+            continue;
+        }
+        let token: string;
+        try {token = (await run('op', ['service-account', 'create', account.name, '--vault', vaultId + ':' + account.permissions.join(','), '--expires-in', request.expiresIn, '--raw'], env, undefined, signal)).trim();}
+        catch {throw new Error('1Password did not confirm service account creation; owner review is required before retrying');}
+        if (!token || /\s/.test(token)) throw new Error('1Password returned an unexpected service account response; owner review is required');
+        try {await storeCredential(run, env, request.backupVaultId, title, account.name, token, signal);}
+        catch {throw new Error('The service account was created but its token backup failed; owner review is required');}
+        accounts.push({profile: account.profile, token, recovered: false});
+    }
+    return {vaultId, vaultName, accounts};
+}
+// Prove what a service account can actually do: it must see exactly one vault, read it,
+// and report whether 1Password accepts a write there.
+export async function probeServiceScope(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, signal?: AbortSignal) {
+    const vaults = JSON.parse(await run('op', ['vault', 'list', '--format=json'], env, undefined, signal));
+    if (!Array.isArray(vaults) || vaults.length !== 1 || vaults[0]?.id !== vaultId) throw new Error('Service account scope differs from the automation vault');
+    try {JSON.parse(await run('op', ['item', 'list', '--vault', vaultId, '--format=json'], env, undefined, signal));}
+    catch {throw new Error('Service account could not read the automation vault');}
+    let itemId: string;
+    try {itemId = (await storeCredential(run, env, vaultId, 'OXI OP write probe ' + randomUUID(), 'synthetic-probe', randomUUID(), signal)).itemId;}
+    catch {return {vaultIds: [vaultId], writable: false};}
+    await run('op', ['item', 'delete', itemId, '--vault', vaultId], env, undefined, signal);
+    return {vaultIds: [vaultId], writable: true};
 }
