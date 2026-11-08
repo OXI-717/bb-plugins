@@ -605,3 +605,25 @@ test('automatic access setup needs an online execution machine, desktop setup an
  assert.equal((await outsider.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','other','--session-hosts',JSON.stringify(sessionHosts)],context)).exitCode,1);
  for(const h of [offline,missing,service,outsider])assert.equal(h.inspection.experimental_hostRpcCalls.length+h.inspection.pendingInteractions.length,0);
 });
+test('tokens saved by an earlier approval are resumed on the server without a new card',async t=>{
+ const base=issuing();
+ const h=fleet(t,{offline:['mac-air','mac-max'],routes:projectRoutes,tokens:{'p-one':{routine:'synthetic-p-one-routine',intake:'synthetic-p-one-intake'}},callHost:x=>x.method==='describeScope'?{vaults:[{id:'vault-p-one',name:'Example p-one — Automation'}]}:base(x)});
+ const out=(await h.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)],context)).stdout;
+ assert.equal(h.inspection.pendingInteractions.length,0);
+ assert(!out.includes('synthetic'));
+ assert.deepEqual(JSON.parse(out).projects.map(x=>[x.state,x.resumed]),[['configured',true]]);
+ const calls=h.inspection.experimental_hostRpcCalls;
+ assert(calls.every(c=>c.hostId==='linux-server'&&c.method!=='issueServiceAccounts'));
+ assert.deepEqual(calls.filter(c=>c.method==='describeScope').map(c=>c.input.serviceAccountToken).sort(),['synthetic-p-one-intake','synthetic-p-one-routine']);
+ assert.equal(JSON.parse((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-one'})).stdout).vaultId,'vault-p-one');
+ const wrong=fleet(t,{routes:projectRoutes,tokens:{'p-one':{routine:'a',intake:'b'}},callHost:x=>x.method==='describeScope'?{vaults:[{id:'vault-p-one',name:'Example p-one — Automation'},{id:'other',name:'Other'}]}:base(x)});
+ const row=JSON.parse((await wrong.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)],context)).stdout).projects[0];
+ assert.deepEqual([row.state,row.stage,row.reason],['needs-review','resume-scope','scope-differs']);
+ assert.equal((await wrong.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-one'})).exitCode,1);
+});
+test('resume-only never opens an approval when no tokens were saved',async t=>{
+ const h=fleet(t,{routes:projectRoutes,callHost:issuing()});
+ const out=JSON.parse((await h.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts),'--resume-only'],context)).stdout);
+ assert.deepEqual(out.projects.map(x=>x.state),['not-issued']);
+ assert.equal(h.inspection.pendingInteractions.length+h.inspection.experimental_hostRpcCalls.length,0);
+});

@@ -46,6 +46,12 @@ export default experimental_defineHostEntry({ contract, handlers: {
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, args, env, input, signal);
             return execWithKeys(runner, runCommand, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, argv, keys, cwd, timeoutSeconds * 1000, ctx.signal);
         },
+        describeScope: async ({opBinary, serviceAccountToken}, ctx) => {
+            if (ctx.signal.aborted) throw new Error('Operation cancelled');
+            const vaults = JSON.parse(await runProcess(opBinary, ['vault', 'list', '--format=json'], serviceEnvironment(serviceAccountToken), undefined, ctx.signal));
+            if (!Array.isArray(vaults) || vaults.length > 20) throw new Error('Service account scope differs from the automation vault');
+            return {vaults: vaults.map((v: {id: unknown; name: unknown}) => ({id: String(v.id), name: String(v.name)}))};
+        },
         probeScope: async ({route, serviceAccountToken}, ctx) => {
             if (route.authentication !== 'service-account') throw new Error('Scope probes require a service account');
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, args, env, input, signal);
