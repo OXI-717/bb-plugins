@@ -3,14 +3,15 @@ import {z} from 'zod';
 
 type Storage = {get<T>(key: string): Promise<T | undefined>; set(key: string, value: unknown): Promise<void>; list(prefix?: string): Promise<string[]>};
 type Context = {projectId: string; threadId: string};
-type Kind = 'automate' | 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
+type Kind = 'automate' | 'exec' | 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
 type State = 'preparing' | 'awaiting-approval' | 'running' | 'completed' | 'cancelled' | 'failed' | 'needs-review' | 'interrupted';
 type Record = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; failureCode?: string; result?: unknown};
 export type Progress = (state: 'awaiting-approval' | 'running', approved?: boolean) => Promise<void>;
 
 // Persist only these metadata shapes; never persist form input or raw errors.
 const results = {
-    automate: z.object({configured: z.literal(true), projectId: z.string(), vaultId: z.string(), profiles: z.array(z.string()), readerWriteDenied: z.literal(true), intakeVerified: z.literal(true), recoveredTokens: z.number().int()}).strict(),
+    exec: z.object({exitCode: z.number().int(), truncated: z.boolean()}),
+    automate: z.object({projects: z.array(z.object({projectId: z.string(), state: z.enum(['configured', 'needs-review']), vaultId: z.string().optional(), recoveredTokens: z.number().int().optional()}).strict())}).strict(),
     'connect-many': z.object({projects: z.array(z.object({projectId:z.string(),state:z.enum(['configured','already-configured','needs-review']),vaultId:z.string().optional()}).strict())}).strict(),
     connect: z.object({configured: z.literal(true), projectId: z.string(), vaultId: z.string()}).strict(),
     store: z.object({itemId: z.string(), verified: z.literal(true)}).strict(),
@@ -25,8 +26,8 @@ export function cancelledOutcome(result: {outcome: string; reason?: string}) {
     return 'Cancelled' + (parsed.success ? ': ' + parsed.data : '');
 }
 export class OperationFailure extends Error {
-    constructor(readonly code: 'credential_host_offline' | 'execution_host_offline' | 'host_status_unavailable') {
-        super(code === 'credential_host_offline' ? 'The credential host is offline. No credential request was sent.' : code === 'execution_host_offline' ? 'The execution host is offline. No operation was started.' : 'Host availability could not be verified. No credential request was sent.');
+    constructor(readonly code: 'credential_host_offline' | 'execution_host_offline' | 'host_status_unavailable' | 'session_host_not_allowed') {
+        super(code === 'session_host_not_allowed' ? 'This session runs on a machine that is not allowed for this access profile. No key was read.' : code === 'credential_host_offline' ? 'No owner machine for 1Password approval is online. No credential request was sent.' : code === 'execution_host_offline' ? 'The execution host is offline. No operation was started.' : 'Host availability could not be verified. No credential request was sent.');
     }
 }
 export function createJournal(storage: Storage) {

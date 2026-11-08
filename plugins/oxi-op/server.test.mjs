@@ -7,6 +7,7 @@ import React from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import plugin from './dist/test/server.js';
 import {createJournal, cancelledOutcome} from './dist/test/journal.js';
+import {routeSchema} from './dist/test/contract.js';
 
 const route = {
   projectId: 'example-project', hostId: 'example-host', vaultId: 'example-vault',
@@ -485,66 +486,121 @@ test('diagnostics identify offline desktop dependency without forms or op calls'
 });
 
 const desktop={authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,credentialHostId:'example-credential-host'};
-function automationSetup(t,{hostStatus='connected',readerWritable=false,issue}={}){
- const h=setup(t,desktop,({method,input})=>{
-  if(method==='issueServiceAccounts')return issue?issue(input):{vaultId:'automation-vault',vaultName:'Example workspace — Automation',accounts:input.accounts.map(a=>({profile:a.profile,token:'synthetic-'+a.profile+'-token',recovered:false}))};
-  if(method==='probeScope')return {vaultIds:['automation-vault'],writable:input.serviceAccountToken==='synthetic-intake-token'||readerWritable};
+const owner={authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined,desktopHosts:[{hostId:'mac-air',opBinary:'/air/op'},{hostId:'mac-max',opBinary:'/max/op'}]};
+const sessionHosts={'linux-server':'/usr/bin/op','mac-max':'/max/op','mac-air':'/air/op'};
+function fleet(t,{offline=[],sessionHost='linux-server',environmentId='example-env',callHost,routes,tokens}={}){
+ const host=createFakePluginHost({
+  pluginId:'oxi-op',settings:{routes:JSON.stringify(routes),...(tokens?{projectServiceAccounts:JSON.stringify(tokens)}:{})},
+  sdk:{
+   projects:{get:async({projectId})=>({id:projectId,name:'Example '+projectId})},
+   threads:{get:async({threadId})=>({id:threadId,projectId:route.projectId,title:'Example session',environmentId}),send:async()=>({delivery:'sent'}),interactions:{list:async()=>[]}},
+   environments:{get:async({environmentId})=>({id:environmentId,hostId:sessionHost,path:'/work/example'})},
+   hosts:{get:async({hostId})=>({id:hostId,name:'Machine '+hostId,status:offline.includes(hostId)?'disconnected':'connected'})},
+  },
+  experimental_callHostRpc:callHost??(()=>({completed:true})),
+ });
+ plugin(host.bb);t.after(()=>host.harness.lifecycle.dispose());return host.harness;
+}
+const agentRoute={...route,profile:'routine',tokenEnvironment:undefined,tokenSetting:'projectServiceAccounts',requireApproval:false,allowAgentCommands:true,hostId:'linux-server',opBinary:'/usr/bin/op',vaultId:'automation-vault',sessionHosts,operations:[]};
+const agentTokens={[route.projectId]:{routine:'synthetic-reader-token'}};
+test('critical approval moves to the online owner Mac and keeps its own op path',async t=>{
+ const h=fleet(t,{offline:['mac-air'],routes:[{...route,...owner,hostId:'mac-max'}],callHost:()=>({itemId:'example-item',verified:true})});
+ const work=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ const form=h.inspection.pendingInteractions[0];
+ assert.equal(form.payload.hostId,'mac-max');assert.equal(form.payload.hostLabel,'Machine mac-max');
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ h.behavior.submitInteraction(form.id,{password:'synthetic-sensitive-value'});await work;
+ const call=h.inspection.experimental_hostRpcCalls[0];
+ assert.equal(call.hostId,'mac-max');assert.equal(call.input.route.opBinary,'/max/op');assert.equal(call.input.route.credentialHostId,'mac-max');
+});
+test('with every owner Mac offline no form opens and nothing is contacted',async t=>{
+ const h=fleet(t,{offline:['mac-air','mac-max'],routes:[{...route,...owner,hostId:'mac-max'}]});
+ const result=JSON.parse(await h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context));
+ assert.equal(result.code,'credential_host_offline');
+ assert.equal(h.inspection.pendingInteractions.length+h.inspection.experimental_hostRpcCalls.length,0);
+});
+test('agent keys run without approval on the session machine and never return values or the token',async t=>{
+ for(const [machine,op] of [['linux-server','/usr/bin/op'],['mac-max','/max/op']]){
+  const h=fleet(t,{sessionHost:machine,routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens,callHost:({method})=>method==='listKeys'?{items:[{item:'Example API',fields:['credential']}]}:{exitCode:0,output:'ok <concealed>',truncated:false}});
+  const keys=JSON.parse(await h.behavior.callAgentTool('oxi_op_keys',{},context));
+  assert.deepEqual(keys.items[0].fields,['credential']);
+  const result=JSON.parse(await h.behavior.callAgentTool('oxi_op_exec',{argv:['deploy','--check'],keys:{API_KEY:{item:'Example API',field:'credential'}}},context));
+  assert.equal(result.exitCode,0);assert.equal(result.output,'ok <concealed>');
+  assert.equal(h.inspection.pendingInteractions.length,0);
+  const calls=h.inspection.experimental_hostRpcCalls;
+  assert(calls.every(c=>c.hostId===machine&&c.input.route.opBinary===op));
+  assert.equal(calls[1].input.cwd,'/work/example');assert.equal(calls[1].input.serviceAccountToken,'synthetic-reader-token');
+  const history=(await h.behavior.runCli(['history'],context)).stdout;
+  assert(!history.includes('synthetic')&&!history.includes('ok <concealed>'));
+  assert.equal(JSON.parse(history)[0].result.exitCode,0);
+ }
+});
+test('agent keys refuse unlisted machines, critical vaults and reserved variables',async t=>{
+ const h=fleet(t,{sessionHost:'unknown-machine',routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens});
+ assert.equal(JSON.parse(await h.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'a',field:'b'}}},context)).code,'session_host_not_allowed');
+ const critical=JSON.parse(await h.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'a',field:'b'}},profile:'default'},context));
+ assert.equal(critical.completed,false);
+ await assert.rejects(h.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{OP_SERVICE_ACCOUNT_TOKEN:{item:'a',field:'b'}}},context));
+ await assert.rejects(h.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'../a',field:'b'}}},context));
+ const missing=fleet(t,{routes:[agentRoute],tokens:{}});
+ assert.equal(JSON.parse(await missing.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'a',field:'b'}}},context)).completed,false);
+ assert.equal(h.inspection.experimental_hostRpcCalls.length+missing.inspection.experimental_hostRpcCalls.length,0);
+ assert.throws(()=>routeSchema.parse({...route,...owner,allowAgentCommands:true}));
+ assert.throws(()=>routeSchema.parse({...agentRoute,requireApproval:true}));
+});
+function issuing({readerWritable=false,failProject}={}){
+ return ({method,input})=>{
+  if(method==='issueServiceAccounts'){if(input.projectId===failProject)throw new Error('synthetic provider detail');return {vaultId:'vault-'+input.projectId,vaultName:input.vaultName,accounts:input.accounts.map(a=>({profile:a.profile,token:'synthetic-'+input.projectId+'-'+a.profile,recovered:false}))};}
+  if(method==='probeScope')return {vaultIds:[input.route.vaultId],writable:input.route.profile==='intake'||readerWritable};
   if(method==='verify')return {verified:true,cleaned:true};
   throw new Error('unexpected '+method);
- },undefined,undefined,hostStatus);
- return h;
+ };
 }
-const automateArgs=['automate','--project','target-project','--profile','default','--host','example-exec-host','--op-binary','/usr/bin/op'];
-test('automatic project access is issued after one approval and proven from the execution host',async t=>{
- const h=automationSetup(t);
- await h.behavior.setSettings({routes:JSON.stringify([{...route,...desktop},{...route,...desktop,projectId:'target-project',vaultId:'target-default-vault'}])});
+const projectRoutes=[{...route,...owner,hostId:'mac-max'},{...route,...owner,hostId:'mac-max',projectId:'p-one',vaultId:'p-one-default'},{...route,...owner,hostId:'mac-max',projectId:'p-two',vaultId:'p-two-default'}];
+const automateArgs=['automate','--projects','p-one,p-two','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)];
+test('one approval issues agent access for several projects and proves it before activation',async t=>{
+ const h=fleet(t,{offline:['mac-air'],routes:projectRoutes,callHost:issuing({failProject:'p-two'})});
  const cancelled=h.behavior.runCli(automateArgs,context);await setImmediate();
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
  const form=h.inspection.pendingInteractions[0];
- assert.equal(form.timeoutMs,60_000);
- assert(form.payload.purpose.includes('read_items')&&form.payload.purpose.includes('90'));
+ assert.equal(form.timeoutMs,60_000);assert.equal(form.payload.hostId,'mac-max');
+ assert(form.payload.purpose.includes('read_items')&&form.payload.purpose.includes('90')&&form.payload.purpose.includes('Machine mac-max'));
  h.behavior.cancelInteraction(form.id);await cancelled;
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
  const work=h.behavior.runCli(automateArgs,context);await setImmediate();
  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
- const out=(await work).stdout;
- assert(!out.includes('synthetic'));
- const result=JSON.parse(out);
- assert.equal(result.configured,true);assert.equal(result.readerWriteDenied,true);assert.equal(result.intakeVerified,true);
+ const out=(await work).stdout;assert(!out.includes('synthetic'));
+ assert.deepEqual(JSON.parse(out).projects.map(x=>x.state),['configured','needs-review']);
  const calls=h.inspection.experimental_hostRpcCalls;
- assert.deepEqual(calls[0].method,'issueServiceAccounts');assert.equal(calls[0].hostId,'example-credential-host');
- assert.equal(calls[0].input.backupVaultId,'target-default-vault');assert.equal(calls[0].input.expiresIn,'90d');
- assert.deepEqual(calls[0].input.accounts.map(a=>[a.profile,a.permissions.join(',')]),[['routine','read_items'],['intake','read_items,write_items']]);
- assert(calls.slice(1).every(c=>c.hostId==='example-exec-host'&&c.input.route.opBinary==='/usr/bin/op'&&c.input.route.authentication==='service-account'));
- const target={...context,projectId:'target-project'};
- const routine=JSON.parse((await h.behavior.runCli(['status','--profile','routine'],target)).stdout);
- assert.equal(routine.requireApproval,false);assert.equal(routine.vaultId,'automation-vault');assert.equal(routine.hostId,'example-exec-host');
- assert.equal(JSON.parse((await h.behavior.runCli(['status','--profile','intake'],target)).stdout).requireApproval,true);
- assert.equal(JSON.parse((await h.behavior.runCli(['diagnose','--profile','routine'],target)).stdout).serviceTokenConfigured,true);
+ const issue=calls.find(c=>c.method==='issueServiceAccounts');
+ assert.equal(issue.hostId,'mac-max');assert.equal(issue.input.route.opBinary,'/max/op');assert.equal(issue.input.backupVaultId,'p-one-default');assert.equal(issue.input.expiresIn,'90d');
+ assert.deepEqual(issue.input.accounts.map(a=>[a.profile,a.permissions.join(',')]),[['routine','read_items'],['intake','read_items,write_items']]);
+ assert(calls.filter(c=>c.method!=='issueServiceAccounts').every(c=>c.hostId==='linux-server'&&c.input.route.authentication==='service-account'));
+ const one={...context,projectId:'p-one'};
+ const routine=JSON.parse((await h.behavior.runCli(['status','--profile','routine'],one)).stdout);
+ assert.equal(routine.requireApproval,false);assert.equal(routine.vaultId,'vault-p-one');
+ assert.equal(JSON.parse((await h.behavior.runCli(['status','--profile','intake'],one)).stdout).requireApproval,true);
+ assert.equal((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-two'})).exitCode,1);
  assert(!(await h.behavior.runCli(['history'],context)).stdout.includes('synthetic'));
  const before=calls.length;
- assert.equal((await h.behavior.runCli(automateArgs,context)).exitCode,1);
+ assert.equal((await h.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)],context)).exitCode,1);
  assert.equal(h.inspection.experimental_hostRpcCalls.length,before);
 });
-test('a reader that can write is never activated as automatic access',async t=>{
- const h=automationSetup(t,{readerWritable:true});
- await h.behavior.setSettings({routes:JSON.stringify([{...route,...desktop},{...route,...desktop,projectId:'target-project',vaultId:'target-default-vault'}])});
+test('a reader that can write is never activated',async t=>{
+ const h=fleet(t,{routes:projectRoutes,callHost:issuing({readerWritable:true})});
  const work=h.behavior.runCli(automateArgs,context);await setImmediate();
  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
- assert.equal((await work).exitCode,1);
- assert.equal((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'target-project'})).exitCode,1);
- assert.equal(JSON.parse((await h.behavior.runCli(['history'],context)).stdout).find(x=>x.kind==='automate').state,'needs-review');
+ assert(JSON.parse((await work).stdout).projects.every(x=>x.state==='needs-review'));
+ assert.equal((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-one'})).exitCode,1);
 });
-test('automatic access setup needs an online execution host and an existing desktop project vault',async t=>{
- const offline=automationSetup(t,{hostStatus:id=>id==='example-exec-host'?'disconnected':'connected'});
- await offline.behavior.setSettings({routes:JSON.stringify([{...route,...desktop},{...route,...desktop,projectId:'target-project',vaultId:'target-default-vault'}])});
+test('automatic access setup needs an online execution machine, desktop setup and project vaults',async t=>{
+ const offline=fleet(t,{offline:['linux-server'],routes:projectRoutes});
  assert.equal((await offline.behavior.runCli(automateArgs,context)).exitCode,1);
- assert.equal(offline.inspection.pendingInteractions.length,0);
- const missing=automationSetup(t);
- await missing.behavior.setSettings({routes:JSON.stringify([{...route,...desktop}])});
+ const missing=fleet(t,{routes:[projectRoutes[0]]});
  assert.equal((await missing.behavior.runCli(automateArgs,context)).exitCode,1);
- const service=automationSetup(t);
- await service.behavior.setSettings({routes:JSON.stringify([route,{...route,...desktop,projectId:'target-project',vaultId:'target-default-vault'}])});
+ const service=fleet(t,{routes:[route,...projectRoutes.slice(1)]});
  assert.equal((await service.behavior.runCli(automateArgs,context)).exitCode,1);
- for(const h of [missing,service])assert.equal(h.inspection.experimental_hostRpcCalls.length+h.inspection.pendingInteractions.length,0);
+ const outsider=fleet(t,{routes:projectRoutes});
+ assert.equal((await outsider.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','other','--session-hosts',JSON.stringify(sessionHosts)],context)).exitCode,1);
+ for(const h of [offline,missing,service,outsider])assert.equal(h.inspection.experimental_hostRpcCalls.length+h.inspection.pendingInteractions.length,0);
 });

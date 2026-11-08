@@ -176,3 +176,60 @@ export async function probeServiceScope(run: Runner, env: NodeJS.ProcessEnv, vau
     await run('op', ['item', 'delete', itemId, '--vault', vaultId], env, undefined, signal);
     return {vaultIds: [vaultId], writable: true};
 }
+
+export type KeyReference = {item: string; field: string};
+// Titles and field labels only; values are never returned by this listing.
+export async function listVaultKeys(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, signal?: AbortSignal) {
+    const items = JSON.parse(await run('op', ['item', 'list', '--vault', vaultId, '--format=json'], env, undefined, signal));
+    if (!Array.isArray(items)) throw new Error('Invalid item list');
+    const result: {item: string; fields: string[]}[] = [];
+    for (const entry of items.slice(0, 200)) {
+        if (typeof entry?.id !== 'string' || typeof entry?.title !== 'string') continue;
+        const item = JSON.parse(await run('op', ['item', 'get', entry.id, '--vault', vaultId, '--format=json'], env, undefined, signal));
+        const fields = Array.isArray(item.fields) ? item.fields.map((field: {label?: unknown}) => field.label).filter((label: unknown): label is string => typeof label === 'string' && label.length > 0 && !label.includes('/')) : [];
+        result.push({item: entry.title, fields: [...new Set(fields as string[])]});
+    }
+    return {items: result};
+}
+export type CommandResult = {exitCode: number; output: string; truncated: boolean};
+export type CommandRunner = (binary: string, args: string[], env: NodeJS.ProcessEnv, cwd: string | undefined, timeoutMs: number, signal?: AbortSignal) => Promise<CommandResult>;
+const outputLimit = 32768;
+export const runCommand: CommandRunner = (binary, args, env, cwd, timeoutMs, signal) => new Promise((resolve, reject) => {
+    if (signal?.aborted) {reject(new Error('Operation cancelled')); return;}
+    const child = spawn(binary, args, {env, cwd, stdio: ['ignore', 'pipe', 'pipe']});
+    let output = '';
+    let truncated = false;
+    const kill = () => child.kill('SIGKILL');
+    const timer = setTimeout(() => {truncated = true; kill();}, timeoutMs);
+    signal?.addEventListener('abort', kill, {once: true});
+    const collect = (chunk: Buffer) => {output += chunk.toString('utf8'); if (output.length > outputLimit * 2) {output = output.slice(-outputLimit); truncated = true;}};
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    child.on('error', () => {clearTimeout(timer); reject(new Error('Command could not start'));});
+    child.on('close', code => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', kill);
+        if (output.length > outputLimit) {output = output.slice(-outputLimit); truncated = true;}
+        resolve({exitCode: code ?? 137, output, truncated});
+    });
+});
+// Read only the requested fields with the scoped token, then run the agent's command without
+// any OP_ variables so the child never receives the service-account token. Exact values are
+// replaced in the returned output.
+export async function execWithKeys(run: Runner, command: CommandRunner, env: NodeJS.ProcessEnv, vaultId: string, argv: string[], keys: Record<string, KeyReference>, cwd: string | undefined, timeoutMs: number, signal?: AbortSignal) {
+    const values: Record<string, string> = {};
+    for (const [variable, key] of Object.entries(keys)) {
+        if (variable.startsWith('OP_') || key.item.includes('/') || key.field.includes('/')) throw new Error('Key reference is not allowed');
+        try {values[variable] = await run('op', ['read', '--no-newline', 'op://' + vaultId + '/' + key.item + '/' + key.field], env, undefined, signal);}
+        catch {throw new Error('Key ' + key.item + ' / ' + key.field + ' could not be read from the automation vault');}
+    }
+    const childEnv: NodeJS.ProcessEnv = {...process.env};
+    for (const name of Object.keys(childEnv)) if (name.startsWith('OP_')) delete childEnv[name];
+    Object.assign(childEnv, values);
+    try {
+        const result = await command(argv[0], argv.slice(1), childEnv, cwd, timeoutMs, signal);
+        let output = result.output;
+        for (const value of Object.values(values).filter(Boolean).sort((a, b) => b.length - a.length)) output = output.split(value).join('<concealed>');
+        return {...result, output};
+    } finally {for (const key of Object.keys(values)) delete values[key];}
+}
