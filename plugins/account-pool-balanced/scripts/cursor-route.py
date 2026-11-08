@@ -27,6 +27,7 @@ import threading
 import json
 import re
 import select
+import socket
 from urllib.parse import urlsplit
 
 CURSOR_BINARY = "cursor-agent"
@@ -238,6 +239,24 @@ def main(argv=None):
     os.execve(command[0], command, env)
 
 
+def watch_client_disconnect(client, upstream, stopped):
+    """Cancel a quiet upstream when its local consumer disappears."""
+    while not stopped.wait(0.25):
+        try:
+            if not select.select([client], [], [], 0)[0]:
+                continue
+            # Peek only: a subsequent HTTP request must remain untouched.
+            if client.recv(1, socket.MSG_PEEK):
+                continue
+        except (OSError, ValueError):
+            pass
+        try:
+            upstream.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        return
+
+
 def run_gateway(executable, argv, env):
     """Translate arbitrary Cursor RPC paths to BB's one exact gateway route."""
     target = urlsplit(env[ENDPOINT_VAR].rstrip("/"))
@@ -270,6 +289,8 @@ def run_gateway(executable, argv, env):
                 self.send_error(400, "Invalid RPC path")
                 return
             connection = None
+            watcher = None
+            stopped = threading.Event()
             prompt = failures.begin_model_request(rpc_path)
             try:
                 limit = 16 * 1024 * 1024
@@ -304,6 +325,9 @@ def run_gateway(executable, argv, env):
                 connection_type = http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
                 connection = connection_type(target.hostname, target.port, timeout=120)
                 connection.request(self.command, path, body=body, headers=headers)
+                # Keep the deadline for connecting and receiving headers only.
+                # getresponse() can detach this socket for Connection: close.
+                upstream_socket = connection.sock
                 response = connection.getresponse()
                 if prompt is not None:
                     failures.model_response(rpc_path, response.getheader('x-bb-pool-error'), prompt)
@@ -313,6 +337,12 @@ def run_gateway(executable, argv, env):
                         self.send_header(k, v)
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
+                # Cursor streams can be quiet while a model or tool is running.
+                # Their lifetime follows the consumer rather than a read timer.
+                upstream_socket.settimeout(None)
+                watcher = threading.Thread(target=watch_client_disconnect,
+                    args=(self.connection, upstream_socket, stopped), daemon=True)
+                watcher.start()
                 while True:
                     chunk = response.read1(8192)
                     if not chunk:
@@ -329,6 +359,9 @@ def run_gateway(executable, argv, env):
                     print("Cursor pool gateway connection failed", file=sys.stderr)
                 self.close_connection = True
             finally:
+                stopped.set()
+                if watcher:
+                    watcher.join(timeout=1)
                 if connection:
                     connection.close()
 
