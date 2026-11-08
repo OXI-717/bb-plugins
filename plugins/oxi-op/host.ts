@@ -1,8 +1,8 @@
 import {runTaskProcess} from './task-process.js';
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
-import { probeWriteMethods } from './core.js';
 import { contract, type Route } from './contract.js';
+import { CodedError } from './errors.js';
 import { runProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand } from './core.js';
 const pending = new Set<string>();
 async function environment(route: Route, signal: AbortSignal, serviceAccountToken?: string) {
@@ -50,12 +50,8 @@ export default experimental_defineHostEntry({ contract, handlers: {
         describeScope: async ({opBinary, serviceAccountToken}, ctx) => {
             if (ctx.signal.aborted) throw new Error('Operation cancelled');
             const vaults = JSON.parse(await runProcess(opBinary, ['vault', 'list', '--format=json'], serviceEnvironment(serviceAccountToken), undefined, ctx.signal));
-            if (!Array.isArray(vaults) || vaults.length > 20) throw new Error('Service account scope differs from the automation vault');
+            if (!Array.isArray(vaults) || vaults.length > 20) throw new CodedError('scope-differs', 'Service account scope differs from the automation vault');
             return {vaults: vaults.map((v: {id: unknown; name: unknown}) => ({id: String(v.id), name: String(v.name)}))};
-        },
-        probeWriteMethods: async ({opBinary, serviceAccountToken, vaultId}, ctx) => {
-            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(opBinary, args, env, input, signal);
-            return probeWriteMethods(runner, serviceEnvironment(serviceAccountToken), vaultId, ctx.signal);
         },
         deleteSelftest: async ({route, serviceAccountToken, title}, ctx) => {
             if (route.authentication !== 'service-account') throw new Error('Self-test cleanup requires a service account');
@@ -99,7 +95,7 @@ export default experimental_defineHostEntry({ contract, handlers: {
                 // Recover an uncertain create, but remove only our exact synthetic item.
                 const items = JSON.parse(await runner('op', ['item', 'list', '--vault', route.vaultId, '--format=json'], env));
                 const matches = items.filter((item: {title: string}) => item.title === title);
-                if (matches.length === 0 && !itemId) throw failure ?? new Error('Verification did not create an item; no cleanup needed');
+                if (matches.length === 0 && !itemId) throw failure ?? new CodedError('verify-not-created', 'Verification did not create an item; no cleanup needed');
                 if (matches.length !== 1) throw new Error('Verification cleanup needs owner review: ' + title);
                 const candidate = matches[0].id;
                 const stored = JSON.parse(await runner('op', ['item', 'get', candidate, '--vault', route.vaultId, '--format=json', '--reveal'], env));
@@ -107,7 +103,7 @@ export default experimental_defineHostEntry({ contract, handlers: {
                 if (stored.title !== title || fields.get('username') !== username || fields.get('password') !== password || (itemId && itemId !== candidate)) throw new Error('Verification item differs; cleanup declined: ' + title);
                 await runner('op', ['item', 'delete', candidate, '--vault', route.vaultId], env);
                 const remaining = JSON.parse(await runner('op', ['item', 'list', '--vault', route.vaultId, '--format=json'], env));
-                if (remaining.some((item: {id: string}) => item.id === candidate)) throw new Error('Verification cleanup could not be confirmed');
+                if (remaining.some((item: {id: string}) => item.id === candidate)) throw new CodedError('verify-cleanup-unconfirmed', 'Verification cleanup could not be confirmed');
             }
             return {verified: true as const, cleaned: true as const};
         },

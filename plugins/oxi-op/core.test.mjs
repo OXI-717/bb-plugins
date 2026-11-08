@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
@@ -135,7 +135,8 @@ function fakeAccount(options={}){
   if(group==='service-account'){if(options.failCreate)throw new Error('synthetic provider failure');return 'synthetic-token-'+(++next)+'\n';}
   if(action==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));
   if(action==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});
-  if(action==='create'){if(options.failBackup)throw new Error('synthetic backup failure');const t=JSON.parse(input);const id='item-'+items.size;items.set(id,{title:t.title,fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id});}
+  if(action==='create'){if(options.failBackup)throw new Error('synthetic backup failure');const t=JSON.parse(input);const id='item-'+items.size;items.set(id,{title:t.title,created_at:options.createdAt??new Date().toISOString(),fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id});}
+  if(action==='edit'){const it=items.get(args[2]);it.title=args[args.indexOf('--title')+1];return '{}';}
   if(action==='get')return JSON.stringify(items.get(args[2]));
   throw new Error('unexpected');
  };
@@ -234,10 +235,43 @@ test('an agent command timeout ends descendants that hold keys',async t=>{
  let pid;
  try{
   const result=await execWithKeys(async()=>'synthetic-key',runCommand,{},'v',[process.execPath,'-e',source],{K:{item:'a',field:'b'}},undefined,700);
-  assert.equal(result.truncated,true);
+  assert.equal(result.timedOut,true);
   pid=Number(await readFile(file,'utf8'));
   const running=async()=>{try{process.kill(pid,0);}catch{return false;}if(process.platform==='linux'){try{if((await readFile('/proc/'+pid+'/stat','utf8')).split(' ')[2]==='Z')return false;}catch{return false;}}return true;};
   let alive=true;for(let i=0;i<100&&(alive=await running());i++)await new Promise(r=>setTimeout(r,10));
   assert.equal(alive,false,'descendant with the key must not survive');
  }finally{if(pid){try{process.kill(pid,'SIGKILL');}catch{}}await rm(directory,{recursive:true,force:true});}
+});
+test('a backup near its 90-day expiry is set aside and a new account is issued',async()=>{
+ const f=fakeAccount({createdAt:new Date(Date.now()-85*86400000).toISOString()});
+ await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ const again=await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ assert.deepEqual(again.accounts.map(a=>a.recovered),[false,false]);
+ assert.equal(f.calls.filter(c=>c.args[0]==='service-account').length,4);
+ assert.equal([...f.items.values()].filter(x=>/\(expired \d{4}-\d{2}-\d{2}\)$/.test(x.title)).length,2);
+ const fresh=fakeAccount();
+ await issueServiceAccounts(fresh.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ const recovered=await issueServiceAccounts(fresh.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ assert.deepEqual(recovered.accounts.map(a=>a.recovered),[true,true]);
+});
+test('concealment happens before the cut and a split value at the cut is hidden',()=>{
+ const value='SYNTHETICVALUE1234567890';
+ const big='x'.repeat(40000)+'\n'+'y'.repeat(10)+value+'\n'+'tail';
+ const r=concealOutput(big,[value],false);
+ assert(!r.output.includes(value));assert(r.output.includes('<concealed>'));assert.equal(r.truncated,true);
+ const split=value.slice(-12)+' rest';
+ const s=concealOutput(split,[value],true);
+ assert(!s.output.includes(value.slice(-12)));assert(s.output.startsWith('<concealed>'));
+});
+test('a leader that exits while an escaped descendant holds output does not hang the call',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ const source="const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setTimeout(()=>{},3000)'],{detached:true,stdio:['ignore','inherit','inherit']}).unref();";
+ const started=Date.now();
+ await assert.rejects(runCommand(process.execPath,['-e',source],{},undefined,20000),/cleanup unconfirmed/);
+ assert(Date.now()-started<2500);
+});
+test('multibyte titles survive pipe chunk boundaries',async()=>{
+ const text='Oxi Op service account — Пример '.repeat(5000);
+ const out=await runProcess(process.execPath,['-e','process.stdout.write(process.argv[1])',text],{});
+ assert.equal(out,text);
 });

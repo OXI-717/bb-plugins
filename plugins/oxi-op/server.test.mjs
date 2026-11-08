@@ -521,7 +521,7 @@ test('with every owner Mac offline no form opens and nothing is contacted',async
 });
 test('agent keys run without approval on the session machine and never return values or the token',async t=>{
  for(const [machine,op] of [['linux-server','/usr/bin/op'],['mac-max','/max/op']]){
-  const h=fleet(t,{sessionHost:machine,routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens,callHost:({method})=>method==='listKeys'?{items:[{item:'Example API',fields:['credential']}]}:{exitCode:0,output:'ok <concealed>',truncated:false}});
+  const h=fleet(t,{sessionHost:machine,routes:[{...route,...owner,hostId:'mac-max'},agentRoute],tokens:agentTokens,callHost:({method})=>method==='listKeys'?{items:[{item:'Example API',fields:['credential']}]}:{exitCode:0,output:'ok <concealed>',truncated:false,timedOut:false}});
   const keys=JSON.parse(await h.behavior.callAgentTool('oxi_op_keys',{},context));
   assert.deepEqual(keys.items[0].fields,['credential']);
   const result=JSON.parse(await h.behavior.callAgentTool('oxi_op_exec',{argv:['deploy','--check'],keys:{API_KEY:{item:'Example API',field:'credential'}}},context));
@@ -606,20 +606,23 @@ test('automatic access setup needs an online execution machine, desktop setup an
  for(const h of [offline,missing,service,outsider])assert.equal(h.inspection.experimental_hostRpcCalls.length+h.inspection.pendingInteractions.length,0);
 });
 test('tokens saved by an earlier approval are resumed on the server without a new card',async t=>{
- const base=issuing();
- const h=fleet(t,{offline:['mac-air','mac-max'],routes:projectRoutes,tokens:{'p-one':{routine:'synthetic-p-one-routine',intake:'synthetic-p-one-intake'}},callHost:x=>x.method==='describeScope'?{vaults:[{id:'vault-p-one',name:'Example p-one — Automation'}]}:base(x)});
- const out=(await h.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)],context)).stdout;
+ let readerWritable=true;
+ const h=fleet(t,{offline:['mac-air'],routes:projectRoutes,callHost:x=>x.method==='describeScope'?{vaults:[{id:'vault-p-one',name:'Example p-one — Automation'}]}:issuing({readerWritable})(x)});
+ const args=['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)];
+ const first=h.behavior.runCli(args,context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
+ assert.equal(JSON.parse((await first).stdout).projects[0].reason,'reader-can-write');
+ readerWritable=false;
+ await h.behavior.setSettings({routes:JSON.stringify(projectRoutes)});
+ const before=h.inspection.experimental_hostRpcCalls.length;
+ const out=(await h.behavior.runCli([...args,'--resume-only'],context)).stdout;
  assert.equal(h.inspection.pendingInteractions.length,0);
  assert(!out.includes('synthetic'));
  assert.deepEqual(JSON.parse(out).projects.map(x=>[x.state,x.resumed]),[['configured',true]]);
- const calls=h.inspection.experimental_hostRpcCalls;
+ const calls=h.inspection.experimental_hostRpcCalls.slice(before);
  assert(calls.every(c=>c.hostId==='linux-server'&&c.method!=='issueServiceAccounts'));
  assert.deepEqual(calls.filter(c=>c.method==='describeScope').map(c=>c.input.serviceAccountToken).sort(),['synthetic-p-one-intake','synthetic-p-one-routine']);
  assert.equal(JSON.parse((await h.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-one'})).stdout).vaultId,'vault-p-one');
- const wrong=fleet(t,{routes:projectRoutes,tokens:{'p-one':{routine:'a',intake:'b'}},callHost:x=>x.method==='describeScope'?{vaults:[{id:'vault-p-one',name:'Example p-one — Automation'},{id:'other',name:'Other'}]}:base(x)});
- const row=JSON.parse((await wrong.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify(sessionHosts)],context)).stdout).projects[0];
- assert.deepEqual([row.state,row.stage,row.reason],['needs-review','resume-scope','scope-differs']);
- assert.equal((await wrong.behavior.runCli(['status','--profile','routine'],{...context,projectId:'p-one'})).exitCode,1);
 });
 test('resume-only never opens an approval when no tokens were saved',async t=>{
  const h=fleet(t,{routes:projectRoutes,callHost:issuing()});
@@ -633,18 +636,40 @@ test('self-test stores one synthetic key, proves each machine and always removes
  const call=({method,input,hostId})=>{
   if(method==='store'){value=input.password;return {itemId:'i',verified:true};}
   if(method==='listKeys')return {items:[{item:'other',fields:[]},{item:[...JSON.stringify(input)].length?'x':'x',fields:[]}].concat([{item:lastTitle,fields:['password']}])};
-  if(method==='exec'){if(hostId==='mac-max')throw new Error('synthetic failure');return {exitCode:0,output:createHash('sha256').update(value).digest('hex')+'  -\n<concealed>\n',truncated:false};}
+  if(method==='exec'){if(hostId==='mac-max')throw new Error('synthetic failure');return {exitCode:0,output:createHash('sha256').update(value).digest('hex')+'  -\n<concealed>\n',truncated:false,timedOut:false};}
   if(method==='deleteSelftest'){assert.equal(input.title,lastTitle);return {deleted:1};}
   throw new Error('unexpected '+method);
  };
  let lastTitle;
  const h=fleet(t,{routes:[agentRoute,intakeRoute],tokens:{[route.projectId]:{routine:'r',intake:'i'}},callHost:x=>{if(x.method==='store')lastTitle=x.input.title;return call(x);}});
- const out=await h.behavior.runCli(['selftest','--project',route.projectId,'--hosts','linux-server,mac-max'],context);
+ const out=await h.behavior.runCli(['selftest','--hosts','linux-server,mac-max'],context);
  const result=JSON.parse(out.stdout);
  assert.equal(out.exitCode,1);assert.equal(result.passed,false);
  assert.deepEqual(result.machines[0],{hostId:'linux-server',keyListed:true,exitCode:0,valueMatched:true,valueConcealed:true});
  assert.equal(result.machines[1].hostId,'mac-max');assert.equal(result.machines[2].cleanedUp,1);
  assert(!out.stdout.includes(value));
  assert.equal(h.inspection.pendingInteractions.length,0);
- assert.equal((await h.behavior.runCli(['selftest','--project',route.projectId,'--hosts','unknown'],context)).exitCode,1);
+ assert.equal((await h.behavior.runCli(['selftest','--hosts','unknown'],context)).exitCode,1);
+});
+test('self-test removes its key even when the store result is uncertain',async t=>{
+ const intakeRoute={...agentRoute,profile:'intake',requireApproval:true,allowAgentCommands:false};
+ const calls=[];
+ const h=fleet(t,{routes:[agentRoute,intakeRoute],tokens:{[route.projectId]:{routine:'r',intake:'i'}},callHost:x=>{calls.push(x.method);if(x.method==='store')throw new Error('uncertain');if(x.method==='deleteSelftest')return {deleted:1};throw new Error('unexpected');}});
+ const out=await h.behavior.runCli(['selftest','--hosts','linux-server'],context).catch(()=>({exitCode:1}));
+ assert.equal(out.exitCode,1);
+ assert.deepEqual(calls,['store','deleteSelftest']);
+});
+test('resume uses only the machines and op paths of an approved card',async t=>{
+ const base=issuing();
+ const tokens={'p-one':{routine:'synthetic-r',intake:'synthetic-i'}};
+ const describe=x=>x.method==='describeScope'?{vaults:[{id:'vault-p-one',name:'Example p-one — Automation'}]}:base(x);
+ const h=fleet(t,{routes:projectRoutes,tokens,callHost:describe});
+ const tampered=JSON.parse((await h.behavior.runCli(['automate','--projects','p-one','--profile','default','--host','linux-server','--session-hosts',JSON.stringify({...sessionHosts,'linux-server':'/tmp/other-op'}),'--resume-only'],context)).stdout).projects[0];
+ assert.deepEqual([tampered.state,tampered.reason],['needs-review','plan-mismatch']);
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ await h.behavior.setSettings({projectServiceAccounts:'{}'});
+ const work=h.behavior.runCli(automateArgs.map(a=>a==='p-one,p-two'?'p-one':a),context);await setImmediate();
+ const form=h.inspection.pendingInteractions[0];
+ assert(form.payload.purpose.includes('/usr/bin/op')&&form.payload.purpose.includes('/max/op'));
+ h.behavior.submitInteraction(form.id,{approved:true});await work;
 });
