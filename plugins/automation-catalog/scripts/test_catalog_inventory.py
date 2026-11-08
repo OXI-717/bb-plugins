@@ -42,7 +42,7 @@ class CronIdentityTests(unittest.TestCase):
         content='CRON_TZ=UTC\n5 * * * * /usr/bin/example --argument=value\n'
         with TemporaryDirectory() as root:
             data=discover(lambda argv:content if argv[0]=='crontab' else '',system='Linux',etc=root)
-        ids=[r['unit'] for r in data['observations'] if r['scheduler']=='cron']
+        ids=[r['unit'] for r in data['observations'] if r['scheduler']=='cron' and r['scope']=='user']
         self.assertEqual(ids,[t['id'] for t in cron_tasks(content,'sample','operator')])
 
 class LoadedDependencyTests(unittest.TestCase):
@@ -76,16 +76,22 @@ class InertPlistTests(unittest.TestCase):
         self.assertEqual(launchd_label({'Program':'/bin/true'},'broken'), 'broken')
 
 class DanglingLaunchdTests(unittest.TestCase):
-    def test_only_absent_file_and_confirmed_absent_service_is_inert(self):
-        from catalog_inventory import inert_launchd_link
-        from pathlib import Path
-        from subprocess import CompletedProcess, TimeoutExpired
+    def test_loaded_labels_are_not_inferred_from_dangling_filename(self):
+        from catalog_inventory import launchd_services
+        text='system = {\n services = {\n 123 - org.example.actual\n 0 (pe) org.example.waiting\n }\n}'
+        self.assertEqual(launchd_services('system',lambda a:text),['org.example.actual','org.example.waiting'])
+        for bad in ('', 'services = {\n malformed row\n}', 'services = {\n - - unknown\n}'):
+            with self.assertRaises(RuntimeError):launchd_services('system',lambda a:bad)
+        with self.assertRaises(RuntimeError):launchd_services('system',lambda a:(_ for _ in ()).throw(RuntimeError('denied')))
+
+class RootCronCoverageTests(unittest.TestCase):
+    def test_readonly_existing_root_route_is_separate_from_user_scope(self):
+        def run(argv):
+            if argv[-4:]==['crontab','-u','root','-l']:
+                return 'CRON_TZ=UTC\n1 2 * * * /synthetic/root-task --secret=hidden\n'
+            return ''
         with tempfile.TemporaryDirectory() as root:
-            link=Path(root)/'vendor.plist';link.symlink_to(Path(root)/'missing.plist')
-            absent=lambda argv:CompletedProcess(argv,113,'','Could not find service "vendor" in domain for system')
-            self.assertTrue(inert_launchd_link(link,'system',absent))
-            self.assertFalse(inert_launchd_link(link,'system',lambda a:CompletedProcess(a,0,'loaded','')))
-            self.assertFalse(inert_launchd_link(link,'system',lambda a:CompletedProcess(a,1,'','Operation not permitted')))
-            self.assertFalse(inert_launchd_link(link,'system',lambda a:CompletedProcess(a,113,'','Could not find domain')))
-            (Path(root)/'missing.plist').write_text('broken content')
-            self.assertFalse(inert_launchd_link(link,'system',absent))
+            data=discover(run,system='Linux',etc=root)
+        self.assertTrue(any(c['scheduler']=='cron' and c['scope']=='root' and c['ok'] for c in data['coverage']))
+        self.assertEqual(len([r for r in data['observations'] if r['scope']=='root']),1)
+        self.assertNotIn('hidden',str(data))

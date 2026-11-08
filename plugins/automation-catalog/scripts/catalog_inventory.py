@@ -26,14 +26,22 @@ def launchd_label(data, fallback):
     return data.get('Label', fallback)
 
 
-def inert_launchd_link(path, scope, query=None):
-    """Only a missing symlink target AND absent live service prove an inert link."""
-    if not path.is_symlink() or path.exists():
-        return False
+def launchd_services(scope, run=command):
+    """Read actual loaded labels, never infer Label from a missing filename."""
     domain = 'system' if scope == 'system' else 'gui/' + str(os.getuid())
-    argv = ['launchctl', 'print', domain + '/' + path.stem]
-    result = query(argv) if query else subprocess.run(argv, capture_output=True, text=True, timeout=10)
-    return result.returncode == 113 and 'Could not find service' in result.stderr
+    text = run(['launchctl', 'print', domain])
+    sections = re.findall(r'^\s*services = \{\n(.*?)^\s*\}', text, re.M | re.S)
+    if len(sections) != 1:
+        raise RuntimeError('Unrecognized launchd domain inventory')
+    labels = []
+    for line in sections[0].splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) != 3 or not fields[0].isdigit():
+            raise RuntimeError('Incomplete launchd service row')
+        labels.append(fields[2])
+    return labels
 
 
 def discover(run=command, system=None, home=None, etc=None):
@@ -74,16 +82,22 @@ def discover(run=command, system=None, home=None, etc=None):
                 if not folder.exists():
                     return []
                 names = []
+                dangling = False
                 for p in folder.glob('*.plist'):
                     try:
                         data = plistlib.loads(p.read_bytes())
                     except FileNotFoundError:
-                        if inert_launchd_link(p, scope):
+                        if p.is_symlink() and not p.exists():
+                            dangling = True
                             continue
                         raise
                     label = launchd_label(data, p.stem)
                     if label is not None:
                         names.append(label)
+                if dangling:
+                    # The former Label is unknowable. Include EVERY loaded label
+                    # so a live job survives even when its original plist vanished.
+                    names.extend(launchd_services(scope, run))
                 return names
             probe('launchd', scope, read)
     else:
@@ -99,8 +113,9 @@ def discover(run=command, system=None, home=None, etc=None):
                 names.append('crontab')
             return names
         probe('cron', 'system', system_cron)
-    def cron():
-        result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=25) if run is command else None
+    def cron(root=False):
+        argv = (['sudo', '-n'] if os.geteuid() != 0 else []) + ['crontab', '-u', 'root', '-l'] if root else ['crontab', '-l']
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=25) if run is command else None
         if result is not None:
             if result.returncode == 1 and 'no crontab for' in result.stderr.lower():
                 return []
@@ -108,7 +123,7 @@ def discover(run=command, system=None, home=None, etc=None):
                 raise RuntimeError('cron unavailable')
             content = result.stdout
         else:
-            content = run(['crontab', '-l'])
+            content = run(argv)
         ids = set()
         timezone = 'host timezone'
         for raw in content.splitlines():
@@ -125,8 +140,7 @@ def discover(run=command, system=None, home=None, etc=None):
             ids.add(marker[1] if marker and 'catalog_receipt_run.py' in line else 'cron:'+digest)
         return sorted(ids)
     probe('cron', 'user', cron)
-    if os.geteuid() != 0:
-        coverage.append(dict(scheduler='cron', scope='root', ok=False))
+    probe('cron', 'root', lambda: cron(root=True))
     return dict(observations=observations, coverage=coverage)
 
 
