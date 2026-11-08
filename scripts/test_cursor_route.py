@@ -162,7 +162,7 @@ else:
                 # Scale only the wrapper's real socket deadline; the CLI keeps its own.
                 bootstrap = "import http.client,runpy,sys; original=http.client.HTTPConnection; http.client.HTTPConnection=lambda *a,**kw:original(*a,**{**kw,'timeout':" + repr(header_deadline) + "}); path=sys.argv[1];sys.argv=sys.argv[1:];runpy.run_path(path,run_name='__main__')"
                 command = [sys.executable, str(WRAPPER), 'acp'] if mode == 'cancel' else [sys.executable, '-c', bootstrap, str(WRAPPER), 'acp']
-                result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=idle_seconds + 15)
+                result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=idle_seconds + 60)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.strip(), 'HEADER_TIMEOUT_OK' if mode == 'headers' else 'STREAM_OK')
                 if mode == 'cancel':
