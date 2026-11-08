@@ -59,3 +59,10 @@ fixed error category and optional Guard failure reason. No body bytes, URLs or
 raw error messages are logged. Match that UUID to request observations before
 attributing an `incomplete envelope` to Guard. A nearby Guard timeout alone is
 not proof. Success and ordinary caller cancellations produce no body warning.
+
+
+Cursor's local RPC gateway limits connection/header waits to 120 seconds. An
+accepted response body follows the client's lifetime, so long model/tool waits
+do not truncate it. Disconnecting the local client shuts down its upstream
+socket. A silent upstream can remain open while the client is still waiting;
+the gateway does not invent a Connect end frame or replay inference.

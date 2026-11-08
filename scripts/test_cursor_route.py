@@ -89,6 +89,106 @@ print("PROBE_OK")
             hub.server_close()
             thread.join()
 
+    def gateway_stream_case(self, mode, *, close_response=False, idle_seconds=0.7, header_deadline=0.3):
+        import time
+        import socket
+        disconnected = []
+        class Hub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                if mode == 'headers':
+                    time.sleep(0.7)
+                self.send_response(200)
+                self.send_header('Transfer-Encoding', 'chunked')
+                self.send_header('Connection', 'close' if close_response else 'keep-alive')
+                self.end_headers()
+                try:
+                    self.wfile.write(b'3\r\nabc\r\n')
+                    self.wfile.flush()
+                    if mode == 'cancel':
+                        started = time.monotonic()
+                        self.connection.settimeout(3)
+                        disconnected.append((self.connection.recv(1), time.monotonic() - started))
+                        return
+                    time.sleep(idle_seconds if mode == 'quiet' else 0)
+                    payload = bytes(range(256)) * 12288 if mode == 'large' else b'def'
+                    for offset in range(0, len(payload), 8191):
+                        chunk = payload[offset:offset + 8191]
+                        self.wfile.write(('%x\r\n' % len(chunk)).encode() + chunk + b'\r\n')
+                    self.wfile.write(b'0\r\n\r\n')
+                    self.wfile.flush()
+                except (OSError, TimeoutError):
+                    pass
+
+        hub = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Hub)
+        worker = threading.Thread(target=hub.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cli = Path(tmp) / 'cursor-agent'
+                cli.write_text('#!' + sys.executable + '\n' + '''import http.client, os, time
+from urllib.parse import urlsplit
+u = urlsplit(os.environ['CURSOR_API_ENDPOINT'])
+c = http.client.HTTPConnection(u.hostname, u.port, timeout=float(os.environ['STREAM_TIMEOUT']))
+c.request('POST', '/agent.v1.AgentService/RunSSE', body=b'probe')
+mode = os.environ['STREAM_CASE']
+if mode == 'headers':
+    try:
+        c.getresponse()
+    except http.client.RemoteDisconnected:
+        print('HEADER_TIMEOUT_OK')
+    else:
+        raise AssertionError('Header deadline was removed')
+else:
+    r = c.getresponse()
+    if mode == 'cancel':
+        assert r.read(3) == b'abc'
+        r.close()
+        c.close()
+        # Keep the process alive: process exit must not be what cancels upstream.
+        time.sleep(2)
+    else:
+        expected = b'abc' + (bytes(range(256)) * 12288 if mode == 'large' else b'def')
+        assert r.read() == expected
+    print('STREAM_OK')
+''')
+                cli.chmod(0o755)
+                env = dict(os.environ, HOME=tmp, PATH=tmp + os.pathsep + os.environ['PATH'],
+                    CURSOR_API_ENDPOINT=f'http://127.0.0.1:{hub.server_port}/cursor',
+                    CURSOR_POOL_RPC_GATEWAY='1', STREAM_CASE=mode, STREAM_TIMEOUT=str(idle_seconds + 10))
+                # Scale only the wrapper's real socket deadline; the CLI keeps its own.
+                bootstrap = "import http.client,runpy,sys; original=http.client.HTTPConnection; http.client.HTTPConnection=lambda *a,**kw:original(*a,**{**kw,'timeout':" + repr(header_deadline) + "}); path=sys.argv[1];sys.argv=sys.argv[1:];runpy.run_path(path,run_name='__main__')"
+                command = [sys.executable, str(WRAPPER), 'acp'] if mode == 'cancel' else [sys.executable, '-c', bootstrap, str(WRAPPER), 'acp']
+                result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=idle_seconds + 60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), 'HEADER_TIMEOUT_OK' if mode == 'headers' else 'STREAM_OK')
+                if mode == 'cancel':
+                    self.assertEqual(len(disconnected), 1)
+                    self.assertEqual(disconnected[0][0], b'')
+                    self.assertLess(disconnected[0][1], 1.5)
+        finally:
+            hub.shutdown()
+            hub.server_close()
+            worker.join()
+
+    def test_quiet_stream_survives_header_deadline(self):
+        self.gateway_stream_case('quiet')
+
+    def test_quiet_connection_close_stream_survives_header_deadline(self):
+        self.gateway_stream_case('quiet', close_response=True)
+
+    def test_header_deadline_is_still_enforced(self):
+        self.gateway_stream_case('headers')
+
+    def test_client_disconnect_cancels_quiet_upstream(self):
+        self.gateway_stream_case('cancel')
+
+    def test_large_response_preserves_every_byte(self):
+        self.gateway_stream_case('large')
+
     def test_jsonl_failure_roundtrip_through_gateway(self):
         class Hub(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):

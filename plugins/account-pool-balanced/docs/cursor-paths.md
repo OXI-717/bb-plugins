@@ -4,7 +4,10 @@ Use the custom ACP provider `acp-oxi-cursor` with command `cursor-route acp`.
 The built-in `acp-cursor` continues to use the machine's own login. Python 3 and
 `cursor-agent` must be on PATH on every host that launches the custom provider.
 
-Install the wrapper from this checkout (replacing an old symlink safely):
+Install the wrapper from the published plugin's checkout (replacing an old symlink safely).
+Updating the server plugin does not replace a separately installed launcher. Repeat this
+installation on each client host after a launcher update and compare its SHA256 with
+`scripts/cursor-route.py` in the installed release before testing an existing session:
 
 ```bash
 mkdir -p "$HOME/.local/bin"
