@@ -145,6 +145,61 @@ export default function plugin(bb: BbPluginApi) {
             },'Подключение хранилищ проектов');
         }finally{connecting=false;}
     }
+    const tokenMapSchema = z.record(z.string(), z.record(z.string(), z.string().min(1)));
+    // One owner approval issues a read-only pipeline account and a write-capable intake account
+    // for one dedicated automation vault. Routes become active only after both scopes are proven
+    // from the execution host; tokens never leave encrypted settings and the project backup item.
+    async function automate(projectId: string, profile: string, executionHostId: string, opBinary: string, ctx: OperationContext) {
+        if (connecting) throw new Error('Project setup is already pending');
+        connecting = true;
+        try {
+            const {route} = await accessFor(ctx.projectId, profile);
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Automatic access setup requires approved owner desktop access');
+            const project = await bb.sdk.projects.get({projectId, signal: ctx.signal});
+            if (project.id !== projectId || !project.name?.trim()) throw new Error('Target project could not be verified');
+            const backup = resolveRoute(JSON.parse((await settings.get()).routes), projectId);
+            if (backup.authentication !== 'desktop' || !backup.requireApproval) throw new Error('Target project needs an owner-approved desktop vault for token backups');
+            const routes = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
+            if (routes.some(r => r.projectId === projectId && (r.profile === 'routine' || r.profile === 'intake'))) throw new Error('Automatic access is already configured for this project; no changes made');
+            await requireHost(executionHostId, 'execution', ctx);
+            const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
+            const execution = await displayContext({...route, hostId: executionHostId}, ctx);
+            const vaultName = project.name + ' — Automation';
+            const accounts = [
+                {profile: 'routine', name: project.name + ' pipeline reader', permissions: ['read_items'] as ['read_items']},
+                {profile: 'intake', name: project.name + ' secret intake', permissions: ['read_items', 'write_items'] as ['read_items', 'write_items']},
+            ];
+            return await journal.run('automate', profile, ctx, async progress => {
+                await requireCredentialHost(route, ctx);
+                await progress('awaiting-approval');
+                const decision = await bb.ui.requestInput({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Автоматический доступ: ' + project.name, payload: {mode: 'approve', title: 'Выпустить автоматический доступ для ' + project.name, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: project.name + ' — автоматический доступ', hostId: credentialHost(route), ...display, vaultId: 'automation-vault', vaultLabel: vaultName, purpose: ['Создать или восстановить сейф «' + vaultName + '» только для ключей автоматизации.', '«' + accounts[0].name + '»: только чтение (read_items), 90 дней — для пайплайнов на ' + execution.hostLabel + '.', '«' + accounts[1].name + '»: чтение и запись (read_items, write_items), 90 дней — для приёма ключей через закрытую форму.', 'Без доступа к другим сейфам, без share_items и создания сейфов. Токены хранятся только в зашифрованных настройках Oxi Op и резервной записи в сейфе «' + (backup.vaultLabel ?? project.name) + '».', 'После выпуска права проверяются с ' + execution.hostLabel + ': чтение — без записи, приём — запись и сверка тестовой записи.'].join('\n'), secrets: []}, describeSubmission: () => ({title: 'Automatic access issuance approved (no credential values)'})}, {signal: ctx.signal});
+                if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
+                await progress('awaiting-approval', true);
+                await requireCredentialHost(route, ctx);
+                await requireHost(executionHostId, 'execution', ctx);
+                await progress('running', true);
+                const issued = await host.call('issueServiceAccounts', {route, projectId, vaultName, backupVaultId: backup.vaultId, expiresIn: '90d', accounts}, {hostId: credentialHost(route), signal: ctx.signal});
+                const tokens = new Map(issued.accounts.map(a => [a.profile, a.token]));
+                if (accounts.some(a => !tokens.get(a.profile)) || tokens.size !== accounts.length) throw new Error('Issued accounts differ from the request');
+                const targets = accounts.map(a => routeSchema.parse({projectId, profile: a.profile, label: project.name + (a.profile === 'routine' ? ' — автоматическое чтение' : ' — приём ключей'), hostId: executionHostId, vaultId: issued.vaultId, vaultLabel: issued.vaultName, opBinary, authentication: 'service-account', tokenSetting: 'projectServiceAccounts', requireApproval: a.profile !== 'routine', operations: []}));
+                const stored = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts));
+                await settings.experimental_set({projectServiceAccounts: JSON.stringify({...stored, [projectId]: {...(stored[projectId] ?? {}), ...Object.fromEntries(tokens)}})});
+                const saved = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts))[projectId] ?? {};
+                if (accounts.some(a => saved[a.profile] !== tokens.get(a.profile))) throw new Error('Saved service tokens differ');
+                const [reader, intake] = targets;
+                const readerScope = await host.call('probeScope', {route: reader, serviceAccountToken: tokens.get('routine')!}, {hostId: executionHostId, signal: ctx.signal});
+                const intakeScope = await host.call('probeScope', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
+                if (readerScope.writable || !intakeScope.writable) throw new Error('Issued permissions differ from the approved scope; automatic routes were not activated');
+                await host.call('verify', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
+                const latest = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
+                if (latest.some(r => r.projectId === projectId && (r.profile === 'routine' || r.profile === 'intake'))) throw new Error('Routing changed during setup');
+                await settings.experimental_set({routes: JSON.stringify([...latest, ...targets])});
+                const current = JSON.parse((await settings.get()).routes);
+                if (targets.some(t => resolveRoute(current, projectId, t.profile).vaultId !== issued.vaultId)) throw new Error('Saved routes differ');
+                return JSON.stringify({configured: true, projectId, vaultId: issued.vaultId, profiles: accounts.map(a => a.profile), readerWriteDenied: true, intakeVerified: true, recoveredTokens: issued.accounts.filter(a => a.recovered).length});
+            }, 'Автоматический доступ ' + project.name);
+        } finally {connecting = false;}
+    }
     const profileParameter = z.string().min(1).max(80).default('default');
     bb.agents.registerTool({ name: 'oxi_op_store', description: 'Request a credential in a private BB form and save it to the current project vault and configured access profile. Passwords must never be supplied in tool arguments. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ title: z.string().min(1).max(160), username: z.string().max(200).default(''), profile: profileParameter }).strict(), execute: ({ title, username, profile }, ctx) => toolOutcome(() => store(title, username, profile, ctx)) });
     async function runConfigured(operation: string, profile: string, ctx: OperationContext) {
@@ -241,6 +296,7 @@ export default function plugin(bb: BbPluginApi) {
     }
     bb.cli.register(defineCli({ name: 'oxi-op', summary: 'Project-scoped 1Password operations', commands: {
             diagnose:cliCommand({summary:'Inspect routing and machine availability without contacting 1Password',options:{profile:{type:'string',description:'Configured access profile',default:'default'}},async run(input,ctx){if(!ctx.projectId)throw new Error('Run in a BB project');return {exitCode:0,stdout:JSON.stringify(await diagnose(ctx.projectId,input.options.profile))};}}),
+            automate:cliCommand({summary:'Approve issuing read-only pipeline and intake service accounts for one project automation vault',options:{notify:notifyOption,project:{type:'string',description:'Exact target BB project ID',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true},host:{type:'string',description:'Exact execution machine ID for automatic access',required:true},'op-binary':{type:'string',description:'Absolute op path on the execution machine',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');if(!input.options['op-binary'].startsWith('/'))throw new Error('The op path must be absolute');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>automate(input.options.project,input.options.profile,input.options.host,input.options['op-binary'],context));}}),
             'connect-many':cliCommand({summary:'Approve a bounded explicit list of project vault connections',options:{notify:notifyOption,projects:{type:'string',description:'JSON array of projectId and optional exact existingVaultId',required:true},profile:{type:'string',description:'Existing owner desktop setup profile',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectMany(input.options.projects,input.options.profile,context));}}),
             connect: cliCommand({summary:'Approve creating a dedicated vault and default project route',options:{notify:notifyOption,project:{type:'string',description:'Exact target BB project ID',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectProject(input.options.project,input.options.profile,context));}}),
             'display-status':cliCommand({summary:'Read form rendering receipts for this session; never contacts 1Password',async run(_,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const keys=await bb.storage.kv.list(receiptPrefix(ctx.projectId,ctx.threadId));const rows=await Promise.all(keys.map(k=>bb.storage.kv.get<Receipt>(k)));return {exitCode:0,stdout:JSON.stringify(rows.filter(Boolean).sort((a,b)=>b!.mountedAt.localeCompare(a!.mountedAt)).slice(0,20))};}}),

@@ -1,7 +1,7 @@
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
 import { contract, type Route } from './contract.js';
-import { runProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault } from './core.js';
+import { runProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope } from './core.js';
 const pending = new Set<string>();
 async function environment(route: Route, signal: AbortSignal, serviceAccountToken?: string) {
     if (signal.aborted)
@@ -29,6 +29,16 @@ export default experimental_defineHostEntry({ contract, handlers: {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Project setup requires owner desktop approval');
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
             return provisionProjectVault(runner, await environment(route, ctx.signal), projectId, name, ctx.signal, existingVaultId);
+        },
+        issueServiceAccounts: async ({route, ...request}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Service account issuance requires owner desktop approval');
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            return issueServiceAccounts(runner, await environment(route, ctx.signal), request, ctx.signal);
+        },
+        probeScope: async ({route, serviceAccountToken}, ctx) => {
+            if (route.authentication !== 'service-account') throw new Error('Scope probes require a service account');
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, args, env, input, signal);
+            return probeServiceScope(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, ctx.signal);
         },
         inventory: async ({route, registryTitle}, ctx) => {
             if (route.authentication !== 'desktop') throw new Error('Registry inventory requires explicit owner desktop access');

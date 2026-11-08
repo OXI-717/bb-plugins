@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
@@ -89,4 +89,60 @@ test('explicit existing project vault IDs are verified without creation or item 
  assert.deepEqual(calls,[['vault','get','existing-vault','--format=json']]);
  await assert.rejects(provisionProjectVault(run,{},'target','Other project',undefined,'existing-vault'));
  await assert.rejects(provisionProjectVault(run,{},'target','Example Project',undefined,'different-vault'));
+});
+
+function fakeAccount(options={}){
+ const items=new Map(options.items??[]);const calls=[];let next=0;
+ const vault={id:'automation-vault',name:'Example — Automation',description:'Managed by Oxi Op for BB project target'};
+ const run=async(_b,args,_env,input)=>{
+  calls.push({args,input});
+  const [group,action]=args;
+  if(group==='vault')return JSON.stringify(action==='list'?[]:vault);
+  if(group==='service-account'){if(options.failCreate)throw new Error('synthetic provider failure');return 'synthetic-token-'+(++next)+'\n';}
+  if(action==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));
+  if(action==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});
+  if(action==='create'){if(options.failBackup)throw new Error('synthetic backup failure');const t=JSON.parse(input);const id='item-'+items.size;items.set(id,{title:t.title,fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id});}
+  if(action==='get')return JSON.stringify(items.get(args[2]));
+  throw new Error('unexpected');
+ };
+ return {run,calls,items};
+}
+const accounts=[{profile:'routine',name:'Example pipeline reader',permissions:['read_items']},{profile:'intake',name:'Example secret intake',permissions:['read_items','write_items']}];
+test('service accounts are issued once, scoped to one vault, backed up through stdin before use',async()=>{
+ const f=fakeAccount();
+ const result=await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ assert.equal(result.vaultId,'automation-vault');
+ assert.deepEqual(result.accounts.map(a=>[a.profile,a.token,a.recovered]),[['routine','synthetic-token-1',false],['intake','synthetic-token-2',false]]);
+ const creates=f.calls.filter(c=>c.args[0]==='service-account').map(c=>c.args);
+ assert.deepEqual(creates,[
+  ['service-account','create','Example pipeline reader','--vault','automation-vault:read_items','--expires-in','90d','--raw'],
+  ['service-account','create','Example secret intake','--vault','automation-vault:read_items,write_items','--expires-in','90d','--raw'],
+ ]);
+ assert(!creates.flat().some(a=>a.includes('can-create-vaults')||a.includes('share_items')));
+ assert(!JSON.stringify(f.calls.map(c=>c.args)).includes('synthetic-token'));
+ assert(f.calls.filter(c=>c.args[1]==='create'&&c.args[0]==='item').every(c=>c.args.includes('backup-vault')));
+ assert.equal(f.items.size,2);
+});
+test('a retried issue recovers backed-up tokens instead of creating another service account',async()=>{
+ const f=fakeAccount();
+ await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ const before=f.calls.filter(c=>c.args[0]==='service-account').length;
+ const again=await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ assert.equal(f.calls.filter(c=>c.args[0]==='service-account').length,before);
+ assert.deepEqual(again.accounts.map(a=>[a.token,a.recovered]),[['synthetic-token-1',true],['synthetic-token-2',true]]);
+});
+test('issue failures never disclose provider output or tokens',async()=>{
+ await assert.rejects(issueServiceAccounts(fakeAccount({failCreate:true}).run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts}),e=>!e.message.includes('synthetic'));
+ await assert.rejects(issueServiceAccounts(fakeAccount({failBackup:true}).run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts}),e=>!e.message.includes('synthetic')&&e.message.includes('owner review'));
+});
+test('scope probe requires exactly one visible vault and reports a refused write',async()=>{
+ const calls=[];
+ const reader=async(_b,args)=>{calls.push(args);if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});throw new Error('denied');};
+ assert.deepEqual(await probeServiceScope(reader,{},'automation-vault'),{vaultIds:['automation-vault'],writable:false});
+ await assert.rejects(probeServiceScope(async()=>JSON.stringify([{id:'automation-vault'},{id:'other-vault'}]),{},'automation-vault'),/scope/);
+ await assert.rejects(probeServiceScope(async(_b,args)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);throw new Error('offline');},{},'automation-vault'),/read/);
+ const items=new Map();
+ const writer=async(_b,args,_e,input)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create'){const t=JSON.parse(input);items.set('probe',{title:t.title,fields:t.fields.map(f=>({label:f.label,value:f.value}))});return JSON.stringify({id:'probe'});}if(args[1]==='get')return JSON.stringify(items.get('probe'));if(args[1]==='delete'){items.delete(args[2]);return '';}throw new Error('unexpected');};
+ assert.deepEqual(await probeServiceScope(writer,{},'automation-vault'),{vaultIds:['automation-vault'],writable:true});
+ assert.equal(items.size,0);
 });
