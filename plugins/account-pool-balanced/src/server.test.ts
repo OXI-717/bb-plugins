@@ -8731,3 +8731,38 @@ describe('server-owned account egress dispatch',()=>{
     await response.text();expect(routed).toHaveBeenCalledOnce();expect(direct).not.toHaveBeenCalled();
   });
 });
+
+
+it('correlates a mid-frame Cursor policy abort without leaking payload or RPC errors',async()=>{
+ let unavailable=false;
+ const outbound=vi.fn(async(input:RequestInfo|URL)=>{
+  const url=input instanceof Request?input.url:String(input);
+  if(url.startsWith('https://exchange.example/'))return Response.json({accessToken:'synthetic-access'});
+  if(url.startsWith('https://usage.example/'))return Response.json({planUsage:{totalPercentUsed:10}});
+  if(!url.endsWith('/RunSSE'))return Response.json({});
+  return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}}),{headers:{'content-type':'application/connect+proto'}});
+ });
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example/token',cursorUsageUrl:'https://usage.example/usage',fetch:outbound}});
+ fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
+ fixture.host.harness.sdk.stub('plugins.callRpc',async()=>{
+  if(unavailable)throw Error('private RPC payload');
+  return {schema:'bb-vpn-guard/network-decision/2',hostId:'pool-host',allowed:true,reason:'direct'};
+ });
+ await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true,vpnOnlyProviders:[]});
+ const response=await fixture.host.harness.behavior.fetchHttp('POST','/cursor/agent.v1.AgentService/RunSSE',{
+  headers:{authorization:`Bearer ${fixture.key}`,'content-type':'application/connect+proto'},body:'private prompt',
+ });
+ expect(response.status).toBe(200);const reader=response.body!.getReader();expect((await reader.read()).value).toEqual(new Uint8Array([0,0,0]));
+ unavailable=true;const failed=expect(reader.read()).rejects.toThrow('VPN_GUARD_UNAVAILABLE');
+ const policy=fixture.host.harness.behavior.runService('network-policy');
+ try {await failed;}finally{policy.controller.abort();await policy.done;}
+ const logs=fixture.host.harness.inspection.logEntries.filter(e=>e.message.startsWith('Account Pooler cursor transport failed:'));
+ expect(logs).toHaveLength(1);
+ const prefix='Account Pooler cursor transport failed: VPN_GUARD_UNAVAILABLE. ';
+ expect(logs[0]!.message.startsWith(prefix)).toBe(true);
+ const diagnostic=JSON.parse(logs[0]!.message.slice(prefix.length));
+ expect(diagnostic).toEqual({code:'VPN_GUARD_UNAVAILABLE',category:'policy',elapsedMs:expect.any(Number),
+  stage:'response_body',transport:'ipv4',operation:'model',requestId:expect.stringMatching(/^[a-f0-9-]{36}$/),bytesRead:3,guardReason:'rpc_failed'});
+ expect(JSON.stringify(logs)).not.toMatch(/private|authorization|upstream.example/);
+ expect(outbound.mock.calls.filter(([input])=>(input instanceof Request?input.url:String(input)).endsWith('/RunSSE'))).toHaveLength(1);
+});

@@ -43,3 +43,19 @@ to the existing client issuance command. Only explicitly opted-in accounts are
 selectable; project policies and quota guards still apply. Existing credentials
 remain legacy. A client name or request header cannot supply the trusted purpose.
 Do not choose or enable accounts without the operator's policy instruction.
+
+
+## Concurrent Guard reads and interrupted Cursor streams
+
+Pending Guard permission checks share one in-flight read per provider. The
+completed decision is never cached: the next call starts a fresh read, with the
+same host binding/recheck and two-attempt timeout budget. Explicit denial and
+RPC/validation failures remain final. Probe invocations have independent checks
+and cannot delay or change production permission checks.
+
+A failed background permission check still aborts active streams for that
+provider. Body failures log a safe `response_body` stage, request UUID, bytes read,
+fixed error category and optional Guard failure reason. No body bytes, URLs or
+raw error messages are logged. Match that UUID to request observations before
+attributing an `incomplete envelope` to Guard. A nearby Guard timeout alone is
+not proof. Success and ordinary caller cancellations produce no body warning.

@@ -236,7 +236,7 @@ export function createAccountPoolPlugin(
       onUpstreamError: (provider, error, context) => {
         const diagnostic = describeTransportError(error);
         bb.log.warn(
-          `Account Pooler ${provider} transport failed: ${transportErrorCode(error)}. ` +
+          `Account Pooler ${provider} transport failed: ${diagnostic.category==='policy'?diagnostic.code:transportErrorCode(error)}. ` +
           JSON.stringify({ ...diagnostic, ...context }),
         );
       },

@@ -1,3 +1,4 @@
+import {GuardRequiredError} from './network-errors.js';
 import {CURSOR_RPC_PATH_HEADER} from './cursor-rpc.js';
 import { EgressUnavailable, type AccountRoute } from "./account-egress.js";
 import { providerBudgetQuota, providerEvidenceFromUsage, PROVIDER_BUDGET_MAX_AGE_MS, NUMERIC_BUDGET_PROVIDERS } from './provider-budget.js';
@@ -134,7 +135,7 @@ interface HubOptions {
   now: () => number;
   drainTimeoutMs: number;
   onAccountsChanged: () => void;
-  onUpstreamError: (provider: PoolProvider, error: unknown, context: { elapsedMs: number; transport: "ipv4" | "default"; stage: "fetch_headers"; operation: "model" | "auxiliary" }) => void;
+  onUpstreamError: (provider: PoolProvider, error: unknown, context: { elapsedMs: number; transport: "ipv4" | "default"; stage: "fetch_headers" | "response_body"; requestId?: string; bytesRead?: number; guardReason?: "timeout" | "invalid_decision" | "rpc_failed"; operation: "model" | "auxiliary" }) => void;
 }
 
 interface SelectedAccount {
@@ -1563,7 +1564,13 @@ export class AccountPoolHub {
             });
             if (started.value !== null) return started.value.response;
           }
-        },check,route.fetch(this.requiresIpv4(account.provider)))
+        },check,route.fetch(this.requiresIpv4(account.provider)),(error,bytesRead)=>{
+          this.options.onUpstreamError(account.provider,error,{
+            elapsedMs:Math.max(0,this.options.now()-openedAt),transport:this.requiresIpv4(account.provider)?"ipv4":"default",
+            stage:"response_body",operation:"model",requestId:trace.requestId,bytesRead,
+            ...(error instanceof GuardRequiredError && error.failureReason ? {guardReason:error.failureReason}:{}),
+          });
+        })
         .catch((cause: unknown) => {
           if (cause instanceof EgressUnavailable || cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
           throw new UpstreamConnectionError("Upstream connection failed.", {

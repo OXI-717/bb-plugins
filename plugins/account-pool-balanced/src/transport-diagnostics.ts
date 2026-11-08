@@ -1,4 +1,5 @@
 const CATEGORIES = new Map<string, string>([
+  ["VPN_GUARD_UNAVAILABLE", "policy"], ["VPN_GUARD_BLOCKED", "policy"], ["VPN_REQUIRED", "policy"],
   ["ENOTFOUND", "dns"], ["EAI_AGAIN", "dns"],
   ["UND_ERR_CONNECT_TIMEOUT", "connect"], ["ECONNREFUSED", "connect"],
   ["ETIMEDOUT", "timeout"], // A generic timeout does not establish the stage.
