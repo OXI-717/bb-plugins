@@ -181,7 +181,7 @@ export default function plugin(bb: BbPluginApi) {
     // active only after both scopes are proven from the default execution machine; tokens live
     // only in encrypted settings and in the project's owner-approved backup item.
     // Only fixed codes are recorded: raw errors can quote provider output, including tokens.
-    type AutomationStage = 'issue' | 'save-tokens' | 'probe-reader' | 'probe-intake' | 'verify-intake' | 'save-routes';
+    type AutomationStage = 'resume-scope' | 'issue' | 'save-tokens' | 'probe-reader' | 'probe-intake' | 'verify-intake' | 'save-routes';
     const failureReasons: [string, string][] = [
         ['token backup vault could not be listed', 'backup-list-failed'], ['Duplicate token backups', 'duplicate-backups'],
         ['existing token backup could not be read', 'backup-read-failed'], ['existing token backup is incomplete', 'backup-incomplete'],
@@ -197,7 +197,7 @@ export default function plugin(bb: BbPluginApi) {
         return failureReasons.find(([fragment]) => message.includes(fragment))?.[1] ?? (error instanceof OperationFailure ? error.code : 'unclassified');
     };
     const sessionHostsSchema = z.record(z.string().min(1), z.string().regex(/^\/[^\0]*$/)).refine(x => Object.keys(x).length > 0 && Object.keys(x).length <= 6, 'List one to six machines');
-    async function automate(projectIds: string[], profile: string, executionHostId: string, sessionHosts: Record<string, string>, ctx: OperationContext) {
+    async function automate(projectIds: string[], profile: string, executionHostId: string, sessionHosts: Record<string, string>, ctx: OperationContext, resumeOnly = false) {
         if (connecting) throw new Error('Project setup is already pending');
         connecting = true;
         try {
@@ -220,20 +220,69 @@ export default function plugin(bb: BbPluginApi) {
             await requireHost(executionHostId, 'execution', ctx);
             const execution = await displayContext({...configured, hostId: executionHostId}, ctx);
             const machineNames = await Promise.all(Object.keys(sessionHosts).map(async hostId => (await displayContext({...configured, hostId}, ctx)).hostLabel));
-            const title = projects.length === 1 ? projects[0].name : projects.length + ' проектов';
+            type Project = (typeof projects)[number];
+            // Shared by fresh issuance and by resuming tokens an earlier approval already produced.
+            const activate = async (project: Project, tokens: Map<string, string>, vault: {vaultId: string; vaultName: string}, setStage: (stage: AutomationStage) => void) => {
+                const targets = project.accounts.map(a => routeSchema.parse({projectId: project.projectId, profile: a.profile, label: project.name + (a.profile === 'routine' ? ' — ключи агентов' : ' — приём ключей'), hostId: executionHostId, vaultId: vault.vaultId, vaultLabel: vault.vaultName, opBinary: sessionHosts[executionHostId], authentication: 'service-account', tokenSetting: 'projectServiceAccounts', requireApproval: a.profile !== 'routine', allowAgentCommands: a.profile === 'routine', sessionHosts, operations: []}));
+                setStage('save-tokens');
+                const stored = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts));
+                await settings.experimental_set({projectServiceAccounts: JSON.stringify({...stored, [project.projectId]: {...(stored[project.projectId] ?? {}), ...Object.fromEntries(tokens)}})});
+                const saved = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts))[project.projectId] ?? {};
+                if (project.accounts.some(a => saved[a.profile] !== tokens.get(a.profile))) throw new Error('Saved service tokens differ');
+                const [reader, intake] = targets;
+                setStage('probe-reader');
+                const readerScope = await host.call('probeScope', {route: reader, serviceAccountToken: tokens.get('routine')!}, {hostId: executionHostId, signal: ctx.signal});
+                setStage('probe-intake');
+                const intakeScope = await host.call('probeScope', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
+                if (readerScope.writable || !intakeScope.writable) throw new Error('Issued permissions differ from the approved scope');
+                setStage('verify-intake');
+                await host.call('verify', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
+                setStage('save-routes');
+                const latest = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
+                if (latest.some(r => r.projectId === project.projectId && (r.profile === 'routine' || r.profile === 'intake'))) throw new Error('Routing changed during setup');
+                await settings.experimental_set({routes: JSON.stringify([...latest, ...targets])});
+                const current = JSON.parse((await settings.get()).routes);
+                if (targets.some(t => resolveRoute(current, project.projectId, t.profile).vaultId !== vault.vaultId)) throw new Error('Saved routes differ');
+            };
+            // An earlier approval may already have produced and saved tokens before a later step failed.
+            // Continue from them on the execution machine without a new card or desktop authorization.
+            const saved = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts));
+            const resumable = projects.filter(p => p.accounts.every(a => !!saved[p.projectId]?.[a.profile]));
+            const fresh = projects.filter(p => !resumable.includes(p));
+            const resumedRows: {projectId: string; state: 'configured' | 'needs-review'; vaultId?: string; resumed?: boolean; stage?: AutomationStage; reason?: string}[] = [];
+            if (resumable.length) {
+                const resumed = await journal.run('automate', profile, ctx, async progress => {
+                    await progress('running');
+                    for (const project of resumable) {
+                        let stage: AutomationStage = 'resume-scope';
+                        try {
+                            const tokens = new Map(project.accounts.map(a => [a.profile, saved[project.projectId][a.profile]]));
+                            const scopes = await Promise.all(project.accounts.map(a => host.call('describeScope', {opBinary: sessionHosts[executionHostId], serviceAccountToken: tokens.get(a.profile)!}, {hostId: executionHostId, signal: ctx.signal})));
+                            const vault = scopes[0].vaults[0];
+                            if (!vault || scopes.some(x => x.vaults.length !== 1 || x.vaults[0].id !== vault.id) || vault.name !== project.name + ' — Automation') throw new Error('Service account scope differs from the automation vault');
+                            await activate(project, tokens, {vaultId: vault.id, vaultName: vault.name}, next => {stage = next;});
+                            resumedRows.push({projectId: project.projectId, state: 'configured', vaultId: vault.id, resumed: true});
+                        } catch (error) {resumedRows.push({projectId: project.projectId, state: 'needs-review', resumed: true, stage, reason: failureReason(error)});}
+                    }
+                    return JSON.stringify({projects: resumedRows});
+                }, 'Продолжение автоматического доступа: ' + resumable.map(p => p.name).join(', '));
+                if (!fresh.length) return resumed;
+            }
+            if (resumeOnly) return JSON.stringify({projects: [...resumedRows, ...fresh.map(p => ({projectId: p.projectId, state: 'not-issued' as const}))]});
+            const title = fresh.length === 1 ? fresh[0].name : fresh.length + ' проектов';
             return await journal.run('automate', profile, ctx, async progress => {
                 const route = await credentialTarget(configured, ctx);
                 await requireCredentialHost(route, ctx);
                 const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
                 await progress('awaiting-approval');
-                const decision = await bb.ui.requestInput({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Автоматический доступ агентов: ' + title, payload: {mode: 'approve', title: 'Выпустить автоматический доступ агентов: ' + title, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: projects.map(x => x.name).join(', '), hostId: credentialHost(route), ...display, vaultId: 'automation-vaults', vaultLabel: 'Отдельный сейф «<Проект> — Automation» у каждого проекта', purpose: ['Для каждого проекта: сейф только для ключей агентов и два доступа к нему на 90 дней.', 'Чтение (read_items) — агенты используют ключи без подтверждений на машинах: ' + machineNames.join(', ') + '.', 'Чтение и запись (read_items, write_items) — приём новых ключей через закрытую форму.', 'Без других сейфов, share_items и создания сейфов. Критические пароли в основном сейфе проекта по-прежнему требуют вашего подтверждения.', 'Токены — только в зашифрованных настройках Oxi Op и резервной записи в основном сейфе проекта.', 'Права проверяются с ' + execution.hostLabel + ' до включения.'].join('\n'), secrets: []}, describeSubmission: () => ({title: 'Automatic agent access approved (no credential values)'})}, {signal: ctx.signal});
+                const decision = await bb.ui.requestInput({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Автоматический доступ агентов: ' + title, payload: {mode: 'approve', title: 'Выпустить автоматический доступ агентов: ' + title, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: fresh.map(x => x.name).join(', '), hostId: credentialHost(route), ...display, vaultId: 'automation-vaults', vaultLabel: 'Отдельный сейф «<Проект> — Automation» у каждого проекта', purpose: ['Для каждого проекта: сейф только для ключей агентов и два доступа к нему на 90 дней.', 'Чтение (read_items) — агенты используют ключи без подтверждений на машинах: ' + machineNames.join(', ') + '.', 'Чтение и запись (read_items, write_items) — приём новых ключей через закрытую форму.', 'Без других сейфов, share_items и создания сейфов. Критические пароли в основном сейфе проекта по-прежнему требуют вашего подтверждения.', 'Токены — только в зашифрованных настройках Oxi Op и резервной записи в основном сейфе проекта.', 'Права проверяются с ' + execution.hostLabel + ' до включения.'].join('\n'), secrets: []}, describeSubmission: () => ({title: 'Automatic agent access approved (no credential values)'})}, {signal: ctx.signal});
                 if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
                 await progress('awaiting-approval', true);
                 await requireCredentialHost(route, ctx);
                 await requireHost(executionHostId, 'execution', ctx);
                 await progress('running', true);
                 const rows: {projectId: string; state: 'configured' | 'needs-review'; vaultId?: string; recoveredTokens?: number; stage?: AutomationStage; reason?: string}[] = [];
-                for (const project of projects) {
+                for (const project of fresh) {
                     if (ctx.signal?.aborted) throw new Error('Automatic access setup interrupted');
                     let stage: AutomationStage = 'issue';
                     try {
@@ -241,30 +290,11 @@ export default function plugin(bb: BbPluginApi) {
                         const issued = await host.call('issueServiceAccounts', {route, projectId: project.projectId, vaultName, backupVaultId: project.backup.vaultId, expiresIn: '90d', accounts: project.accounts}, {hostId: credentialHost(route), signal: ctx.signal});
                         const tokens = new Map(issued.accounts.map(a => [a.profile, a.token]));
                         if (project.accounts.some(a => !tokens.get(a.profile)) || tokens.size !== project.accounts.length) throw new Error('Issued accounts differ from the request');
-                        const targets = project.accounts.map(a => routeSchema.parse({projectId: project.projectId, profile: a.profile, label: project.name + (a.profile === 'routine' ? ' — ключи агентов' : ' — приём ключей'), hostId: executionHostId, vaultId: issued.vaultId, vaultLabel: issued.vaultName, opBinary: sessionHosts[executionHostId], authentication: 'service-account', tokenSetting: 'projectServiceAccounts', requireApproval: a.profile !== 'routine', allowAgentCommands: a.profile === 'routine', sessionHosts, operations: []}));
-                        stage = 'save-tokens';
-                        const stored = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts));
-                        await settings.experimental_set({projectServiceAccounts: JSON.stringify({...stored, [project.projectId]: {...(stored[project.projectId] ?? {}), ...Object.fromEntries(tokens)}})});
-                        const saved = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts))[project.projectId] ?? {};
-                        if (project.accounts.some(a => saved[a.profile] !== tokens.get(a.profile))) throw new Error('Saved service tokens differ');
-                        const [reader, intake] = targets;
-                        stage = 'probe-reader';
-                        const readerScope = await host.call('probeScope', {route: reader, serviceAccountToken: tokens.get('routine')!}, {hostId: executionHostId, signal: ctx.signal});
-                        stage = 'probe-intake';
-                        const intakeScope = await host.call('probeScope', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
-                        if (readerScope.writable || !intakeScope.writable) throw new Error('Issued permissions differ from the approved scope');
-                        stage = 'verify-intake';
-                        await host.call('verify', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
-                        stage = 'save-routes';
-                        const latest = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
-                        if (latest.some(r => r.projectId === project.projectId && (r.profile === 'routine' || r.profile === 'intake'))) throw new Error('Routing changed during setup');
-                        await settings.experimental_set({routes: JSON.stringify([...latest, ...targets])});
-                        const current = JSON.parse((await settings.get()).routes);
-                        if (targets.some(t => resolveRoute(current, project.projectId, t.profile).vaultId !== issued.vaultId)) throw new Error('Saved routes differ');
+                        await activate(project, tokens, {vaultId: issued.vaultId, vaultName: issued.vaultName}, next => {stage = next;});
                         rows.push({projectId: project.projectId, state: 'configured', vaultId: issued.vaultId, recoveredTokens: issued.accounts.filter(a => a.recovered).length});
                     } catch (error) {rows.push({projectId: project.projectId, state: 'needs-review', stage, reason: failureReason(error)});}
                 }
-                return JSON.stringify({projects: rows});
+                return JSON.stringify({projects: [...resumedRows, ...rows]});
             }, 'Автоматический доступ агентов: ' + title);
         } finally {connecting = false;}
     }
@@ -391,7 +421,7 @@ export default function plugin(bb: BbPluginApi) {
     }
     bb.cli.register(defineCli({ name: 'oxi-op', summary: 'Project-scoped 1Password operations', commands: {
             diagnose:cliCommand({summary:'Inspect routing and machine availability without contacting 1Password',options:{profile:{type:'string',description:'Configured access profile',default:'default'}},async run(input,ctx){if(!ctx.projectId)throw new Error('Run in a BB project');return {exitCode:0,stdout:JSON.stringify(await diagnose(ctx.projectId,input.options.profile))};}}),
-            automate:cliCommand({summary:'Approve issuing agent-reader and key-intake service accounts for project automation vaults',options:{notify:notifyOption,projects:{type:'string',description:'Comma-separated exact target BB project IDs',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true},host:{type:'string',description:'Default execution machine ID used for scope proofs',required:true},'session-hosts':{type:'string',description:'JSON object of allowed machine IDs to absolute op paths',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const hosts=sessionHostsSchema.parse(JSON.parse(input.options['session-hosts']));const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>automate(input.options.projects.split(',').map(x=>x.trim()).filter(Boolean),input.options.profile,input.options.host,hosts,context));}}),
+            automate:cliCommand({summary:'Approve issuing agent-reader and key-intake service accounts for project automation vaults',options:{notify:notifyOption,projects:{type:'string',description:'Comma-separated exact target BB project IDs',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true},host:{type:'string',description:'Default execution machine ID used for scope proofs',required:true},'session-hosts':{type:'string',description:'JSON object of allowed machine IDs to absolute op paths',required:true},'resume-only':{type:'boolean',description:'Only continue from tokens an earlier approval saved; never open a new approval',default:false}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const hosts=sessionHostsSchema.parse(JSON.parse(input.options['session-hosts']));const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>automate(input.options.projects.split(',').map(x=>x.trim()).filter(Boolean),input.options.profile,input.options.host,hosts,context,input.options['resume-only']));}}),
             keys:cliCommand({summary:'List agent key titles and field names for this project; never values',options:{profile:{type:'string',description:'Agent access profile',default:'routine'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');return {exitCode:0,stdout:await listAgentKeys(input.options.profile,{projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal})};}}),
             exec:cliCommand({summary:'Run a command on this session machine with project agent keys; values are concealed in output',options:{argv:{type:'string',description:'JSON array: program and arguments',required:true},keys:{type:'string',description:'JSON object: VARIABLE to {item, field}',required:true},timeout:{type:'string',description:'Seconds, 1-600',default:'120'},profile:{type:'string',description:'Agent access profile',default:'routine'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const argv=z.array(z.string()).min(1).max(200).parse(JSON.parse(input.options.argv));const keys=keysSchema.parse(JSON.parse(input.options.keys));const seconds=z.coerce.number().int().min(1).max(600).parse(input.options.timeout);const result=JSON.parse(await execAgentCommand(argv,keys,input.options.profile,seconds,{projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal}));return {exitCode:result.exitCode===0?0:1,stdout:JSON.stringify(result)};}}),
             'connect-many':cliCommand({summary:'Approve a bounded explicit list of project vault connections',options:{notify:notifyOption,projects:{type:'string',description:'JSON array of projectId and optional exact existingVaultId',required:true},profile:{type:'string',description:'Existing owner desktop setup profile',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectMany(input.options.projects,input.options.profile,context));}}),
