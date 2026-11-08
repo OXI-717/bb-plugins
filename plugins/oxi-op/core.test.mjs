@@ -300,3 +300,7 @@ test('codes survive a wrapping transport message',async()=>{
  assert.equal(errorCode(new Error('Host call failed: '+new CodedError('backup-list-failed','x').message)),'backup-list-failed');
  assert.equal(errorCode(new Error('plain')),undefined);
 });
+test('a write probe whose create succeeded but read-back failed is inconclusive, not a denial',async()=>{
+ const run=async(_b,args,_e,input)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create')return JSON.stringify({id:'probe'});throw new Error('transient read failure');};
+ await assert.rejects(probeServiceScope(run,{},'automation-vault'),e=>e.message.includes('[probe-inconclusive]'));
+});

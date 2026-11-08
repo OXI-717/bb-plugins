@@ -253,7 +253,12 @@ export async function probeServiceScope(run: Runner, env: NodeJS.ProcessEnv, vau
     catch {throw new CodedError('scope-unreadable', 'Service account could not read the automation vault');}
     let itemId: string;
     try {itemId = (await storeCredential(run, env, vaultId, 'OXI OP write probe ' + randomUUID(), 'synthetic-probe', randomUUID(), signal)).itemId;}
-    catch (error) {return {vaultIds: [vaultId], writable: false, writeFailure: writeFailureCode(error)};}
+    catch (error) {
+        // Only a refused create proves the account cannot write. Any later failure (for example a
+        // read-back error after a successful create) is inconclusive and must not pass as denial.
+        if (errorCode(error) !== 'op-item-create') throw new CodedError('probe-inconclusive', 'The write probe was inconclusive; no access was activated');
+        return {vaultIds: [vaultId], writable: false, writeFailure: writeFailureCode(error)};
+    }
     await run('op', ['item', 'delete', itemId, '--vault', vaultId], env, undefined, signal);
     return {vaultIds: [vaultId], writable: true};
 }
