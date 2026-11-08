@@ -170,3 +170,13 @@ An explicit complete registry entry or scoped exclusion resolves a prior unknown
 identity even during a host outage. This is recorded as a registry decision,
 separately from runtime recovery; the outage remains visible. Unclassified jobs
 and incomplete registry entries retain their prior finding during lost coverage.
+When a plist symlink target is missing, discovery reads the entire live launchd
+service-label section in that same domain and merges all loaded labels with
+readable files. It never infers a missing Label from a filename. Domain failures,
+unrecognized output, malformed rows and timeouts retain unknown coverage; no
+file or service is changed. Only identity labels leave the collector.
+Root crontab identity collection uses only the existing noninteractive read
+route (`sudo -n crontab -u root -l`, or direct crontab when already root).
+It never prompts for a password, changes sudo policy or exports command bodies.
+A denied route remains unknown; a confirmed absent crontab is a successful empty
+inventory. Root and current-user scopes stay distinct.
