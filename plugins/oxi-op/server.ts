@@ -224,7 +224,8 @@ export default function plugin(bb: BbPluginApi) {
         return errorCode(error) ?? 'unclassified';
     };
     const sessionHostsSchema = z.record(z.string().min(1), z.string().regex(/^\/[^\0]*$/)).refine(x => Object.keys(x).length > 0 && Object.keys(x).length <= 6, 'List one to six machines');
-    async function automate(projectIds: string[], profile: string, executionHostId: string, sessionHosts: Record<string, string>, ctx: OperationContext, resumeOnly = false) {
+    async function automate(projectIds: string[], profile: string, executionHostId: string, sessionHosts: Record<string, string>, ctx: OperationContext, resumeOnly = false, options: {reissue?: boolean; expiresIn?: string} = {}) {
+        const {reissue = false, expiresIn} = options;
         if (connecting) throw new Error('Project setup is already pending');
         connecting = true;
         try {
@@ -238,7 +239,7 @@ export default function plugin(bb: BbPluginApi) {
                 if (project.id !== projectId || !project.name?.trim()) throw new Error('Target project could not be verified');
                 const backup = resolveRoute(routes, projectId);
                 if (backup.authentication !== 'desktop' || !backup.requireApproval) throw new Error('Target project needs an owner-approved desktop vault for token backups');
-                if (routes.some(r => r.projectId === projectId && (r.profile === 'routine' || r.profile === 'intake'))) throw new Error('Automatic access is already configured for ' + project.name + '; no changes made');
+                if (!reissue && routes.some(r => r.projectId === projectId && (r.profile === 'routine' || r.profile === 'intake'))) throw new Error('Automatic access is already configured for ' + project.name + '; use --reissue to replace it');
                 return {projectId, name: project.name, backup, accounts: [
                     {profile: 'routine', name: project.name + ' agent reader', permissions: ['read_items'] as ['read_items']},
                     {profile: 'intake', name: project.name + ' key intake', permissions: ['read_items', 'write_items'] as ['read_items', 'write_items']},
@@ -249,14 +250,22 @@ export default function plugin(bb: BbPluginApi) {
             const machineNames = await Promise.all(Object.entries(sessionHosts).map(async ([hostId, opPath]) => (await displayContext({...configured, hostId}, ctx)).hostLabel + ' (' + opPath + ')'));
             type Project = (typeof projects)[number];
             // Shared by fresh issuance and by resuming tokens an earlier approval already produced.
+            // Prove the new accounts from the execution machine, then save tokens and routes in one
+            // settings write. Fresh setup and resume refuse to overwrite configured routes; a reissue
+            // replaces them, so a failed proof always leaves the previous access untouched.
             const activate = async (project: Project, tokens: Map<string, string>, vault: {vaultId: string; vaultName: string}, setStage: (stage: AutomationStage) => void) => {
                 const targets = project.accounts.map(a => routeSchema.parse({projectId: project.projectId, profile: a.profile, label: project.name + (a.profile === 'routine' ? ' — ключи агентов' : ' — приём ключей'), hostId: executionHostId, vaultId: vault.vaultId, vaultLabel: vault.vaultName, opBinary: sessionHosts[executionHostId], authentication: 'service-account', tokenSetting: 'projectServiceAccounts', requireApproval: a.profile !== 'routine', allowAgentCommands: a.profile === 'routine', sessionHosts, operations: []}));
-                setStage('save-tokens');
-                const stored = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts));
-                await settings.experimental_set({projectServiceAccounts: JSON.stringify({...stored, [project.projectId]: {...(stored[project.projectId] ?? {}), ...Object.fromEntries(tokens)}})});
-                const saved = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts))[project.projectId] ?? {};
-                if (project.accounts.some(a => saved[a.profile] !== tokens.get(a.profile))) throw new CodedError('tokens-not-saved', 'Saved service tokens differ');
                 const [reader, intake] = targets;
+                // First setup keeps tokens right away (inert without routes) so a fixed later step can
+                // resume without another approval; a reissue must not touch working tokens yet.
+                const saveTokens = async () => {
+                    const stored = tokenMapSchema.parse(JSON.parse((await settings.get()).projectServiceAccounts));
+                    return {...stored, [project.projectId]: {...(stored[project.projectId] ?? {}), ...Object.fromEntries(tokens)}};
+                };
+                if (!reissue) {
+                    setStage('save-tokens');
+                    await settings.experimental_set({projectServiceAccounts: JSON.stringify(await saveTokens())});
+                }
                 setStage('probe-reader');
                 const readerScope = await host.call('probeScope', {route: reader, serviceAccountToken: tokens.get('routine')!}, {hostId: executionHostId, signal: ctx.signal});
                 setStage('probe-intake');
@@ -266,10 +275,15 @@ export default function plugin(bb: BbPluginApi) {
                 setStage('verify-intake');
                 await host.call('verify', {route: intake, serviceAccountToken: tokens.get('intake')!}, {hostId: executionHostId, signal: ctx.signal});
                 setStage('save-routes');
-                const latest = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
-                if (latest.some(r => r.projectId === project.projectId && (r.profile === 'routine' || r.profile === 'intake'))) throw new CodedError('routes-changed', 'Routing changed during setup');
-                await settings.experimental_set({routes: JSON.stringify([...latest, ...targets])});
-                const current = JSON.parse((await settings.get()).routes);
+                const values = await settings.get();
+                const latest = z.array(routeSchema).parse(JSON.parse(values.routes));
+                const own = (r: Route) => r.projectId === project.projectId && (r.profile === 'routine' || r.profile === 'intake');
+                if (!reissue && latest.some(own)) throw new CodedError('routes-changed', 'Routing changed during setup');
+                await settings.experimental_set({routes: JSON.stringify([...latest.filter(r => !own(r)), ...targets]), projectServiceAccounts: JSON.stringify(await saveTokens())});
+                const after = await settings.get();
+                const saved = tokenMapSchema.parse(JSON.parse(after.projectServiceAccounts))[project.projectId] ?? {};
+                if (project.accounts.some(a => saved[a.profile] !== tokens.get(a.profile))) throw new CodedError('tokens-not-saved', 'Saved service tokens differ');
+                const current = JSON.parse(after.routes);
                 if (targets.some(t => resolveRoute(current, project.projectId, t.profile).vaultId !== vault.vaultId)) throw new CodedError('routes-not-saved', 'Saved routes differ');
             };
             // An earlier approval may already have produced and saved tokens before a later step failed.
@@ -281,7 +295,7 @@ export default function plugin(bb: BbPluginApi) {
             // Saved tokens without a matching approved plan go through the card again; issuance
             // then recovers the backed-up tokens instead of creating new accounts.
             const plans = new Map(await Promise.all(projects.map(async p => [p.projectId, (await bb.storage.kv.get<{plan: string}>(planKey(p.projectId)))?.plan] as const)));
-            const resumable = projects.filter(p => p.accounts.every(a => !!saved[p.projectId]?.[a.profile]) && plans.get(p.projectId) === plan);
+            const resumable = reissue ? [] : projects.filter(p => p.accounts.every(a => !!saved[p.projectId]?.[a.profile]) && plans.get(p.projectId) === plan);
             const fresh = projects.filter(p => !resumable.includes(p));
             const resumedRows: {projectId: string; state: 'configured' | 'needs-review'; vaultId?: string; resumed?: boolean; stage?: AutomationStage; reason?: string}[] = [];
             if (resumable.length) {
@@ -309,10 +323,11 @@ export default function plugin(bb: BbPluginApi) {
                 await requireCredentialHost(route, ctx);
                 const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
                 await progress('awaiting-approval');
-                const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Автоматический доступ агентов: ' + title, payload: {mode: 'approve', title: 'Выпустить автоматический доступ агентов: ' + title, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: fresh.map(x => x.name).join(', '), hostId: credentialHost(route), ...display, vaultId: 'automation-vaults', vaultLabel: 'Отдельный сейф «<Проект> — Automation» у каждого проекта', purpose: ['Для каждого проекта: сейф только для ключей агентов и два доступа к нему на 90 дней.', 'Чтение (read_items) — агенты используют ключи без подтверждений на машинах: ' + machineNames.join(', ') + '.', 'Чтение и запись (read_items, write_items) — приём новых ключей через закрытую форму.', 'Без других сейфов, share_items и создания сейфов. Критические пароли в основном сейфе проекта по-прежнему требуют вашего подтверждения.', 'Токены — только в зашифрованных настройках Oxi Op и резервной записи в основном сейфе проекта.', 'Права проверяются с ' + execution.hostLabel + ' до включения.'].join('\n'), secrets: []}, describeSubmission: () => ({title: 'Automatic agent access approved (no credential values)'})}, {signal: ctx.signal});
+                const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: (reissue ? 'Перевыпуск доступа агентов: ' : 'Автоматический доступ агентов: ') + title, payload: {mode: 'approve', title: (reissue ? 'Перевыпустить доступ агентов: ' : 'Выпустить автоматический доступ агентов: ') + title, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: fresh.map(x => x.name).join(', '), hostId: credentialHost(route), ...display, vaultId: 'automation-vaults', vaultLabel: 'Отдельный сейф «<Проект> — Automation» у каждого проекта', purpose: [(reissue ? 'Перевыпустить для каждого проекта два доступа к сейфу ключей агентов, ' : 'Для каждого проекта: сейф только для ключей агентов и два доступа к нему, ') + (expiresIn ? 'срок ' + expiresIn + '.' : 'без срока действия.'), 'Чтение (read_items) — агенты используют ключи без подтверждений на машинах: ' + machineNames.join(', ') + '.', 'Чтение и запись (read_items, write_items) — приём новых ключей через закрытую форму.', 'Без других сейфов, share_items и создания сейфов. Критические пароли в основном сейфе проекта по-прежнему требуют вашего подтверждения.', 'Токены — только в зашифрованных настройках Oxi Op и резервной записи в основном сейфе проекта.', 'Права проверяются с ' + execution.hostLabel + ' до включения.', ...(reissue ? ['Прежние доступы работают до замены и после неё остаются в 1Password: удалите их там вручную.'] : [])].join('\n'), secrets: []}, describeSubmission: () => ({title: 'Automatic agent access approved (no credential values)'})}, {signal: ctx.signal});
                 if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
                 await progress('awaiting-approval', true);
-                for (const project of fresh) await bb.storage.kv.set(planKey(project.projectId), {plan, approvedAt: new Date().toISOString()});
+                const approvedAt = new Date().toISOString();
+                for (const project of fresh) await bb.storage.kv.set(planKey(project.projectId), {plan, approvedAt});
                 await requireCredentialHost(route, ctx);
                 await requireHost(executionHostId, 'execution', ctx);
                 await progress('running', true);
@@ -322,7 +337,7 @@ export default function plugin(bb: BbPluginApi) {
                     let stage: AutomationStage = 'issue';
                     try {
                         const vaultName = project.name + ' — Automation';
-                        const issued = await host.call('issueServiceAccounts', {route, projectId: project.projectId, vaultName, backupVaultId: project.backup.vaultId, expiresIn: '90d', accounts: project.accounts}, {hostId: credentialHost(route), signal: ctx.signal});
+                        const issued = await host.call('issueServiceAccounts', {route, projectId: project.projectId, vaultName, backupVaultId: project.backup.vaultId, ...(expiresIn ? {expiresIn} : {}), ...(reissue ? {replaceExisting: true} : {}), accounts: project.accounts}, {hostId: credentialHost(route), signal: ctx.signal});
                         const tokens = new Map(issued.accounts.map(a => [a.profile, a.token]));
                         if (project.accounts.some(a => !tokens.get(a.profile)) || tokens.size !== project.accounts.length) throw new CodedError('accounts-differ', 'Issued accounts differ from the request');
                         await activate(project, tokens, {vaultId: issued.vaultId, vaultName: issued.vaultName}, next => {stage = next;});
@@ -456,7 +471,7 @@ export default function plugin(bb: BbPluginApi) {
     }
     bb.cli.register(defineCli({ name: 'oxi-op', summary: 'Project-scoped 1Password operations', commands: {
             diagnose:cliCommand({summary:'Inspect routing and machine availability without contacting 1Password',options:{profile:{type:'string',description:'Configured access profile',default:'default'}},async run(input,ctx){if(!ctx.projectId)throw new Error('Run in a BB project');return {exitCode:0,stdout:JSON.stringify(await diagnose(ctx.projectId,input.options.profile))};}}),
-            automate:cliCommand({summary:'Approve issuing agent-reader and key-intake service accounts for project automation vaults',options:{notify:notifyOption,projects:{type:'string',description:'Comma-separated exact target BB project IDs',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true},host:{type:'string',description:'Default execution machine ID used for scope proofs',required:true},'session-hosts':{type:'string',description:'JSON object of allowed machine IDs to absolute op paths',required:true},'resume-only':{type:'boolean',description:'Only continue from tokens an earlier approval saved; never open a new approval',default:false}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const hosts=sessionHostsSchema.parse(JSON.parse(input.options['session-hosts']));const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>automate(input.options.projects.split(',').map(x=>x.trim()).filter(Boolean),input.options.profile,input.options.host,hosts,context,input.options['resume-only']));}}),
+            automate:cliCommand({summary:'Approve issuing agent-reader and key-intake service accounts for project automation vaults',options:{notify:notifyOption,projects:{type:'string',description:'Comma-separated exact target BB project IDs',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true},host:{type:'string',description:'Default execution machine ID used for scope proofs',required:true},'session-hosts':{type:'string',description:'JSON object of allowed machine IDs to absolute op paths',required:true},'resume-only':{type:'boolean',description:'Only continue from tokens an earlier approval saved; never open a new approval',default:false},reissue:{type:'boolean',description:'Replace configured agent access with new accounts after one approval',default:false},'expires-in':{type:'string',description:'Optional account lifetime such as 90d; accounts never expire by default'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const hosts=sessionHostsSchema.parse(JSON.parse(input.options['session-hosts']));const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>automate(input.options.projects.split(',').map(x=>x.trim()).filter(Boolean),input.options.profile,input.options.host,hosts,context,input.options['resume-only'],{reissue:input.options.reissue,expiresIn:input.options['expires-in']===undefined?undefined:z.string().regex(/^[1-9][0-9]{0,3}[dhw]$/).parse(input.options['expires-in'])}));}}),
             keys:cliCommand({summary:'List agent key titles and field names for this project; never values',options:{profile:{type:'string',description:'Agent access profile',default:'routine'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');return {exitCode:0,stdout:await listAgentKeys(input.options.profile,{projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal})};}}),
             exec:cliCommand({summary:'Run a command on this session machine with project agent keys; values are concealed in output',options:{argv:{type:'string',description:'JSON array: program and arguments',required:true},keys:{type:'string',description:'JSON object: VARIABLE to {item, field}',required:true},timeout:{type:'string',description:'Seconds, 1-600',default:'120'},profile:{type:'string',description:'Agent access profile',default:'routine'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const argv=z.array(z.string()).min(1).max(200).parse(JSON.parse(input.options.argv));const keys=keysSchema.parse(JSON.parse(input.options.keys));const seconds=z.coerce.number().int().min(1).max(600).parse(input.options.timeout);const result=JSON.parse(await execAgentCommand(argv,keys,input.options.profile,seconds,{projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal}));return {exitCode:result.exitCode===0?0:1,stdout:JSON.stringify(result)};}}),
             selftest:cliCommand({summary:'Prove agent keys of this session project end to end on listed machines with one synthetic key; never opens a form',options:{hosts:{type:'string',description:'Comma-separated machine IDs from the agent route',required:true}},async run(input,ctx){

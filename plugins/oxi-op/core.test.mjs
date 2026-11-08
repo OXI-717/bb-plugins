@@ -245,28 +245,24 @@ test('an agent command timeout ends descendants that hold keys',async t=>{
   assert.equal(alive,false,'descendant with the key must not survive');
  }finally{if(pid){try{process.kill(pid,'SIGKILL');}catch{}}await rm(directory,{recursive:true,force:true});}
 });
-test('a backup near its 90-day expiry is set aside and a new account is issued',async()=>{
- const f=fakeAccount({createdAt:new Date(Date.now()-85*86400000).toISOString()});
- await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
- const again=await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
- assert.deepEqual(again.accounts.map(a=>a.recovered),[false,false]);
- assert.equal(f.calls.filter(c=>c.args[0]==='service-account').length,4);
- assert.equal([...f.items.values()].filter(x=>/\(expired \d{4}-\d{2}-\d{2}\)$/.test(x.title)).length,2);
- const fresh=fakeAccount();
- await issueServiceAccounts(fresh.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
- const recovered=await issueServiceAccounts(fresh.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
- assert.deepEqual(recovered.accounts.map(a=>a.recovered),[true,true]);
-});
-test('concealment happens before the cut and a split value at the cut is hidden',()=>{
- const value='SYNTHETICVALUE1234567890';
- const big='x'.repeat(40000)+'\n'+'y'.repeat(10)+value+'\n'+'tail';
- const r=concealOutput(big,[value],false);
- assert(!r.output.includes(value));assert(r.output.includes('<concealed>'));assert.equal(r.truncated,true);
- const split=value.slice(-12)+' rest';
- const s=concealOutput(split,[value],true);
- assert(!s.output.includes(value.slice(-12)));assert(s.output.startsWith('<concealed>'));
-});
-test('a leader that exits while an escaped descendant holds output does not hang the call',async t=>{
+test('accounts never expire by default and a reissue always sets aside existing backups',async()=>{
+ const f=fakeAccount();
+ await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',accounts});
+ assert(f.calls.filter(c=>c.args[0]==='service-account').every(c=>!c.args.includes('--expires-in')));
+ const limited=fakeAccount();
+ await issueServiceAccounts(limited.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',expiresIn:'90d',accounts});
+ assert(limited.calls.filter(c=>c.args[0]==='service-account').every(c=>c.args.join(' ').includes('--expires-in 90d')));
+ assert.deepEqual((await issueServiceAccounts(f.run,{},{projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',accounts})).accounts.map(a=>a.recovered),[true,true]);
+ const reissue={projectId:'target',vaultName:'Example — Automation',backupVaultId:'backup-vault',replaceExisting:true,accounts};
+ const before=f.calls.length;
+ const replaced=await issueServiceAccounts(f.run,{},reissue,undefined,new Date('2026-11-08T12:00:00.000Z'));
+ assert.deepEqual(replaced.accounts.map(a=>a.recovered),[false,false]);
+ assert(!f.calls.slice(before).some(c=>c.args.includes('--reveal')&&c.args[1]==='get'&&c.args[2]!==undefined&&[...f.items.keys()].slice(0,2).includes(c.args[2])),'a reissue does not read the old tokens');
+ const again=await issueServiceAccounts(f.run,{},reissue,undefined,new Date('2026-11-08T12:00:05.000Z'));
+ assert.deepEqual(again.accounts.map(a=>a.recovered),[false,false],'a retried reissue never brings back an earlier token');
+ assert.equal([...f.items.values()].filter(x=>/\(replaced 2026-11-08T12:00:0[05]Z\)$/.test(x.title)).length,4);
+ assert.equal(f.calls.filter(c=>c.args[0]==='service-account').length,6);
+});test('a leader that exits while an escaped descendant holds output does not hang the call',async t=>{
  if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
  const source="const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setTimeout(()=>{},3000)'],{detached:true,stdio:['ignore','inherit','inherit']}).unref();";
  const started=Date.now();

@@ -198,10 +198,12 @@ export async function provisionProjectVault(run: Runner, env: NodeJS.ProcessEnv,
 export type ServiceAccountRequest = {profile: string; name: string; permissions: ('read_items' | 'write_items')[]};
 export const serviceAccountBackupTitle = (name: string) => 'Oxi Op service account — ' + name;
 // A token is shown once by 1Password. Back it up before returning it, and recover the
-// backup on retry instead of issuing a duplicate service account.
-const day = 86400000;
-const renewAfterMs = 80 * day;
-export async function issueServiceAccounts(run: Runner, env: NodeJS.ProcessEnv, request: {projectId: string; vaultName: string; backupVaultId: string; expiresIn: string; accounts: ServiceAccountRequest[]}, signal?: AbortSignal, now = Date.now()) {
+// backup on retry instead of issuing a duplicate service account. Accounts never expire unless
+// an expiry is requested; a recovered backup keeps the lifetime it was issued with. A reissue
+// never recovers: every existing backup is set aside under a dated title and new accounts are
+// issued, so a leaked, expired or faulty token is never brought back. Accounts of a failed
+// reissue stay visible through their set-aside backups for the owner to delete.
+export async function issueServiceAccounts(run: Runner, env: NodeJS.ProcessEnv, request: {projectId: string; vaultName: string; backupVaultId: string; expiresIn?: string; replaceExisting?: boolean; accounts: ServiceAccountRequest[]}, signal?: AbortSignal, now = new Date()) {
     const {vaultId, name: vaultName} = await provisionProjectVault(run, env, request.projectId, request.vaultName, signal);
     const accounts: {profile: string; token: string; recovered: boolean}[] = [];
     for (const account of request.accounts) {
@@ -212,23 +214,22 @@ export async function issueServiceAccounts(run: Runner, env: NodeJS.ProcessEnv, 
         const matches = items.filter(item => item.title === title);
         if (matches.length > 1) throw new CodedError('duplicate-backups', 'Duplicate token backups need owner review');
         if (matches.length === 1) {
-            let stored: {created_at?: string; fields?: {label: string; value: string}[]};
-            try {stored = JSON.parse(await run('op', ['item', 'get', matches[0].id, '--vault', request.backupVaultId, '--reveal', '--format=json'], env, undefined, signal));}
-            catch {throw new CodedError('backup-read-failed', 'An existing token backup could not be read; owner review is required');}
-            const created = Date.parse(stored.created_at ?? '');
-            if (!Number.isFinite(created)) throw new CodedError('backup-age-unknown', 'An existing token backup has no creation date; owner review is required');
-            if (now - created < renewAfterMs) {
+            if (!request.replaceExisting) {
+                let stored: {fields?: {label: string; value: string}[]};
+                try {stored = JSON.parse(await run('op', ['item', 'get', matches[0].id, '--vault', request.backupVaultId, '--reveal', '--format=json'], env, undefined, signal));}
+                catch {throw new CodedError('backup-read-failed', 'An existing token backup could not be read; owner review is required');}
                 const token = stored.fields?.find(field => field.label === 'password')?.value;
                 if (!token) throw new CodedError('backup-incomplete', 'An existing token backup is incomplete; owner review is required');
                 accounts.push({profile: account.profile, token, recovered: true});
                 continue;
             }
-            // Near or past its 90-day expiry: keep the old backup under a dated title and issue anew.
-            try {await run('op', ['item', 'edit', matches[0].id, '--vault', request.backupVaultId, '--title', title + ' (expired ' + new Date(created + 90 * day).toISOString().slice(0, 10) + ')'], env, undefined, signal);}
-            catch {throw new CodedError('backup-rename-failed', 'An expiring token backup could not be set aside; no service account was issued');}
+            // Reissue: keep the replaced backup under a dated title; its account stays valid until
+            // the owner deletes it in 1Password (the CLI cannot delete service accounts).
+            try {await run('op', ['item', 'edit', matches[0].id, '--vault', request.backupVaultId, '--title', title + ' (replaced ' + now.toISOString().replace(/\.\d+Z$/, 'Z') + ')'], env, undefined, signal);}
+            catch {throw new CodedError('backup-rename-failed', 'A replaced token backup could not be set aside; no service account was issued');}
         }
         let token: string;
-        try {token = (await run('op', ['service-account', 'create', account.name, '--vault', vaultId + ':' + account.permissions.join(','), '--expires-in', request.expiresIn, '--raw'], env, undefined, signal)).trim();}
+        try {token = (await run('op', ['service-account', 'create', account.name, '--vault', vaultId + ':' + account.permissions.join(','), ...(request.expiresIn ? ['--expires-in', request.expiresIn] : []), '--raw'], env, undefined, signal)).trim();}
         catch {throw new CodedError('create-unconfirmed', '1Password did not confirm service account creation; owner review is required before retrying');}
         if (!token || /\s/.test(token)) throw new CodedError('create-unexpected', '1Password returned an unexpected service account response; owner review is required');
         try {await storeCredential(run, env, request.backupVaultId, title, account.name, token, signal);}
