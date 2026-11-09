@@ -329,3 +329,10 @@ test('one unreadable vault or an empty listing does not stop the overview',async
  const result=await overviewVaults(run,{},new Set(['a','b','c']));
  assert.deepEqual(result.vaults.map(v=>[v.name,v.error??null,v.itemTotal??null]),[['A',null,0],['B','vault-get-exit-1',null],['C',null,1]]);
 });
+test('desktop op calls share the host session; other processes get their own',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ const probe="process.stdout.write(String(require('node:child_process').execSync('ps -o pgid= -p '+process.pid).toString().trim()===require('node:child_process').execSync('ps -o pgid= -p '+process.ppid).toString().trim()))";
+ const shared=await runProcess(process.execPath,['-e',probe],{OP_BIOMETRIC_UNLOCK_ENABLED:'true',PATH:process.env.PATH});
+ const own=await runProcess(process.execPath,['-e',probe],{OP_BIOMETRIC_UNLOCK_ENABLED:'false',PATH:process.env.PATH});
+ assert.deepEqual([shared,own],['true','false']);
+});
