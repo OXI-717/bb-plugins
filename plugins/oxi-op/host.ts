@@ -72,12 +72,17 @@ export default experimental_defineHostEntry({ contract, handlers: {
             const env = await environment(route, ctx.signal);
             const runner: typeof runProcess = (_binary, args, values, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], values, input, signal);
             const ids = new Set(serviceVaultIds);
+            // A missing or unreadable registry narrows the map; it is reported instead of failing it.
+            let registryRead = !registryTitle;
             if (registryTitle) {
-                const registry = JSON.parse(await runner('op', ['item', 'get', registryTitle, '--vault', route.vaultId, '--format=json', '--reveal'], env, undefined, ctx.signal));
-                const notes = String(registry.notesPlain ?? '') + '\n' + (registry.fields ?? []).filter((x: {id: string}) => x.id === 'notesPlain').map((x: {value: string}) => x.value).join('\n');
-                for (const id of notes.match(/\b[a-z2-7]{26}\b/g) ?? []) ids.add(id);
+                try {
+                    const registry = JSON.parse(await runner('op', ['item', 'get', registryTitle, '--vault', route.vaultId, '--format=json', '--reveal'], env, undefined, ctx.signal));
+                    const notes = String(registry.notesPlain ?? '') + '\n' + (registry.fields ?? []).filter((x: {id: string}) => x.id === 'notesPlain').map((x: {value: string}) => x.value).join('\n');
+                    for (const id of notes.match(/\b[a-z2-7]{26}\b/g) ?? []) ids.add(id);
+                    registryRead = true;
+                } catch {}
             }
-            return overviewVaults(runner, env, ids, ctx.signal);
+            return {...await overviewVaults(runner, env, ids, ctx.signal), registryRead};
         },
         inventory: async ({route, registryTitle}, ctx) => {
             if (route.authentication !== 'desktop') throw new Error('Registry inventory requires explicit owner desktop access');
