@@ -3,7 +3,7 @@ import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
 import { contract, type Route } from './contract.js';
 import { CodedError } from './errors.js';
-import { runProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults } from './core.js';
+import { runProcess, runOwnedProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults } from './core.js';
 const pending = new Set<string>();
 async function environment(route: Route, signal: AbortSignal, serviceAccountToken?: string) {
     if (signal.aborted)
@@ -167,7 +167,7 @@ export default experimental_defineHostEntry({ contract, handlers: {
                     throw new Error('Reference is outside the configured vault');
                 env[key] = ref;
             }
-            await runProcess(route.opBinary, [...(route.authentication === 'desktop' ? ['--account', route.accountId!] : []), 'run', '--', ...op.argv], env, undefined, ctx.signal);
+            await runOwnedProcess(route.opBinary, [...(route.authentication === 'desktop' ? ['--account', route.accountId!] : []), 'run', '--', ...op.argv], env, undefined, ctx.signal);
             return { completed: true as const };
         }
     } });

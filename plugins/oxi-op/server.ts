@@ -12,7 +12,10 @@ const setupTimeoutMs = 600_000;
 export const deliveryContract = defineRpcContract({formReceipt: {input: z.object({threadId:z.string().min(1).max(100),interactionId:z.string().min(1).max(100),visible:z.boolean()}).strict(),output:z.object({recorded:z.literal(true)})}});
 export default function plugin(bb: BbPluginApi) {
     const settings = bb.settings.define({ routes: { type: 'string', label: 'Project vault routes (JSON)', default: '[]', experimental_multiline: true }, serviceAccountToken: { type: 'string', label: 'Legacy scoped service account token', secret: true, default: '' }, projectServiceAccounts: {type: 'string', label: 'Project and profile service accounts (encrypted JSON)', secret: true, default: '{}'} });
-    const host = bb.hosts.experimental_client({ contract });
+    const rawHost = bb.hosts.experimental_client({ contract });
+    // Owner approval on a Mac can take minutes (fingerprint prompts, many op calls); the SDK
+    // default of 30 seconds cut working calls off. Calls may run up to 15 minutes.
+    const host: typeof rawHost = {...rawHost, call: (method, input, options) => rawHost.call(method, input, {timeoutMs: 15 * 60_000, ...options})};
     const credentialHost = (route: Route) => route.credentialHostId ?? route.hostId;
     const journal = createJournal(bb.storage.kv);
     type Receipt = {interactionId:string;mountedAt:string;lastSeenAt:string;visibleEver:boolean};

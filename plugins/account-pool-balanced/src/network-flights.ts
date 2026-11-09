@@ -1,7 +1,7 @@
 import type {PoolProvider} from './contracts.js';
 
 export type StreamIdentity={requestId:string;threadId:string|null};
-export type CursorStream={requestId:string;threadId:string;bytesRead:number};
+export type CursorStream={requestId:string;threadId:string;bytesRead:number;contentType:string};
 
 export class NetworkFlights {
   private readonly active=new Map<AbortController,PoolProvider>();
@@ -52,7 +52,7 @@ export class NetworkFlights {
       signal.throwIfAborted();
       if(!response.body){finished=true;release();return response;}
       reader=response.body.getReader();
-      const cursorBody=provider==='cursor'&&identity?.threadId?{requestId:identity.requestId,threadId:identity.threadId,bytesRead:0}:undefined;
+      const cursorBody=provider==='cursor'&&identity?.threadId?{requestId:identity.requestId,threadId:identity.threadId,bytesRead:0,contentType:['text/event-stream','application/connect+proto','application/connect+json'].includes(response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase()??'')?response.headers.get('content-type')!.split(';')[0]!.trim().toLowerCase():'other'}:undefined;
       if(cursorBody)this.cursorBodies.set(owner,cursorBody);
       const body=new ReadableStream<Uint8Array>({
         start(controller){downstream=controller;},

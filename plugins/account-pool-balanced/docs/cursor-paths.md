@@ -107,3 +107,9 @@ not an HTTP route for provider clients. It does not replay inference or tools.
 Observe the actual ACP failure, bounded native retry, preserved history and tool
 execution ledger independently. A controlled local body failure does not prove
 the cause of an earlier upstream TCP closure.
+
+Cursor also labels binary Connect frames as `text/event-stream`. This does not
+make its body textual SSE. The launcher observes the same bounded envelope state
+for this MIME type. The pool propagates Cursor body errors without appending a
+textual SSE error event; textual SSE handling for other providers is preserved.
+The stream probe reports an allowlisted MIME category (`other` for unknown types).
