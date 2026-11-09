@@ -726,3 +726,21 @@ test('a reissue keeps working access until the replacements prove their scope, t
  const routes=JSON.parse(JSON.parse(JSON.stringify((await h.behavior.runCli(['diagnose','--profile','routine'],p1)).stdout))).serviceTokenConfigured;
  assert.equal(routes,true);
 });
+test('projects listed with one vault name share one vault and keep the owner Mac order',async t=>{
+ const calls=[];
+ const h=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'}],callHost:({method,input})=>{assert.equal(method,'provisionVault');calls.push(input);return {vaultId:input.existingVaultId??'shared-vault',name:input.name};}});
+ const work=h.behavior.runCli(['connect-many','--projects',JSON.stringify([{projectId:'personal-a',vaultName:'BB Personal'},{projectId:'personal-b',vaultName:'BB Personal'}]),'--profile','default'],context);await setImmediate();
+ const form=h.inspection.pendingInteractions[0];
+ assert(form.payload.purpose.includes('сейф «BB Personal» (общий)'));
+ h.behavior.submitInteraction(form.id,{approved:true});
+ assert.deepEqual(JSON.parse((await work).stdout).projects.map(p=>[p.state,p.vaultId]),[['configured','shared-vault'],['configured','shared-vault']]);
+ assert.deepEqual(calls.map(c=>[c.projectId,c.name,c.existingVaultId]),[['personal-a','BB Personal',undefined],['personal-b','BB Personal','shared-vault']]);
+ const routes=JSON.parse((await h.behavior.runCli(['diagnose'],{...context,projectId:'personal-b'})).stdout);
+ assert.deepEqual(routes.ownerMachines.map(m=>m.name),['Machine mac-air','Machine mac-max']);
+});
+test('an unconnected project gets a clear answer instead of a generic failure',async t=>{
+ const h=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'}]});
+ const result=JSON.parse(await h.behavior.callAgentTool('oxi_op_store',{title:'Example'},{...context,projectId:'unconnected-project'}));
+ assert.equal(result.code,'project_not_connected');assert(result.message.includes('not connected'));
+ assert.equal(h.inspection.pendingInteractions.length+h.inspection.experimental_hostRpcCalls.length,0);
+});
