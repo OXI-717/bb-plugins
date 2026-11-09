@@ -73,13 +73,37 @@ after a complete end envelope does not invalidate the RPC. This follows the
 [Connect streaming protocol](https://connectrpc.com/docs/protocol/).
 
 For one unambiguous ACP prompt, a confirmed interruption converts Cursor's false
-`end_turn` success into the existing local `POOL_UPSTREAM_UNAVAILABLE` JSON-RPC
-error. Detection does not depend on assistant text, including text emitted before
+`end_turn` success or the exact incomplete-envelope ACP error into the existing
+local `POOL_UPSTREAM_UNAVAILABLE` JSON-RPC error. Other RPC errors are preserved. Detection does not depend on assistant text, including text emitted before
 the interruption. Auxiliary RPCs, stale model requests, ambiguous concurrent
 prompts, client disconnection and ACP cancellation do not acquire this attribution.
 A fresh model request clears the previous interruption.
 
 The existing bounded native turn retry can then continue the same thread with its
-original provider, model and accepted history. The gateway does not replay HTTP
+original provider, model and accepted history. The retry classifier accepts the
+exact local marker from the latest ACP provider error detail in the failed request;
+a raw incomplete-envelope error or assistant text alone cannot authorize a retry. The gateway does not replay HTTP
 requests or tools, manufacture a Connect success frame, or bypass Guard. This
 restores failure/recovery semantics; it does not prevent upstream socket failures.
+
+## Controlled stream recovery check
+
+Use `bb pool stream-probe --thread <thread-id> --json` to inspect active Cursor
+model response bodies for a single thread. It returns only server request UUIDs,
+thread IDs and byte counts. Auxiliary RPCs and responses without an attributed
+thread are excluded. No upstream operation or Guard policy change is performed.
+
+In an explicitly authorized, synthetic test session, interrupt one observed body:
+
+```sh
+bb pool stream-probe --thread <thread-id> --interrupt-request <request-uuid> --confirm --json
+```
+
+The two identities must match the same currently open response with bytes read.
+A stale UUID, another thread, a header wait or an already finished request returns
+`interrupted: false`. One interruption removes the target; it cannot abort a new
+retry or a neighbouring stream. The command is an authenticated BB CLI operation,
+not an HTTP route for provider clients. It does not replay inference or tools.
+Observe the actual ACP failure, bounded native retry, preserved history and tool
+execution ledger independently. A controlled local body failure does not prove
+the cause of an earlier upstream TCP closure.

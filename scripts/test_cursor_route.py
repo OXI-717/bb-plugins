@@ -283,7 +283,8 @@ except (OSError,http.client.HTTPException):
  pass
 c.close()
 update('\\n\\nError: RetriableError: [invalid_argument] protocol error: incomplete envelope')
-print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'}}),flush=True)
+reply={'error':{'code':-32603,'message':'[invalid_argument] protocol error: incomplete envelope'}} if os.environ['BODY_MODE']=='rpc-error' else {'result':{'stopReason':'end_turn'}}
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],**reply}),flush=True)
 """)
                 cli.chmod(0o755)
                 env = dict(os.environ, HOME=tmp, PATH=tmp+os.pathsep+os.environ['PATH'],
@@ -301,6 +302,9 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'
                     self.assertEqual(messages[-1],{'jsonrpc':'2.0','id':7,'error':{'code':-32603,'message':'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.'}})
         finally:
             hub.shutdown();hub.server_close();worker.join()
+
+    def test_confirmed_body_failure_normalizes_actual_acp_rpc_error(self):
+        self.gateway_body_failure_case('rpc-error')
 
     def test_socket_cut_becomes_failed_prompt_after_normal_output(self):
         self.gateway_body_failure_case('socket')
@@ -407,6 +411,19 @@ class AcpFailureNormalizationTest(unittest.TestCase):
             for byte in terminal[:boundary]:
                 state.feed(bytes([byte]))
             self.assertEqual(state.complete,boundary>=len(terminal))
+
+    def test_confirmed_interruption_normalizes_cursor_rpc_incomplete_envelope(self):
+        for prefix in ('','RetriableError: ','Internal error: '):
+            state=route.AcpPoolFailures();state.client({'id':1,'method':'session/prompt','params':{}})
+            state.model_interrupted(state.begin_model_request('agent.v1.AgentService/RunSSE'))
+            original={'jsonrpc':'2.0','id':1,'error':{'code':-32603,'message':prefix+'[invalid_argument] protocol error: incomplete envelope'}}
+            result=state.child(original)
+            self.assertEqual(result['error']['message'],'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.')
+
+    def test_rpc_envelope_text_without_local_interruption_is_unchanged(self):
+        state=route.AcpPoolFailures();state.client({'id':1,'method':'session/prompt','params':{}})
+        original={'id':1,'error':{'code':-32603,'message':'[invalid_argument] protocol error: incomplete envelope'}}
+        self.assertEqual(state.child(original),original)
 
     def test_no_cross_session_guessing_or_arbitrary_error_propagation(self):
         state=route.AcpPoolFailures()
