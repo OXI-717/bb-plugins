@@ -124,7 +124,13 @@ class AcpPoolFailures:
             if type(identifier) not in (str, int) or ('result' not in message and 'error' not in message):
                 return message
             current = self.pending.pop(identifier, None)
-            if current and current['reason'] and (current['reported'] or current['interrupted']) and isinstance(message.get('result'), dict) and message['result'].get('stopReason') == 'end_turn':
+            rpc_error = message.get('error')
+            incomplete_rpc = (isinstance(rpc_error, dict) and rpc_error.get('code') == -32603
+                and isinstance(rpc_error.get('message'), str) and re.fullmatch(
+                    r'(?:Internal error: )?(?:Error: )?(?:RetriableError: )?\[invalid_argument\] protocol error: incomplete envelope',
+                    rpc_error['message'].strip()) is not None)
+            false_success = isinstance(message.get('result'), dict) and message['result'].get('stopReason') == 'end_turn'
+            if current and current['reason'] and (current['reported'] or current['interrupted']) and (false_success or (current['interrupted'] and incomplete_rpc)):
                 reason = current['reason']
                 return {'jsonrpc': '2.0', 'id': identifier, 'error': {
                     'code': -32603, 'message': '[' + reason + '] Pooler connection temporarily unavailable.'}}

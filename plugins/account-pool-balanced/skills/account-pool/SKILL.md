@@ -66,3 +66,10 @@ accepted response body follows the client's lifetime, so long model/tool waits
 do not truncate it. Disconnecting the local client shuts down its upstream
 socket. A silent upstream can remain open while the client is still waiting;
 the gateway does not invent a Connect end frame or replay inference.
+
+
+For an explicitly authorized synthetic recovery test, inspect one thread with
+`bb pool stream-probe --thread <thread-id> --json`. Interrupt only an exact observed
+model response using `--interrupt-request <request-uuid> --confirm`; both identities
+must match. It does not change Guard, replay requests, or interrupt neighbours.
+See [controlled stream recovery](../../docs/cursor-paths.md#controlled-stream-recovery-check).

@@ -1,3 +1,4 @@
+import type {CursorStream} from './network-flights.js';
 import {guardProbeSchema,type GuardProbeInput, type runGuardProbe} from './guard-server.js';
 import type { AccountEgress } from "./account-egress.js";
 import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
@@ -72,6 +73,7 @@ const HELP = [
   '  bb pool native configure <executor-json>',
   '  bb pool native mode <managed|off>',
   '  bb pool native attest-stopped <lease-id> --confirmed',
+  "  bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]",
   "  bb pool observations [--json]",
   "  bb pool guard-probe --provider cursor [--delay-stage guard-rpc] [--delay-ms 4100] [--delay-attempts first|all] [--json]",
   "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
@@ -361,6 +363,7 @@ export function registerPoolCli(
   nativeSessions?: NativeSessions,
   egress?: AccountEgress,
   guardProbe?:(input:GuardProbeInput)=>ReturnType<typeof runGuardProbe>,
+  streamProbe?:(threadId:string,requestId?:string)=>{streams:CursorStream[];interrupted?:boolean},
 ): void {
   bb.cli.register({
     name: "pool",
@@ -427,6 +430,7 @@ export function registerPoolCli(
         usage: "bb pool account refresh <id>",
       },
       { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json]" },
+      {name:"stream-probe",summary:"Inspect one thread or interrupt one exact observed Cursor body",usage:"bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]"},
       { name:"guard-probe", summary:"Rehearse read-only Guard admission, optionally delaying only this probe", usage:"bb pool guard-probe --provider cursor [--delay-stage server-host|guard-rpc|server-host-recheck] [--delay-ms 0..4500] [--delay-attempts first|all] [--json]" },
       { name:"observations", summary:"Inspect bounded request metadata and retained-event minute counts", usage:"bb pool observations [--json]" },
       { name:"history", summary:"Inspect bounded fourteen-day hourly account and client counters", usage:"bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]" },
@@ -805,6 +809,15 @@ export function registerPoolCli(
           const projectId = providerReadinessSchema.shape.projectId.parse(flags.values.get("project") ?? null);
           const entries = await operations.readiness(projectId);
           return {exitCode:0, stdout:flags.booleans.has("json") ? json(entries) : entries.map(entry => `${entry.provider}: ${entry.ready ? "ready" : entry.reason}`).join("\n")+"\n"};
+        }
+        if(argv[0]==='stream-probe'){
+          const flags=parseFlags(argv.slice(1),['json','confirm'],['thread','interrupt-request']);
+          const threadId=flags.values.get('thread')??'',requestId=flags.values.get('interrupt-request');
+          if(!/^thr_[a-z0-9]+$/.test(threadId))throw Error('--thread requires a BB thread ID');
+          if(requestId!==undefined&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId))throw Error('--interrupt-request requires an exact request UUID');
+          if((requestId!==undefined)!==flags.booleans.has('confirm'))throw Error('Interrupting one stream requires both --interrupt-request and --confirm');
+          if(!streamProbe)throw Error('Cursor stream probe unavailable');
+          return {exitCode:0,stdout:json(streamProbe(threadId,requestId))};
         }
         if(argv[0]==='guard-probe'){
           const flags=parseFlags(argv.slice(1),['json'],['provider','delay-stage','delay-ms','delay-attempts']);

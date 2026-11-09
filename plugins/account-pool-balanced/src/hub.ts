@@ -245,6 +245,10 @@ export class AccountPoolHub {
 
   admissionLimitsChanged(): void { this.admission.limitsChanged(); this.cursorControlAdmission.limitsChanged(); }
   async enforceNetworkPolicy():Promise<void>{await this.networkFlights.enforce();}
+  cursorStreamProbe(threadId:string,requestId?:string){
+    const interrupted=requestId===undefined?undefined:this.networkFlights.interruptCursorStream(requestId,threadId);
+    return {streams:this.networkFlights.cursorStreams(threadId),...(interrupted===undefined?{}:{interrupted})};
+  }
 
   async start(signal: AbortSignal): Promise<void> {
     this.affinityBindings = this.options.affinity.loadBindings(
@@ -1570,7 +1574,7 @@ export class AccountPoolHub {
             stage:"response_body",operation:"model",requestId:trace.requestId,bytesRead,
             ...(error instanceof GuardRequiredError && error.failureReason ? {guardReason:error.failureReason}:{}),
           });
-        })
+        },account.provider==='cursor'&&/^agent\.v[0-9]+\.AgentService\/Run(?:SSE|Poll)?$/.test(rpc??'')?{requestId:trace.requestId,threadId:trace.threadId}:undefined)
         .catch((cause: unknown) => {
           if (cause instanceof EgressUnavailable || cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
           throw new UpstreamConnectionError("Upstream connection failed.", {
