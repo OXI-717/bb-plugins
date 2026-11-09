@@ -42,7 +42,7 @@ export default function plugin(bb: BbPluginApi) {
     // BB resumes an idle agent for a fulfilled tool result, including a reported failure.
     const toolOutcome = async (work: () => Promise<string>) => {
         try {return await work();}
-        catch (error) {if(error instanceof OperationFailure)return JSON.stringify({completed:false,code:error.code,message:error.message});return JSON.stringify({completed: false, message: 'Operation failed. Inspect oxi_op_history before retrying; no secret values are included.'});}
+        catch (error) {if(error instanceof OperationFailure)return JSON.stringify({completed:false,code:error.code,message:error.message});if(errorCode(error)==='project-not-connected')return JSON.stringify({completed:false,code:'project_not_connected',message:'This BB project or access profile is not connected to 1Password in Oxi Op, so no form was opened and nothing was requested. Ask the owner to connect it in Oxi Op. Never ask for passwords in chat.'});return JSON.stringify({completed: false, message: 'Operation failed. Inspect oxi_op_history before retrying; no secret values are included.'});}
     };
     const accessFor = async (projectId: string, profile: string) => {
         const values = await settings.get();
@@ -82,6 +82,9 @@ export default function plugin(bb: BbPluginApi) {
         if (machine.id !== hostId) throw new OperationFailure('host_status_unavailable');
         if (machine.status !== 'connected') throw new OperationFailure(kind === 'credential' ? 'credential_host_offline' : 'execution_host_offline');
     }
+    // New project routes inherit the setup route's owner machines, so approval keeps its
+    // fallback order instead of being pinned to whichever Mac approved the setup.
+    const ownerHosts = (configured: Route, resolved: Route) => configured.desktopHosts ? {desktopHosts: configured.desktopHosts} : {credentialHostId: credentialHost(resolved), opBinary: resolved.opBinary};
     const requireCredentialHost = (route: Route, ctx: OperationContext) => requireHost(credentialHost(route), 'credential', ctx);
     // Owner approval goes to the first listed owner machine that is online.
     async function credentialTarget(route: Route, ctx: OperationContext): Promise<Route> {
@@ -161,7 +164,7 @@ export default function plugin(bb: BbPluginApi) {
                 const vault = await host.call('provisionVault',{route,projectId,name:project.name},{hostId:credentialHost(route),signal:ctx.signal});
                 const latest = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
                 if (latest.some(r=>r.projectId===projectId && r.profile==='default')) throw new CodedError('routes-changed', 'Routing changed during setup; vault preserved for recovery');
-                const target = routeSchema.parse({projectId,profile:'default',label:project.name,hostId:route.hostId,credentialHostId:credentialHost(route),vaultId:vault.vaultId,vaultLabel:vault.name,opBinary:route.opBinary,authentication:'desktop',accountId:route.accountId,requireApproval:true,operations:[]});
+                const target = routeSchema.parse({projectId,profile:'default',label:project.name,hostId:route.hostId,...ownerHosts(configured,route),vaultId:vault.vaultId,vaultLabel:vault.name,authentication:'desktop',accountId:route.accountId,requireApproval:true,operations:[]});
                 await settings.experimental_set({routes:JSON.stringify([...latest,target])});
                 const saved=resolveRoute(JSON.parse((await settings.get()).routes),projectId);
                 if (saved.vaultId!==vault.vaultId) throw new Error('Saved route differs');
@@ -169,7 +172,7 @@ export default function plugin(bb: BbPluginApi) {
             }, 'Подключить проект '+project.name);
         } finally {connecting=false;}
     }
-    const targetsSchema = z.array(z.object({projectId:z.string().min(1),existingVaultId:z.string().min(1).optional()}).strict()).min(1).max(50).refine(xs=>new Set(xs.map(x=>x.projectId)).size===xs.length,'Duplicate target projects');
+    const targetsSchema = z.array(z.object({projectId:z.string().min(1),existingVaultId:z.string().min(1).optional(),vaultName:z.string().min(1).max(160).optional()}).strict()).min(1).max(50).refine(xs=>new Set(xs.map(x=>x.projectId)).size===xs.length,'Duplicate target projects');
     async function connectMany(raw: string, profile: string, ctx: OperationContext) {
         if (connecting) throw new Error('Project setup is already pending');
         connecting=true;
@@ -181,7 +184,7 @@ export default function plugin(bb: BbPluginApi) {
             const projects=await Promise.all(targets.map(async target=>{
                 const project=await bb.sdk.projects.get({projectId:target.projectId,signal:ctx.signal});
                 if(project.id!==target.projectId||!project.name?.trim())throw new Error('Target identity differs');
-                return {...target,name:project.name};
+                return {...target,name:project.name,vault:target.vaultName??project.name};
             }));
             const routes=z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
             const pending=projects.filter(p=>!routes.some(r=>r.projectId===p.projectId&&r.profile==='default'));
@@ -190,17 +193,22 @@ export default function plugin(bb: BbPluginApi) {
             const display=await displayContext({...route,hostId:credentialHost(route)},ctx);
             return await journal.run('connect-many',profile,ctx,async progress=>{
                 await progress('awaiting-approval');
-                const decision=await requestApproval({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Подключить хранилища проектов',payload:{mode:'approve',title:'Подключить '+pending.length+' проектов',profile,projectId:ctx.projectId,threadId:ctx.threadId,label:pending.map(p=>p.name).join(', '),hostId:credentialHost(route),...display,vaultId:'project-vaults',vaultLabel:'Отдельный сейф каждого проекта',purpose:pending.map(p=>p.name+': '+(p.existingVaultId?'подключить существующий сейф по точному ID':'создать или восстановить сейф с меткой проекта')).join('\n')+'\nСохранить привязки по умолчанию. Пароли не читаются; автоматический доступ не выдаётся. Уже настроенные проекты пропускаются.',secrets:[]},describeSubmission:()=>({title:'Project vault connections approved (no credential values)'})},{signal:ctx.signal});
+                const decision=await requestApproval({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Подключить хранилища проектов',payload:{mode:'approve',title:'Подключить '+pending.length+' проектов',profile,projectId:ctx.projectId,threadId:ctx.threadId,label:pending.map(p=>p.name).join(', '),hostId:credentialHost(route),...display,vaultId:'project-vaults',vaultLabel:'Отдельный сейф каждого проекта',purpose:pending.map(p=>p.name+': '+(p.existingVaultId?'подключить существующий сейф по точному ID':'сейф «'+p.vault+'»'+(pending.filter(x=>x.vault===p.vault).length>1?' (общий)':'')+', создать или восстановить с меткой проекта')).join('\n')+'\nСохранить привязки по умолчанию. Пароли не читаются; автоматический доступ не выдаётся. Уже настроенные проекты пропускаются.',secrets:[]},describeSubmission:()=>({title:'Project vault connections approved (no credential values)'})},{signal:ctx.signal});
                 if(decision.outcome!=='submitted'||!z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success)return cancelledOutcome(decision);
                 await progress('running',true);
+                // Projects listed with the same vault name in one batch share one vault, created for
+                // the first of them; later runs join it only through its exact existingVaultId.
+                const shared=new Map<string,{vaultId:string;name:string}>();
                 for(const project of pending){
                     if(ctx.signal?.aborted)throw new Error('Project setup interrupted');
                     try{
-                        const vault=await host.call('provisionVault',{route,projectId:project.projectId,name:project.name,...(project.existingVaultId?{existingVaultId:project.existingVaultId}:{})},{hostId:credentialHost(route),signal:ctx.signal});
+                        const existing=project.existingVaultId??shared.get(project.vault)?.vaultId;
+                        const vault=await host.call('provisionVault',{route,projectId:project.projectId,name:project.vault,...(existing?{existingVaultId:existing}:{})},{hostId:credentialHost(route),signal:ctx.signal});
+                        if(!shared.has(project.vault))shared.set(project.vault,vault);
                         const latest=z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
                         if(latest.some(r=>r.projectId===project.projectId&&r.profile==='default'))throw new CodedError('routes-changed', 'Routing changed during setup');
                         if(ctx.signal?.aborted)throw new Error('Project setup interrupted');
-                        const target=routeSchema.parse({projectId:project.projectId,profile:'default',label:project.name,hostId:route.hostId,credentialHostId:credentialHost(route),vaultId:vault.vaultId,vaultLabel:vault.name,opBinary:route.opBinary,authentication:'desktop',accountId:route.accountId,requireApproval:true,operations:[]});
+                        const target=routeSchema.parse({projectId:project.projectId,profile:'default',label:project.name,hostId:route.hostId,...ownerHosts(configured,route),vaultId:vault.vaultId,vaultLabel:vault.name,authentication:'desktop',accountId:route.accountId,requireApproval:true,operations:[]});
                         await settings.experimental_set({routes:JSON.stringify([...latest,target])});
                         if(resolveRoute(JSON.parse((await settings.get()).routes),project.projectId).vaultId!==vault.vaultId)throw new Error('Saved route differs');
                         rows.push({projectId:project.projectId,state:'configured',vaultId:vault.vaultId});
