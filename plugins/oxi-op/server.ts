@@ -361,7 +361,7 @@ export default function plugin(bb: BbPluginApi) {
     // One owner approval returns a metadata-only map of service vaults: which routes use each vault,
     // item titles and dates (never values), empty and unused vaults, and titles found in several
     // vaults. Other vaults the owner account can see are reported by name only.
-    async function overview(profile: string, registryTitle: string | undefined, reportKey: string, ctx: OperationContext) {
+    async function overview(profile: string, registryTitle: string | undefined, ctx: OperationContext) {
         const {route: configured} = await accessFor(ctx.projectId, profile);
         if (configured.authentication !== 'desktop' || !configured.requireApproval) throw new Error('Vault overview requires approved owner desktop access');
         const routes = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
@@ -369,7 +369,7 @@ export default function plugin(bb: BbPluginApi) {
         for (const projectId of new Set(routes.map(r => r.projectId))) {
             try {names.set(projectId, (await bb.sdk.projects.get({projectId, signal: ctx.signal})).name);} catch {names.set(projectId, projectId);}
         }
-        return journal.run('inventory', profile, ctx, async progress => {
+        return journal.run('overview', profile, ctx, async progress => {
             const route = await credentialTarget(configured, ctx);
             await requireCredentialHost(route, ctx);
             const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
@@ -386,9 +386,8 @@ export default function plugin(bb: BbPluginApi) {
             for (const vault of map.vaults) for (const item of vault.items ?? []) titles.set(item.title, [...(titles.get(item.title) ?? []), vault.name]);
             const vaults = map.vaults.map(v => ({...v, markerProject: v.marker ? names.get(v.marker) ?? v.marker : undefined, usedBy: usedBy.get(v.id) ?? [], itemCount: v.itemTotal}));
             // Repeats are found among listed items only; a truncated vault says so explicitly.
-            const report = {complete: !map.vaultsTruncated && !vaults.some(v => v.itemsTruncated), vaultTotal: map.vaultTotal, vaultsTruncated: map.vaultsTruncated, vaults, repeatedTitles: [...titles].filter(([, where]) => where.length > 1).map(([title, where]) => ({title, vaults: where})), emptyServiceVaults: vaults.filter(v => v.service && v.itemCount === 0).map(v => v.name), unusedServiceVaults: vaults.filter(v => v.service && v.usedBy.length === 0).map(v => v.name)};
-            await bb.storage.kv.set(reportKey, {at: new Date().toISOString(), report});
-            return JSON.stringify({vaults: vaults.filter(v => v.service).map(v => ({id: v.id, name: v.name}))});
+            const report = {complete: map.registryRead && !map.vaultsTruncated && !vaults.some(v => v.itemsTruncated || v.error), registryRead: map.registryRead, vaultTotal: map.vaultTotal, vaultsTruncated: map.vaultsTruncated, unreadableVaults: vaults.filter(v => v.error).map(v => ({name: v.name, error: v.error})), vaults, repeatedTitles: [...titles].filter(([, where]) => where.length > 1).map(([title, where]) => ({title, vaults: where})), emptyServiceVaults: vaults.filter(v => v.service && v.itemCount === 0).map(v => v.name), unusedServiceVaults: vaults.filter(v => v.service && v.usedBy.length === 0).map(v => v.name)};
+            return JSON.stringify({at: new Date().toISOString(), ...report});
         }, 'Обзор сейфов');
     }
     const profileParameter = z.string().min(1).max(80).default('default');
@@ -546,7 +545,7 @@ export default function plugin(bb: BbPluginApi) {
                 const ok=rows.filter(r=>'hostId' in r).every(r=>r.keyListed===true&&r.exitCode===0&&r.valueMatched===true&&r.valueConcealed===true);
                 return {exitCode:ok?0:1,stdout:JSON.stringify({passed:ok,machines:rows})};
             }}),
-            overview:cliCommand({summary:'Approve a metadata-only map of service vaults; prints it after approval',options:{notify:notifyOption,profile:{type:'string',description:'Owner desktop setup profile',required:true},registry:{type:'string',description:'Service registry item title in the setup vault'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};const key='overview:'+encodeURIComponent(ctx.projectId)+':'+encodeURIComponent(ctx.threadId)+':'+randomUUID();const result=await interactiveCli(context,input.options.notify,()=>overview(input.options.profile,input.options.registry,key,context));const stored=await bb.storage.kv.get(key);if(stored){result.stdout=JSON.stringify(stored);await bb.storage.kv.delete(key);}return result;}}),
+            overview:cliCommand({summary:'Approve a metadata-only map of service vaults; prints it after approval',options:{notify:notifyOption,profile:{type:'string',description:'Owner desktop setup profile',required:true},registry:{type:'string',description:'Service registry item title in the setup vault'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>overview(input.options.profile,input.options.registry,context));}}),
             'connect-many':cliCommand({summary:'Approve a bounded explicit list of project vault connections',options:{notify:notifyOption,projects:{type:'string',description:'JSON array of projectId and optional exact existingVaultId',required:true},profile:{type:'string',description:'Existing owner desktop setup profile',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectMany(input.options.projects,input.options.profile,context));}}),
             connect: cliCommand({summary:'Approve creating a dedicated vault and default project route',options:{notify:notifyOption,project:{type:'string',description:'Exact target BB project ID',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectProject(input.options.project,input.options.profile,context));}}),
             'display-status':cliCommand({summary:'Read form rendering receipts for this session; never contacts 1Password',async run(_,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const keys=await bb.storage.kv.list(receiptPrefix(ctx.projectId,ctx.threadId));const rows=await Promise.all(keys.map(k=>bb.storage.kv.get<Receipt>(k)));return {exitCode:0,stdout:JSON.stringify(rows.filter(Boolean).sort((a,b)=>b!.mountedAt.localeCompare(a!.mountedAt)).slice(0,20))};}}),

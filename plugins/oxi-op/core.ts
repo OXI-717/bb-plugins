@@ -341,23 +341,33 @@ export async function execWithKeys(run: Runner, command: CommandRunner, env: Nod
 
 
 export const oxiOpMarker = 'Managed by Oxi Op for BB project ';
-export type VaultOverview = {id: string; name: string; service: boolean; marker?: string; itemTotal?: number; itemsTruncated?: boolean; items?: {title: string; category: string; createdAt: string; updatedAt: string}[]};
+export type VaultOverview = {id: string; name: string; service: boolean; marker?: string; error?: string; itemTotal?: number; itemsTruncated?: boolean; items?: {title: string; category: string; createdAt: string; updatedAt: string}[]};
 const overviewVaultLimit = 200;
 const overviewItemLimit = 500;
 // Metadata only. Items are listed (titles, categories, dates; never values) only in service vaults:
 // those named by routes, the service registry or the Oxi Op marker. Any other vault the owner
 // account can see is reported by name alone and never opened.
+// op prints nothing for some empty results; treat that as an empty list rather than a failure.
+const parseJsonOutput = (output: string) => output.trim() ? JSON.parse(output) : [];
+const failureTail = (error: unknown) => {
+    const exit = /process exit (\d{1,3}|null)/.exec(error instanceof Error ? error.message : '')?.[1];
+    return error instanceof SyntaxError ? 'invalid-json' : exit ? 'exit-' + exit : 'failed';
+};
 export async function overviewVaults(run: Runner, env: NodeJS.ProcessEnv, serviceIds: Set<string>, signal?: AbortSignal) {
     const vaults = JSON.parse(await run('op', ['vault', 'list', '--format=json'], env, undefined, signal));
     if (!Array.isArray(vaults)) throw new CodedError('overview-invalid', 'Invalid vault list');
     const result: VaultOverview[] = [];
     for (const vault of vaults.slice(0, overviewVaultLimit)) {
         if (typeof vault?.id !== 'string' || typeof vault?.name !== 'string') continue;
-        const details = JSON.parse(await run('op', ['vault', 'get', vault.id, '--format=json'], env, undefined, signal));
-        const description = typeof details.description === 'string' ? details.description : '';
+        // One unreadable vault is reported with a fixed code; it must not hide the rest of the map.
+        let description = '';
+        try {const details = parseJsonOutput(await run('op', ['vault', 'get', vault.id, '--format=json'], env, undefined, signal)); description = typeof details?.description === 'string' ? details.description : '';}
+        catch (error) {result.push({id: vault.id, name: vault.name, service: serviceIds.has(vault.id), error: 'vault-get-' + failureTail(error)}); continue;}
         const marker = description.startsWith(oxiOpMarker) ? description.slice(oxiOpMarker.length).trim() : undefined;
         if (!serviceIds.has(vault.id) && !marker) {result.push({id: vault.id, name: vault.name, service: false}); continue;}
-        const items = JSON.parse(await run('op', ['item', 'list', '--vault', vault.id, '--format=json'], env, undefined, signal));
+        let items: unknown;
+        try {items = parseJsonOutput(await run('op', ['item', 'list', '--vault', vault.id, '--format=json'], env, undefined, signal));}
+        catch (error) {result.push({id: vault.id, name: vault.name, service: true, ...(marker ? {marker} : {}), error: 'item-list-' + failureTail(error)}); continue;}
         const all = Array.isArray(items) ? items : [];
         result.push({id: vault.id, name: vault.name, service: true, ...(marker ? {marker} : {}), itemTotal: all.length, itemsTruncated: all.length > overviewItemLimit, items: all.slice(0, overviewItemLimit).map((item: {title?: unknown; category?: unknown; created_at?: unknown; updated_at?: unknown}) => ({title: String(item.title ?? ''), category: String(item.category ?? ''), createdAt: String(item.created_at ?? ''), updatedAt: String(item.updated_at ?? '')}))});
     }
