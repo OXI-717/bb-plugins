@@ -178,3 +178,17 @@ describe('official native session admission',()=>{
     expect(bytes).toBeLessThan(512*1024);
   });
 });
+
+it('projects registered subscriptions without exposing execution authority, and counts shared leases',async()=>{
+  const {sessions,clock}=await fixture();
+  await sessions.configure({...executor,id:'worker-official',hostId:'worker',callerIds:['worker'],autopilotAllowed:true});
+  await sessions.configure({...executor,id:'disabled-official',accountId:'subscription-two',enabled:false});
+  await sessions.request(caller,acquire());
+  await sessions.request({...caller,hostId:'worker'},acquire('worker-official'));
+  expect(await sessions.accounts()).toEqual({managed:true,accounts:[
+    {accountId:'subscription-one',executors:[{id:'mac-official',enabled:true,autopilotAllowed:false},{id:'worker-official',enabled:true,autopilotAllowed:true}],active:1,queued:1,uncertain:0},
+    {accountId:'subscription-two',executors:[{id:'disabled-official',enabled:false,autopilotAllowed:false}],active:0,queued:0,uncertain:0},
+  ]});
+  clock(1000+NATIVE_LEASE_MS+1);
+  expect((await sessions.accounts()).accounts[0]).toMatchObject({active:0,queued:0,uncertain:1});
+});
