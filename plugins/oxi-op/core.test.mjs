@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
@@ -299,4 +299,23 @@ test('codes survive a wrapping transport message',async()=>{
 test('a write probe whose create succeeded but read-back failed is inconclusive, not a denial',async()=>{
  const run=async(_b,args,_e,input)=>{if(args[0]==='vault')return JSON.stringify([{id:'automation-vault'}]);if(args[1]==='list')return '[]';if(args[1]==='template')return JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]});if(args[1]==='create')return JSON.stringify({id:'probe'});throw new Error('transient read failure');};
  await assert.rejects(probeServiceScope(run,{},'automation-vault'),e=>e.message.includes('[probe-inconclusive]'));
+});
+test('the overview never lists items of vaults that are neither routed nor marked',async()=>{
+ const listed=[];
+ const run=async(_b,args)=>{
+  if(args[0]==='vault'&&args[1]==='list')return JSON.stringify([{id:'routed',name:'Routed'},{id:'marked',name:'Marked'},{id:'private',name:'Private'}]);
+  if(args[0]==='vault'&&args[1]==='get')return JSON.stringify({description:args[2]==='marked'?'Managed by Oxi Op for BB project p-x':'Personal things'});
+  if(args[0]==='item'&&args[1]==='list'){listed.push(args[3]);return JSON.stringify([{title:'T',category:'LOGIN',created_at:'c',updated_at:'u'}]);}
+  if(args.includes('--reveal'))throw new Error('values must never be read');
+  throw new Error('unexpected '+args.join(' '));
+ };
+ const result=await overviewVaults(run,{},new Set(['routed']));
+ assert.deepEqual(listed,['routed','marked']);
+ assert.deepEqual(result.vaults.map(v=>[v.name,v.service,v.marker??null,v.items?.length??null]),[['Routed',true,null,1],['Marked',true,'p-x',1],['Private',false,null,null]]);
+});
+test('an overview of a large vault keeps the full count and marks the cut',async()=>{
+ const items=Array.from({length:501},(_,i)=>({title:'t'+i,category:'LOGIN',created_at:'c',updated_at:'u'}));
+ const run=async(_b,args)=>args[1]==='list'&&args[0]==='vault'?JSON.stringify([{id:'routed',name:'Routed'}]):args[1]==='get'?JSON.stringify({description:''}):JSON.stringify(items);
+ const result=await overviewVaults(run,{},new Set(['routed']));
+ assert.deepEqual([result.vaults[0].itemTotal,result.vaults[0].itemsTruncated,result.vaults[0].items.length,result.vaultsTruncated],[501,true,500,false]);
 });

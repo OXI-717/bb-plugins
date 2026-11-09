@@ -394,7 +394,7 @@ test('project connection requires desktop approval and preserves existing projec
  const args=['connect','--project','target-project','--profile','default'];
  const cancelled=h.behavior.runCli(args,context);await setImmediate();
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
- assert.equal(h.inspection.pendingInteractions[0].timeoutMs,60_000);
+ assert.equal(h.inspection.pendingInteractions[0].timeoutMs,600_000);
  h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);await cancelled;
  assert.equal((await h.behavior.runCli(['status'],{...context,projectId:'target-project'})).exitCode,1);
  const work=h.behavior.runCli(args,context);await setImmediate();
@@ -423,7 +423,7 @@ test('batch connection gates all writes once, preserves partial progress and ski
  const args=['connect-many','--projects',JSON.stringify(targets),'--profile','default'];
  const cancelled=h.behavior.runCli(args,context);await setImmediate();
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
- assert.equal(h.inspection.pendingInteractions[0].timeoutMs,60_000);
+ assert.equal(h.inspection.pendingInteractions[0].timeoutMs,600_000);
  h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);await cancelled;
  const work=h.behavior.runCli(args,context);await setImmediate();
  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
@@ -564,7 +564,7 @@ test('one approval issues agent access for several projects and proves it before
  const cancelled=h.behavior.runCli(automateArgs,context);await setImmediate();
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
  const form=h.inspection.pendingInteractions[0];
- assert.equal(form.timeoutMs,60_000);assert.equal(form.payload.hostId,'mac-max');
+ assert.equal(form.timeoutMs,600_000);assert.equal(form.payload.hostId,'mac-max');
  assert(form.payload.purpose.includes('read_items')&&form.payload.purpose.includes('без срока действия')&&form.payload.purpose.includes('Machine mac-max'));
  h.behavior.cancelInteraction(form.id);await cancelled;
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
@@ -743,4 +743,21 @@ test('an unconnected project gets a clear answer instead of a generic failure',a
  const result=JSON.parse(await h.behavior.callAgentTool('oxi_op_store',{title:'Example'},{...context,projectId:'unconnected-project'}));
  assert.equal(result.code,'project_not_connected');assert(result.message.includes('not connected'));
  assert.equal(h.inspection.pendingInteractions.length+h.inspection.experimental_hostRpcCalls.length,0);
+});
+test('vault overview lists items only in service vaults and maps routes, repeats and empty vaults',async t=>{
+ const h=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'},{...route,...owner,hostId:'mac-max',projectId:'p-one',vaultId:'v-one'}],callHost:({method,input})=>{
+  assert.equal(method,'overview');assert.deepEqual(input.serviceVaultIds.sort(),['example-vault','v-one']);
+  return {vaultTotal:4,vaultsTruncated:false,vaults:[{id:'v-one',name:'Example p-one',service:true,marker:'p-one',itemTotal:1,itemsTruncated:false,items:[{title:'Server root',category:'LOGIN',createdAt:'a',updatedAt:'b'}]},{id:'v-two',name:'Example p-one Admin',service:true,marker:'p-one',itemTotal:1,itemsTruncated:false,items:[{title:'Server root',category:'LOGIN',createdAt:'a',updatedAt:'b'}]},{id:'v-empty',name:'Leftover',service:true,marker:'p-two',itemTotal:0,itemsTruncated:false,items:[]},{id:'private',name:'Private',service:false}]};
+ }});
+ const work=h.behavior.runCli(['overview','--profile','default'],context);await setImmediate();await setImmediate();
+ const form=h.inspection.pendingInteractions[0];assert.equal(form.timeoutMs,600_000);assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ h.behavior.submitInteraction(form.id,{approved:true});
+ const report=JSON.parse((await work).stdout).report;
+ assert.deepEqual(report.repeatedTitles,[{title:'Server root',vaults:['Example p-one','Example p-one Admin']}]);
+ assert.deepEqual(report.emptyServiceVaults,['Leftover']);
+ assert.deepEqual(report.unusedServiceVaults.sort(),['Example p-one Admin','Leftover']);
+ assert.equal(report.vaults.find(v=>v.id==='private').items,undefined);
+ assert.deepEqual(report.vaults.find(v=>v.id==='v-one').usedBy,['Example p-one / default']);
+ assert.equal(report.complete,true);
+ assert.deepEqual(await h.behavior.runCli(['history'],context).then(r=>JSON.parse(r.stdout)[0].kind),'inventory');
 });
