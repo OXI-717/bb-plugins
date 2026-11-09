@@ -5,6 +5,14 @@ import {assignmentSchema} from './task-contract.js';
 export const operationSchema = z.object({ name: z.string().min(1), label: z.string().min(1).max(160).optional(), purpose: z.string().min(1).max(500).optional(), argv: z.array(z.string()).min(1).max(100), references: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string().startsWith('op://')), referenceLabels: z.record(z.string(), z.object({item: z.string().min(1).max(160), field: z.string().min(1).max(160)}).strict()).optional() }).strict();
 const absolutePath = z.string().regex(/^\/[^\0]*$/);
 export const keyReferenceSchema = z.object({item: z.string().min(1).max(160).regex(/^[^/\n]+$/), field: z.string().min(1).max(160).regex(/^[^/\n]+$/)}).strict();
+const vaultRef = z.string().regex(/^[a-z0-9]{26}$/);
+const itemRef = z.string().min(1).max(160);
+export const tidyStepSchema = z.discriminatedUnion('kind', [
+    z.object({kind: z.literal('same'), a: z.object({vaultId: vaultRef, item: itemRef}).strict(), b: z.object({vaultId: vaultRef, item: itemRef}).strict()}).strict(),
+    z.object({kind: z.literal('move'), vaultId: vaultRef, item: itemRef, toVaultId: vaultRef}).strict(),
+    z.object({kind: z.literal('archive'), vaultId: vaultRef, item: itemRef}).strict(),
+    z.object({kind: z.literal('delete-vault'), vaultId: vaultRef}).strict(),
+]);
 export const routeSchema = z.object({
     projectId: z.string().min(1),
     profile: z.string().min(1).max(80).default('default'),
@@ -52,6 +60,9 @@ export const contract = defineRpcContract({
     resolve: {input: z.object({route: routeSchema, operation: z.string()}).strict(), output: z.object({bindings: z.record(z.string(), z.string())}).strict()},
     execute: {input: z.object({route: routeSchema, operation: z.string(), bindings: z.record(z.string(), z.string())}).strict(), output: z.object({completed: z.literal(true)}).strict()},
     overview: {input: z.object({route: routeSchema, serviceVaultIds: z.array(z.string()).max(200), registryTitle: z.string().min(1).optional()}).strict(), output: z.object({vaultTotal: z.number().int(), vaultsTruncated: z.boolean(), registryRead: z.boolean(), vaults: z.array(z.object({id: z.string(), name: z.string(), service: z.boolean(), marker: z.string().optional(), error: z.string().regex(/^[a-z0-9-]{1,40}$/).optional(), itemTotal: z.number().int().optional(), itemsTruncated: z.boolean().optional(), items: z.array(z.object({title: z.string(), category: z.string(), createdAt: z.string(), updatedAt: z.string()}).strict()).optional()}).strict())}).strict()},
+    resolveKeys: {input: z.object({route: routeSchema, keys: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), keyReferenceSchema)}).strict(), output: z.object({bindings: z.record(z.string(), z.string())}).strict()},
+    execResolved: {input: z.object({argv: z.array(z.string()).min(1).max(200), bindings: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string()), cwd: absolutePath.optional(), timeoutSeconds: z.number().int().min(1).max(600)}).strict(), output: z.object({exitCode: z.number().int(), output: z.string(), truncated: z.boolean(), timedOut: z.boolean(), escapedProcess: z.boolean()}).strict()},
+    tidy: {input: z.object({route: routeSchema, steps: z.array(tidyStepSchema).min(1).max(20)}).strict(), output: z.object({results: z.array(z.object({kind: z.string(), ok: z.boolean(), code: z.string().optional(), same: z.boolean().optional(), sameUsername: z.boolean().optional()}).strict())}).strict()},
     inventory: { input: z.object({route: routeSchema, registryTitle: z.string().min(1)}).strict(), output: z.object({vaults: z.array(z.object({id: z.string(), name: z.string()}))}) },
     verify: { input: z.object({ route: routeSchema, serviceAccountToken: z.string().optional() }).strict(), output: z.object({ verified: z.literal(true), cleaned: z.literal(true) }) },
     check: { input: z.object({ route: routeSchema, serviceAccountToken: z.string().optional() }).strict(), output: z.object({ authorized: z.literal(true) }) },

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
@@ -351,4 +351,33 @@ test('cancelling a desktop op run ends the command it launched',async t=>{
   let alive=true;for(let i=0;i<100&&(alive=await running());i++)await new Promise(r=>setTimeout(r,10));
   assert.equal(alive,false);
  }finally{if(pid){try{process.kill(pid,'SIGKILL');}catch{}}await rm(dir,{recursive:true,force:true});}
+});
+test('a resolved critical value reaches only the command and is concealed in its output',async()=>{
+ const r=await execResolved(runCommand,[process.execPath,'-e','console.log(process.env.SSHPASS, typeof process.env.OP_SERVICE_ACCOUNT_TOKEN)'],{SSHPASS:'synthetic-root-value'},undefined,10000);
+ assert.equal(r.output.trim(),'<concealed> undefined');
+ await assert.rejects(execResolved(runCommand,['true'],{OP_X:'v'},undefined,1000));
+});
+test('tidy compares by hash, stops when values differ, and deletes only an empty vault',async()=>{
+ const vaults={va:[{id:'i1',title:'Root A',fields:[{purpose:'USERNAME',value:'root'},{purpose:'PASSWORD',value:'synthetic-same'}]}],vb:[{id:'i2',title:'Root B',fields:[{purpose:'USERNAME',value:'root'},{purpose:'PASSWORD',value:'synthetic-same'}]}],vc:[{id:'i3',title:'Other',fields:[{purpose:'PASSWORD',value:'synthetic-other'}]}]};
+ const calls=[];
+ const run=async(_b,args)=>{calls.push(args);
+  if(args[0]==='item'&&args[1]==='list'){const v=args[args.indexOf('--vault')+1];return JSON.stringify((vaults[v]??[]).map(x=>({id:x.id,title:x.title})));}
+  if(args[0]==='item'&&args[1]==='get'){const v=args[args.indexOf('--vault')+1];return JSON.stringify(vaults[v].find(x=>x.id===args[2]));}
+  if(args[0]==='item'&&args[1]==='move'){const from=args[args.indexOf('--current-vault')+1],to=args[args.indexOf('--destination-vault')+1];const it=vaults[from].find(x=>x.id===args[2]);vaults[from]=vaults[from].filter(x=>x!==it);(vaults[to]??=[]).push({...it,id:it.id+'m'});return '';}
+  if(args[0]==='item'&&args[1]==='delete'){const v=args[args.indexOf('--vault')+1];vaults[v]=vaults[v].filter(x=>x.id!==args[2]);return '';}
+  if(args[0]==='vault'&&args[1]==='delete'){delete vaults[args[2]];return '';}
+  if(args[0]==='vault'&&args[1]==='list')return JSON.stringify(Object.keys(vaults).map(id=>({id})));
+  throw new Error('unexpected');};
+ const id=x=>x.padEnd(26,'a');
+ for(const k of ['va','vb','vc']){vaults[id(k)]=vaults[k];delete vaults[k];}
+ const differ=await runTidy(run,{},[{kind:'same',a:{vaultId:id('va'),item:'Root A'},b:{vaultId:id('vc'),item:'Other'}},{kind:'delete-vault',vaultId:id('va')}]);
+ assert.deepEqual(differ.results.map(r=>[r.kind,r.ok,r.code??null]),[['same',false,'values-differ']]);
+ assert(!JSON.stringify(differ).includes('synthetic'));
+ const plan=[{kind:'same',a:{vaultId:id('va'),item:'Root A'},b:{vaultId:id('vb'),item:'Root B'}},{kind:'move',vaultId:id('va'),item:'Root A',toVaultId:id('vb')},{kind:'archive',vaultId:id('vb'),item:'Root A'},{kind:'delete-vault',vaultId:id('va')}];
+ const done=await runTidy(run,{},plan);
+ assert.deepEqual(done.results.map(r=>[r.kind,r.ok]),[['same',true],['move',true],['archive',true],['delete-vault',true]]);
+ assert.equal(vaults[id('va')],undefined);assert.deepEqual(vaults[id('vb')].map(x=>x.title),['Root B']);
+ vaults[id('vd')]=[{id:'z',title:'Keep'}];
+ const refused=await runTidy(run,{},[{kind:'delete-vault',vaultId:id('vd')}]);
+ assert.deepEqual(refused.results[0],{kind:'delete-vault',ok:false,code:'vault-not-empty'});
 });
