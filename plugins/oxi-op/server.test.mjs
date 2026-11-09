@@ -747,7 +747,7 @@ test('an unconnected project gets a clear answer instead of a generic failure',a
 test('vault overview lists items only in service vaults and maps routes, repeats and empty vaults',async t=>{
  const h=fleet(t,{routes:[{...route,...owner,hostId:'mac-max'},{...route,...owner,hostId:'mac-max',projectId:'p-one',vaultId:'v-one'}],callHost:({method,input})=>{
   assert.equal(method,'overview');assert.deepEqual(input.serviceVaultIds.sort(),['example-vault','v-one']);
-  return {vaults:[{id:'v-one',name:'Example p-one',service:true,marker:'p-one',items:[{title:'Server root',category:'LOGIN',createdAt:'a',updatedAt:'b'}]},{id:'v-two',name:'Example p-one Admin',service:true,marker:'p-one',items:[{title:'Server root',category:'LOGIN',createdAt:'a',updatedAt:'b'}]},{id:'v-empty',name:'Leftover',service:true,marker:'p-two',items:[]},{id:'private',name:'Private',service:false}]};
+  return {vaultTotal:4,vaultsTruncated:false,vaults:[{id:'v-one',name:'Example p-one',service:true,marker:'p-one',itemTotal:1,itemsTruncated:false,items:[{title:'Server root',category:'LOGIN',createdAt:'a',updatedAt:'b'}]},{id:'v-two',name:'Example p-one Admin',service:true,marker:'p-one',itemTotal:1,itemsTruncated:false,items:[{title:'Server root',category:'LOGIN',createdAt:'a',updatedAt:'b'}]},{id:'v-empty',name:'Leftover',service:true,marker:'p-two',itemTotal:0,itemsTruncated:false,items:[]},{id:'private',name:'Private',service:false}]};
  }});
  const work=h.behavior.runCli(['overview','--profile','default'],context);await setImmediate();await setImmediate();
  const form=h.inspection.pendingInteractions[0];assert.equal(form.timeoutMs,600_000);assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
@@ -758,4 +758,6 @@ test('vault overview lists items only in service vaults and maps routes, repeats
  assert.deepEqual(report.unusedServiceVaults.sort(),['Example p-one Admin','Leftover']);
  assert.equal(report.vaults.find(v=>v.id==='private').items,undefined);
  assert.deepEqual(report.vaults.find(v=>v.id==='v-one').usedBy,['Example p-one / default']);
+ assert.equal(report.complete,true);
+ assert.deepEqual(await h.behavior.runCli(['history'],context).then(r=>JSON.parse(r.stdout)[0].kind),'inventory');
 });

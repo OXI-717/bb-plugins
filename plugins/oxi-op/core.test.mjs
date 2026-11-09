@@ -313,3 +313,9 @@ test('the overview never lists items of vaults that are neither routed nor marke
  assert.deepEqual(listed,['routed','marked']);
  assert.deepEqual(result.vaults.map(v=>[v.name,v.service,v.marker??null,v.items?.length??null]),[['Routed',true,null,1],['Marked',true,'p-x',1],['Private',false,null,null]]);
 });
+test('an overview of a large vault keeps the full count and marks the cut',async()=>{
+ const items=Array.from({length:501},(_,i)=>({title:'t'+i,category:'LOGIN',created_at:'c',updated_at:'u'}));
+ const run=async(_b,args)=>args[1]==='list'&&args[0]==='vault'?JSON.stringify([{id:'routed',name:'Routed'}]):args[1]==='get'?JSON.stringify({description:''}):JSON.stringify(items);
+ const result=await overviewVaults(run,{},new Set(['routed']));
+ assert.deepEqual([result.vaults[0].itemTotal,result.vaults[0].itemsTruncated,result.vaults[0].items.length,result.vaultsTruncated],[501,true,500,false]);
+});
