@@ -289,7 +289,7 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],**reply}),flush=True)
                 cli.chmod(0o755)
                 env = dict(os.environ, HOME=tmp, PATH=tmp+os.pathsep+os.environ['PATH'],
                     CURSOR_API_ENDPOINT=f'http://127.0.0.1:{hub.server_port}/cursor', CURSOR_POOL_RPC_GATEWAY='1', BODY_MODE=mode)
-                result = subprocess.run([sys.executable, str(WRAPPER), 'acp'],
+                result = subprocess.run([sys.executable, str(WRAPPER), '--model', 'synthetic-model', 'acp'],
                     input=json.dumps({'id':7,'method':'session/prompt','params':{'sessionId':'synthetic'}})+'\n',
                     env=env,capture_output=True,text=True,timeout=60)
                 self.assertEqual(result.returncode,0,result.stderr)
@@ -437,6 +437,41 @@ class AcpFailureNormalizationTest(unittest.TestCase):
         state.model_response('agent.v1.AgentService/Run','private-secret')
         original={"id":2,"result":{"stopReason":"end_turn"}}
         self.assertEqual(state.child(original),original)
+
+class CursorGlobalOptionsTest(unittest.TestCase):
+    def test_global_model_option_enables_acp_without_rewriting_arguments(self):
+        for args in ([],['acp'],['--model','synthetic-model','acp'],['--model=synthetic-model','acp'],['--agent-endpoint','https://synthetic.example','--model','synthetic','acp'],['--use-system-ca','--model','synthetic','acp']):
+            argv=['cursor-route',*args]
+            self.assertTrue(route.is_acp_invocation(argv),args)
+            self.assertEqual(argv,['cursor-route',*args])
+
+    def test_option_values_or_print_commands_do_not_enable_acp(self):
+        for args in (['--model','acp'],['--model=acp'],['--agent-endpoint','acp'],['--model','synthetic','--print','acp'],['--unknown','acp'],['--help'],['--model']):
+            self.assertFalse(route.is_acp_invocation(['cursor-route',*args]),args)
+
+    def test_actual_stream_ended_rpc_error_needs_current_local_interruption(self):
+        for prefix in ('','Internal error: ','RetriableError: ','Error: RetriableError: '):
+            for local in (False,True):
+                state=route.AcpPoolFailures();state.client({'id':1,'method':'session/prompt','params':{}})
+                token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+                if local:state.model_interrupted(token)
+                original={'id':1,'error':{'code':-32603,'message':prefix+'Stream ended without turnEnded — connection likely dropped mid-stream'}}
+                result=state.child(original)
+                if local:self.assertEqual(result['error']['message'],'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.')
+                else:self.assertIs(result,original)
+
+    def test_stream_ended_error_does_not_cross_cancellation_new_requests_or_rpc_codes(self):
+        text='Stream ended without turnEnded — connection likely dropped mid-stream'
+        for mode in ('cancel','new-request','reused-id','wrong-code','different-message'):
+            state=route.AcpPoolFailures()
+            state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+            token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+            state.model_interrupted(token)
+            if mode=='cancel':state.client({'method':'session/cancel','params':{'sessionId':'synthetic'}})
+            if mode=='new-request':state.begin_model_request('agent.v1.AgentService/RunSSE')
+            if mode=='reused-id':state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+            original={'id':1,'error':{'code':-1 if mode=='wrong-code' else -32603,'message':'unrelated' if mode=='different-message' else text}}
+            self.assertIs(state.child(original),original,mode)
 
 class CursorDiagnosticTest(unittest.TestCase):
     def test_success_is_silent_and_ring_is_bounded(self):

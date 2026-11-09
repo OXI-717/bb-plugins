@@ -117,7 +117,18 @@ class AcpPoolFailures:
                 self.dump_trace('read_error')
 
     def client(self, message):
-        if not isinstance(message, dict) or message.get('method') != 'session/prompt':
+        if not isinstance(message, dict):
+            return
+        if message.get('method') == 'session/cancel':
+            params = message.get('params')
+            session = params.get('sessionId') if isinstance(params, dict) else None
+            if isinstance(session, str):
+                with self.lock:
+                    self.pending = {identifier: current for identifier, current in self.pending.items()
+                        if current['session'] != session}
+                    self.note('cancel', pendingCount=len(self.pending))
+            return
+        if message.get('method') != 'session/prompt':
             return
         identifier = message.get('id')
         if type(identifier) not in (str, int):
@@ -198,12 +209,12 @@ class AcpPoolFailures:
                 self.dump_trace('known_transport_text')
                 self.observed_error = False
             rpc_error = message.get('error')
-            incomplete_rpc = (isinstance(rpc_error, dict) and rpc_error.get('code') == -32603
+            interrupted_rpc = (isinstance(rpc_error, dict) and rpc_error.get('code') == -32603
                 and isinstance(rpc_error.get('message'), str) and re.fullmatch(
-                    r'(?:Internal error: )?(?:Error: )?(?:RetriableError: )?\[invalid_argument\] protocol error: incomplete envelope',
+                    r'(?:Internal error: )?(?:Error: )?(?:RetriableError: )?(?:\[invalid_argument\] protocol error: incomplete envelope|Stream ended without turnEnded — connection likely dropped mid-stream)',
                     rpc_error['message'].strip()) is not None)
             false_success = isinstance(message.get('result'), dict) and message['result'].get('stopReason') == 'end_turn'
-            if current and current['reason'] and (current['reported'] or current['interrupted']) and (false_success or (current['interrupted'] and incomplete_rpc)):
+            if current and current['reason'] and (current['reported'] or current['interrupted']) and (false_success or (current['interrupted'] and interrupted_rpc)):
                 reason = current['reason']
                 return {'jsonrpc': '2.0', 'id': identifier, 'error': {
                     'code': -32603, 'message': '[' + reason + '] Pooler connection temporarily unavailable.'}}
@@ -304,6 +315,25 @@ def relay_acp(process, failures):
     finally:
         stopped.set()
         reader.join(timeout=1)
+
+
+def is_acp_invocation(argv):
+    """Recognize ACP after known global options, without changing CLI arguments."""
+    arguments = iter(argv[1:])
+    if not argv[1:]:
+        return True
+    for argument in arguments:
+        if argument in ('--model', '--agent-endpoint'):
+            if next(arguments, None) is None:
+                return False
+        elif argument.startswith(('--model=', '--agent-endpoint=')):
+            continue
+        elif argument in ('--use-system-ca', '--no-use-system-ca'):
+            continue
+        else:
+            # Unknown options and other commands keep the original CLI I/O path.
+            return argument == 'acp'
+    return False
 
 
 def build_argv(executable, argv, env):
@@ -526,7 +556,7 @@ def run_gateway(executable, argv, env):
     local_env = dict(env)
     local_env[ENDPOINT_VAR] = "http://127.0.0.1:%d" % server.server_port
     command = build_argv(executable, argv, local_env)
-    acp = not argv[1:] or argv[1] == 'acp'
+    acp = is_acp_invocation(argv)
     process = subprocess.Popen(command, env=local_env,
         **({'stdin': subprocess.PIPE, 'stdout': subprocess.PIPE} if acp else {}))
     def stop(signum, _frame):
