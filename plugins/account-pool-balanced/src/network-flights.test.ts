@@ -79,3 +79,31 @@ it('does not report success, caller cancellation or a downstream cancel as body 
  const downstream=await flights.fetch('cursor','https://synthetic.example',undefined,false,undefined,undefined,undefined,report);await downstream.body!.cancel();
  expect(report).not.toHaveBeenCalled();expect(flights.size).toBe(0);
 });
+
+it('interrupts only the exact observed Cursor body once, without affecting its neighbour',async()=>{
+ const stop=new AbortController(),report=vi.fn();
+ const upstream=vi.fn(async()=>new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}})));
+ const flights=new NetworkFlights(upstream,()=>stop.signal,async()=>{});
+ const open=(provider:'cursor'|'kimi',requestId:string,threadId:string)=>flights.fetch(provider,'https://synthetic.example',undefined,true,undefined,undefined,undefined,report,{requestId,threadId});
+ const a=await open('cursor','request-a','thr_one'),b=await open('cursor','request-b','thr_two'),c=await open('kimi','request-c','thr_one');
+ const reader=a.body!.getReader();await reader.read();
+ expect(flights.cursorStreams('thr_one')).toEqual([{requestId:'request-a',threadId:'thr_one',bytesRead:3}]);
+ expect(flights.interruptCursorStream('request-a','thr_two')).toBe(false);
+ expect(flights.interruptCursorStream('request-c','thr_one')).toBe(false);
+ const rejected=expect(reader.read()).rejects.toThrow('Controlled Cursor stream interruption');
+ expect(flights.interruptCursorStream('request-a','thr_one')).toBe(true);await rejected;
+ expect(flights.interruptCursorStream('request-a','thr_one')).toBe(false);
+ expect(flights.cursorStreams('thr_one')).toEqual([]);expect(flights.size).toBe(2);
+ expect(upstream).toHaveBeenCalledTimes(3);expect(report).toHaveBeenCalledTimes(1);
+ expect((await b.body!.getReader().read()).value).toEqual(new Uint8Array([0,0,0]));await c.body!.cancel();
+});
+
+it('does not expose or interrupt unknown, header-pending, completed or cancelled streams',async()=>{
+ const stop=new AbortController();let respond!:(r:Response)=>void;
+ const flights=new NetworkFlights(()=>new Promise<Response>(r=>{respond=r;}),()=>stop.signal,async()=>{});
+ const pending=flights.fetch('cursor','https://synthetic.example',undefined,true,undefined,undefined,undefined,undefined,{requestId:'pending',threadId:'thr_one'});
+ await vi.waitFor(()=>expect(respond).toBeTypeOf('function'));
+ expect(flights.cursorStreams('thr_one')).toEqual([]);expect(flights.interruptCursorStream('pending','thr_one')).toBe(false);
+ respond(new Response('ok'));const response=await pending;expect(await response.text()).toBe('ok');
+ expect(flights.interruptCursorStream('pending','thr_one')).toBe(false);expect(flights.cursorStreams('thr_one')).toEqual([]);
+});

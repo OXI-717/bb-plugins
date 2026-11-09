@@ -358,7 +358,7 @@ export function createAccountPoolPlugin(
         return { opened: true };
       }, agyLogin, url=>browser.openAgyLogin(url),egress),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input));
+    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId));
     registerUsageSource(bb, hub);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);

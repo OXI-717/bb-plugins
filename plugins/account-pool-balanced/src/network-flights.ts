@@ -1,7 +1,18 @@
 import type {PoolProvider} from './contracts.js';
 
+export type StreamIdentity={requestId:string;threadId:string|null};
+export type CursorStream={requestId:string;threadId:string;bytesRead:number};
+
 export class NetworkFlights {
   private readonly active=new Map<AbortController,PoolProvider>();
+  private readonly cursorBodies=new Map<AbortController,CursorStream>();
+  cursorStreams(threadId:string):CursorStream[]{return [...this.cursorBodies.values()].filter(s=>s.threadId===threadId).map(s=>({...s}));}
+  interruptCursorStream(requestId:string,threadId:string):boolean {
+    for(const [owner,stream] of this.cursorBodies) if(stream.requestId===requestId&&stream.threadId===threadId&&stream.bytesRead>0){
+      owner.abort(new Error('Controlled Cursor stream interruption'));return true;
+    }
+    return false;
+  }
   constructor(private readonly upstream:typeof fetch,private readonly stop:()=>AbortSignal,private readonly check:(provider:PoolProvider)=>Promise<void>,private readonly selectFetch:(provider:PoolProvider,drainable:boolean)=>typeof fetch=()=>upstream) {}
   get size(){return this.active.size;}
   async enforce() {
@@ -11,7 +22,7 @@ export class NetworkFlights {
       }
     }
   }
-  async fetch(provider:PoolProvider,input:RequestInfo|URL,init?:RequestInit,drainable=false,admit?: (send:()=>Promise<Response>)=>Promise<Response>,requestCheck?:()=>Promise<void>, accountFetch?:typeof fetch,onBodyError?:(error:unknown,bytesRead:number)=>void):Promise<Response> {
+  async fetch(provider:PoolProvider,input:RequestInfo|URL,init?:RequestInit,drainable=false,admit?: (send:()=>Promise<Response>)=>Promise<Response>,requestCheck?:()=>Promise<void>, accountFetch?:typeof fetch,onBodyError?:(error:unknown,bytesRead:number)=>void,identity?:StreamIdentity):Promise<Response> {
     const check=requestCheck??(()=>this.check(provider));
     await check();
     const owner=new AbortController();
@@ -22,7 +33,7 @@ export class NetworkFlights {
     let downstream:ReadableStreamDefaultController<Uint8Array>|undefined;
     let finished=false,bytesRead=0;
     const report=(error:unknown)=>{try{onBodyError?.(error,bytesRead);}catch{/* Diagnostics cannot change forwarding. */}};
-    const release=()=>{this.active.delete(owner);signal.removeEventListener('abort',abort);};
+    const release=()=>{this.cursorBodies.delete(owner);this.active.delete(owner);signal.removeEventListener('abort',abort);};
     const abort=()=>{
       if(finished)return;
       if(reader&&owner.signal.aborted)report(signal.reason);
@@ -41,12 +52,14 @@ export class NetworkFlights {
       signal.throwIfAborted();
       if(!response.body){finished=true;release();return response;}
       reader=response.body.getReader();
+      const cursorBody=provider==='cursor'&&identity?.threadId?{requestId:identity.requestId,threadId:identity.threadId,bytesRead:0}:undefined;
+      if(cursorBody)this.cursorBodies.set(owner,cursorBody);
       const body=new ReadableStream<Uint8Array>({
         start(controller){downstream=controller;},
         async pull(controller){
           try {
             const next=await reader!.read();if(finished)return;
-            if(next.done){finished=true;release();controller.close();}else {bytesRead+=next.value.byteLength;controller.enqueue(next.value);}
+            if(next.done){finished=true;release();controller.close();}else {bytesRead+=next.value.byteLength;if(cursorBody)cursorBody.bytesRead=bytesRead;controller.enqueue(next.value);}
           } catch(error){if(!finished){report(error);finished=true;release();controller.error(error);}}
         },
         async cancel(reason){finished=true;release();owner.abort(reason);await reader!.cancel(reason);},

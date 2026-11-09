@@ -23,10 +23,13 @@ async function normalizedCursorFailure(bb:BbPluginApi,failure:PluginTurnFailedEv
     if(row.threadId!==failure.threadId)return failure;
     if(row.type==='client/turn/requested'){
       if(row.data.requestId!==failure.requestId||!message)return failure;
-      const match=/^\[(POOL_UPSTREAM_UNAVAILABLE|VPN_REQUIRED|VPN_GUARD_BLOCKED|VPN_GUARD_UNAVAILABLE)\] Pooler connection temporarily unavailable\.$/.exec(message);
+      const match=/^(?:Internal error: )?\[(POOL_UPSTREAM_UNAVAILABLE|VPN_REQUIRED|VPN_GUARD_BLOCKED|VPN_GUARD_UNAVAILABLE)\] Pooler connection temporarily unavailable\.$/.exec(message);
       return match?{...failure,errorInfo:{category:'connection-failed',httpStatusCode:503,providerCode:match[1]!}}:failure;
     }
-    if(row.type==='provider/error'&&message===undefined)message=row.data.message;
+    if(row.type==='provider/error'&&message===undefined){
+      const detail=row.data.detail;
+      message=row.data.message==='Provider error'&&typeof detail==='string'?detail:row.data.message;
+    }
   }
   return failure;
 }
