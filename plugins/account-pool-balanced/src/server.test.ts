@@ -8779,24 +8779,24 @@ it('requires exact thread/request and explicit confirmation for Cursor stream pr
  expect(stale.exitCode).toBe(0);expect(JSON.parse(stale.stdout)).toEqual({streams:[],interrupted:false});
 });
 
-it('wires an exact authenticated Cursor stream probe without touching a neighbour or append',async()=>{
+it.each(['application/connect+proto','text/event-stream'])('wires an exact authenticated Cursor stream probe without touching a neighbour or append (%s)',async(contentType)=>{
  const outbound=vi.fn(async(input:RequestInfo|URL)=>{
   const url=input instanceof Request?input.url:String(input);
   if(url.startsWith('https://exchange.example/'))return Response.json({accessToken:'synthetic-access'});
   if(url.startsWith('https://usage.example/'))return Response.json({planUsage:{totalPercentUsed:10}});
-  return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}}),{headers:{'content-type':'application/connect+proto'}});
+  return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}}),{headers:{'content-type':contentType}});
  });
  const f=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example/token',cursorUsageUrl:'https://usage.example/usage',fetch:outbound}});
  const call=async(threadId:string,rpc:string)=>{
   const env=await f.host.harness.behavior.resolveProviderEnv('acp-oxi-cursor',{threadId,projectId:'proj_abcdef',hostId:'host-one'});
   const token=env.find(e=>e.name==='CURSOR_API_KEY')!.value as string;
-  return f.host.harness.behavior.fetchHttp('POST','/cursor/rpc',{headers:{authorization:`Bearer ${token}`,'content-type':'application/connect+proto','x-bb-cursor-rpc-path':rpc},body:'synthetic'});
+  return f.host.harness.behavior.fetchHttp('POST','/cursor/rpc',{headers:{authorization:`Bearer ${token}`,'content-type':contentType,'x-bb-cursor-rpc-path':rpc},body:'synthetic'});
  };
  const one=await call('thr_abcdef','agent.v1.AgentService/RunSSE'),two=await call('thr_ghijkl','agent.v1.AgentService/RunSSE'),append=await call('thr_abcdef','aiserver.v1.BidiService/BidiAppend');
  expect(one.status).toBe(200);expect(two.status).toBe(200);expect(append.status).toBe(200);
  const reader=one.body!.getReader();await reader.read();
  const probe=async(...args:string[])=>JSON.parse((await f.host.harness.behavior.runCli(['stream-probe','--thread','thr_abcdef',...args,'--json'])).stdout);
- const streams=(await probe()).streams;expect(streams).toHaveLength(1);expect(streams[0]).toMatchObject({threadId:'thr_abcdef',bytesRead:3});
+ const streams=(await probe()).streams;expect(streams).toHaveLength(1);expect(streams[0]).toMatchObject({threadId:'thr_abcdef',bytesRead:3,contentType});
  const rejected=expect(reader.read()).rejects.toThrow('Controlled Cursor stream interruption');
  expect((await probe('--interrupt-request',streams[0].requestId,'--confirm')).interrupted).toBe(true);await rejected;
  expect((await probe('--interrupt-request',streams[0].requestId,'--confirm')).interrupted).toBe(false);

@@ -241,7 +241,7 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end
             def do_POST(self):
                 self.rfile.read(int(self.headers.get('Content-Length', 0)))
                 self.send_response(200)
-                self.send_header('Content-Type', 'application/connect+proto')
+                self.send_header('Content-Type', 'text/event-stream' if mode=='cursor-sse' else 'application/connect+proto')
                 self.send_header('Transfer-Encoding', 'chunked')
                 self.end_headers()
                 payload = b'\x00\x00\x00\x00\x03abc'
@@ -302,6 +302,9 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],**reply}),flush=True)
                     self.assertEqual(messages[-1],{'jsonrpc':'2.0','id':7,'error':{'code':-32603,'message':'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.'}})
         finally:
             hub.shutdown();hub.server_close();worker.join()
+
+    def test_cursor_binary_frames_under_event_stream_recover_on_partial_eof(self):
+        self.gateway_body_failure_case('cursor-sse')
 
     def test_confirmed_body_failure_normalizes_actual_acp_rpc_error(self):
         self.gateway_body_failure_case('rpc-error')

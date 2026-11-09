@@ -87,7 +87,7 @@ it('interrupts only the exact observed Cursor body once, without affecting its n
  const open=(provider:'cursor'|'kimi',requestId:string,threadId:string)=>flights.fetch(provider,'https://synthetic.example',undefined,true,undefined,undefined,undefined,report,{requestId,threadId});
  const a=await open('cursor','request-a','thr_one'),b=await open('cursor','request-b','thr_two'),c=await open('kimi','request-c','thr_one');
  const reader=a.body!.getReader();await reader.read();
- expect(flights.cursorStreams('thr_one')).toEqual([{requestId:'request-a',threadId:'thr_one',bytesRead:3}]);
+ expect(flights.cursorStreams('thr_one')).toEqual([{requestId:'request-a',threadId:'thr_one',bytesRead:3,contentType:'other'}]);
  expect(flights.interruptCursorStream('request-a','thr_two')).toBe(false);
  expect(flights.interruptCursorStream('request-c','thr_one')).toBe(false);
  const rejected=expect(reader.read()).rejects.toThrow('Controlled Cursor stream interruption');

@@ -387,7 +387,7 @@ def run_gateway(executable, argv, env):
                     failures.model_response(rpc_path, response.getheader('x-bb-pool-error'), prompt)
                 content_type = response.getheader('content-type', '').split(';')[0].strip().lower()
                 completion = ConnectCompletion() if content_type in {
-                    'application/connect+proto', 'application/connect+json'} else None
+                    'application/connect+proto', 'application/connect+json', 'text/event-stream'} else None
                 self.send_response(response.status)
                 for k, v in response.getheaders():
                     if k.lower() not in {"content-length", "connection", "transfer-encoding"}:

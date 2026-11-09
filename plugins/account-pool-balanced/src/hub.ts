@@ -771,7 +771,7 @@ export class AccountPoolHub {
               const heldUntil=this.options.now()+retryAfterMilliseconds(response.headers.get('retry-after'),this.options.now());
               this.options.quotas.put({...observed,heldUntil});
             }
-            return result(this.clientResponse(upstream));
+            return result(this.clientResponse(upstream, adapter.provider !== 'cursor'));
           }
           if (response.status === 429) {
             if (adapter.isQuotaRejection(response.headers)) {
@@ -891,7 +891,7 @@ export class AccountPoolHub {
             if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'accepted'});
             this.options.quotas.recordSuccessfulRequest(selected.account.id);
           }
-          return result(this.clientResponse(upstream));
+          return result(this.clientResponse(upstream, adapter.provider !== 'cursor'));
         }
       }
       signal.throwIfAborted();
@@ -1594,7 +1594,7 @@ export class AccountPoolHub {
     }
   }
 
-  private clientResponse(upstream: UpstreamResult): Response {
+  private clientResponse(upstream: UpstreamResult, allowSseError: boolean): Response {
     const headers = new Headers();
     for (const [name, value] of upstream.response.headers) {
       if (!DROPPED_RESPONSE_HEADERS.has(name.toLowerCase()))
@@ -1609,7 +1609,7 @@ export class AccountPoolHub {
       });
     }
     const reader = upstream.response.body.getReader();
-    const eventStream =
+    const eventStream = allowSseError &&
       upstream.response.headers
         .get("content-type")
         ?.split(";", 1)[0]
