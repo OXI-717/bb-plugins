@@ -319,3 +319,13 @@ test('an overview of a large vault keeps the full count and marks the cut',async
  const result=await overviewVaults(run,{},new Set(['routed']));
  assert.deepEqual([result.vaults[0].itemTotal,result.vaults[0].itemsTruncated,result.vaults[0].items.length,result.vaultsTruncated],[501,true,500,false]);
 });
+test('one unreadable vault or an empty listing does not stop the overview',async()=>{
+ const run=async(_b,args)=>{
+  if(args[0]==='vault'&&args[1]==='list')return JSON.stringify([{id:'a',name:'A'},{id:'b',name:'B'},{id:'c',name:'C'}]);
+  if(args[0]==='vault'&&args[1]==='get'){if(args[2]==='b')throw new Error('process exit 1; output suppressed');return JSON.stringify({description:''});}
+  if(args[1]==='list')return args[3]==='a'?'':JSON.stringify([{title:'T'}]);
+  throw new Error('unexpected');
+ };
+ const result=await overviewVaults(run,{},new Set(['a','b','c']));
+ assert.deepEqual(result.vaults.map(v=>[v.name,v.error??null,v.itemTotal??null]),[['A',null,0],['B','vault-get-exit-1',null],['C',null,1]]);
+});
