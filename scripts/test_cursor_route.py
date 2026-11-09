@@ -438,5 +438,66 @@ class AcpFailureNormalizationTest(unittest.TestCase):
         original={"id":2,"result":{"stopReason":"end_turn"}}
         self.assertEqual(state.child(original),original)
 
+class CursorDiagnosticTest(unittest.TestCase):
+    def test_success_is_silent_and_ring_is_bounded(self):
+        state=route.AcpPoolFailures()
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as output:
+            for i in range(100):
+                state.client({'id':i,'method':'session/prompt','params':{}})
+                state.child({'id':i,'result':{'stopReason':'end_turn'}})
+            self.assertEqual(output.getvalue(), '')
+        self.assertEqual(len(state.trace),64)
+        self.assertGreater(state.trace[-1]['seq'],64)
+
+    def test_missing_and_stale_tokens_are_distinguishable_without_payload(self):
+        state=route.AcpPoolFailures()
+        state.client({'id':'synthetic-private-id','method':'session/prompt','params':{'sessionId':'synthetic-private-session'}})
+        old=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.begin_model_request('agent.v1.AgentService/RunSSE')
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as output:
+            state.body_trace(None,None,'read_error',route.ConnectCompletion(),3)
+            state.body_trace(old,None,'read_error',route.ConnectCompletion(),4)
+        records=[json.loads(x.removeprefix('Cursor pool diagnostic ')) for x in output.getvalue().splitlines()]
+        first=records[0]['events'][-1];last=records[1]['events'][-1]
+        self.assertFalse(first['tokenPresent'])
+        self.assertTrue(last['tokenPresent']);self.assertFalse(last['currentMatch'])
+        self.assertNotIn('synthetic-private',output.getvalue())
+
+    def test_dumps_have_a_process_lifetime_limit(self):
+        state=route.AcpPoolFailures()
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as output:
+            for _ in range(8):state.body_trace(None,None,'read_error',None,0)
+        self.assertEqual(len(output.getvalue().splitlines()),3)
+
+    @unittest.skipUnless(os.name == 'posix', 'Private diagnostic files use POSIX directory descriptors')
+    def test_private_storage_is_bounded_and_symlinks_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {'BB_THREAD_STORAGE':tmp}), mock.patch('sys.stderr', new_callable=io.StringIO):
+            target=Path(tmp)/'cursor-pool-diagnostics.jsonl'
+            state=route.AcpPoolFailures();state.body_trace(None,None,'read_error',None,0)
+            self.assertEqual(target.stat().st_mode & 0o777,0o600)
+            self.assertEqual(json.loads(target.read_text())['trigger'],'read_error')
+            target.write_bytes(b'x'*(1024*1024));state.dump_trace('read_error')
+            self.assertEqual(target.stat().st_size,1024*1024)
+            target.unlink();victim=Path(tmp)/'synthetic-victim';victim.write_text('preserve')
+            target.symlink_to(victim);state.dump_trace('read_error')
+            self.assertEqual(victim.read_text(),'preserve')
+
+    def test_missing_or_closed_stderr_does_not_write_acp_stdout(self):
+        for sink in (None, mock.Mock(write=mock.Mock(side_effect=OSError('synthetic closed sink')))):
+            with mock.patch('sys.stderr',sink), mock.patch('sys.stdout',new_callable=io.StringIO) as output, mock.patch.dict(os.environ,{'BB_THREAD_STORAGE':''}):
+                route.AcpPoolFailures().dump_trace('read_error')
+                self.assertEqual(output.getvalue(),'')
+
+    def test_known_error_observation_does_not_enable_retries_by_text(self):
+        state=route.AcpPoolFailures()
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+        chunk={'method':'session/update','params':{'sessionId':'synthetic','update':{'sessionUpdate':'agent_message_chunk','content':{'text':'Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream'}}}}
+        self.assertIs(state.child(chunk),chunk)
+        reply={'id':1,'result':{'stopReason':'end_turn'}}
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as output:
+            self.assertIs(state.child(reply),reply)
+        self.assertIn('known_transport_text',output.getvalue())
+        self.assertNotIn('connection likely',output.getvalue())
+
 if __name__ == "__main__":
     unittest.main()

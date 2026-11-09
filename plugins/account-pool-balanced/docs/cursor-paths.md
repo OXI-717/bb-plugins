@@ -113,3 +113,24 @@ make its body textual SSE. The launcher observes the same bounded envelope state
 for this MIME type. The pool propagates Cursor body errors without appending a
 textual SSE error event; textual SSE handling for other providers is preserved.
 The stream probe reports an allowlisted MIME category (`other` for unknown types).
+
+
+### Bounded failed-stream diagnostics
+
+The standalone launcher retains at most 64 metadata events and emits at most
+three diagnostic snapshots per process to stderr on a body read failure or a
+recognized transport-error notification. Ordinary success stays silent. The
+notification is an observation only: it does not make assistant text retryable.
+Snapshots contain local counters, timing, prompt/token match booleans and
+transport framing state, never prompt IDs, session IDs, payloads, URLs, raw
+errors or credentials. The hub supplies its own request UUID in
+`x-bb-pool-request-id` only on Cursor model responses, replacing any upstream
+value. This links one launcher stream to a controlled stream-probe interruption.
+A transport end-envelope and the application-level `turnEnded` are separate
+conditions; these diagnostics alone do not establish recovery.
+
+On POSIX hosts the same failure snapshots are also appended privately to
+`cursor-pool-diagnostics.jsonl` in the existing `BB_THREAD_STORAGE` directory.
+The file is limited to 1 MiB, uses mode 0600, refuses symlinks, and skips a write
+when busy or unavailable. This is needed because ACP retains stderr until exit.
+Diagnostics never create a new storage directory or change the ACP result.

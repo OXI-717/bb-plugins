@@ -160,6 +160,7 @@ interface RoutingAttempt {
   pinnedAccountId: string | null;
 }
 interface UpstreamResult {
+  poolRequestId?: string;
   response: Response;
   controller: AbortController;
   release: (outcome?: "complete"|"error"|"canceled") => void;
@@ -1587,7 +1588,7 @@ export class AccountPoolHub {
         try{forwarded=adapter.transformResponse(request,response,controller.signal);}
         catch{controller.abort();void response.body?.cancel().catch(()=>undefined);throw new UpstreamConnectionError('Invalid provider response');}
       }
-      return { response:forwarded, controller, release };
+      return { response:forwarded, controller, release, ...(adapter.provider === 'cursor' && /^agent\.v[0-9]+\.AgentService\/Run(?:SSE|Poll)?$/.test(rpc ?? '') ? {poolRequestId:trace.requestId} : {}) };
     } catch (error) {
       release();
       throw error;
@@ -1600,6 +1601,8 @@ export class AccountPoolHub {
       if (!DROPPED_RESPONSE_HEADERS.has(name.toLowerCase()))
         headers.append(name, value);
     }
+    headers.delete("x-bb-pool-request-id");
+    if (upstream.poolRequestId) headers.set("x-bb-pool-request-id", upstream.poolRequestId);
     if (upstream.response.body === null) {
       upstream.release();
       return new Response(null, {
