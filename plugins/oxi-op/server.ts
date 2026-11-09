@@ -398,6 +398,9 @@ export default function plugin(bb: BbPluginApi) {
     // them, move an entry, archive it (recoverable), or delete an empty vault no route still uses.
     async function tidy(profile: string, rawPlan: string, ctx: OperationContext) {
         const steps = z.array(tidyStepSchema).min(1).max(20).parse(JSON.parse(rawPlan));
+        if (connecting) throw new Error('Project setup is already pending');
+        connecting = true;
+        try {
         const {route: configured} = await accessFor(ctx.projectId, profile);
         if (configured.authentication !== 'desktop' || !configured.requireApproval) throw new Error('Clean-up requires approved owner desktop access');
         const routes = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
@@ -415,10 +418,14 @@ export default function plugin(bb: BbPluginApi) {
             const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: 'Порядок в сейфах: ' + steps.length + ' шагов', payload: {mode: 'approve', title: 'Навести порядок в сейфах', purpose: steps.map((step, i) => (i + 1) + '. ' + describe(step)).join('\n') + '\nШаги идут по порядку и останавливаются на первой ошибке.', profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: 'Порядок в сейфах', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Служебный сейф', secrets: []}, describeSubmission: () => ({title: 'Vault clean-up approved (no credential values)'})}, {signal: ctx.signal});
             if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
             await progress('awaiting-approval', true);
+            // Routes may have changed while the card waited; check again right before acting.
+            const current = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
+            for (const step of steps) if (step.kind === 'delete-vault' && current.some(r => r.vaultId === step.vaultId)) throw new CodedError('vault-in-use', 'A route now uses this vault; nothing was changed');
             await requireCredentialHost(route, ctx);
             await progress('running', true);
             return JSON.stringify(await host.call('tidy', {route, steps}, {hostId: credentialHost(route), signal: ctx.signal}));
         }, 'Порядок в сейфах');
+        } finally {connecting = false;}
     }
     // Structure rules the overview checks: one '<Project>' vault for critical entries and at most one
     // '<Project> — Automation' vault per project, plus the service registry vault.
@@ -512,15 +519,17 @@ export default function plugin(bb: BbPluginApi) {
         if (configured.authentication !== 'desktop' || !configured.requireApproval) throw new Error('Critical access needs an owner-approved desktop profile');
         const session = await sessionMachine(ctx);
         await requireHost(session.hostId, 'execution', ctx);
+        // The owner must see exactly what receives the password: the full command or nothing.
+        const commandLine = argv.map(a => /[\s"'\\]/.test(a) ? JSON.stringify(a) : a).join(' ');
+        if (commandLine.length > 1500) throw new CodedError('command-too-long', 'A command with a critical password must fit on the approval card (1500 characters); put longer logic in a reviewed script file');
         const label = 'Команда с паролем: ' + (argv[0].split('/').at(-1) ?? 'command').slice(0, 60) + ' (' + Object.keys(keys).join(', ') + ')';
         return journal.run('exec', profile, ctx, async progress => {
             const route = await credentialTarget(configured, ctx);
             await requireCredentialHost(route, ctx);
             const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
             const machine = await displayContext({...route, hostId: session.hostId}, ctx);
-            const commandLine = argv.map(a => /\s/.test(a) ? JSON.stringify(a) : a).join(' ');
             await progress('awaiting-approval');
-            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Использовать пароль: ' + [...new Set(Object.values(keys).map(k => k.item))].join(', ').slice(0, 120), payload: {mode: 'approve', title: 'Разовая команда с паролем', profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Команда: ' + (commandLine.length > 400 ? commandLine.slice(0, 400) + '…' : commandLine) + '\nВыполнится на: ' + machine.hostLabel + '\nПароль получит только эта команда; в ответ агенту он не вернётся.', secrets: Object.entries(keys).map(([variable, key]) => ({variable, item: key.item, field: key.field}))}, describeSubmission: () => ({title: 'Critical command approved'})}, {signal: ctx.signal});
+            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Использовать пароль: ' + [...new Set(Object.values(keys).map(k => k.item))].join(', ').slice(0, 120), payload: {mode: 'approve', title: 'Разовая команда с паролем', profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Команда целиком: ' + commandLine + '\nВыполнится на: ' + machine.hostLabel + '\nПароль получит только эта команда; в ответ агенту он не вернётся.', secrets: Object.entries(keys).map(([variable, key]) => ({variable, item: key.item, field: key.field}))}, describeSubmission: () => ({title: 'Critical command approved'})}, {signal: ctx.signal});
             if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
             await progress('awaiting-approval', true);
             await requireCredentialHost(route, ctx);
