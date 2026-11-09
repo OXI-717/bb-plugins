@@ -14,11 +14,12 @@ export type GroupResult = {code: number | null; output: Buffer; truncated: boole
 // One process group per operation: the command and every ordinary descendant end together.
 // Killing only the leader could leave descendants holding credentials and inherited pipes.
 // Output is kept as bytes so multibyte characters split across pipe chunks stay intact.
-export function spawnGroup(binary: string, args: string[], options: {env: NodeJS.ProcessEnv; cwd?: string; input?: string; timeoutMs: number; maxBytes: number; overflow: 'fail' | 'keep-tail'; includeStderr: boolean; onEscape?: 'reject' | 'report'; signal?: AbortSignal}) {
+export function spawnGroup(binary: string, args: string[], options: {env: NodeJS.ProcessEnv; cwd?: string; input?: string; timeoutMs: number; maxBytes: number; overflow: 'fail' | 'keep-tail'; includeStderr: boolean; onEscape?: 'reject' | 'report'; ownSession?: boolean; signal?: AbortSignal}) {
     return new Promise<GroupResult>((resolve, reject) => {
         if (options.signal?.aborted) {reject(new CodedError('cancelled', 'Operation cancelled')); return;}
         if (process.platform !== 'linux' && process.platform !== 'darwin') {reject(new Error('Operation requires a supported POSIX host')); return;}
-        const child = spawn(binary, args, {env: options.env, cwd: options.cwd, detached: true, stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']});
+        const ownSession = options.ownSession ?? true;
+        const child = spawn(binary, args, {env: options.env, cwd: options.cwd, detached: ownSession, stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']});
         const chunks: Buffer[] = [];
         let bytes = 0;
         let truncated = false;
@@ -32,7 +33,7 @@ export function spawnGroup(binary: string, args: string[], options: {env: NodeJS
         let leaderExited = false;
         // After the leader has exited, macOS answers EPERM for a group that holds only zombies.
         const killGroup = () => {
-            try {if (child.pid) process.kill(-child.pid, 'SIGKILL');}
+            try {if (child.pid) process.kill(ownSession ? -child.pid : child.pid, 'SIGKILL');}
             catch (error) {
                 const code = (error as NodeJS.ErrnoException).code;
                 if (code !== 'ESRCH' && !(code === 'EPERM' && leaderExited)) cleanupFailed = true;
@@ -78,11 +79,17 @@ export function spawnGroup(binary: string, args: string[], options: {env: NodeJS
         if (options.signal?.aborted) kill();
     });
 }
-export const runProcess: Runner = async (binary, args, env, input, signal) => {
-    const result = await spawnGroup(binary, args, {env, input: input ?? '', timeoutMs: 90000, maxBytes: 1048576, overflow: 'fail', includeStderr: false, signal});
+// Desktop (biometric) op calls stay in the host's own session: 1Password recognises an
+// authorised caller by its session, so a new session per call asked for a fingerprint each
+// time. Only service-account and agent processes get their own group for cleanup.
+// A command launched through `op run` holds resolved credentials and always gets its own group.
+const runWith = (ownSession: (env: NodeJS.ProcessEnv) => boolean): Runner => async (binary, args, env, input, signal) => {
+    const result = await spawnGroup(binary, args, {env, input: input ?? '', timeoutMs: 90000, maxBytes: 1048576, overflow: 'fail', includeStderr: false, ownSession: ownSession(env), signal});
     if (result.code !== 0 || result.expired) throw new CredentialProcessError('process exit ' + result.code + '; output suppressed');
     return result.output.toString('utf8');
 };
+export const runProcess: Runner = runWith(env => env.OP_BIOMETRIC_UNLOCK_ENABLED !== 'true');
+export const runOwnedProcess: Runner = runWith(() => true);
 // op on Linux rejects a template read from /dev/stdin (exit 9); macOS accepts it. On Linux the
 // template goes to a 0600 file in a private 0700 directory, memory-backed (XDG_RUNTIME_DIR or /dev/shm)
 // when available, removed immediately after the call.
