@@ -176,7 +176,7 @@ export async function executeOperationBindings(run: Runner, env: NodeJS.ProcessE
 
 // Recover only vaults carrying this exact project marker; never adopt a namesake.
 export async function provisionProjectVault(run: Runner, env: NodeJS.ProcessEnv, projectId: string, name: string, signal?: AbortSignal, existingVaultId?: string) {
-    const description = 'Managed by Oxi Op for BB project ' + projectId;
+    const description = oxiOpMarker + projectId;
     const op = async (args: string[]) => JSON.parse(await run('op', args, env, undefined, signal));
     if (existingVaultId) {
         const verified = await op(['vault', 'get', existingVaultId, '--format=json']);
@@ -339,3 +339,24 @@ export async function execWithKeys(run: Runner, command: CommandRunner, env: Nod
     } finally {for (const key of Object.keys(values)) delete values[key];}
 }
 
+
+export const oxiOpMarker = 'Managed by Oxi Op for BB project ';
+export type VaultOverview = {id: string; name: string; service: boolean; marker?: string; items?: {title: string; category: string; createdAt: string; updatedAt: string}[]};
+// Metadata only. Items are listed (titles, categories, dates; never values) only in service vaults:
+// those named by routes, the service registry or the Oxi Op marker. Any other vault the owner
+// account can see is reported by name alone and never opened.
+export async function overviewVaults(run: Runner, env: NodeJS.ProcessEnv, serviceIds: Set<string>, signal?: AbortSignal) {
+    const vaults = JSON.parse(await run('op', ['vault', 'list', '--format=json'], env, undefined, signal));
+    if (!Array.isArray(vaults)) throw new CodedError('overview-invalid', 'Invalid vault list');
+    const result: VaultOverview[] = [];
+    for (const vault of vaults.slice(0, 200)) {
+        if (typeof vault?.id !== 'string' || typeof vault?.name !== 'string') continue;
+        const details = JSON.parse(await run('op', ['vault', 'get', vault.id, '--format=json'], env, undefined, signal));
+        const description = typeof details.description === 'string' ? details.description : '';
+        const marker = description.startsWith(oxiOpMarker) ? description.slice(oxiOpMarker.length).trim() : undefined;
+        if (!serviceIds.has(vault.id) && !marker) {result.push({id: vault.id, name: vault.name, service: false}); continue;}
+        const items = JSON.parse(await run('op', ['item', 'list', '--vault', vault.id, '--format=json'], env, undefined, signal));
+        result.push({id: vault.id, name: vault.name, service: true, ...(marker ? {marker} : {}), items: (Array.isArray(items) ? items : []).slice(0, 500).map((item: {title?: unknown; category?: unknown; created_at?: unknown; updated_at?: unknown}) => ({title: String(item.title ?? ''), category: String(item.category ?? ''), createdAt: String(item.created_at ?? ''), updatedAt: String(item.updated_at ?? '')}))});
+    }
+    return {vaults: result};
+}

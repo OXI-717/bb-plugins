@@ -3,7 +3,7 @@ import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
 import { contract, type Route } from './contract.js';
 import { CodedError } from './errors.js';
-import { runProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand } from './core.js';
+import { runProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults } from './core.js';
 const pending = new Set<string>();
 async function environment(route: Route, signal: AbortSignal, serviceAccountToken?: string) {
     if (signal.aborted)
@@ -66,6 +66,18 @@ export default experimental_defineHostEntry({ contract, handlers: {
             if (route.authentication !== 'service-account') throw new Error('Scope probes require a service account');
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, args, env, input, signal);
             return probeServiceScope(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, ctx.signal);
+        },
+        overview: async ({route, serviceVaultIds, registryTitle}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Vault overview requires owner desktop approval');
+            const env = await environment(route, ctx.signal);
+            const runner: typeof runProcess = (_binary, args, values, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], values, input, signal);
+            const ids = new Set(serviceVaultIds);
+            if (registryTitle) {
+                const registry = JSON.parse(await runner('op', ['item', 'get', registryTitle, '--vault', route.vaultId, '--format=json', '--reveal'], env, undefined, ctx.signal));
+                const notes = String(registry.notesPlain ?? '') + '\n' + (registry.fields ?? []).filter((x: {id: string}) => x.id === 'notesPlain').map((x: {value: string}) => x.value).join('\n');
+                for (const id of notes.match(/\b[a-z2-7]{26}\b/g) ?? []) ids.add(id);
+            }
+            return overviewVaults(runner, env, ids, ctx.signal);
         },
         inventory: async ({route, registryTitle}, ctx) => {
             if (route.authentication !== 'desktop') throw new Error('Registry inventory requires explicit owner desktop access');
