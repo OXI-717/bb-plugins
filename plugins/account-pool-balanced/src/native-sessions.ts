@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import {summarizeNativeAccounts} from './native-accounts.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const nativeExecutionSchema=z.object({
@@ -120,6 +121,7 @@ export class NativeSessions {
     return executor;
   });}
   async setManaged(managed:boolean){return this.serial(()=>{this.state.managed=managed;return {managed};});}
+  async accounts(){return this.serial(()=>summarizeNativeAccounts(this.state));}
   async snapshot(){return this.serial(()=>({managed:this.state.managed,executors:this.state.executors,
     leases:this.state.leases.map(({id,executor,caller,kind,state,deadline,createdAt})=>({id,executorId:executor.id,accountId:executor.accountId,hostId:executor.hostId,projectId:caller.projectId,kind,state,deadline,createdAt})),
     events:this.state.events,budget:'unknown' as const}));}

@@ -168,6 +168,7 @@ function render(
       rpc: {
         "status.get": () => status(accounts),
         "config.get": () => config(),
+        "native.accounts": () => ({managed: false, accounts: []}),
         ...extraRpc,
       },
       openUrl: () => true,
@@ -176,6 +177,33 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it("shows one official Google subscription across executors without an OAuth sign-in", async () => {
+    const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
+      {id: "official-desktop", enabled: true, autopilotAllowed: false},
+      {id: "official-worker", enabled: true, autopilotAllowed: true},
+    ], active: 1, queued: 2, uncertain: 0}]})});
+    expect(await slot.findAllByText("Google · Antigravity")).toHaveLength(1);
+    await slot.findByText("official-worker · включён · автопилот разрешён");
+    expect(slot.queryByText("В пуле нет аккаунтов")).toBeNull();
+    expect(slot.queryByRole("switch", {name: "Направлять треды Antigravity"})).toBeNull();
+    expect(slot.queryByRole("button", {name: "Добавить аккаунт Antigravity"})).toBeNull();
+    await slot.findByText("В работе: 1; в очереди: 2; остановка не подтверждена: 0.");
+    await slot.findByText("Лимит здесь не измеряется. Состояние входа проверяет официальный клиент на машине исполнителя.");
+    expect(slot.rpcCalls.some(call => call.method.startsWith("agyLogin."))).toBe(false);
+  });
+  it("surfaces native registry failures without offering an OAuth retry", async () => {
+    const slot=render([], {"native.accounts":()=>{throw Error("registry unavailable");}});
+    await slot.findByText("Не удалось загрузить исполнителей: registry unavailable");
+    expect(slot.queryByRole("switch", {name:"Направлять треды Antigravity"})).toBeNull();
+    expect(slot.rpcCalls.some(call=>call.method.startsWith("agyLogin."))).toBe(false);
+  });
+  it("marks uncertain execution and does not present it as ready", async () => {
+    const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
+      {id: "official-desktop", enabled: true, autopilotAllowed: false},
+    ], active: 0, queued: 0, uncertain: 1}]})});
+    await slot.findByText("Требуется проверка остановки");
+  });
+
   it("saves the explicit account permission with compare-and-set and reports conflicts", async () => {
     const slot=render([account()], {"account.setAutopilotAllowed":()=>{throw Error("permission changed");}});
     fireEvent.click(await slot.findByRole("button", {name:"Открыть карточку: person@example.com"}));
@@ -508,6 +536,7 @@ describe("Account Pool settings", () => {
 
   it("offers Antigravity Google login without paid key or local credential import",async()=>{
     const slot=render([],{'agyLogin.cancel':()=>({cancelled:true}),'agyLogin.start':()=>({sessionId:'synthetic-session',authorizeUrl:'https://accounts.google.com/o/oauth2/v2/auth',expiresAt:Date.now()+600000})});
+    await slot.findByRole('switch',{name:'Направлять треды Antigravity'});
     const buttons=await slot.findAllByRole('button',{name:'Добавить аккаунт'});
     fireEvent.pointerDown(buttons[4]!);
     fireEvent.click(await slot.findByText('Вход в Antigravity',{selector:'span.block'}));
@@ -520,6 +549,7 @@ describe("Account Pool settings", () => {
 
   it("adds a Devin PAT from its card without offering Codex login", async () => {
     const slot = render([], { "account.add": () => account({ provider: "devin" }) });
+    await slot.findByRole("switch", {name:"Направлять треды Antigravity"});
     const addButtons = await slot.findAllByRole("button", { name: "Добавить аккаунт" });
     fireEvent.pointerDown(addButtons[8]!);
     expect(slot.queryByText("Вход в Codex", { selector: "span.block" })).toBeNull();

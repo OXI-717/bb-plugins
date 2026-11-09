@@ -1,3 +1,4 @@
+import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
 import {AccountEmailForm} from './account-email-form';
 import { AccountSettingsStyle } from './account-settings-style';
@@ -1042,6 +1043,8 @@ function AccountPoolSettings() {
   const rpc = useRpc<typeof accountPoolRpcContract>();
   const navigate = useBbNavigate();
   const [status, setStatus] = useState<PoolStatus | null>(readCachedStatus);
+  const [nativeAccounts, setNativeAccounts] = useState<NativeAccounts | null>(null);
+  const [nativeError, setNativeError] = useState<string | null>(null);
   const [statusIsCached, setStatusIsCached] = useState(status !== null);
   const [config, setConfig] = useState<AccountPoolConfig | null>(null);
   const [drafts, setDrafts] = useState<Record<ConfigField, string>>({
@@ -1123,6 +1126,19 @@ function AccountPoolSettings() {
       if (mounted.current) setError(errorText(loadError));
     }
   }, [rpc]);
+  const refreshNative = useCallback(async () => {
+    try {
+      const next = await rpc.call("native.accounts", null);
+      if (mounted.current) { setNativeAccounts(next); setNativeError(null); }
+    } catch (loadError) {
+      if (mounted.current) { setNativeAccounts(null); setNativeError(errorText(loadError)); }
+    }
+  }, [rpc]);
+  useEffect(() => {
+    void refreshNative();
+    const timer = window.setInterval(() => void refreshNative(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [refreshNative]);
   const refreshConfig = useCallback(async () => {
     try {
       const next = await rpc.call("config.get", null);
@@ -1502,7 +1518,7 @@ function AccountPoolSettings() {
           {error}
         </div>
       )}
-      {status !== null && !statusIsCached && accounts.length === 0 ? (
+      {status !== null && !statusIsCached && accounts.length === 0 && nativeAccounts?.accounts.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border px-5 py-6 text-center">
           <h2 className="text-sm font-semibold text-foreground">
             В пуле нет аккаунтов
@@ -1545,9 +1561,9 @@ function AccountPoolSettings() {
           <SettingsSection
             key={provider.id}
             title={provider.title}
-            description={`${provider.description} В работе: ${providerAccounts.reduce((n,a)=>n+a.inFlight,0)}; в очереди: ${providerAccounts.reduce((n,a)=>n+a.queuedRequests,0)}. Предел на аккаунт: ${config?.maxConcurrentRequestsPerAccount ?? 2}.`}
+            description={provider.id === "agy" && nativeAccounts?.managed !== false ? "Официальный клиент. Вход Google хранится на машинах исполнителей; одна подписка объединяет их общий лимит." : `${provider.description} В работе: ${providerAccounts.reduce((n,a)=>n+a.inFlight,0)}; в очереди: ${providerAccounts.reduce((n,a)=>n+a.queuedRequests,0)}. Предел на аккаунт: ${config?.maxConcurrentRequestsPerAccount ?? 2}.`}
             action={
-              <div className="flex items-center gap-2">
+              provider.id === "agy" && nativeAccounts?.managed !== false ? <SettingsBadge>{nativeAccounts === null ? nativeError ? "Данные недоступны" : "Проверка исполнителей…" : "Официальный клиент"}</SettingsBadge> : <div className="flex items-center gap-2">
                 <Switch
                   checked={status?.routing[provider.id] ?? true}
                   disabled={pending !== null}
@@ -1574,10 +1590,23 @@ function AccountPoolSettings() {
               </div>
             }
           >
+            {provider.id === "agy" && nativeError !== null ? <p role="alert" className="py-2.5 text-sm text-destructive-text">Не удалось загрузить исполнителей: {nativeError}</p> : null}
+            {provider.id === "agy" ? nativeAccounts?.accounts.map(account => (
+              <div key={account.accountId} className="space-y-2 border-b border-border py-3 last:border-b-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-foreground">Google · Antigravity</span>
+                  <SettingsBadge>{!nativeAccounts.managed ? "Управляемый режим выключен" : account.uncertain > 0 ? "Требуется проверка остановки" : account.executors.some(executor => executor.enabled) ? "Настроен" : "Исполнители выключены"}</SettingsBadge>
+                </div>
+                <p className="break-all text-xs text-muted-foreground">Подписка: {account.accountId}</p>
+                <ul className="space-y-1 text-xs text-muted-foreground">{account.executors.map(executor => <li key={executor.id} className="break-words">{executor.id} · {executor.enabled ? "включён" : "выключен"} · автопилот {executor.autopilotAllowed ? "разрешён" : "выключен"}</li>)}</ul>
+                <p className="text-xs text-muted-foreground">В работе: {account.active}; в очереди: {account.queued}; остановка не подтверждена: {account.uncertain}.</p>
+                <p className="text-xs text-muted-foreground">Лимит здесь не измеряется. Состояние входа проверяет официальный клиент на машине исполнителя.</p>
+              </div>
+            )) : null}
             {status === null ? (
               <p className="py-2.5 text-sm text-muted-foreground">Загрузка…</p>
             ) : providerAccounts.length === 0 ? (
-              <p className="py-2.5 text-sm text-subtle-foreground">
+              provider.id === "agy" && (nativeAccounts?.accounts.length || nativeError) ? null : <p className="py-2.5 text-sm text-subtle-foreground">
                 Аккаунтов пока нет.
               </p>
             ) : (

@@ -1,4 +1,5 @@
 import { egressProfileSchema, egressStateSchema, type AccountEgress } from "./account-egress.js";
+import {nativeAccountsSchema, type NativeAccounts} from "./native-accounts.js";
 import type {AgyOAuthLogin} from "./agy-oauth-login.js";
 import { defineRpcContract, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -54,6 +55,7 @@ const browserOpenInputSchema = z.object({
 export type BrowserOpenInput = z.infer<typeof browserOpenInputSchema>;
 
 export const accountPoolRpcContract = defineRpcContract({
+  "native.accounts": {input: z.null(), output: nativeAccountsSchema},
   "egress.status":{input:z.null(),output:egressStateSchema},
   "egress.bind":{input:z.object({accountId:z.string().uuid(),ref:z.object({id:z.string(),version:z.number().int().positive()}).strict().nullable()}).strict(),output:z.null()},
   "egress.configure":{input:egressProfileSchema,output:z.null()},
@@ -192,8 +194,10 @@ export function createRpcHandlers(
   agyLogin?: AgyOAuthLogin,
   openAgyBrowser:(url:string)=>Promise<{opened:true}>=async()=>{throw Error("Sign-in browser unavailable");},
   egress?:AccountEgress,
+  nativeAccounts: () => Promise<NativeAccounts> = async () => ({managed: false, accounts: []}),
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
+    "native.accounts": () => nativeAccounts(),
     "egress.status":()=>{if(!egress)throw Error("Egress unavailable");return egress.snapshot();},
     "egress.configure":async input=>{if(!egress)throw Error("Egress unavailable");await egress.configure(input);return null;},
     "egress.bind":async({accountId,ref})=>{if(!egress)throw Error("Egress unavailable");await egress.bind(accountId,ref);return null;},
