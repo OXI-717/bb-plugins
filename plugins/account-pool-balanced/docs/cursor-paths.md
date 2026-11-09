@@ -62,3 +62,24 @@ advance those streams or the metadata needed to start a session. Unknown methods
 retain ordinary admission. Account selection, quota cooldown, authentication and
 VPN Guard checks still apply to both lanes. Total in-flight requests can therefore
 reach twice the configured limit for Cursor; inference capacity does not increase.
+
+## Interrupted model streams
+
+The launcher observes Connect envelope boundaries with at most five header bytes
+of parser state; model payloads and wire bytes are not retained or rewritten.
+A model response with HTTP 200 is incomplete if its body disconnects before the
+Connect end envelope, or HTTP ends cleanly without that envelope. A socket failure
+after a complete end envelope does not invalidate the RPC. This follows the
+[Connect streaming protocol](https://connectrpc.com/docs/protocol/).
+
+For one unambiguous ACP prompt, a confirmed interruption converts Cursor's false
+`end_turn` success into the existing local `POOL_UPSTREAM_UNAVAILABLE` JSON-RPC
+error. Detection does not depend on assistant text, including text emitted before
+the interruption. Auxiliary RPCs, stale model requests, ambiguous concurrent
+prompts, client disconnection and ACP cancellation do not acquire this attribution.
+A fresh model request clears the previous interruption.
+
+The existing bounded native turn retry can then continue the same thread with its
+original provider, model and accepted history. The gateway does not replay HTTP
+requests or tools, manufacture a Connect success frame, or bypass Guard. This
+restores failure/recovery semantics; it does not prevent upstream socket failures.

@@ -53,6 +53,7 @@ class AcpPoolFailures:
         self.lock = threading.Lock()
         self.pending = {}
         self.generation = 0
+        self.request_generation = 0
 
     def client(self, message):
         if not isinstance(message, dict) or message.get('method') != 'session/prompt':
@@ -66,7 +67,12 @@ class AcpPoolFailures:
                 params = message.get('params') or {}
                 self.pending[identifier] = {'generation': self.generation,
                     'session': params.get('sessionId') if isinstance(params, dict) else None,
-                    'reason': None, 'reported': False, 'prefix': ''}
+                    'reason': None, 'reported': False, 'prefix': '',
+                    'request': None, 'interrupted': False}
+                if len(self.pending) > 1:
+                    # No HTTP-to-prompt attribution survives ambiguous prompts.
+                    for current in self.pending.values():
+                        current.update(request=None, reason=None, reported=False, interrupted=False)
 
     def begin_model_request(self, path):
         if not re.fullmatch(r'agent\.v[0-9]+\.AgentService/Run(?:SSE|Poll)?', path):
@@ -75,8 +81,10 @@ class AcpPoolFailures:
             if len(self.pending) != 1:
                 return None
             identifier = next(iter(self.pending))
-            self.pending[identifier].update(reason=None, reported=False, prefix='')
-            return (identifier, self.pending[identifier]['generation'])
+            self.request_generation += 1
+            self.pending[identifier].update(reason=None, reported=False, prefix='',
+                request=self.request_generation, interrupted=False)
+            return (identifier, self.pending[identifier]['generation'], self.request_generation)
 
     def model_response(self, path, reason, prompt=None):
         token = prompt if prompt is not None else self.begin_model_request(path)
@@ -84,8 +92,16 @@ class AcpPoolFailures:
             return
         with self.lock:
             current = self.pending.get(token[0])
-            if current and current['generation'] == token[1]:
+            if current and (current['generation'], current['request']) == token[1:]:
                 current['reason'] = reason if reason in self.REASONS else None
+
+    def model_interrupted(self, token):
+        if token is None:
+            return
+        with self.lock:
+            current = self.pending.get(token[0])
+            if current and (current['generation'], current['request']) == token[1:]:
+                current.update(reason='POOL_UPSTREAM_UNAVAILABLE', interrupted=True)
 
     def child(self, message):
         if not isinstance(message, dict):
@@ -108,11 +124,40 @@ class AcpPoolFailures:
             if type(identifier) not in (str, int) or ('result' not in message and 'error' not in message):
                 return message
             current = self.pending.pop(identifier, None)
-            if current and current['reason'] and current['reported'] and isinstance(message.get('result'), dict) and message['result'].get('stopReason') == 'end_turn':
+            if current and current['reason'] and (current['reported'] or current['interrupted']) and isinstance(message.get('result'), dict) and message['result'].get('stopReason') == 'end_turn':
                 reason = current['reason']
                 return {'jsonrpc': '2.0', 'id': identifier, 'error': {
                     'code': -32603, 'message': '[' + reason + '] Pooler connection temporarily unavailable.'}}
         return message
+
+
+class ConnectCompletion:
+    """Observe envelope boundaries without retaining model payloads or changing bytes."""
+    def __init__(self):
+        self.header = bytearray()
+        self.remaining = 0
+        self.end = False
+        self.complete = False
+
+    def feed(self, chunk):
+        offset = 0
+        while offset < len(chunk):
+            if self.remaining:
+                take = min(self.remaining, len(chunk) - offset)
+                self.remaining -= take
+                offset += take
+                if not self.remaining and self.end:
+                    self.complete = True
+            else:
+                take = min(5 - len(self.header), len(chunk) - offset)
+                self.header.extend(chunk[offset:offset + take])
+                offset += take
+                if len(self.header) == 5:
+                    self.end = bool(self.header[0] & 2)
+                    self.remaining = int.from_bytes(self.header[1:], 'big')
+                    self.header.clear()
+                    if not self.remaining and self.end:
+                        self.complete = True
 
 
 def relay_acp(process, failures):
@@ -239,7 +284,7 @@ def main(argv=None):
     os.execve(command[0], command, env)
 
 
-def watch_client_disconnect(client, upstream, stopped):
+def watch_client_disconnect(client, upstream, stopped, disconnected=None):
     """Cancel a quiet upstream when its local consumer disappears."""
     while not stopped.wait(0.25):
         try:
@@ -250,6 +295,8 @@ def watch_client_disconnect(client, upstream, stopped):
                 continue
         except (OSError, ValueError):
             pass
+        if disconnected is not None:
+            disconnected.set()
         try:
             upstream.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -291,6 +338,7 @@ def run_gateway(executable, argv, env):
             connection = None
             watcher = None
             stopped = threading.Event()
+            disconnected = threading.Event()
             prompt = failures.begin_model_request(rpc_path)
             try:
                 limit = 16 * 1024 * 1024
@@ -331,6 +379,9 @@ def run_gateway(executable, argv, env):
                 response = connection.getresponse()
                 if prompt is not None:
                     failures.model_response(rpc_path, response.getheader('x-bb-pool-error'), prompt)
+                content_type = response.getheader('content-type', '').split(';')[0].strip().lower()
+                completion = ConnectCompletion() if content_type in {
+                    'application/connect+proto', 'application/connect+json'} else None
                 self.send_response(response.status)
                 for k, v in response.getheaders():
                     if k.lower() not in {"content-length", "connection", "transfer-encoding"}:
@@ -341,12 +392,21 @@ def run_gateway(executable, argv, env):
                 # Their lifetime follows the consumer rather than a read timer.
                 upstream_socket.settimeout(None)
                 watcher = threading.Thread(target=watch_client_disconnect,
-                    args=(self.connection, upstream_socket, stopped), daemon=True)
+                    args=(self.connection, upstream_socket, stopped, disconnected), daemon=True)
                 watcher.start()
                 while True:
-                    chunk = response.read1(8192)
+                    try:
+                        chunk = response.read1(8192)
+                    except (OSError, http.client.HTTPException):
+                        if response.status == 200 and not disconnected.is_set() and not (completion and completion.complete):
+                            failures.model_interrupted(prompt)
+                        raise
                     if not chunk:
+                        if response.status == 200 and completion and not completion.complete and not disconnected.is_set():
+                            failures.model_interrupted(prompt)
                         break
+                    if completion:
+                        completion.feed(chunk)
                     self.wfile.write(("%x\r\n" % len(chunk)).encode() + chunk + b"\r\n")
                     self.wfile.flush()
                 self.wfile.write(b"0\r\n\r\n")
