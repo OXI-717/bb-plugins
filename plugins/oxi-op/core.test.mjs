@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
@@ -334,5 +334,21 @@ test('desktop op calls share the host session; other processes get their own',as
  const probe="process.stdout.write(String(require('node:child_process').execSync('ps -o pgid= -p '+process.pid).toString().trim()===require('node:child_process').execSync('ps -o pgid= -p '+process.ppid).toString().trim()))";
  const shared=await runProcess(process.execPath,['-e',probe],{OP_BIOMETRIC_UNLOCK_ENABLED:'true',PATH:process.env.PATH});
  const own=await runProcess(process.execPath,['-e',probe],{OP_BIOMETRIC_UNLOCK_ENABLED:'false',PATH:process.env.PATH});
- assert.deepEqual([shared,own],['true','false']);
+ const ownedDesktop=await runOwnedProcess(process.execPath,['-e',probe],{OP_BIOMETRIC_UNLOCK_ENABLED:'true',PATH:process.env.PATH});
+ assert.deepEqual([shared,own,ownedDesktop],['true','false','false'],'a command run through op run keeps its own group even with desktop unlock');
+});
+test('cancelling a desktop op run ends the command it launched',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ const {mkdtemp,readFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-run-'));const file=join(dir,'pid');
+ const source=`const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(file)},String(c.pid));setInterval(()=>{},1000);`;
+ const controller=new AbortController();let pid;
+ try{
+  const pending=runOwnedProcess(process.execPath,['-e',source],{OP_BIOMETRIC_UNLOCK_ENABLED:'true',PATH:process.env.PATH},undefined,controller.signal).catch(()=>'rejected');
+  for(let i=0;i<200&&!pid;i++){try{pid=Number(await readFile(file,'utf8'))||undefined;}catch{}await new Promise(r=>setTimeout(r,5));}
+  assert(pid);controller.abort();assert.equal(await pending,'rejected');
+  const running=async()=>{try{process.kill(pid,0);}catch{return false;}if(process.platform==='linux'){try{if((await readFile('/proc/'+pid+'/stat','utf8')).split(' ')[2]==='Z')return false;}catch{return false;}}return true;};
+  let alive=true;for(let i=0;i<100&&(alive=await running());i++)await new Promise(r=>setTimeout(r,10));
+  assert.equal(alive,false);
+ }finally{if(pid){try{process.kill(pid,'SIGKILL');}catch{}}await rm(dir,{recursive:true,force:true});}
 });

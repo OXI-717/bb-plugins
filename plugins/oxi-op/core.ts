@@ -82,12 +82,14 @@ export function spawnGroup(binary: string, args: string[], options: {env: NodeJS
 // Desktop (biometric) op calls stay in the host's own session: 1Password recognises an
 // authorised caller by its session, so a new session per call asked for a fingerprint each
 // time. Only service-account and agent processes get their own group for cleanup.
-export const runProcess: Runner = async (binary, args, env, input, signal) => {
-    const desktop = env.OP_BIOMETRIC_UNLOCK_ENABLED === 'true';
-    const result = await spawnGroup(binary, args, {env, input: input ?? '', timeoutMs: 90000, maxBytes: 1048576, overflow: 'fail', includeStderr: false, ownSession: !desktop, signal});
+// A command launched through `op run` holds resolved credentials and always gets its own group.
+const runWith = (ownSession: (env: NodeJS.ProcessEnv) => boolean): Runner => async (binary, args, env, input, signal) => {
+    const result = await spawnGroup(binary, args, {env, input: input ?? '', timeoutMs: 90000, maxBytes: 1048576, overflow: 'fail', includeStderr: false, ownSession: ownSession(env), signal});
     if (result.code !== 0 || result.expired) throw new CredentialProcessError('process exit ' + result.code + '; output suppressed');
     return result.output.toString('utf8');
 };
+export const runProcess: Runner = runWith(env => env.OP_BIOMETRIC_UNLOCK_ENABLED !== 'true');
+export const runOwnedProcess: Runner = runWith(() => true);
 // op on Linux rejects a template read from /dev/stdin (exit 9); macOS accepts it. On Linux the
 // template goes to a 0600 file in a private 0700 directory, memory-backed (XDG_RUNTIME_DIR or /dev/shm)
 // when available, removed immediately after the call.
