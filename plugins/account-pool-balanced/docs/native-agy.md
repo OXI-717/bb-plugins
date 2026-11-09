@@ -103,7 +103,7 @@ checks do not establish those live results.
 The Antigravity section displays registered official-client subscriptions directly
 from the native registry. Executors with the same `accountId` share one card;
 no proxy OAuth account or duplicate Google login is created. The card lists
-executor enablement, autopilot permissions, and active, queued or uncertain
+executor enablement, automation permissions, and active, queued or uncertain
 leases. It refreshes every 15 seconds and reports registry read failures.
 
 Registration is configuration evidence only. The card does not claim that a
