@@ -8784,7 +8784,7 @@ it.each(['application/connect+proto','text/event-stream'])('wires an exact authe
   const url=input instanceof Request?input.url:String(input);
   if(url.startsWith('https://exchange.example/'))return Response.json({accessToken:'synthetic-access'});
   if(url.startsWith('https://usage.example/'))return Response.json({planUsage:{totalPercentUsed:10}});
-  return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}}),{headers:{'content-type':contentType}});
+  return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}}),{headers:{'content-type':contentType,'x-bb-pool-request-id':'synthetic-untrusted-upstream-id'}});
  });
  const f=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example/token',cursorUsageUrl:'https://usage.example/usage',fetch:outbound}});
  const call=async(threadId:string,rpc:string)=>{
@@ -8797,6 +8797,9 @@ it.each(['application/connect+proto','text/event-stream'])('wires an exact authe
  const reader=one.body!.getReader();await reader.read();
  const probe=async(...args:string[])=>JSON.parse((await f.host.harness.behavior.runCli(['stream-probe','--thread','thr_abcdef',...args,'--json'])).stdout);
  const streams=(await probe()).streams;expect(streams).toHaveLength(1);expect(streams[0]).toMatchObject({threadId:'thr_abcdef',bytesRead:3,contentType});
+ expect(one.headers.get('x-bb-pool-request-id')).toBe(streams[0].requestId);
+ expect(two.headers.get('x-bb-pool-request-id')).not.toBe(streams[0].requestId);
+ expect(append.headers.get('x-bb-pool-request-id')).toBeNull();
  const rejected=expect(reader.read()).rejects.toThrow('Controlled Cursor stream interruption');
  expect((await probe('--interrupt-request',streams[0].requestId,'--confirm')).interrupted).toBe(true);await rejected;
  expect((await probe('--interrupt-request',streams[0].requestId,'--confirm')).interrupted).toBe(false);

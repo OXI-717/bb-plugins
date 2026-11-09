@@ -28,6 +28,9 @@ import json
 import re
 import select
 import socket
+import time
+import stat
+from collections import deque
 from urllib.parse import urlsplit
 
 CURSOR_BINARY = "cursor-agent"
@@ -54,6 +57,64 @@ class AcpPoolFailures:
         self.pending = {}
         self.generation = 0
         self.request_generation = 0
+        self.trace = deque(maxlen=64)
+        self.trace_sequence = 0
+        self.trace_dumps = 0
+        self.observed_error = False
+
+    def note(self, event, **fields):
+        # Callers supply fixed enums, booleans, counters and validated pool UUIDs.
+        # Never pass protocol dictionaries, text, URLs or exception messages.
+        self.trace_sequence += 1
+        self.trace.append(dict(seq=self.trace_sequence, atMs=int(time.monotonic()*1000),
+                               event=event, **fields))
+
+    def dump_trace(self, trigger):
+        if self.trace_dumps >= 3:
+            return
+        self.trace_dumps += 1
+        snapshot = json.dumps(dict(trigger=trigger, events=list(self.trace)), separators=(',', ':'))
+        if sys.stderr is not None:
+            try:
+                print('Cursor pool diagnostic ' + snapshot, file=sys.stderr, flush=True)
+            except (OSError, ValueError):
+                pass
+        # ACP keeps stderr in memory until process exit. Preserve bounded metadata
+        # in the existing thread storage too; failures never alter the protocol.
+        storage = os.environ.get('BB_THREAD_STORAGE')
+        if not storage or os.name != 'posix':
+            return
+        directory = descriptor = None
+        try:
+            import fcntl
+            directory = os.open(storage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            descriptor = os.open('cursor-pool-diagnostics.jsonl', os.O_WRONLY | os.O_APPEND |
+                os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            info = os.fstat(descriptor)
+            encoded = (snapshot + '\n').encode()
+            if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_size + len(encoded) <= 1024*1024:
+                os.fchmod(descriptor, 0o600)
+                os.write(descriptor, encoded)
+        except (OSError, ImportError):
+            pass
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if directory is not None:
+                os.close(directory)
+
+    def body_trace(self, token, pool_id, outcome, completion, count):
+        with self.lock:
+            current = self.pending.get(token[0]) if token else None
+            matches = bool(current and (current['generation'], current['request']) == token[1:])
+            self.note('body_end', poolRequestId=pool_id, tokenPresent=token is not None,
+                currentMatch=matches, pendingCount=len(self.pending), outcome=outcome,
+                bytesRead=count, complete=bool(completion and completion.complete),
+                remaining=completion.remaining if completion else 0,
+                headerLength=len(completion.header) if completion else 0)
+            if outcome == 'read_error':
+                self.dump_trace('read_error')
 
     def client(self, message):
         if not isinstance(message, dict) or message.get('method') != 'session/prompt':
@@ -62,6 +123,7 @@ class AcpPoolFailures:
         if type(identifier) not in (str, int):
             return
         with self.lock:
+            self.note('prompt', pendingCount=len(self.pending))
             if len(self.pending) < 64:
                 self.generation += 1
                 params = message.get('params') or {}
@@ -78,6 +140,7 @@ class AcpPoolFailures:
         if not re.fullmatch(r'agent\.v[0-9]+\.AgentService/Run(?:SSE|Poll)?', path):
             return None
         with self.lock:
+            self.note('model_open', pendingCount=len(self.pending), requestGeneration=self.request_generation)
             if len(self.pending) != 1:
                 return None
             identifier = next(iter(self.pending))
@@ -102,6 +165,9 @@ class AcpPoolFailures:
             current = self.pending.get(token[0])
             if current and (current['generation'], current['request']) == token[1:]:
                 current.update(reason='POOL_UPSTREAM_UNAVAILABLE', interrupted=True)
+                self.note('interruption', applied=True)
+            else:
+                self.note('interruption', applied=False, tokenPresent=token is not None)
 
     def child(self, message):
         if not isinstance(message, dict):
@@ -112,6 +178,9 @@ class AcpPoolFailures:
                 update = params.get('update', {}) if isinstance(params, dict) else {}
                 content = update.get('content', {}) if isinstance(update, dict) else {}
                 text = content.get('text') if isinstance(content, dict) else None
+                if isinstance(text, str) and text.strip().startswith(('Error: RetriableError: Stream ended without turnEnded', 'Error: RetriableError: [invalid_argument] protocol error: incomplete envelope')):
+                    self.observed_error = True
+                    self.note('known_transport_text')
                 if isinstance(update, dict) and update.get('sessionUpdate') == 'agent_message_chunk' and isinstance(text, str):
                     for current in self.pending.values():
                         if params.get('sessionId') != current['session']:
@@ -124,6 +193,10 @@ class AcpPoolFailures:
             if type(identifier) not in (str, int) or ('result' not in message and 'error' not in message):
                 return message
             current = self.pending.pop(identifier, None)
+            self.note('reply', pendingMatch=current is not None, interrupted=bool(current and current['interrupted']), hasError='error' in message)
+            if self.observed_error:
+                self.dump_trace('known_transport_text')
+                self.observed_error = False
             rpc_error = message.get('error')
             incomplete_rpc = (isinstance(rpc_error, dict) and rpc_error.get('code') == -32603
                 and isinstance(rpc_error.get('message'), str) and re.fullmatch(
@@ -172,6 +245,8 @@ def relay_acp(process, failures):
     input_fd = sys.stdin.fileno()
     def parse(line):
         if len(line) > 1024 * 1024:
+            with failures.lock:
+                failures.note('parse_too_large', bytesRead=len(line))
             return None
         try:
             return json.loads(line)
@@ -346,6 +421,10 @@ def run_gateway(executable, argv, env):
             stopped = threading.Event()
             disconnected = threading.Event()
             prompt = failures.begin_model_request(rpc_path)
+            pool_id = None
+            completion = None
+            bytes_read = 0
+            body_outcome = None
             try:
                 limit = 16 * 1024 * 1024
                 if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
@@ -385,6 +464,11 @@ def run_gateway(executable, argv, env):
                 response = connection.getresponse()
                 if prompt is not None:
                     failures.model_response(rpc_path, response.getheader('x-bb-pool-error'), prompt)
+                raw_pool_id = response.getheader('x-bb-pool-request-id', '')
+                pool_id = raw_pool_id if re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', raw_pool_id) else None
+                with failures.lock:
+                    if prompt is not None or re.fullmatch(r'agent\.v[0-9]+\.AgentService/Run(?:SSE|Poll)?', rpc_path):
+                        failures.note('model_headers', poolRequestId=pool_id, tokenPresent=prompt is not None, pendingCount=len(failures.pending))
                 content_type = response.getheader('content-type', '').split(';')[0].strip().lower()
                 completion = ConnectCompletion() if content_type in {
                     'application/connect+proto', 'application/connect+json', 'text/event-stream'} else None
@@ -404,13 +488,16 @@ def run_gateway(executable, argv, env):
                     try:
                         chunk = response.read1(8192)
                     except (OSError, http.client.HTTPException):
+                        body_outcome = 'downstream_disconnect' if disconnected.is_set() else 'read_error'
                         if response.status == 200 and not disconnected.is_set() and not (completion and completion.complete):
                             failures.model_interrupted(prompt)
                         raise
                     if not chunk:
+                        body_outcome = 'downstream_disconnect' if disconnected.is_set() else 'eof'
                         if response.status == 200 and completion and not completion.complete and not disconnected.is_set():
                             failures.model_interrupted(prompt)
                         break
+                    bytes_read += len(chunk)
                     if completion:
                         completion.feed(chunk)
                     self.wfile.write(("%x\r\n" % len(chunk)).encode() + chunk + b"\r\n")
@@ -425,6 +512,8 @@ def run_gateway(executable, argv, env):
                     print("Cursor pool gateway connection failed", file=sys.stderr)
                 self.close_connection = True
             finally:
+                if body_outcome and re.fullmatch(r'agent\.v[0-9]+\.AgentService/Run(?:SSE|Poll)?', rpc_path):
+                    failures.body_trace(prompt, pool_id, body_outcome, completion, bytes_read)
                 stopped.set()
                 if watcher:
                     watcher.join(timeout=1)
