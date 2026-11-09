@@ -3,7 +3,7 @@ import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
 import { contract, type Route } from './contract.js';
 import { CodedError } from './errors.js';
-import { runProcess, runOwnedProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults } from './core.js';
+import { runProcess, runOwnedProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults, execResolved, runTidy } from './core.js';
 const pending = new Set<string>();
 async function environment(route: Route, signal: AbortSignal, serviceAccountToken?: string) {
     if (signal.aborted)
@@ -66,6 +66,22 @@ export default experimental_defineHostEntry({ contract, handlers: {
             if (route.authentication !== 'service-account') throw new Error('Scope probes require a service account');
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, args, env, input, signal);
             return probeServiceScope(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, ctx.signal);
+        },
+        resolveKeys: async ({route, keys}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Critical keys require approved desktop access');
+            const env = await environment(route, ctx.signal);
+            const bindings: Record<string, string> = {};
+            for (const [variable, key] of Object.entries(keys)) {
+                try {bindings[variable] = await runProcess(route.opBinary, ['--account', route.accountId!, 'read', '--no-newline', 'op://' + route.vaultId + '/' + key.item + '/' + key.field], env, undefined, ctx.signal);}
+                catch {throw new CodedError('key-unreadable', 'A requested key could not be read');}
+            }
+            return {bindings};
+        },
+        execResolved: async ({argv, bindings, cwd, timeoutSeconds}, ctx) => execResolved(runCommand, argv, bindings, cwd, timeoutSeconds * 1000, ctx.signal),
+        tidy: async ({route, steps}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Clean-up requires owner desktop approval');
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            return runTidy(runner, await environment(route, ctx.signal), steps, ctx.signal);
         },
         overview: async ({route, serviceVaultIds, registryTitle}, ctx) => {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Vault overview requires owner desktop approval');

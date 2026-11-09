@@ -3,7 +3,7 @@ import { z } from 'zod';
 import {taskContract,assignmentSchema} from './task-contract.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { CodedError, errorCode } from './errors.js';
-import { contract, routeSchema, resolveRoute, keyReferenceSchema, type Route } from './contract.js';
+import { contract, routeSchema, resolveRoute, keyReferenceSchema, tidyStepSchema, type Route } from './contract.js';
 import {createJournal, cancelledOutcome, OperationFailure} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal};
 const approvalTimeoutMs = 60_000;
@@ -389,9 +389,64 @@ export default function plugin(bb: BbPluginApi) {
             for (const vault of map.vaults) for (const item of vault.items ?? []) titles.set(item.title, [...(titles.get(item.title) ?? []), vault.name]);
             const vaults = map.vaults.map(v => ({...v, markerProject: v.marker ? names.get(v.marker) ?? v.marker : undefined, usedBy: usedBy.get(v.id) ?? [], itemCount: v.itemTotal}));
             // Repeats are found among listed items only; a truncated vault says so explicitly.
-            const report = {complete: map.registryRead && !map.vaultsTruncated && !vaults.some(v => v.itemsTruncated || v.error), registryRead: map.registryRead, vaultTotal: map.vaultTotal, vaultsTruncated: map.vaultsTruncated, unreadableVaults: vaults.filter(v => v.error).map(v => ({name: v.name, error: v.error})), vaults, repeatedTitles: [...titles].filter(([, where]) => where.length > 1).map(([title, where]) => ({title, vaults: where})), emptyServiceVaults: vaults.filter(v => v.service && v.itemCount === 0).map(v => v.name), unusedServiceVaults: vaults.filter(v => v.service && v.usedBy.length === 0).map(v => v.name)};
+            const findings = doctorFindings(routes, vaults, names);
+            const report = {findings, complete: map.registryRead && !map.vaultsTruncated && !vaults.some(v => v.itemsTruncated || v.error), registryRead: map.registryRead, vaultTotal: map.vaultTotal, vaultsTruncated: map.vaultsTruncated, unreadableVaults: vaults.filter(v => v.error).map(v => ({name: v.name, error: v.error})), vaults, repeatedTitles: [...titles].filter(([, where]) => where.length > 1).map(([title, where]) => ({title, vaults: where})), emptyServiceVaults: vaults.filter(v => v.service && v.itemCount === 0).map(v => v.name), unusedServiceVaults: vaults.filter(v => v.service && v.usedBy.length === 0).map(v => v.name)};
             return JSON.stringify({at: new Date().toISOString(), ...report});
         }, 'Обзор сейфов');
+    }
+    // Owner-approved structural clean-up in one card: compare two entries by value without showing
+    // them, move an entry, archive it (recoverable), or delete an empty vault no route still uses.
+    async function tidy(profile: string, rawPlan: string, ctx: OperationContext) {
+        const steps = z.array(tidyStepSchema).min(1).max(20).parse(JSON.parse(rawPlan));
+        const {route: configured} = await accessFor(ctx.projectId, profile);
+        if (configured.authentication !== 'desktop' || !configured.requireApproval) throw new Error('Clean-up requires approved owner desktop access');
+        const routes = z.array(routeSchema).parse(JSON.parse((await settings.get()).routes));
+        for (const step of steps) if (step.kind === 'delete-vault' && routes.some(r => r.vaultId === step.vaultId)) throw new CodedError('vault-in-use', 'A route still uses this vault; move its routes first');
+        const label = (vaultId: string) => '«' + (routes.find(r => r.vaultId === vaultId)?.vaultLabel ?? vaultId) + '»';
+        const describe = (step: z.infer<typeof tidyStepSchema>) => step.kind === 'same' ? 'Сравнить ' + label(step.a.vaultId) + ' / ' + step.a.item + ' и ' + label(step.b.vaultId) + ' / ' + step.b.item + ' по значению (без показа); при различии — остановиться'
+            : step.kind === 'move' ? 'Перенести ' + step.item + ' из ' + label(step.vaultId) + ' в ' + label(step.toVaultId)
+            : step.kind === 'archive' ? 'Убрать в архив ' + step.item + ' в ' + label(step.vaultId) + ' (можно восстановить)'
+            : 'Удалить пустой сейф ' + label(step.vaultId) + ' (только если пуст, включая архив)';
+        return journal.run('tidy', profile, ctx, async progress => {
+            const route = await credentialTarget(configured, ctx);
+            await requireCredentialHost(route, ctx);
+            const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
+            await progress('awaiting-approval');
+            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: 'Порядок в сейфах: ' + steps.length + ' шагов', payload: {mode: 'approve', title: 'Навести порядок в сейфах', purpose: steps.map((step, i) => (i + 1) + '. ' + describe(step)).join('\n') + '\nШаги идут по порядку и останавливаются на первой ошибке.', profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: 'Порядок в сейфах', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Служебный сейф', secrets: []}, describeSubmission: () => ({title: 'Vault clean-up approved (no credential values)'})}, {signal: ctx.signal});
+            if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
+            await progress('awaiting-approval', true);
+            await requireCredentialHost(route, ctx);
+            await progress('running', true);
+            return JSON.stringify(await host.call('tidy', {route, steps}, {hostId: credentialHost(route), signal: ctx.signal}));
+        }, 'Порядок в сейфах');
+    }
+    // Structure rules the overview checks: one '<Project>' vault for critical entries and at most one
+    // '<Project> — Automation' vault per project, plus the service registry vault.
+    function doctorFindings(routes: Route[], vaults: {id: string; name: string; service: boolean; itemCount?: number; usedBy: string[]; markerProject?: string}[], names: Map<string, string>) {
+        const findings: {code: string; vault?: string; route?: string}[] = [];
+        const ids = new Set(vaults.map(v => v.id));
+        const routeName = (r: Route) => (names.get(r.projectId) ?? r.projectId) + ' / ' + r.profile;
+        for (const r of routes) {
+            if (!ids.has(r.vaultId)) findings.push({code: 'route-missing-vault', route: routeName(r)});
+            if (r.authentication === 'desktop' && r.credentialHostId && !r.desktopHosts) findings.push({code: 'route-single-owner-machine', route: routeName(r)});
+            const owner = routes.find(o => o.vaultId === r.vaultId && o.profile === 'default');
+            if (owner && owner.projectId !== r.projectId) findings.push({code: 'route-uses-other-project-vault', route: routeName(r), vault: r.vaultLabel ?? r.vaultId});
+        }
+        for (const v of vaults.filter(v => v.service)) {
+            const projects = new Set(routes.filter(r => r.vaultId === v.id).map(r => names.get(r.projectId) ?? r.projectId));
+            const project = v.markerProject ?? [...projects][0];
+            const allowed = project ? [project, project + ' — Automation'] : [];
+            if (v.name !== 'OXI.Control' && project && !allowed.includes(v.name)) findings.push({code: 'vault-name-outside-scheme', vault: v.name});
+            if (!v.usedBy.length) findings.push({code: 'vault-not-routed', vault: v.name});
+            if (v.name.endsWith(' — Automation') && v.itemCount === 0) findings.push({code: 'automation-vault-empty', vault: v.name});
+        }
+        const perProject = new Map<string, string[]>();
+        for (const v of vaults.filter(v => v.service && v.name !== 'OXI.Control' && !v.name.endsWith(' — Automation'))) {
+            const project = v.markerProject ?? names.get(routes.find(r => r.vaultId === v.id)?.projectId ?? '') ?? v.name;
+            perProject.set(project, [...(perProject.get(project) ?? []), v.name]);
+        }
+        for (const [, list] of perProject) if (list.length > 1) findings.push({code: 'project-has-several-vaults', vault: list.join(', ')});
+        return findings;
     }
     const profileParameter = z.string().min(1).max(80).default('default');
     bb.agents.registerTool({ name: 'oxi_op_store', description: 'Request a credential in a private BB form and save it to the current project vault and configured access profile. Passwords must never be supplied in tool arguments. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ title: z.string().min(1).max(160), username: z.string().max(200).default(''), profile: profileParameter }).strict(), execute: ({ title, username, profile }, ctx) => toolOutcome(() => store(title, username, profile, ctx)) });
@@ -439,7 +494,46 @@ export default function plugin(bb: BbPluginApi) {
         return JSON.stringify(await host.call('listKeys', {route, serviceAccountToken}, {hostId: route.hostId, signal: ctx.signal}));
     }
     const keysSchema = z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine(x => !x.startsWith('OP_'), 'OP_ variables are reserved'), keyReferenceSchema).refine(x => Object.keys(x).length >= 1 && Object.keys(x).length <= 20, 'Request one to twenty keys');
+    // The machine and folder of the requesting session, whatever access profile is used.
+    async function sessionMachine(ctx: OperationContext) {
+        let environment;
+        try {
+            const thread = await bb.sdk.threads.get({threadId: ctx.threadId, signal: ctx.signal});
+            if (thread.id !== ctx.threadId || thread.projectId !== ctx.projectId || !thread.environmentId) throw new Error();
+            environment = await bb.sdk.environments.get({environmentId: thread.environmentId, signal: ctx.signal});
+        } catch {throw new OperationFailure('session_host_not_allowed');}
+        return {hostId: environment.hostId, cwd: environment.path ?? undefined};
+    }
+    // A critical password in a one-off command: one card names the command, the machine and every
+    // requested entry; the owner approves it and 1Password confirms on the owner's Mac. Values are
+    // read there, handed only to this command on the session machine and concealed in its output.
+    async function execCriticalCommand(argv: string[], keys: Record<string, {item: string; field: string}>, profile: string, timeoutSeconds: number, ctx: OperationContext) {
+        const {route: configured} = await accessFor(ctx.projectId, profile);
+        if (configured.authentication !== 'desktop' || !configured.requireApproval) throw new Error('Critical access needs an owner-approved desktop profile');
+        const session = await sessionMachine(ctx);
+        await requireHost(session.hostId, 'execution', ctx);
+        const label = 'Команда с паролем: ' + (argv[0].split('/').at(-1) ?? 'command').slice(0, 60) + ' (' + Object.keys(keys).join(', ') + ')';
+        return journal.run('exec', profile, ctx, async progress => {
+            const route = await credentialTarget(configured, ctx);
+            await requireCredentialHost(route, ctx);
+            const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
+            const machine = await displayContext({...route, hostId: session.hostId}, ctx);
+            const commandLine = argv.map(a => /\s/.test(a) ? JSON.stringify(a) : a).join(' ');
+            await progress('awaiting-approval');
+            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Использовать пароль: ' + [...new Set(Object.values(keys).map(k => k.item))].join(', ').slice(0, 120), payload: {mode: 'approve', title: 'Разовая команда с паролем', profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Команда: ' + (commandLine.length > 400 ? commandLine.slice(0, 400) + '…' : commandLine) + '\nВыполнится на: ' + machine.hostLabel + '\nПароль получит только эта команда; в ответ агенту он не вернётся.', secrets: Object.entries(keys).map(([variable, key]) => ({variable, item: key.item, field: key.field}))}, describeSubmission: () => ({title: 'Critical command approved'})}, {signal: ctx.signal});
+            if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
+            await progress('awaiting-approval', true);
+            await requireCredentialHost(route, ctx);
+            await requireHost(session.hostId, 'execution', ctx);
+            await progress('running', true);
+            const {bindings} = await host.call('resolveKeys', {route, keys}, {hostId: credentialHost(route), signal: ctx.signal});
+            try {return JSON.stringify({completed: true, ...await host.call('execResolved', {argv, bindings, ...(session.cwd ? {cwd: session.cwd} : {}), timeoutSeconds}, {hostId: session.hostId, signal: ctx.signal})});}
+            finally {for (const key of Object.keys(bindings)) delete bindings[key];}
+        }, label);
+    }
     async function execAgentCommand(argv: string[], keys: Record<string, {item: string; field: string}>, profile: string, timeoutSeconds: number, ctx: OperationContext) {
+        const configuredRoute = (await accessFor(ctx.projectId, profile)).route;
+        if (configuredRoute.authentication === 'desktop') return execCriticalCommand(argv, keys, profile, timeoutSeconds, ctx);
         const {route, cwd, serviceAccountToken} = await agentAccess(profile, ctx);
         const label = 'Команда агента: ' + (argv[0].split('/').at(-1) ?? 'command').slice(0, 60) + ' (' + Object.keys(keys).join(', ') + ')';
         return journal.run('exec', profile, ctx, async progress => {
@@ -449,7 +543,7 @@ export default function plugin(bb: BbPluginApi) {
         }, label);
     }
     bb.agents.registerTool({name: 'oxi_op_keys', description: 'List the agent keys of the current project (item titles and field names only, never values). Works on the machine of this session without owner approval when the project has automatic agent access.', parameters: z.object({profile: z.string().min(1).max(80).default('routine')}).strict(), execute: ({profile}, ctx) => toolOutcome(() => listAgentKeys(profile, ctx))});
-    bb.agents.registerTool({name: 'oxi_op_exec', description: 'Run a command on this session machine with project agent keys in environment variables, without owner approval. Map each variable to an item title and field from oxi_op_keys. Key values are removed from the returned output; never print, save or commit them. Critical passwords are not available here.', parameters: z.object({argv: z.array(z.string()).min(1).max(200), keys: keysSchema, timeoutSeconds: z.number().int().min(1).max(600).default(120), profile: z.string().min(1).max(80).default('routine')}).strict(), execute: ({argv, keys, timeoutSeconds, profile}, ctx) => toolOutcome(() => execAgentCommand(argv, keys, profile, timeoutSeconds, ctx))});
+    bb.agents.registerTool({name: 'oxi_op_exec', description: 'Run a command on this session machine with project keys in environment variables. With the default agent profile (routine) it needs no approval. With a critical profile such as default, the owner approves one card naming the command and entries, then 1Password on the owner Mac; use it for one-off work like SSH with a root password (for example sshpass -e with SSHPASS). Map each variable to an item title and field (oxi_op_keys lists agent keys; for critical entries use the exact title the owner gave). Key values are removed from the returned output; never print, save or commit them.', parameters: z.object({argv: z.array(z.string()).min(1).max(200), keys: keysSchema, timeoutSeconds: z.number().int().min(1).max(600).default(120), profile: z.string().min(1).max(80).default('routine')}).strict(), execute: ({argv, keys, timeoutSeconds, profile}, ctx) => toolOutcome(() => execAgentCommand(argv, keys, profile, timeoutSeconds, ctx))});
     bb.agents.registerTool({ name: 'oxi_op_run', description: 'Run an owner-configured operation using current project secrets. Only a completion result is returned; command output and secret values are suppressed. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ operation: z.string().min(1), profile: profileParameter }).strict(), execute: ({operation, profile}, ctx) => toolOutcome(() => runConfigured(operation, profile, ctx)) });
     async function inspectVault(kind: 'inventory' | 'check' | 'verify', profile: string, registryTitle: string | undefined, ctx: OperationContext) {
         const configuredAccess = await accessFor(ctx.projectId, profile);
@@ -549,6 +643,8 @@ export default function plugin(bb: BbPluginApi) {
                 return {exitCode:ok?0:1,stdout:JSON.stringify({passed:ok,machines:rows})};
             }}),
             overview:cliCommand({summary:'Approve a metadata-only map of service vaults; prints it after approval',options:{notify:notifyOption,profile:{type:'string',description:'Owner desktop setup profile',required:true},registry:{type:'string',description:'Service registry item title in the setup vault'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>overview(input.options.profile,input.options.registry,context));}}),
+            doctor:cliCommand({summary:'Check vault structure against the Oxi Op scheme after one approval; prints findings first',options:{profile:{type:'string',description:'Owner desktop setup profile',required:true},registry:{type:'string',description:'Service registry item title in the setup vault'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const result=await interactiveCli({projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal},false,()=>overview(input.options.profile,input.options.registry,{projectId:ctx.projectId!,threadId:ctx.threadId!,signal:ctx.signal}));if(result.stdout.startsWith('{')){const report=JSON.parse(result.stdout);result.stdout=JSON.stringify({ok:report.findings.length===0&&report.complete,findings:report.findings,complete:report.complete});}return result;}}),
+            tidy:cliCommand({summary:'Approve an ordered clean-up plan: compare by value, move, archive, delete empty unused vaults',options:{notify:notifyOption,profile:{type:'string',description:'Owner desktop setup profile',required:true},plan:{type:'string',description:'JSON array of steps (same, move, archive, delete-vault)',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>tidy(input.options.profile,input.options.plan,context));}}),
             'connect-many':cliCommand({summary:'Approve a bounded explicit list of project vault connections',options:{notify:notifyOption,projects:{type:'string',description:'JSON array of projectId and optional exact existingVaultId',required:true},profile:{type:'string',description:'Existing owner desktop setup profile',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectMany(input.options.projects,input.options.profile,context));}}),
             connect: cliCommand({summary:'Approve creating a dedicated vault and default project route',options:{notify:notifyOption,project:{type:'string',description:'Exact target BB project ID',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectProject(input.options.project,input.options.profile,context));}}),
             'display-status':cliCommand({summary:'Read form rendering receipts for this session; never contacts 1Password',async run(_,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const keys=await bb.storage.kv.list(receiptPrefix(ctx.projectId,ctx.threadId));const rows=await Promise.all(keys.map(k=>bb.storage.kv.get<Receipt>(k)));return {exitCode:0,stdout:JSON.stringify(rows.filter(Boolean).sort((a,b)=>b!.mountedAt.localeCompare(a!.mountedAt)).slice(0,20))};}}),
