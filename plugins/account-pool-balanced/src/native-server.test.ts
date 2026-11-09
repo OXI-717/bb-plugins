@@ -19,6 +19,8 @@ it('authenticates prepared runtime grants against the server profile registry be
     expect((await host.harness.behavior.runCli(['egress','configure',JSON.stringify(profile)])).exitCode).toBe(0);
     expect((await configure()).exitCode).toBe(0);
     expect((await host.harness.behavior.runCli(['native','mode','managed'])).exitCode).toBe(0);
+    const visible=await host.harness.behavior.callRpc('native.accounts',null);
+    expect(visible).toEqual({managed:true,accounts:[{accountId:'subscription-one',executors:[{id:'native-one',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0}]});
     const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
     const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
     const sessionId=randomUUID();

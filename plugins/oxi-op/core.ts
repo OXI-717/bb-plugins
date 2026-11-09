@@ -380,3 +380,66 @@ export async function overviewVaults(run: Runner, env: NodeJS.ProcessEnv, servic
     }
     return {vaults: result, vaultTotal: vaults.length, vaultsTruncated: vaults.length > overviewVaultLimit};
 }
+
+// Run a command with values that were resolved elsewhere (owner-approved desktop read). The child
+// gets no OP_ variables; exact values are concealed in the returned output.
+export async function execResolved(command: CommandRunner, argv: string[], bindings: Record<string, string>, cwd: string | undefined, timeoutMs: number, signal?: AbortSignal) {
+    const childEnv: NodeJS.ProcessEnv = {...process.env};
+    for (const name of Object.keys(childEnv)) if (name.startsWith('OP_')) delete childEnv[name];
+    for (const name of Object.keys(bindings)) if (name.startsWith('OP_')) throw new CodedError('reserved-variable', 'OP_ variables are reserved');
+    Object.assign(childEnv, bindings);
+    const result = await command(argv[0], argv.slice(1), childEnv, cwd, timeoutMs, signal);
+    return {...result, ...concealOutput(result.output, Object.values(bindings), result.truncated || result.timedOut)};
+}
+export type TidyStep =
+    | {kind: 'same'; a: {vaultId: string; item: string}; b: {vaultId: string; item: string}}
+    | {kind: 'move'; vaultId: string; item: string; toVaultId: string}
+    | {kind: 'archive'; vaultId: string; item: string}
+    | {kind: 'delete-vault'; vaultId: string};
+const digest = async (value: string) => (await import('node:crypto')).createHash('sha256').update(value).digest('hex');
+// Owner-approved structural clean-up. Steps run in order and stop at the first failure or at a
+// comparison that differs; values are compared by hash inside this process and never returned.
+export async function runTidy(run: Runner, env: NodeJS.ProcessEnv, steps: TidyStep[], signal?: AbortSignal) {
+    const op = async (args: string[]) => run('op', args, env, undefined, signal);
+    const findOne = async (vaultId: string, item: string) => {
+        const items = JSON.parse((await op(['item', 'list', '--vault', vaultId, '--format=json'])).trim() || '[]');
+        const matches = items.filter((x: {id: string; title: string}) => x.id === item || x.title === item);
+        if (matches.length !== 1) throw new CodedError(matches.length ? 'ambiguous-item' : 'item-not-found', 'Item must match exactly one entry');
+        return matches[0] as {id: string; title: string};
+    };
+    const fingerprint = async (vaultId: string, item: string) => {
+        const found = await findOne(vaultId, item);
+        const full = JSON.parse(await op(['item', 'get', found.id, '--vault', vaultId, '--reveal', '--format=json']));
+        const fields = Array.isArray(full.fields) ? full.fields : [];
+        const pick = (purpose: string, label: string) => String(fields.find((f: {purpose?: string; label?: string}) => f.purpose === purpose || f.label === label)?.value ?? '');
+        return {password: await digest(pick('PASSWORD', 'password')), username: await digest(pick('USERNAME', 'username')), hasPassword: pick('PASSWORD', 'password').length > 0};
+    };
+    const results: {kind: string; ok: boolean; code?: string; same?: boolean; sameUsername?: boolean}[] = [];
+    for (const step of steps) {
+        try {
+            if (step.kind === 'same') {
+                const [a, b] = [await fingerprint(step.a.vaultId, step.a.item), await fingerprint(step.b.vaultId, step.b.item)];
+                const same = a.hasPassword && a.password === b.password;
+                results.push({kind: step.kind, ok: same, same, sameUsername: a.username === b.username, ...(same ? {} : {code: 'values-differ'})});
+                if (!same) break;
+            } else if (step.kind === 'move') {
+                const found = await findOne(step.vaultId, step.item);
+                await op(['item', 'move', found.id, '--current-vault', step.vaultId, '--destination-vault', step.toVaultId]);
+                await findOne(step.toVaultId, found.title);
+                results.push({kind: step.kind, ok: true});
+            } else if (step.kind === 'archive') {
+                const found = await findOne(step.vaultId, step.item);
+                await op(['item', 'delete', found.id, '--vault', step.vaultId, '--archive']);
+                results.push({kind: step.kind, ok: true});
+            } else {
+                const left = JSON.parse((await op(['item', 'list', '--vault', step.vaultId, '--include-archive', '--format=json'])).trim() || '[]');
+                if (left.length) throw new CodedError('vault-not-empty', 'Vault still holds items, including archived ones');
+                await op(['vault', 'delete', step.vaultId]);
+                const vaults = JSON.parse(await op(['vault', 'list', '--format=json']));
+                if (vaults.some((v: {id: string}) => v.id === step.vaultId)) throw new CodedError('vault-still-present', 'Vault deletion could not be confirmed');
+                results.push({kind: step.kind, ok: true});
+            }
+        } catch (error) {results.push({kind: step.kind, ok: false, code: errorCode(error) ?? 'failed'}); break;}
+    }
+    return {results};
+}

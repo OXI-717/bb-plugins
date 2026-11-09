@@ -97,3 +97,18 @@ and continuation checks, and one ordinary headless acceptance in its intended
 isolated user/workspace. No copying native credentials to containers, no disabling
 container isolation and no automatic Google consent. Synthetic tests and CLI help
 checks do not establish those live results.
+
+## Accounts settings
+
+The Antigravity section displays registered official-client subscriptions directly
+from the native registry. Executors with the same `accountId` share one card;
+no proxy OAuth account or duplicate Google login is created. The card lists
+executor enablement, automation permissions, and active, queued or uncertain
+leases. It refreshes every 15 seconds and reports registry read failures.
+
+Registration is configuration evidence only. The card does not claim that a
+client is signed in or that a numeric quota is available. In managed mode,
+legacy OAuth controls are hidden; routing and VPN controls remain available
+for native execution. Official clients retain
+ownership of authentication. With managed mode off, registered cards remain
+visible with that state, and legacy controls remain available.
