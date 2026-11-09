@@ -134,3 +134,12 @@ On POSIX hosts the same failure snapshots are also appended privately to
 The file is limited to 1 MiB, uses mode 0600, refuses symlinks, and skips a write
 when busy or unavailable. This is needed because ACP retains stderr until exit.
 Diagnostics never create a new storage directory or change the ACP result.
+
+
+ACP recovery also applies when the CLI puts global `--model` or
+`--agent-endpoint` options before `acp`. The launcher recognizes their values
+without reordering or rewriting arguments; option values named `acp`, print
+commands and unknown options do not activate the ACP relay. A confirmed local
+interruption can normalize the exact structured `Stream ended without turnEnded`
+RPC error as well as `incomplete envelope`. Assistant text alone still cannot
+trigger recovery.
