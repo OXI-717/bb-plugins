@@ -1563,7 +1563,7 @@ function AccountPoolSettings() {
             title={provider.title}
             description={provider.id === "agy" && nativeAccounts?.managed !== false ? "Официальный клиент. Вход Google хранится на машинах исполнителей; одна подписка объединяет их общий лимит." : `${provider.description} В работе: ${providerAccounts.reduce((n,a)=>n+a.inFlight,0)}; в очереди: ${providerAccounts.reduce((n,a)=>n+a.queuedRequests,0)}. Предел на аккаунт: ${config?.maxConcurrentRequestsPerAccount ?? 2}.`}
             action={
-              provider.id === "agy" && nativeAccounts?.managed !== false ? <SettingsBadge>{nativeAccounts === null ? nativeError ? "Данные недоступны" : "Проверка исполнителей…" : "Официальный клиент"}</SettingsBadge> : <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Switch
                   checked={status?.routing[provider.id] ?? true}
                   disabled={pending !== null}
@@ -1583,10 +1583,10 @@ function AccountPoolSettings() {
                       ? [...(config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id), provider.id as "codex" | "claude" | "cursor" | "devin" | "neuraldeep" | "agy"]
                       : (config?.vpnOnlyProviders ?? []).filter(value => value !== provider.id) })} />Только VPN
                 </label>}
-                <AddAccountMenu
+                {provider.id === "agy" && nativeAccounts?.managed !== false ? <SettingsBadge>{nativeAccounts === null ? nativeError ? "Данные недоступны" : "Проверка исполнителей…" : "Официальный клиент"}</SettingsBadge> : <AddAccountMenu
                   provider={provider.id}
                   onChoose={(choice) => void chooseAdd(provider.id, choice)}
-                />
+                />}
               </div>
             }
           >

@@ -108,6 +108,7 @@ leases. It refreshes every 15 seconds and reports registry read failures.
 
 Registration is configuration evidence only. The card does not claim that a
 client is signed in or that a numeric quota is available. In managed mode,
-legacy OAuth and proxy-routing controls are hidden; official clients retain
+legacy OAuth controls are hidden; routing and VPN controls remain available
+for native execution. Official clients retain
 ownership of authentication. With managed mode off, registered cards remain
 visible with that state, and legacy controls remain available.

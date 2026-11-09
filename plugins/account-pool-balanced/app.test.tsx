@@ -185,16 +185,28 @@ describe("Account Pool settings", () => {
     expect(await slot.findAllByText("Google · Antigravity")).toHaveLength(1);
     await slot.findByText("official-worker · включён · автопилот разрешён");
     expect(slot.queryByText("В пуле нет аккаунтов")).toBeNull();
-    expect(slot.queryByRole("switch", {name: "Направлять треды Antigravity"})).toBeNull();
+    expect(slot.getByRole("switch", {name: "Направлять треды Antigravity"})).toBeTruthy();
     expect(slot.queryByRole("button", {name: "Добавить аккаунт Antigravity"})).toBeNull();
     await slot.findByText("В работе: 1; в очереди: 2; остановка не подтверждена: 0.");
     await slot.findByText("Лимит здесь не измеряется. Состояние входа проверяет официальный клиент на машине исполнителя.");
     expect(slot.rpcCalls.some(call => call.method.startsWith("agyLogin."))).toBe(false);
   });
+  it("keeps managed routing available when the route was previously disabled", async () => {
+    const slot=render([], {
+      "native.accounts":()=>({managed:true,accounts:[]}),
+      "status.get":()=>({...status([]),routing:{...status([]).routing,agy:false}}),
+      "routing.set":()=>null,
+    });
+    await slot.findByText("Официальный клиент");
+    const toggle=slot.getByRole("switch",{name:"Направлять треды Antigravity"});
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(toggle);
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:"routing.set",input:{provider:"agy",enabled:true}}));
+  });
   it("surfaces native registry failures without offering an OAuth retry", async () => {
     const slot=render([], {"native.accounts":()=>{throw Error("registry unavailable");}});
     await slot.findByText("Не удалось загрузить исполнителей: registry unavailable");
-    expect(slot.queryByRole("switch", {name:"Направлять треды Antigravity"})).toBeNull();
+    expect(slot.getByRole("switch", {name:"Направлять треды Antigravity"})).toBeTruthy();
     expect(slot.rpcCalls.some(call=>call.method.startsWith("agyLogin."))).toBe(false);
   });
   it("marks uncertain execution and does not present it as ready", async () => {
