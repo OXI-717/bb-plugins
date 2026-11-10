@@ -2,8 +2,9 @@ import { Button } from './ui/components/ui/button';
 import { useEffect, useRef, useState } from 'react';
 import { accountProjectsSchema, type AccountProjects, type AccountSummary } from './src/contracts.js';
 
-export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChange }: {
-  account: AccountSummary;
+export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChange, showRoles = true }: {
+  account: Pick<AccountSummary, "projects" | "role">;
+  showRoles?: boolean;
   loadProjects: () => Promise<Array<{ id: string; name: string }>>;
   save: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
   onUnsavedChange?: (value: boolean) => void;
@@ -53,7 +54,7 @@ export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChan
   const names = new Map(catalog.map(project => [project.id, project.name]));
   return <section className="pool-settings-section" aria-label="Проекты подписки">
     <h3 className="pool-settings-heading">Проекты</h3>
-    <p className="pool-settings-help">Роль по умолчанию: {account.role === 'primary' ? 'основной' : 'резерв'}. Настройки проекта переопределяют эту роль. Квоты и расписание общие для подписки.</p>
+    {showRoles && <p className="pool-settings-help">Роль по умолчанию: {account.role === 'primary' ? 'основной' : 'резерв'}. Настройки проекта переопределяют эту роль. Квоты и расписание общие для подписки.</p>}
     <fieldset disabled={pending || conflict} className="pool-settings-fields">
       <label className="pool-settings-field pool-settings-inline">Где использовать <select aria-label="Где использовать" className="pool-settings-control" value={draft.onlySelected ? 'selected' : 'all'} onChange={e => void change({ ...draft, onlySelected: e.target.value === 'selected' })}>
         <option value="all">Во всех проектах</option><option value="selected">Только в выбранных</option>
@@ -61,16 +62,16 @@ export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChan
       {draft.rules.length === 0 && <p className="pool-settings-help">Список пуст — используется в любом проекте.</p>}
       {draft.rules.map(rule => <div key={rule.projectId} className="pool-settings-project">
         <span className="pool-settings-project-name">{names.get(rule.projectId) ?? `Недоступный проект (${rule.projectId})`}</span>
-        <select aria-label={`Роль в ${names.get(rule.projectId) ?? rule.projectId}`} className="pool-settings-control" value={rule.role} onChange={e => void change({ ...draft, rules: draft.rules.map(value => value.projectId === rule.projectId ? { ...value, role: e.target.value as typeof rule.role } : value) })}>
+        {showRoles && <select aria-label={`Роль в ${names.get(rule.projectId) ?? rule.projectId}`} className="pool-settings-control" value={rule.role} onChange={e => void change({ ...draft, rules: draft.rules.map(value => value.projectId === rule.projectId ? { ...value, role: e.target.value as typeof rule.role } : value) })}>
           <option value="inherit">По умолчанию</option><option value="primary">Основной</option><option value="reserve">Резерв</option>
-        </select>
+        </select>}
         <Button className="pool-settings-remove" size="sm" variant="ghost" type="button" aria-label={`Убрать ${names.get(rule.projectId) ?? rule.projectId}`} onClick={() => void change({ ...draft, rules: draft.rules.filter(value => value.projectId !== rule.projectId) })}><span aria-hidden="true">×</span></Button>
       </div>)}
       <label className="pool-settings-field pool-settings-inline pool-settings-project-add">Добавить проект <select aria-label="Добавить проект" className="pool-settings-control" value="" onChange={e => { if (e.target.value) void change({ ...draft, rules: [...draft.rules, { projectId: e.target.value, role: 'inherit' }] }); }}>
         <option value="">Выберите проект</option>{catalog.filter(project => !draft.rules.some(rule => rule.projectId === project.id)).map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
       </select></label>
     </fieldset>
-    <p className="pool-settings-help">Порядок: основной проекта → резерв проекта → общий основной → общий резерв. «До исчерпания» временно разрешает использование везде.</p>
+    {showRoles && <p className="pool-settings-help">Порядок: основной проекта → резерв проекта → общий основной → общий резерв. «До исчерпания» временно разрешает использование везде.</p>}
     {catalogError && <p role="alert" className="text-sm">Не удалось загрузить список проектов. Сохранённые привязки остаются в силе.</p>}
     <p role="status" className="pool-settings-status">{pending ? "Сохраняем…" : saved ? "Сохранено" : ""}</p>
     {error && <div role="alert" className="pool-settings-error">{error} {conflict

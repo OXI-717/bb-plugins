@@ -24,6 +24,18 @@ bb pool native configure '{"id":"native-mac","accountId":"subscription-one","hos
 bb pool native status --json
 ```
 
+Open the Google subscription card in Accounts to use the existing Projects form.
+Choose **All projects** to include future projects, or **Only selected** to limit
+execution to the listed projects. As with other accounts, an empty list permits
+all projects. Saving applies atomically to every executor sharing the subscription;
+active/queued/uncertain leases, ambiguous executor selection and stale forms refuse changes. Native lists are limited to 32 project IDs. Native executors do
+not implement project-specific primary/reserve roles, so those controls are hidden.
+
+Legacy registrations retain their `projectIds` allowlist until explicitly changed.
+The optional `projects` field uses the existing account projects contract and takes
+precedence over that legacy list. Caller/host, catalog-only and automation permissions,
+network checks, prepared runtime bindings and host workspace limits still apply.
+
 Use the SAME subscription identifier for executors sharing one real Google
 account; do not infer identity from a path or copy a native profile. Only one
 enabled executor may match a host/project for BB auto-selection. Additional

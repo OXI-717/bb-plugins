@@ -177,6 +177,18 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it('opens the native card and saves the existing all-projects control',async()=>{
+    const projects={onlySelected:true,rules:[{projectId:'project-one',role:'inherit' as const}]};
+    const slot=render([],{"native.accounts":()=>({managed:true,accounts:[{accountId:'subscription-one',projects,projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.setProjects":()=>null});
+    fireEvent.click(await slot.findByRole('button',{name:'Google · Antigravity'}));
+    const control=await slot.findByLabelText('Где использовать');
+    expect(control.closest('.pool-settings')).not.toBeNull();
+    expect((control as HTMLSelectElement).value).toBe('selected');
+    expect(slot.queryByLabelText('Роль в project-one')).toBeNull();
+    fireEvent.change(control,{target:{value:'all'}});
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.setProjects',input:{accountId:'subscription-one',projects:{...projects,onlySelected:false},expectedRevision:'a'.repeat(64)}}));
+  });
+
   it("shows one official Google subscription across executors without an OAuth sign-in", async () => {
     const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
       {id: "official-desktop", enabled: true, autopilotAllowed: false},
