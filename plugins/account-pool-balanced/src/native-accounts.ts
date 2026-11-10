@@ -6,13 +6,16 @@ export const nativeProjectsSchema = accountProjectsSchema.refine(value => value.
 
 export const nativeAccountsSchema = z.object({
   managed: z.boolean(),
+  selectionRevision:z.string().regex(/^[a-f0-9]{64}$/).optional(),
   accounts: z.array(z.object({
     accountId: z.string(),
+    label:z.string().optional(),
     projects: accountProjectsSchema,
     projectsRevision: z.string(),
     mixedProjects: z.boolean(),
     executors: z.array(z.object({
       id: z.string(), enabled: z.boolean(), autopilotAllowed: z.boolean(),
+      preferred:z.boolean().optional(),
     }).strict()),
     active: z.number().int().nonnegative(),
     queued: z.number().int().nonnegative(),
@@ -24,7 +27,8 @@ export type NativeAccounts = z.infer<typeof nativeAccountsSchema>;
 /** UI metadata only: never expose caller authority, execution bindings or credentials. */
 export function summarizeNativeAccounts(state: {
   managed: boolean;
-  executors: Array<{id: string; accountId: string; enabled: boolean; autopilotAllowed: boolean; projectIds: string[]; projects?: AccountProjects}>;
+  preferredExecutors?:Record<string,string>;
+  executors: Array<{id: string; accountId: string; hostId?:string; label?:string; enabled: boolean; autopilotAllowed: boolean; projectIds: string[]; projects?: AccountProjects}>;
   leases: Array<{executor: {accountId: string}; state: "active" | "queued" | "uncertain"}>;
 }): NativeAccounts {
   const accounts: NativeAccounts["accounts"] = [];
@@ -37,7 +41,9 @@ export function summarizeNativeAccounts(state: {
       account = {accountId: executor.accountId, projects:structuredClone(projects), mixedProjects:policies.some(p=>JSON.stringify(p)!==JSON.stringify(projects)), projectsRevision: createHash('sha256').update(JSON.stringify(group.map(e => [e.id,e.projectIds,e.projects]))).digest('hex'), executors: [], active: 0, queued: 0, uncertain: 0};
       accounts.push(account);
     }
-    account.executors.push({id: executor.id, enabled: executor.enabled, autopilotAllowed: executor.autopilotAllowed});
+    if(executor.label&&!account.label)account.label=executor.label;
+    account.executors.push({id: executor.id, enabled: executor.enabled, autopilotAllowed: executor.autopilotAllowed,
+      ...(executor.hostId&&state.preferredExecutors?.[executor.hostId]===executor.id?{preferred:true}:{})});
   }
   for (const lease of state.leases) {
     const account = accounts.find(item => item.accountId === lease.executor.accountId);

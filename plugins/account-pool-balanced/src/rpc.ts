@@ -57,6 +57,7 @@ export type BrowserOpenInput = z.infer<typeof browserOpenInputSchema>;
 export const accountPoolRpcContract = defineRpcContract({
   "native.setProjects": {input:z.object({accountId:z.string().min(1).max(80),projects:nativeProjectsSchema,expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
   "native.accounts": {input: z.null(), output: nativeAccountsSchema},
+  "native.prefer": {input:z.object({executorId:z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
   "egress.status":{input:z.null(),output:egressStateSchema},
   "egress.bind":{input:z.object({accountId:z.string().uuid(),ref:z.object({id:z.string(),version:z.number().int().positive()}).strict().nullable()}).strict(),output:z.null()},
   "egress.configure":{input:egressProfileSchema,output:z.null()},
@@ -197,9 +198,11 @@ export function createRpcHandlers(
   egress?:AccountEgress,
   nativeAccounts: () => Promise<NativeAccounts> = async () => ({managed: false, accounts: []}),
   nativeSetProjects: (accountId:string,projects:import('./contracts.js').AccountProjects,revision:string)=>Promise<null> = async()=>{throw Error('Native project settings unavailable');},
+  nativePrefer:(executorId:string,revision:string)=>Promise<null> = async()=>{throw Error('Native account selection unavailable');},
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
     "native.accounts": () => nativeAccounts(),
+    "native.prefer": ({executorId,expectedRevision}) => nativePrefer(executorId,expectedRevision),
     "native.setProjects": ({accountId,projects,expectedRevision}) => nativeSetProjects(accountId,projects,expectedRevision),
     "egress.status":()=>{if(!egress)throw Error("Egress unavailable");return egress.snapshot();},
     "egress.configure":async input=>{if(!egress)throw Error("Egress unavailable");await egress.configure(input);return null;},
