@@ -20,7 +20,7 @@ it('authenticates prepared runtime grants against the server profile registry be
     expect((await configure()).exitCode).toBe(0);
     expect((await host.harness.behavior.runCli(['native','mode','managed'])).exitCode).toBe(0);
     const visible=await host.harness.behavior.callRpc('native.accounts',null);
-    expect(visible).toEqual({managed:true,accounts:[{accountId:'subscription-one',executors:[{id:'native-one',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0}]});
+    expect(visible).toEqual({managed:true,accounts:[{accountId:'subscription-one',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'native-one',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0}]});
     const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
     const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
     const sessionId=randomUUID();
@@ -71,4 +71,24 @@ it('real registration binds CLI, BB env, authenticated HTTP and forbids the old 
     const state=JSON.parse((await host.harness.behavior.runCli(['native','status','--json'])).stdout);
     expect(state.leases).toHaveLength(0);expect(state.events.map((e:{event:string})=>e.event)).toEqual(['queued','active','released']);
   }finally{await host.harness.lifecycle.dispose();await rm(dataDir,{recursive:true,force:true});}
+});
+
+
+it('saves native projects through RPC and contributes the executor for a future project',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  try{
+    await createAccountPoolPlugin({fetch:vi.fn(async()=>new Response('{}'))})(host.bb);
+    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+    expect((await host.harness.behavior.runCli(['native','configure',JSON.stringify(executor)])).exitCode).toBe(0);
+    await host.harness.behavior.runCli(['native','mode','managed']);
+    const context={hostId:'host-one',projectId:'future-project',threadId:'thread-new'};
+    const before=await host.harness.behavior.resolveProviderEnv('acp-agy',context);
+    expect(before.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('');
+    const account=(await host.harness.behavior.callRpc('native.accounts',null)).accounts[0];
+    const input={accountId:account.accountId,projects:{onlySelected:false,rules:[]},expectedRevision:account.projectsRevision};
+    await host.harness.behavior.callRpc('native.setProjects',input);
+    const after=await host.harness.behavior.resolveProviderEnv('acp-agy',context);
+    expect(after.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('native-one');
+    await expect(host.harness.behavior.callRpc('native.setProjects',input)).rejects.toThrow();
+  }finally{await host.harness.lifecycle.dispose();}
 });

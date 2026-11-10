@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import {accountProjectsSchema, type AccountProjects} from './contracts.js';
 import {summarizeNativeAccounts} from './native-accounts.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
@@ -13,6 +14,7 @@ export const nativeExecutorSchema = z.object({
   callerIds: z.array(id).min(1).max(16),
   catalogCallerIds: z.array(id).max(16).default([]),
   projectIds: z.array(id).min(1).max(32),
+  projects: accountProjectsSchema.optional(),
   autopilotAllowed: z.boolean().default(false),
   enabled: z.boolean().default(false),
   execution:nativeExecutionSchema.optional(),
@@ -99,7 +101,7 @@ export class NativeSessions {
     this.state.events=this.state.events.filter(e=>e.at>now-14*86400000);
   }
   private allowed(executor:Executor,caller:NativeCaller,kind:'task'|'catalog'='task'){
-    return executor.enabled&&caller.projectId!==null&&executor.projectIds.includes(caller.projectId)&&
+    return executor.enabled&&caller.projectId!==null&&(executor.projects ? (!executor.projects.onlySelected || executor.projects.rules.length === 0 || executor.projects.rules.some(rule => rule.projectId === caller.projectId)) : executor.projectIds.includes(caller.projectId))&&
       (kind==='catalog'?executor.catalogCallerIds:executor.callerIds).includes(caller.hostId)&&(!caller.purpose||executor.autopilotAllowed);
   }
   async available(caller:NativeCaller){return this.serial(()=>this.state.managed&&this.state.executors.some(e=>this.allowed(e,caller)));}
@@ -121,6 +123,18 @@ export class NativeSessions {
     return executor;
   });}
   async setManaged(managed:boolean){return this.serial(()=>{this.state.managed=managed;return {managed};});}
+  async setProjects(accountId:string, projects:AccountProjects, expectedRevision:string){
+    const parsed=accountProjectsSchema.parse(projects);
+    if(parsed.rules.some(rule=>rule.role!=='inherit'))throw new NativeSessionError(400,'native-project-role-unsupported');
+    return this.serial(()=>{
+      const account=summarizeNativeAccounts(this.state).accounts.find(a=>a.accountId===accountId);
+      if(!account)throw new NativeSessionError(404,'native-account-not-found');
+      if(account.projectsRevision!==expectedRevision)throw new NativeSessionError(409,'native-projects-changed');
+      if(this.state.leases.some(l=>l.executor.accountId===accountId))throw new NativeSessionError(409,'native-executor-busy');
+      for(const executor of this.state.executors)if(executor.accountId===accountId)executor.projects=structuredClone(parsed);
+      return null;
+    });
+  }
   async accounts(){return this.serial(()=>summarizeNativeAccounts(this.state));}
   async snapshot(){return this.serial(()=>({managed:this.state.managed,executors:this.state.executors,
     leases:this.state.leases.map(({id,executor,caller,kind,state,deadline,createdAt})=>({id,executorId:executor.id,accountId:executor.accountId,hostId:executor.hostId,projectId:caller.projectId,kind,state,deadline,createdAt})),

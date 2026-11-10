@@ -186,9 +186,40 @@ it('projects registered subscriptions without exposing execution authority, and 
   await sessions.request(caller,acquire());
   await sessions.request({...caller,hostId:'worker'},acquire('worker-official'));
   expect(await sessions.accounts()).toEqual({managed:true,accounts:[
-    {accountId:'subscription-one',executors:[{id:'mac-official',enabled:true,autopilotAllowed:false},{id:'worker-official',enabled:true,autopilotAllowed:true}],active:1,queued:1,uncertain:0},
-    {accountId:'subscription-two',executors:[{id:'disabled-official',enabled:false,autopilotAllowed:false}],active:0,queued:0,uncertain:0},
+    {accountId:'subscription-one',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'mac-official',enabled:true,autopilotAllowed:false},{id:'worker-official',enabled:true,autopilotAllowed:true}],active:1,queued:1,uncertain:0},
+    {accountId:'subscription-two',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'disabled-official',enabled:false,autopilotAllowed:false}],active:0,queued:0,uncertain:0},
   ]});
   clock(1000+NATIVE_LEASE_MS+1);
   expect((await sessions.accounts()).accounts[0]).toMatchObject({active:0,queued:0,uncertain:1});
+});
+
+
+describe('native subscription project settings',()=>{
+  it('allows future projects across registered executors but keeps host, purpose and catalog boundaries',async()=>{
+    const {sessions,kv}=await fixture();
+    await sessions.configure({...executor,id:'other-host',hostId:'worker',callerIds:['worker']});
+    const initial=(await sessions.accounts()).accounts[0];
+    expect(await sessions.executorFor({...caller,projectId:'future-project'})).toBeNull();
+    await sessions.setProjects(executor.accountId,{onlySelected:false,rules:[]},initial.projectsRevision);
+    for(const hostId of ['mac','worker'])expect(await sessions.executorFor({...caller,hostId,projectId:'future-project'})).not.toBeNull();
+    for(const denied of [{...caller,hostId:'foreign'},{...caller,projectId:null}])
+      await expect(sessions.request(denied,acquire())).rejects.toThrow('native-executor-denied');
+    await expect(sessions.request({...caller,hostId:'catalog-only'},{...acquire(),kind:'catalog'})).rejects.toThrow();
+    expect((await sessions.snapshot()).executors.every(e=>e.autopilotAllowed===false)).toBe(true);
+    const restarted=new NativeSessions(kv);await restarted.initialize();
+    expect(await restarted.executorFor({...caller,projectId:'another-future-project'})).toBe(executor.id);
+    const revision=(await sessions.accounts()).accounts[0].projectsRevision;
+    await sessions.setProjects(executor.accountId,{onlySelected:true,rules:[{projectId:'future-project',role:'inherit'}]},revision);
+    expect(await sessions.executorFor(caller)).toBeNull();
+    expect(await sessions.executorFor({...caller,projectId:'future-project'})).toBe(executor.id);
+    await expect(sessions.setProjects(executor.accountId,{onlySelected:false,rules:[]},revision)).rejects.toThrow('native-projects-changed');
+  });
+  it('rejects changes during a lease, unknown subscriptions and unsupported project roles',async()=>{
+    const {sessions}=await fixture();const account=(await sessions.accounts()).accounts[0];
+    const lease=await sessions.request(caller,acquire());
+    await expect(sessions.setProjects(executor.accountId,{onlySelected:false,rules:[]},account.projectsRevision)).rejects.toThrow('native-executor-busy');
+    await sessions.request(caller,release(lease.leaseId!));
+    await expect(sessions.setProjects('missing',{onlySelected:false,rules:[]},account.projectsRevision)).rejects.toThrow('native-account-not-found');
+    await expect(sessions.setProjects(executor.accountId,{onlySelected:true,rules:[{projectId:'project-one',role:'primary'}]},account.projectsRevision)).rejects.toThrow('native-project-role-unsupported');
+  });
 });

@@ -1044,6 +1044,7 @@ function AccountPoolSettings() {
   const navigate = useBbNavigate();
   const [status, setStatus] = useState<PoolStatus | null>(readCachedStatus);
   const [nativeAccounts, setNativeAccounts] = useState<NativeAccounts | null>(null);
+  const [nativeSettings, setNativeSettings] = useState<string | null>(null);
   const [nativeError, setNativeError] = useState<string | null>(null);
   const [statusIsCached, setStatusIsCached] = useState(status !== null);
   const [config, setConfig] = useState<AccountPoolConfig | null>(null);
@@ -1594,7 +1595,7 @@ function AccountPoolSettings() {
             {provider.id === "agy" ? nativeAccounts?.accounts.map(account => (
               <div key={account.accountId} className="space-y-2 border-b border-border py-3 last:border-b-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm font-medium text-foreground">Google · Antigravity</span>
+                  <button type="button" className="text-sm font-medium text-foreground hover:underline" onClick={() => setNativeSettings(account.accountId)}>Google · Antigravity</button>
                   <SettingsBadge>{!nativeAccounts.managed ? "Управляемый режим выключен" : account.uncertain > 0 ? "Требуется проверка остановки" : account.executors.some(executor => executor.enabled) ? "Настроен" : "Исполнители выключены"}</SettingsBadge>
                 </div>
                 <p className="break-all text-xs text-muted-foreground">Подписка: {account.accountId}</p>
@@ -2289,6 +2290,17 @@ function AccountPoolSettings() {
             restart={() => void startCodex()}
           />
         ) : null}
+      </Dialog>
+      <AccountSettingsStyle />
+      <Dialog open={nativeSettings !== null} onOpenChange={open => {if(!open)setNativeSettings(null);}}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader><DialogTitle>Google · Antigravity</DialogTitle></DialogHeader>
+          {nativeAccounts?.accounts.filter(a=>a.accountId===nativeSettings).map(account=><div key={account.accountId}>
+            {account.mixedProjects && <p className="text-sm text-muted-foreground">У исполнителей разные настройки проектов. Сохранение применит выбранные настройки ко всей подписке.</p>}
+            <AccountProjectsForm account={{role:'primary',projects:account.projects}} showRoles={false}
+            loadProjects={()=>rpc.call('projects.list',null)}
+            save={async projects=>{await rpc.call('native.setProjects',{accountId:account.accountId,projects,expectedRevision:account.projectsRevision});await refreshNative();}} /></div>)}
+        </DialogContent>
       </Dialog>
     </div>
   );
