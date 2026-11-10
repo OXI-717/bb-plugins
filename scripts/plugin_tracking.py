@@ -55,10 +55,15 @@ def main():
     parser.add_argument('--database', type=Path, required=True)
     parser.add_argument('--backup', type=Path, required=True)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--plugin', action='append', help='Only these installed plugin IDs (repeatable)')
     args = parser.parse_args()
     db = sqlite3.connect(f'file:{args.database}?mode=rw', uri=True, timeout=15)
     db.row_factory = sqlite3.Row
-    rows = [dict(r) for r in db.execute("SELECT * FROM plugins WHERE removed_at IS NULL AND source_kind='git' AND source_git_range IS NULL AND source_git_ref_kind IN ('commit','tag')")]
+    rows = [dict(r) for r in db.execute("SELECT * FROM plugins WHERE removed_at IS NULL AND source_kind='git' AND source_git_range IS NULL AND source_git_ref_kind IN ('commit','tag','branch')")]
+    if args.plugin:
+        rows = [row for row in rows if row['id'] in args.plugin]
+        if set(args.plugin) != {row['id'] for row in rows}:
+            raise RuntimeError('Requested plugin is absent or already tracks releases')
     changes = [(row, plan(row)) for row in rows]
     if args.apply:
         # Backup only source registrations, never settings/secrets or whole BB state.

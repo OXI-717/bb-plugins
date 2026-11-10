@@ -37,3 +37,5 @@ CI checks manifests/catalog consistency, source privacy, typechecking, focused
 behavior and builds on supported platforms. Private repositories stay private
 unless publication is explicitly authorized and inspected. Disabled plugins stay
 disabled through migration and updates.
+
+Use `--plugin <id>` (repeatable) to scope a migration to an explicitly reviewed installation. Branch selectors are accepted only when the installed commit itself has the verified immutable release tag; no update to an unverified branch head occurs during migration.

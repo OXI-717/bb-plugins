@@ -70,4 +70,23 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(db.execute('SELECT value FROM plugin_kv').fetchone()[0],'unchanged')
         db.close()
 
+    def test_cli_scopes_branch_migration(self):
+        import sqlite3, tempfile, sys
+        from pathlib import Path
+        from plugin_tracking import main, FIELDS
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'bb.db'; backup=Path(tmp)/'backup.json'
+            db=sqlite3.connect(path)
+            db.execute('CREATE TABLE plugins (id TEXT PRIMARY KEY,'+','.join(k+' TEXT' for k in FIELDS)+', source_kind TEXT, removed_at TEXT, source_git_url TEXT, source_git_subdirectory TEXT, git_resolved_commit TEXT, version TEXT)')
+            for id in ['example','unrelated']:
+                db.execute('INSERT INTO plugins VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',(id,'old','main','branch',None,None,None,'git',None,'https://example.invalid/repo.git','plugins/'+id,'abc','0.2.4'))
+            db.commit();db.close()
+            with patch.object(sys,'argv',['tracking','--database',str(path),'--backup',str(backup),'--plugin','example','--apply']), patch('plugin_tracking.remote',return_value='abc\trefs/tags/example/v0.2.4\n'), patch('builtins.print'):
+                main()
+            db=sqlite3.connect(path)
+            self.assertEqual(db.execute("SELECT source_git_range FROM plugins WHERE id='example'").fetchone()[0],'^0.2.4')
+            self.assertEqual(db.execute("SELECT source_git_ref_kind FROM plugins WHERE id='unrelated'").fetchone()[0],'branch')
+            self.assertEqual(backup.stat().st_mode & 0o777,0o600)
+            db.close()
+
 if __name__=='__main__': unittest.main()
