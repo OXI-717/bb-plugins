@@ -91,3 +91,36 @@ test('manifest cannot carry traversal, arbitrary RPC paths, oversized bytes or a
  assert.throws(()=>handoffBytes({...file,projectId:'proj_alpha',bytesBase64:Buffer.from('other bytes').toString('base64')}),/integrity/);
  assert.throws(()=>handoffBytes({...file,name:'file.html',projectId:'proj_alpha',bytesBase64:bytes.toString('base64')}),/extension/);
 });
+
+test('source reads enforce membership, permissions and ordered scoped events',async()=>{
+ const h=harness(),thread={id:'thr_source',projectId:'proj_alpha'};
+ h.deps.get=async(_c,path)=>path.includes('/events?')?[{threadId:thread.id,seq:1}]:thread;
+ const input={serverId:'alpha',projectId:'proj_alpha',threadId:thread.id};
+ assert.equal((await h.service.source(input)).events.length,1);
+ thread.projectId='proj_other';await assert.rejects(()=>h.service.source(input));
+ thread.projectId='proj_alpha';h.config.allowWrites=false;await assert.rejects(()=>h.service.source(input));
+ h.config.allowWrites=true;h.primary.add(thread.id);await assert.rejects(()=>h.service.source(input));
+ h.primary.clear();h.deps.get=async(_c,path)=>path.includes('/events?')?[{threadId:'thr_other',seq:1}]:thread;
+ await assert.rejects(()=>h.service.source(input));
+});
+
+ test('source pages reject out-of-order sequences and configuration changes',async()=>{
+ const h=harness(),input={serverId:'alpha',projectId:'proj_alpha',threadId:'thr_source'};
+ h.deps.get=async(_c,path)=>path.includes('/events?')?[{threadId:'thr_source',seq:2},{threadId:'thr_source',seq:1}]:{id:'thr_source',projectId:'proj_alpha'};
+ await assert.rejects(()=>h.service.source(input),/sequence/);
+ h.deps.get=async(_c,path)=>{if(path.includes('/events?')){h.config.sshTarget='changed';return [];}return {id:'thr_source',projectId:'proj_alpha'};};
+ await assert.rejects(()=>h.service.source(input),/changed/);
+ });
+
+test('source refuses permission or connection changes during the final thread GET',async()=>{
+ for(const mutate of [c=>{c.allowWrites=false;},c=>{c.sshTarget='changed';}]){
+  const h=harness();let threadReads=0;
+  h.deps.get=async(_c,path)=>{
+   if(path.includes('/events?'))return [{threadId:'thr_source',seq:1}];
+   if(++threadReads===2)mutate(h.config);
+   return {id:'thr_source',projectId:'proj_alpha'};
+  };
+  await assert.rejects(()=>h.service.source({serverId:'alpha',projectId:'proj_alpha',threadId:'thr_source'}),/Source connection changed/);
+  assert.equal(threadReads,2);
+ }
+});

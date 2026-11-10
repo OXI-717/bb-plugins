@@ -103,6 +103,7 @@ export default function plugin(bb:BbPluginApi){
   load:id=>bb.storage.kv.get(`handoff:${id}`),save:(id,value)=>bb.storage.kv.set(`handoff:${id}`,value),
  });
  bb.rpc.register(handoffRpc,{
+  handoffSource:input=>handoffs.source(input),
   handoffTargets:()=>handoffs.targets(),handoffOptions:input=>handoffs.options(input),
   handoffBegin:input=>handoffs.begin(input),handoffUpload:input=>handoffs.upload(input),
   handoffCommit:input=>handoffs.commit(input),handoffStatus:input=>handoffs.status(input),
