@@ -2293,7 +2293,7 @@ function AccountPoolSettings() {
       </Dialog>
       <AccountSettingsStyle />
       <Dialog open={nativeSettings !== null} onOpenChange={open => {if(!open)setNativeSettings(null);}}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto">
+        <DialogContent className="pool-settings max-h-[85vh] overflow-y-auto">
           <DialogHeader><DialogTitle>Google · Antigravity</DialogTitle></DialogHeader>
           {nativeAccounts?.accounts.filter(a=>a.accountId===nativeSettings).map(account=><div key={account.accountId}>
             {account.mixedProjects && <p className="text-sm text-muted-foreground">У исполнителей разные настройки проектов. Сохранение применит выбранные настройки ко всей подписке.</p>}

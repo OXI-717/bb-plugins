@@ -182,6 +182,7 @@ describe("Account Pool settings", () => {
     const slot=render([],{"native.accounts":()=>({managed:true,accounts:[{accountId:'subscription-one',projects,projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.setProjects":()=>null});
     fireEvent.click(await slot.findByRole('button',{name:'Google · Antigravity'}));
     const control=await slot.findByLabelText('Где использовать');
+    expect(control.closest('.pool-settings')).not.toBeNull();
     expect((control as HTMLSelectElement).value).toBe('selected');
     expect(slot.queryByLabelText('Роль в project-one')).toBeNull();
     fireEvent.change(control,{target:{value:'all'}});
