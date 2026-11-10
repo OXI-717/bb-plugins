@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {accountProjectsSchema, type AccountProjects} from './contracts.js';
-import {summarizeNativeAccounts} from './native-accounts.js';
+import {nativeProjectsSchema, summarizeNativeAccounts} from './native-accounts.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const nativeExecutionSchema=z.object({
@@ -14,7 +14,7 @@ export const nativeExecutorSchema = z.object({
   callerIds: z.array(id).min(1).max(16),
   catalogCallerIds: z.array(id).max(16).default([]),
   projectIds: z.array(id).min(1).max(32),
-  projects: accountProjectsSchema.optional(),
+  projects: nativeProjectsSchema.optional(),
   autopilotAllowed: z.boolean().default(false),
   enabled: z.boolean().default(false),
   execution:nativeExecutionSchema.optional(),
@@ -124,14 +124,22 @@ export class NativeSessions {
   });}
   async setManaged(managed:boolean){return this.serial(()=>{this.state.managed=managed;return {managed};});}
   async setProjects(accountId:string, projects:AccountProjects, expectedRevision:string){
-    const parsed=accountProjectsSchema.parse(projects);
-    if(parsed.rules.some(rule=>rule.role!=='inherit'))throw new NativeSessionError(400,'native-project-role-unsupported');
+    const parsed=nativeProjectsSchema.parse(projects);
     return this.serial(()=>{
       const account=summarizeNativeAccounts(this.state).accounts.find(a=>a.accountId===accountId);
       if(!account)throw new NativeSessionError(404,'native-account-not-found');
       if(account.projectsRevision!==expectedRevision)throw new NativeSessionError(409,'native-projects-changed');
       if(this.state.leases.some(l=>l.executor.accountId===accountId))throw new NativeSessionError(409,'native-executor-busy');
-      for(const executor of this.state.executors)if(executor.accountId===accountId)executor.projects=structuredClone(parsed);
+      const next=this.state.executors.map(e=>e.accountId===accountId?{...e,projects:structuredClone(parsed)}:e);
+      const scope=(e:Executor)=>e.projects ? (!e.projects.onlySelected||e.projects.rules.length===0?null:e.projects.rules.map(r=>r.projectId)) : e.projectIds;
+      for(let i=0;i<next.length;i++)for(let j=i+1;j<next.length;j++){
+        const a=next[i],b=next[j];
+        if(!a.enabled||!b.enabled||(a.accountId!==accountId&&b.accountId!==accountId))continue;
+        if(!a.callerIds.some(id=>b.callerIds.includes(id))&&!a.catalogCallerIds.some(id=>b.catalogCallerIds.includes(id)))continue;
+        const as=scope(a),bs=scope(b);
+        if(as===null||bs===null||as.some(id=>bs.includes(id)))throw new NativeSessionError(409,'native-projects-ambiguous');
+      }
+      this.state.executors=next;
       return null;
     });
   }

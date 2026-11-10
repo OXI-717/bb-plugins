@@ -28,7 +28,7 @@ Open the Google subscription card in Accounts to use the existing Projects form.
 Choose **All projects** to include future projects, or **Only selected** to limit
 execution to the listed projects. As with other accounts, an empty list permits
 all projects. Saving applies atomically to every executor sharing the subscription;
-active/queued/uncertain leases and stale forms refuse changes. Native executors do
+active/queued/uncertain leases, ambiguous executor selection and stale forms refuse changes. Native lists are limited to 32 project IDs. Native executors do
 not implement project-specific primary/reserve roles, so those controls are hidden.
 
 Legacy registrations retain their `projectIds` allowlist until explicitly changed.

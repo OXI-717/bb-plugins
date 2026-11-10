@@ -4,6 +4,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {it,expect,vi} from 'vitest';
+import {nativeAccountsSchema} from './native-accounts.js';
 import {createAccountPoolPlugin} from './server.js';
 
 it('authenticates prepared runtime grants against the server profile registry before a native task',async()=>{
@@ -84,7 +85,7 @@ it('saves native projects through RPC and contributes the executor for a future 
     const context={hostId:'host-one',projectId:'future-project',threadId:'thread-new'};
     const before=await host.harness.behavior.resolveProviderEnv('acp-agy',context);
     expect(before.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('');
-    const account=(await host.harness.behavior.callRpc('native.accounts',null)).accounts[0];
+    const account=nativeAccountsSchema.parse(await host.harness.behavior.callRpc('native.accounts',null)).accounts[0];
     const input={accountId:account.accountId,projects:{onlySelected:false,rules:[]},expectedRevision:account.projectsRevision};
     await host.harness.behavior.callRpc('native.setProjects',input);
     const after=await host.harness.behavior.resolveProviderEnv('acp-agy',context);

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { accountProjectsSchema, type AccountProjects } from "./contracts.js";
 import { z } from "zod";
 
+export const nativeProjectsSchema = accountProjectsSchema.refine(value => value.rules.length <= 32 && value.rules.every(rule => /^[A-Za-z0-9_-]{1,80}$/.test(rule.projectId) && rule.role === 'inherit'), 'Native project lists allow at most 32 project IDs and inherited roles');
+
 export const nativeAccountsSchema = z.object({
   managed: z.boolean(),
   accounts: z.array(z.object({

@@ -1,5 +1,5 @@
 import { egressProfileSchema, egressStateSchema, type AccountEgress } from "./account-egress.js";
-import {nativeAccountsSchema, type NativeAccounts} from "./native-accounts.js";
+import {nativeProjectsSchema, nativeAccountsSchema, type NativeAccounts} from "./native-accounts.js";
 import type {AgyOAuthLogin} from "./agy-oauth-login.js";
 import { defineRpcContract, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -55,7 +55,7 @@ const browserOpenInputSchema = z.object({
 export type BrowserOpenInput = z.infer<typeof browserOpenInputSchema>;
 
 export const accountPoolRpcContract = defineRpcContract({
-  "native.setProjects": {input:z.object({accountId:z.string().min(1).max(80),projects:accountProjectsSchema,expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
+  "native.setProjects": {input:z.object({accountId:z.string().min(1).max(80),projects:nativeProjectsSchema,expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
   "native.accounts": {input: z.null(), output: nativeAccountsSchema},
   "egress.status":{input:z.null(),output:egressStateSchema},
   "egress.bind":{input:z.object({accountId:z.string().uuid(),ref:z.object({id:z.string(),version:z.number().int().positive()}).strict().nullable()}).strict(),output:z.null()},

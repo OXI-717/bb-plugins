@@ -220,6 +220,25 @@ describe('native subscription project settings',()=>{
     await expect(sessions.setProjects(executor.accountId,{onlySelected:false,rules:[]},account.projectsRevision)).rejects.toThrow('native-executor-busy');
     await sessions.request(caller,release(lease.leaseId!));
     await expect(sessions.setProjects('missing',{onlySelected:false,rules:[]},account.projectsRevision)).rejects.toThrow('native-account-not-found');
-    await expect(sessions.setProjects(executor.accountId,{onlySelected:true,rules:[{projectId:'project-one',role:'primary'}]},account.projectsRevision)).rejects.toThrow('native-project-role-unsupported');
+    await expect(sessions.setProjects(executor.accountId,{onlySelected:true,rules:[{projectId:'project-one',role:'primary'}]},account.projectsRevision)).rejects.toThrow();
   });
+});
+
+
+it.each(['subscription-one','subscription-two'])('refuses overlapping executor project selection for %s without changing policy',async(accountId)=>{
+  const {sessions}=await fixture();
+  await sessions.configure({...executor,id:'second-executor',accountId,projectIds:['project-two']});
+  const initial=(await sessions.accounts()).accounts.find(a=>a.accountId===executor.accountId)!;
+  for(const projects of [{onlySelected:false,rules:[]},{onlySelected:true,rules:[{projectId:'project-two',role:'inherit' as const}]}])
+    await expect(sessions.setProjects(executor.accountId,projects,initial.projectsRevision)).rejects.toThrow('native-projects-ambiguous');
+  expect(await sessions.executorFor(caller)).toBe(executor.id);
+  expect(await sessions.executorFor({...caller,projectId:'project-two'})).toBe('second-executor');
+  expect((await sessions.accounts()).accounts.find(a=>a.accountId===executor.accountId)!.projectsRevision).toBe(initial.projectsRevision);
+});
+it('bounds native project metadata and prevents callers from mutating the stored projects through summaries',async()=>{
+  const {sessions}=await fixture();let account=(await sessions.accounts()).accounts[0];
+  await expect(sessions.setProjects(executor.accountId,{onlySelected:true,rules:Array.from({length:33},(_,i)=>({projectId:'project-'+i,role:'inherit' as const}))},account.projectsRevision)).rejects.toThrow();
+  await sessions.setProjects(executor.accountId,{onlySelected:false,rules:[]},account.projectsRevision);
+  account=(await sessions.accounts()).accounts[0];account.projects.onlySelected=true;account.projects.rules.push({projectId:'foreign',role:'inherit'});
+  expect(await sessions.executorFor(caller)).toBe(executor.id);
 });

@@ -11,7 +11,7 @@ import hostEntry from '../dist/test/host.js';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 export async function poolModules(){
  const temp=await mkdtemp(join(root,'dist','task-harness-'));
- for(const name of ['native-sessions','native-accounts','native-unlock-rpc']){
+ for(const name of ['native-sessions','native-accounts','native-unlock-rpc','contracts']){
   const directory=name!=='native-unlock-rpc'?(process.env.OXI_TEST_POOL_SOURCE??join(root,'../account-pool-balanced/src')):join(root,'../account-pool-balanced/src');
   const source=await readFile(join(directory,name+'.ts'),'utf8');
   await writeFile(join(temp,name+'.js'),ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText);
