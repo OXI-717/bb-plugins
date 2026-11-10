@@ -491,5 +491,6 @@ export const brokerRunner = (socketPath: string): Runner => (_binary, args, _env
         if (reply.code !== 0 || typeof reply.stdout !== 'string') {done(new CredentialProcessError('process exit ' + (typeof reply.code === 'number' ? reply.code : 'null') + '; output suppressed')); return;}
         done(undefined, Buffer.from(reply.stdout, 'base64').toString('utf8'));
     });
-    socket.end(JSON.stringify({args, stdin: Buffer.from(input ?? '', 'utf8').toString('base64')}) + '\n');
+    // Keep our side open: closing it is how the broker learns a call was cancelled.
+    socket.write(JSON.stringify({args, stdin: Buffer.from(input ?? '', 'utf8').toString('base64')}) + '\n');
 });

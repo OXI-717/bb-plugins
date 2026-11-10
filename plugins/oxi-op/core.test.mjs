@@ -406,3 +406,20 @@ test('agent commands find programs like a login shell and report a missing one b
  assert.equal(await programAvailable('sh'),true);assert.equal(await programAvailable('definitely-not-a-program-xyz'),false);
  await assert.rejects(runCommand('definitely-not-a-program-xyz',[],{PATH:'/usr/bin'},undefined,1000),e=>e.message.includes('[command-not-found]'));
 });
+test('cancelling a broker call stops the running op before it can finish a change',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ const {mkdtemp,writeFile,chmod,rm,stat,access}=await import('node:fs/promises');const {join}=await import('node:path');const {spawn}=await import('node:child_process');
+ const dir=await mkdtemp('/tmp/oxop-');const sock=join(dir,'s','b.sock');const fake=join(dir,'op');const mark=join(dir,'changed');
+ await writeFile(fake,'#!/bin/sh\nsleep 1.5\ntouch '+mark+'\necho done\n');await chmod(fake,0o755);
+ const broker=spawn('python3',[new URL('./broker/op_broker.py',import.meta.url).pathname,'--op',fake,'--socket',sock],{stdio:'ignore'});
+ try{
+  for(let i=0;i<100;i++){try{await stat(sock);break;}catch{await new Promise(r=>setTimeout(r,50));}}
+  const controller=new AbortController();
+  const pending=brokerRunner(sock)('op',['--account','A','vault','delete','v'],{},undefined,controller.signal).catch(e=>e.message);
+  await new Promise(r=>setTimeout(r,300));controller.abort();
+  assert((await pending).includes('[cancelled]'));
+  await new Promise(r=>setTimeout(r,2000));
+  await assert.rejects(access(mark),'the cancelled command must not complete its change');
+  assert.equal(await brokerRunner(sock)('op',['--account','A','whoami'],{}),'done\n','the broker keeps serving after a cancellation');
+ }finally{broker.kill('SIGTERM');await new Promise(r=>setTimeout(r,200));await rm(dir,{recursive:true,force:true});}
+});

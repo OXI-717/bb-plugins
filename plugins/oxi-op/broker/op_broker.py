@@ -20,12 +20,15 @@ import argparse
 import base64
 import json
 import os
+import select
 import signal
 import socket
 import socketserver
 import stat
 import subprocess
 import sys
+import threading
+import time
 
 MAX_REQUEST = 4 * 1024 * 1024
 MAX_OUTPUT = 4 * 1024 * 1024
@@ -82,16 +85,33 @@ class Handler(socketserver.StreamRequestHandler):
         try:
             proc = subprocess.Popen([self.op_binary, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, env=child_env(), start_new_session=False)
-            try:
-                out, _ = proc.communicate(data, timeout=TIMEOUT)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                self.reply({"code": 124, "error": "timeout"})
-                return
         except OSError:
             self.reply({"code": 127, "error": "spawn-failed"})
             return
+        # The caller keeps its side open while it waits; a closed connection means it cancelled,
+        # and the command must stop before it can finish a change nobody is waiting for.
+        result: dict = {}
+        worker = threading.Thread(target=lambda: result.update(out=proc.communicate(data)[0]), daemon=True)
+        worker.start()
+        deadline = time.monotonic() + TIMEOUT
+        while worker.is_alive():
+            if time.monotonic() > deadline:
+                proc.kill()
+                worker.join()
+                self.reply({"code": 124, "error": "timeout"})
+                return
+            readable, _, _ = select.select([self.connection], [], [], 0.1)
+            if readable:
+                try:
+                    gone = self.connection.recv(1, socket.MSG_PEEK) == b""
+                except OSError:
+                    gone = True
+                if gone:
+                    proc.kill()
+                    worker.join()
+                    return
+            worker.join(0)
+        out = result.get("out", b"")
         if len(out) > MAX_OUTPUT:
             self.reply({"code": 2, "error": "output-too-large"})
             return
