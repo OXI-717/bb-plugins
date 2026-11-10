@@ -7,6 +7,7 @@ import re
 import sqlite3
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 FIELDS = ('source', 'source_git_requested_ref', 'source_git_ref_kind',
           'source_git_range', 'source_git_tag_prefix', 'source_git_resolved_tag')
@@ -17,19 +18,37 @@ def remote(url, *args):
 
 def plan(row):
     url, version = row['source_git_url'], row['version']
+    parsed = urlsplit(url)
+    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.query or parsed.fragment
+            or any(c.isspace() for c in url)):
+        raise RuntimeError('Use an HTTPS repository URL without credentials, query or fragment')
     tag_output = remote(url, '--tags')
     tag_commits = {line.split()[1].removeprefix('refs/tags/'):line.split()[0] for line in tag_output.splitlines()}
     tags = [line.split('refs/tags/', 1)[1] for line in tag_output.splitlines()
             if 'refs/tags/' in line and not line.endswith('^{}')]
-    matches = [tag for tag in tags if tag == 'v' + version or tag.endswith('/v' + version)]
-    subdir = row['source_git_subdirectory'] or ''
-    if len(matches) > 1:
-        matches = [tag for tag in matches if tag.rsplit('/v', 1)[0] == subdir.split('/')[-1]]
+    # Monorepos use the stable plugin ID, including nested package paths.
+    prefix = row['id'] + '/' if row['source_git_subdirectory'] else ''
+    matches = [tag for tag in tags if tag == prefix + 'v' + version]
     if len(matches) == 1 and tag_commits.get(matches[0]+'^{}',tag_commits.get(matches[0])) == row['git_resolved_commit'] and re.fullmatch(r'\d+\.\d+\.\d+', version):
-        prefix = matches[0][:-len('v' + version)]
-        return dict(zip(FIELDS, [f'git:{url}@semver:{prefix + chr(58) if prefix else str()}^{version}', None, None,
+        return dict(zip(FIELDS, [f'git:{url}@semver:{prefix + ':' if prefix else ''}^{version}', None, None,
                                 '^' + version, prefix, matches[0]]))
     raise RuntimeError('A verified release tag for the installed commit is required: ' + row['id'])
+
+def apply_changes(db, changes):
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        for row, change in changes:
+            current = dict(db.execute('SELECT * FROM plugins WHERE id=?', (row['id'],)).fetchone())
+            if current != row:
+                raise RuntimeError('Registration changed concurrently: ' + row['id'])
+            db.execute('UPDATE plugins SET '+','.join(k+'=?' for k in FIELDS)+' WHERE id=?',
+                       (*[change[k] for k in FIELDS], row['id']))
+            after = dict(db.execute('SELECT * FROM plugins WHERE id=?', (row['id'],)).fetchone())
+            assert after == {**row, **change}
+        db.commit()
+    except BaseException:
+        db.rollback(); raise
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -49,19 +68,7 @@ def main():
             json.dump([{'id': r['id'], 'before': {k:r[k] for k in FIELDS}, 'after': p}
                        for r,p in changes], out, indent=2)
             out.flush(); os.fsync(out.fileno())
-        db.execute('BEGIN IMMEDIATE')
-        try:
-            for row, change in changes:
-                current = dict(db.execute('SELECT * FROM plugins WHERE id=?', (row['id'],)).fetchone())
-                if current != row:
-                    raise RuntimeError('Registration changed concurrently: ' + row['id'])
-                db.execute('UPDATE plugins SET '+','.join(k+'=?' for k in FIELDS)+' WHERE id=?',
-                           (*[change[k] for k in FIELDS], row['id']))
-                after = dict(db.execute('SELECT * FROM plugins WHERE id=?', (row['id'],)).fetchone())
-                assert after == {**row, **change}
-            db.commit()
-        except BaseException:
-            db.rollback(); raise
+        apply_changes(db, changes)
     print(json.dumps({'applied': args.apply, 'changes': [{'id':r['id'], **p} for r,p in changes]}, indent=2))
 
 if __name__ == '__main__':
