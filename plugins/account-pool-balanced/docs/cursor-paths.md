@@ -143,3 +143,11 @@ commands and unknown options do not activate the ACP relay. A confirmed local
 interruption can normalize the exact structured `Stream ended without turnEnded`
 RPC error as well as `incomplete envelope`. Assistant text alone still cannot
 trigger recovery.
+
+The exact structured aborted socket-hang-up RPC error is normalized only after a
+confirmed interruption of the current local model response. Cancellation, stale
+requests, other aborted errors and assistant text alone cannot authorize this.
+Native failed-turn handling emits bounded metadata about verification,
+classification and scheduling phases. Fixed phase/outcome labels and opaque
+core identifiers are recorded without SDK exception text. A reached phase does
+not prove that a retry was scheduled.

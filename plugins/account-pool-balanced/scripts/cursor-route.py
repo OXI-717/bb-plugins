@@ -211,7 +211,7 @@ class AcpPoolFailures:
             rpc_error = message.get('error')
             interrupted_rpc = (isinstance(rpc_error, dict) and rpc_error.get('code') == -32603
                 and isinstance(rpc_error.get('message'), str) and re.fullmatch(
-                    r'(?:Internal error: )?(?:Error: )?(?:RetriableError: )?(?:\[invalid_argument\] protocol error: incomplete envelope|Stream ended without turnEnded — connection likely dropped mid-stream)',
+                    r'(?:Internal error: )?(?:Error: )?(?:RetriableError: )?(?:\[invalid_argument\] protocol error: incomplete envelope|Stream ended without turnEnded — connection likely dropped mid-stream|\[aborted\] socket hang up)',
                     rpc_error['message'].strip()) is not None)
             false_success = isinstance(message.get('result'), dict) and message['result'].get('stopReason') == 'end_turn'
             if current and current['reason'] and (current['reported'] or current['interrupted']) and (false_success or (current['interrupted'] and interrupted_rpc)):

@@ -283,7 +283,7 @@ except (OSError,http.client.HTTPException):
  pass
 c.close()
 update('\\n\\nError: RetriableError: [invalid_argument] protocol error: incomplete envelope')
-reply={'error':{'code':-32603,'message':'[invalid_argument] protocol error: incomplete envelope'}} if os.environ['BODY_MODE']=='rpc-error' else {'result':{'stopReason':'end_turn'}}
+reply={'error':{'code':-32603,'message':'[aborted] socket hang up'}} if os.environ['BODY_MODE']=='rpc-error' else {'result':{'stopReason':'end_turn'}}
 print(json.dumps({'jsonrpc':'2.0','id':r['id'],**reply}),flush=True)
 """)
                 cli.chmod(0o755)
@@ -472,6 +472,22 @@ class CursorGlobalOptionsTest(unittest.TestCase):
             if mode=='reused-id':state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
             original={'id':1,'error':{'code':-1 if mode=='wrong-code' else -32603,'message':'unrelated' if mode=='different-message' else text}}
             self.assertIs(state.child(original),original,mode)
+
+class CursorAbortedRpcTest(unittest.TestCase):
+    def test_exact_aborted_rpc_requires_current_interruption(self):
+        for prefix in ('','Internal error: ','RetriableError: ','Error: RetriableError: '):
+            for mode in ('current','no-evidence','cancel','stale','reused-id','wrong-code','other-aborted'):
+                state=route.AcpPoolFailures()
+                state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+                token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+                if mode!='no-evidence':state.model_interrupted(token)
+                if mode=='cancel':state.client({'method':'session/cancel','params':{'sessionId':'synthetic'}})
+                if mode=='stale':state.begin_model_request('agent.v1.AgentService/RunSSE')
+                if mode=='reused-id':state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+                original={'id':1,'error':{'code':-1 if mode=='wrong-code' else -32603,'message':prefix+('[aborted] user cancelled' if mode=='other-aborted' else '[aborted] socket hang up')}}
+                result=state.child(original)
+                if mode=='current':self.assertEqual(result['error']['message'],'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.')
+                else:self.assertIs(result,original,mode)
 
 class CursorDiagnosticTest(unittest.TestCase):
     def test_success_is_silent_and_ring_is_bounded(self):
