@@ -119,3 +119,5 @@ See [the bridge contract](CONTRACT.md) and [review and validation](REVIEW.md). T
 The matching Handoff plugin can copy a user-selected saved snapshot and selected
 attachments to a ready remote environment. See [contract and limits](HANDOFF.md).
 This does not enroll remote machines or enable agent consumers.
+
+BB 0.49 short thread links (`/threads/<id>`) are resolved through validated remote reads after the primary server confirms absence. Local threads retain priority; failures are not treated as absence.
