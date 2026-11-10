@@ -111,3 +111,16 @@ test('source reads enforce membership, permissions and ordered scoped events',as
  h.deps.get=async(_c,path)=>{if(path.includes('/events?')){h.config.sshTarget='changed';return [];}return {id:'thr_source',projectId:'proj_alpha'};};
  await assert.rejects(()=>h.service.source(input),/changed/);
  });
+
+test('source refuses permission or connection changes during the final thread GET',async()=>{
+ for(const mutate of [c=>{c.allowWrites=false;},c=>{c.sshTarget='changed';}]){
+  const h=harness();let threadReads=0;
+  h.deps.get=async(_c,path)=>{
+   if(path.includes('/events?'))return [{threadId:'thr_source',seq:1}];
+   if(++threadReads===2)mutate(h.config);
+   return {id:'thr_source',projectId:'proj_alpha'};
+  };
+  await assert.rejects(()=>h.service.source({serverId:'alpha',projectId:'proj_alpha',threadId:'thr_source'}),/Source connection changed/);
+  assert.equal(threadReads,2);
+ }
+});

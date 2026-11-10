@@ -82,7 +82,9 @@ export function createHandoffs(d:HandoffDeps){
      (input.order==='asc'?event.seq<=previous:event.seq>=previous))throw Error('Invalid source event sequence');
     previous=event.seq;
    }
-   return {thread:await member(),events};
+   const thread=await member();
+   if(fingerprint(await d.selected(c.serverId))!==fingerprint(c))throw Error('Source connection changed');
+   return {thread,events};
   },
   async targets(){
    const all=await d.configurations();if(!all.enabled)return [];
