@@ -151,3 +151,13 @@ Native failed-turn handling emits bounded metadata about verification,
 classification and scheduling phases. Fixed phase/outcome labels and opaque
 core identifiers are recorded without SDK exception text. A reached phase does
 not prove that a retry was scheduled.
+
+
+The ACP relay releases model sockets owned by a completed prompt generation,
+including older model requests of that same prompt. The CLI process remains
+alive for later prompts. Session cancellation is scoped to the named session.
+A registration racing with its prompt's reply is closed immediately. Unknown
+ownership, ambiguous reused live request IDs and unrelated prompts are not
+closed based on a thread-wide idle event. The registry is bounded, and finished
+HTTP bodies remove their entries. This cleanup does not change Guard policy
+or authorize retries.

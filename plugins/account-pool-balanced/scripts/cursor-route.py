@@ -55,6 +55,7 @@ class AcpPoolFailures:
     def __init__(self):
         self.lock = threading.Lock()
         self.pending = {}
+        self.model_streams = {}
         self.generation = 0
         self.request_generation = 0
         self.trace = deque(maxlen=64)
@@ -116,6 +117,34 @@ class AcpPoolFailures:
             if outcome == 'read_error':
                 self.dump_trace('read_error')
 
+    def _release_generation(self, generation):
+        # Called under the state lock. Socket shutdown does not wait for readers.
+        owned = [key for key, (owner, _) in self.model_streams.items() if owner == generation]
+        for key in owned:
+            _, close = self.model_streams.pop(key)
+            try:
+                close()
+            except Exception:
+                pass
+
+    def register_model_stream(self, token, close):
+        if token is None:
+            return None
+        with self.lock:
+            current = self.pending.get(token[0])
+            if not current or current['generation'] != token[1]:
+                close()
+                return None
+            if len(self.model_streams) >= 64:
+                return None
+            key = object()
+            self.model_streams[key] = (token[1], close)
+            return key
+
+    def unregister_model_stream(self, key):
+        with self.lock:
+            self.model_streams.pop(key, None)
+
     def client(self, message):
         if not isinstance(message, dict):
             return
@@ -124,6 +153,9 @@ class AcpPoolFailures:
             session = params.get('sessionId') if isinstance(params, dict) else None
             if isinstance(session, str):
                 with self.lock:
+                    for current in self.pending.values():
+                        if current['session'] == session:
+                            self._release_generation(current['generation'])
                     self.pending = {identifier: current for identifier, current in self.pending.items()
                         if current['session'] != session}
                     self.note('cancel', pendingCount=len(self.pending))
@@ -138,7 +170,8 @@ class AcpPoolFailures:
             if len(self.pending) < 64:
                 self.generation += 1
                 params = message.get('params') or {}
-                self.pending[identifier] = {'generation': self.generation,
+                ambiguous = identifier in self.pending
+                self.pending[identifier] = {'generation': self.generation, 'ambiguous': ambiguous,
                     'session': params.get('sessionId') if isinstance(params, dict) else None,
                     'reason': None, 'reported': False, 'prefix': '',
                     'request': None, 'interrupted': False}
@@ -204,6 +237,8 @@ class AcpPoolFailures:
             if type(identifier) not in (str, int) or ('result' not in message and 'error' not in message):
                 return message
             current = self.pending.pop(identifier, None)
+            if current and not current['ambiguous']:
+                self._release_generation(current['generation'])
             self.note('reply', pendingMatch=current is not None, interrupted=bool(current and current['interrupted']), hasError='error' in message)
             if self.observed_error:
                 self.dump_trace('known_transport_text')
@@ -448,6 +483,7 @@ def run_gateway(executable, argv, env):
                 return
             connection = None
             watcher = None
+            stream_key = None
             stopped = threading.Event()
             disconnected = threading.Event()
             prompt = failures.begin_model_request(rpc_path)
@@ -491,6 +527,13 @@ def run_gateway(executable, argv, env):
                 # Keep the deadline for connecting and receiving headers only.
                 # getresponse() can detach this socket for Connection: close.
                 upstream_socket = connection.sock
+                def close_owned_stream():
+                    disconnected.set()
+                    try:
+                        upstream_socket.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                stream_key = failures.register_model_stream(prompt, close_owned_stream)
                 response = connection.getresponse()
                 if prompt is not None:
                     failures.model_response(rpc_path, response.getheader('x-bb-pool-error'), prompt)
@@ -542,6 +585,7 @@ def run_gateway(executable, argv, env):
                     print("Cursor pool gateway connection failed", file=sys.stderr)
                 self.close_connection = True
             finally:
+                failures.unregister_model_stream(stream_key)
                 if body_outcome and re.fullmatch(r'agent\.v[0-9]+\.AgentService/Run(?:SSE|Poll)?', rpc_path):
                     failures.body_trace(prompt, pool_id, body_outcome, completion, bytes_read)
                 stopped.set()
