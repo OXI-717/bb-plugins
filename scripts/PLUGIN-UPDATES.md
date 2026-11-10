@@ -2,8 +2,9 @@
 
 Install public releases with a compatible Git semver range and a per-plugin tag
 prefix (for monorepos), or a tracking npm range. Do not pin a release tag or commit
-unless a deliberate freeze is required and documented. For repositories without
-release tags, track a verified branch; branch tracking does not imply compatibility.
+unless a deliberate freeze is required and documented. All owner-maintained Git plugins use compatible release ranges. Never fall back
+to a branch. If the installed commit has no verified release tag, prepare and
+validate a release first; do not silently replace the installed code.
 Local path plugins follow their source checkout and use `bb plugin reload`.
 
 Use `bb plugin source <id> --json` to inspect tracking and `bb plugin update <id>`
@@ -29,3 +30,10 @@ plugin at a time, verify its behavior and compare configuration before/after.
 Do not mass-activate updates to a busy account pool. Local paths, builtins and
 already-tracking registrations are not rewritten. Missing local checkouts need
 separate recovery; never invent a repository based on a display name.
+
+Owner plugin display names start with `OXI ` and use English. Descriptions explain
+the actual user benefit in English. Preserve stable plugin IDs, settings and storage.
+CI checks manifests/catalog consistency, source privacy, typechecking, focused
+behavior and builds on supported platforms. Private repositories stay private
+unless publication is explicitly authorized and inspected. Disabled plugins stay
+disabled through migration and updates.

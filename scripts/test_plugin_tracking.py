@@ -11,13 +11,11 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(value['source_git_tag_prefix'],'example/')
         self.assertIsNone(value['source_git_requested_ref'])
 
-    def test_no_matching_release_uses_verified_default(self):
+    def test_no_matching_release_fails_without_branch_fallback(self):
         row={'git_resolved_commit':'abc','id':'example','version':'0.4.0','source_git_url':'https://example.invalid/repo.git','source_git_subdirectory':None}
-        with patch('plugin_tracking.remote',side_effect=['abc\trefs/tags/v0.3.0\n','ref: refs/heads/stable\tHEAD\n']):
-            value=plan(row)
-        self.assertEqual(value['source_git_requested_ref'],'stable')
-        self.assertEqual(value['source_git_ref_kind'],'branch')
-        self.assertIsNone(value['source_git_range'])
+        with patch('plugin_tracking.remote',return_value='abc\trefs/tags/v0.3.0\n'):
+            with self.assertRaisesRegex(RuntimeError, 'verified release tag'):
+                plan(row)
 
     def test_missing_default_fails(self):
         with patch('plugin_tracking.remote',return_value=''):

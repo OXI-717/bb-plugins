@@ -29,12 +29,7 @@ def plan(row):
         prefix = matches[0][:-len('v' + version)]
         return dict(zip(FIELDS, [f'git:{url}@semver:{prefix + chr(58) if prefix else str()}^{version}', None, None,
                                 '^' + version, prefix, matches[0]]))
-    head = remote(url, '--symref', 'HEAD')
-    match = re.search(r'^ref: refs/heads/([^\s]+)\s+HEAD$', head, re.M)
-    if not match:
-        raise RuntimeError('No unambiguous default branch: ' + row['id'])
-    branch = match.group(1)
-    return dict(zip(FIELDS, [f'git:{url}@{branch}', branch, 'branch', None, None, None]))
+    raise RuntimeError('A verified release tag for the installed commit is required: ' + row['id'])
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
