@@ -1,23 +1,23 @@
 # OXI Public Plugins for BB
 
-Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory and versioned release tags. GitHub Release immutability is enabled for releases published after 0.3.0; the earlier 0.3.0 release is not protected retroactively. This repository ships **Account Pool Balanced**. **Automation Catalog** adds a unified view across schedulers.
+Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory and versioned release tags. GitHub Release immutability is enabled for releases published after 0.3.0; the earlier 0.3.0 release is not protected retroactively. All nine plugins use OXI display names and compatible per-plugin semver release tracking.
 
-## 1Password
+## OXI 1Password
 
 Native credential intake and configured secret use for BB agents, with separate routine and administrative access profiles. See [OXI OP setup](plugins/oxi-op/README.md).
 
-## BB Projects
+## OXI Projects
 
 Tasks, repositories and agent sessions for each BB project. GitHub accounts are
 selected per repository; Linear and Jira can be connected independently. Task
 buttons open beside the conversation. Memory, autopilot and Obsidian tasks are
 optional and start disabled. See [BB Projects setup](plugins/oxi-projects/README.md).
 
-## Models and connections
+## OXI Model Connections
 
 A separate chooser groups local authentication and supported Account Pooler routes, with provider icons, search and per-machine visibility preferences. It changes the current provider's model on the next turn or opens an explicit new-thread form for another provider. It does not patch BB's native menu or restart Account Pooler. See [Model Connections](plugins/model-connections/PLUGIN_OVERVIEW.md).
 
-## VPN Guard
+## OXI VPN Guard
 
 A separate observation-first plugin holds protected BB dispatches and stops protected turns by host-local VPN state. See [VPN Guard operations](plugins/vpn-guard/docs/operations.md). It does not replace a network kill switch.
 
@@ -25,7 +25,7 @@ VPN Guard and Account Pooler work together without an automation controller. The
 
 VPN Guard и Account Pooler работают вместе без контроллера автоматизаций. Дополнительное подключение контроллера позволяет приостанавливать и восстанавливать расписания. Контроллер не входит в комплект и не требуется для VPN-защиты плагинов.
 
-## Account Pool Balanced
+## OXI Account Pool
 
 Use multiple accounts of the same provider, track available quota and switch accounts when needed. Sequential and balanced routing, primary/reserve accounts, per-account caps and session affinity are supported.
 
@@ -105,7 +105,7 @@ CI runs all plugin tests, typechecks and builds on standard GitHub-hosted runner
 
 MIT. Account Pooler and vendored UI derive from `get-bb/bb`; upstream attribution is preserved in [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## Automation Catalog
+## OXI Automation Catalog
 
 An independent panel for inventory, source freshness and execution history across schedulers. It does not execute jobs or invoke models. See [development and source setup](plugins/automation-catalog/README.md). Install through `bb plugin install automation-catalog@oxi-public`, or use the release command in its README.
 
@@ -123,12 +123,18 @@ bash scripts/upgrade-pool.sh
 
 See [checks, waiting, backups and recovery](scripts/UPGRADE-POOL.md).
 
-## Auto Archive
+## OXI Auto Archive
 
 A fork of Shane Logsdon's MIT Auto Archive with a 14-day default, whole-tree
 activity, protected threads, dirty-workspace guards and manual handoff pruning.
 Starts in preview mode. See [Auto Archive setup](plugins/auto-archive/README.md).
 
-## BB Federation (experimental)
+## OXI Federation (experimental)
 
 [BB Federation](plugins/federation-pilot/README.md) displays projects from independent BB servers in the ordinary thread tree, using configured SSH bridges. Native chats, thread creation and permission responses stay on their owning server. Read-only by default; tested with BB 0.46.0/0.46.1. Files and terminals are not federated.
+
+## Release contract
+
+Plugin IDs remain stable. Display names and English descriptions match between package manifests and the marketplace. Each release uses an immutable `<plugin-id>/vX.Y.Z` tag matching the package and lockfile version, with marketplace tracking `^X.Y.Z` and tag prefix `<plugin-id>/`. Branches and commit pins are not plugin update sources. The marketplace catalog itself may track `main`.
+
+Run `node scripts/check-manifests.mjs` and `node --test scripts/check-manifests.test.mjs` before proposing a release. CI checks all packages, catalog entries and release tags; existing typechecks, tests, builds and secret checks remain required. Prepare releases from reviewed commits and never move an existing tag.

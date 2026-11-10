@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['account-pool-balanced/v*', 'automation-catalog/v*', 'vpn-guard/v*', 'oxi-projects/v*', 'model-connections/v*', 'auto-archive/v*', 'federation-pilot/v*', 'pool-maintenance/v*', 'oxi-op/v*']
+    tags: ['*/v*']
   pull_request:
   workflow_dispatch:
 
@@ -25,6 +25,13 @@ jobs:
           python-version: '3.12'
       - name: Check public paths and credentials
         run: python3 scripts/check_hygiene.py
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Check plugin identity and release contract
+        run: |
+          node scripts/check-manifests.mjs
+          node --test scripts/check-manifests.test.mjs
       - name: Check documentation links
         run: python3 scripts/check_doc_refs.py
 

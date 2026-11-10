@@ -1,4 +1,4 @@
-# Project-scoped 1Password access
+# OXI 1Password
 
 Save credentials through a native BB form and use them in owner-configured operations. The agent chooses a project access profile and operation, while passwords stay out of model arguments and conversation history.
 

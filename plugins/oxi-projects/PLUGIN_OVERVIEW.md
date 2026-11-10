@@ -1,4 +1,4 @@
-# BB Projects
+# OXI Projects
 
 Project-scoped GitHub, Linear and Jira tasks; repository/account connections;
 side-panel task links; and native agent-session preparation with explicit model
