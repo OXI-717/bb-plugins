@@ -279,6 +279,32 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     return json(isBootstrap?{...a,projects:[...(a.projects??[]),...extra]}:[...(Array.isArray(a)?a:[]),...extra]);
   }
 
+  // Short thread URLs in BB 0.49 omit the project. Resolve only the current
+  // navigation target, using a primary 404 and server-validated bridge reads.
+  const resolvingThreads = new Map();
+  async function resolveShortThread(threadId) {
+    if(primaryIds.has(threadId)||owners.has(threadId)||conflicts.has(threadId))return;
+    if(resolvingThreads.has(threadId))return resolvingThreads.get(threadId);
+    const task=(async()=>{
+      const path=`/api/v1/threads/${threadId}`;
+      const local=await nativeFetch.call(win,path);
+      if(local.ok){learnPrimary(path,await local.json());return;}
+      if(local.status!==404)throw new FederationError('federation_owner_unavailable',503,'Cannot establish thread ownership on the primary server.');
+      for(const peer of peers){
+        const response=await viaBridge(peer,'GET',path,null);
+        if(response.ok){
+          const thread=await response.clone().json();
+          if(thread.id!==threadId||thread.projectId!==peer.projectId)throw new FederationError('federation_owner_invalid',409,'Invalid remote thread identity.');
+          // The bridge checks collisions across all configured servers.
+          return;
+        }
+        if(primaryIds.has(threadId))return;
+      }
+    })();
+    resolvingThreads.set(threadId,task);
+    try{await task;}finally{resolvingThreads.delete(threadId);}
+  }
+
   async function route(input, init, ctx) {
     const req = input instanceof win.Request ? input : null;
     let url;
@@ -293,6 +319,8 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     const currentRoute=/^\/projects\/(proj_[a-z0-9]+)\/threads\/(thr_[a-z0-9]+)/u.exec(new URL(win.location.href).pathname);
     const currentPeer=peers.find(p=>p.projectId===currentRoute?.[1]);
     if(currentPeer && !primaryIds.has(currentRoute[2]))addRemote(currentRoute[2],currentPeer);
+    const shortRoute=/^\/threads\/(thr_[a-z0-9]+)(?:\/|$)/u.exec(new URL(win.location.href).pathname);
+    if(shortRoute && url.pathname.startsWith(`/api/v1/threads/${shortRoute[1]}`))await resolveShortThread(shortRoute[1]);
     const pathIds = url.pathname.split("/").filter((s) => ID_RE.test(s));
     const queryIds = [];
     for (const [k, v] of url.searchParams) if (SCOPE_PARAMS.includes(k) || ID_RE.test(v)) queryIds.push(v);
