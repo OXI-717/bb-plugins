@@ -72,3 +72,8 @@ it.each([true, false])('restores a pinned panel only on a wide viewport (compact
   expect(slot.inspection.navigateCalls.filter(call => call.method === 'openThreadPanel')).toHaveLength(compact ? 0 : 1);
   expect(localStorage.getItem('bb-taskboard:right-panel-pinned')).toBe('true');
 });
+
+it('uses the OXI name for the project panel and launcher',()=>{
+ expect(panel.title).toBe('OXI Projects');
+ expect(header.title).toBe('OXI Projects');
+});

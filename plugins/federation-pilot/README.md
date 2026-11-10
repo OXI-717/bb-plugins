@@ -1,4 +1,4 @@
-# BB Federation (experimental)
+# OXI Federation (experimental)
 
 Work with independent BB servers in one ordinary BB thread tree. Each configured remote project keeps its original threads, provider and execution environment. The plugin merges lists, routes HTTP to the owning server, and forwards change notifications into BB's native client. It does not modify BB core, copy conversations or enroll the primary machine on a remote server.
 

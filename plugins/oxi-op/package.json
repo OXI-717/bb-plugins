@@ -7,8 +7,8 @@
     "bbPluginSdk": ">=0.6.104"
   },
   "bb": {
-    "name": "Oxi Op",
-    "description": "Project-scoped 1Password access for BB agents.",
+    "name": "OXI 1Password",
+    "description": "Give BB agents project-scoped 1Password access with separate routine and administrative profiles.",
     "branding": {
       "icon": "LockKeyhole"
     },

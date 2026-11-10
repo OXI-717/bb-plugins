@@ -143,5 +143,5 @@ export function GuardPage() {
   </main>;
 }
 export default definePluginApp(app=>{
-  app.slots.navPanel({id:'vpn-guard',title:'VPN Guard',icon:'Shield',path:'vpn-guard',component:GuardPage});
+  app.slots.navPanel({id:'vpn-guard',title:'OXI VPN Guard',icon:'Shield',path:'vpn-guard',component:GuardPage});
 });

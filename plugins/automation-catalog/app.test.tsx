@@ -48,6 +48,7 @@ afterEach(() => {
 });
 async function mount() {
   const app = await loadPluginApp(() => import("./app"));
+  expect(app.navPanels[0]!.title).toBe("OXI Automation Catalog");
   return renderSlot(
     app.navPanels[0]!,
     { subPath: "" },
