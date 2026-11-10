@@ -1,4 +1,4 @@
-# OXI OP
+# OXI 1Password
 
 Native BB tools for project-scoped 1Password credential intake and configured credential use. Requires 1Password CLI on the selected enrolled host and BB SDK 0.6.104 or newer.
 

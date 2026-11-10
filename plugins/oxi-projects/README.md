@@ -1,4 +1,4 @@
-# BB Projects
+# OXI Projects
 
 Keep a project's tasks, repositories and agent sessions together in BB. Open a
 GitHub, Linear or Jira task beside the current conversation, prepare a new agent

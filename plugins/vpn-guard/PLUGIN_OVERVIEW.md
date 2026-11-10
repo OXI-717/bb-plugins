@@ -1,4 +1,4 @@
-# VPN Guard
+# OXI VPN Guard
 
 ## Русский
 

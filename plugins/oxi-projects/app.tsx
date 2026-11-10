@@ -6834,7 +6834,7 @@ function TaskboardThreadHeaderAction({
     (showError: boolean) => {
       const opened = openThreadPanel({
         actionId: THREAD_PANEL_ACTION_ID,
-        title: 'Проект'
+        title: 'OXI Projects'
       });
       if (!opened && showError) {
         toast.error('Taskboard cannot open beside this thread.');
@@ -7146,26 +7146,26 @@ export default definePluginApp(app => {
   });
   app.slots.threadPanelAction({
     id: THREAD_PANEL_ACTION_ID,
-    title: 'Проект',
+    title: 'OXI Projects',
     icon: 'Target',
     component: TaskboardThreadPanel,
     layout: 'flush'
   });
   app.slots.experimental_newThreadPanelAction({
     id: 'taskboard-new-thread-panel',
-    title: 'Проект',
+    title: 'OXI Projects',
     icon: 'Target',
     component: TaskboardNewThreadPanel,
     layout: 'flush'
   });
   app.slots.experimental_threadHeaderAction({
     id: 'open-taskboard-panel',
-    title: 'Проект',
+    title: 'OXI Projects',
     component: TaskboardThreadHeaderAction
   });
   app.slots.navPanel({
     id: 'taskboard',
-    title: 'Проект',
+    title: 'OXI Projects',
     icon: 'Target',
     path: PANEL_PATH,
     component: TaskboardPanel,

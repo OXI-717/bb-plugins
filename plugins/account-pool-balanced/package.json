@@ -1,16 +1,16 @@
 {
   "name": "bb-plugin-account-pool-balanced",
-  "version": "0.4.76",
+  "version": "0.4.77",
   "private": true,
   "type": "module",
-  "description": "Балансировка аккаунтов, квоты и резервные аккаунты для агентов BB.",
+  "description": "Balance provider accounts, track quotas and switch to reserve accounts for BB agents.",
   "engines": {
     "bb": ">=0.46.1",
     "bbPluginSdk": ">=0.6.49 <0.7.0"
   },
   "bb": {
-    "name": "Пул аккаунтов (balanced)",
-    "description": "Балансировка аккаунтов, квоты и резервные аккаунты для агентов BB.",
+    "name": "OXI Account Pool",
+    "description": "Balance provider accounts, track quotas and switch to reserve accounts for BB agents.",
     "branding": {
       "icon": "Layers"
     },
