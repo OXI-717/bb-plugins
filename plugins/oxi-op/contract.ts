@@ -30,14 +30,16 @@ export const routeSchema = z.object({
     requireApproval: z.boolean().default(true),
     operations: z.array(operationSchema).default([]),
     // Desktop approval may happen on whichever listed owner machine is connected, in this order.
-    desktopHosts: z.array(z.object({hostId: z.string().min(1), opBinary: absolutePath}).strict()).min(1).max(4).optional(),
+    desktopHosts: z.array(z.object({hostId: z.string().min(1), opBinary: absolutePath, opBroker: absolutePath.optional()}).strict()).min(1).max(4).optional(),
+    // Socket of the OXI Op broker service on the credential machine (desktop routes only).
+    opBroker: absolutePath.optional(),
     // Service-account work runs on the requesting session's machine when it is listed here.
     sessionHosts: z.record(z.string().min(1), absolutePath).optional(),
     // Agents may run their own commands with keys from this vault, without a form.
     allowAgentCommands: z.boolean().default(false),
 }).strict().refine(x => x.authentication === 'desktop'
-    ? !!x.accountId && !x.tokenEnvironment && !x.tokenSetting && (!(x.credentialHostId || x.desktopHosts) || x.requireApproval) && !(x.credentialHostId && x.desktopHosts) && !x.sessionHosts && !x.allowAgentCommands
-    : (!!x.tokenEnvironment !== !!x.tokenSetting) && !x.accountId && !x.credentialHostId && !x.desktopHosts && (!x.allowAgentCommands || !x.requireApproval),
+    ? !!x.accountId && !x.tokenEnvironment && !x.tokenSetting && (!(x.credentialHostId || x.desktopHosts) || x.requireApproval) && !(x.credentialHostId && x.desktopHosts) && !x.sessionHosts && !x.allowAgentCommands && !(x.opBroker && x.desktopHosts)
+    : (!!x.tokenEnvironment !== !!x.tokenSetting) && !x.accountId && !x.credentialHostId && !x.desktopHosts && !x.opBroker && (!x.allowAgentCommands || !x.requireApproval),
     'Configure one explicit op authentication mode');
 export type Route = z.infer<typeof routeSchema>;
 export function resolveRoute(routes: unknown, projectId: string, profile = 'default') {
@@ -60,6 +62,7 @@ export const contract = defineRpcContract({
     resolve: {input: z.object({route: routeSchema, operation: z.string()}).strict(), output: z.object({bindings: z.record(z.string(), z.string())}).strict()},
     execute: {input: z.object({route: routeSchema, operation: z.string(), bindings: z.record(z.string(), z.string())}).strict(), output: z.object({completed: z.literal(true)}).strict()},
     overview: {input: z.object({route: routeSchema, serviceVaultIds: z.array(z.string()).max(200), registryTitle: z.string().min(1).optional()}).strict(), output: z.object({vaultTotal: z.number().int(), vaultsTruncated: z.boolean(), registryRead: z.boolean(), vaults: z.array(z.object({id: z.string(), name: z.string(), service: z.boolean(), marker: z.string().optional(), error: z.string().regex(/^[a-z0-9-]{1,40}$/).optional(), itemTotal: z.number().int().optional(), itemsTruncated: z.boolean().optional(), items: z.array(z.object({title: z.string(), category: z.string(), createdAt: z.string(), updatedAt: z.string()}).strict()).optional()}).strict())}).strict()},
+    programAvailable: {input: z.object({program: z.string().min(1).max(4096), cwd: absolutePath.optional()}).strict(), output: z.object({available: z.boolean()}).strict()},
     resolveKeys: {input: z.object({route: routeSchema, keys: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), keyReferenceSchema)}).strict(), output: z.object({bindings: z.record(z.string(), z.string())}).strict()},
     execResolved: {input: z.object({argv: z.array(z.string()).min(1).max(200), bindings: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string()), cwd: absolutePath.optional(), timeoutSeconds: z.number().int().min(1).max(600)}).strict(), output: z.object({exitCode: z.number().int(), output: z.string(), truncated: z.boolean(), timedOut: z.boolean(), escapedProcess: z.boolean()}).strict()},
     tidy: {input: z.object({route: routeSchema, steps: z.array(tidyStepSchema).min(1).max(20)}).strict(), output: z.object({results: z.array(z.object({kind: z.string(), ok: z.boolean(), code: z.string().optional(), same: z.boolean().optional(), sameUsername: z.boolean().optional()}).strict())}).strict()},

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createConnection } from 'node:net';
 import { CodedError, errorCode } from './errors.js';
 export { CodedError, errorCode } from './errors.js';
 import { randomUUID } from 'node:crypto';
@@ -64,7 +65,7 @@ export function spawnGroup(binary: string, args: string[], options: {env: NodeJS
         child.stdout!.on('data', collect);
         if (options.includeStderr) child.stderr!.on('data', collect); else child.stderr!.resume();
         child.on('exit', code => {leaderCode = code; leaderExited = true; kill();}); // the leader's exit ends its group
-        child.on('error', () => {kill(); finish(); reject(new Error('Process could not start'));});
+        child.on('error', error => {kill(); finish(); reject((error as NodeJS.ErrnoException).code === 'ENOENT' ? new CodedError('command-not-found', 'The program was not found on this machine') : new CodedError('command-not-started', 'The process could not start'));});
         child.on('close', code => {
             if (finished) return;
             finish();
@@ -330,6 +331,21 @@ export function concealOutput(raw: string, values: string[], alreadyTruncated: b
 // Read only the requested fields with the scoped token, then run the agent's command without
 // any OP_ variables so the child never receives the service-account token. Exact values are
 // replaced in the returned output.
+// Services such as the BB host daemon start with a minimal PATH; agent commands should find
+// programs the way a login shell does (Homebrew and /usr/local included).
+export function commandPath(current: string | undefined) {
+    const parts = (current ?? '').split(':').filter(Boolean);
+    for (const dir of ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']) if (!parts.includes(dir)) parts.push(dir);
+    return parts.join(':');
+}
+// Is the program runnable on this machine, the way the command will look it up?
+export async function programAvailable(program: string, pathValue = commandPath(process.env.PATH)) {
+    const {access, constants} = await import('node:fs/promises');
+    const {join, isAbsolute} = await import('node:path');
+    const candidates = program.includes('/') ? [isAbsolute(program) ? program : ''] : pathValue.split(':').map(dir => join(dir, program));
+    for (const candidate of candidates.filter(Boolean)) {try {await access(candidate, constants.X_OK); return true;} catch {}}
+    return false;
+}
 export async function execWithKeys(run: Runner, command: CommandRunner, env: NodeJS.ProcessEnv, vaultId: string, argv: string[], keys: Record<string, KeyReference>, cwd: string | undefined, timeoutMs: number, signal?: AbortSignal) {
     const values: Record<string, string> = {};
     for (const [variable, key] of Object.entries(keys)) {
@@ -340,6 +356,7 @@ export async function execWithKeys(run: Runner, command: CommandRunner, env: Nod
     const childEnv: NodeJS.ProcessEnv = {...process.env};
     for (const name of Object.keys(childEnv)) if (name.startsWith('OP_')) delete childEnv[name];
     Object.assign(childEnv, values);
+    childEnv.PATH = commandPath(childEnv.PATH);
     try {
         const result = await command(argv[0], argv.slice(1), childEnv, cwd, timeoutMs, signal);
         return {...result, ...concealOutput(result.output, Object.values(values), result.truncated || result.timedOut)};
@@ -388,6 +405,7 @@ export async function execResolved(command: CommandRunner, argv: string[], bindi
     for (const name of Object.keys(childEnv)) if (name.startsWith('OP_')) delete childEnv[name];
     for (const name of Object.keys(bindings)) if (name.startsWith('OP_')) throw new CodedError('reserved-variable', 'OP_ variables are reserved');
     Object.assign(childEnv, bindings);
+    childEnv.PATH = commandPath(childEnv.PATH);
     const result = await command(argv[0], argv.slice(1), childEnv, cwd, timeoutMs, signal);
     return {...result, ...concealOutput(result.output, Object.values(bindings), result.truncated || result.timedOut)};
 }
@@ -443,3 +461,35 @@ export async function runTidy(run: Runner, env: NodeJS.ProcessEnv, steps: TidySt
     }
     return {results};
 }
+
+// Desktop op calls through the OXI Op broker service (see broker/op_broker.py): one long-lived
+// service owns the 1Password and macOS authorisation instead of a new process per call.
+export const brokerRunner = (socketPath: string): Runner => (_binary, args, _env, input, signal) => new Promise((resolve, reject) => {
+    if (signal?.aborted) {reject(new CodedError('cancelled', 'Operation cancelled')); return;}
+    const socket = createConnection(socketPath);
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const done = (error?: Error, value?: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        socket.destroy();
+        if (error) reject(error); else resolve(value!);
+    };
+    const abort = () => done(new CodedError('cancelled', 'Operation cancelled'));
+    const timer = setTimeout(() => done(new CredentialProcessError('process exit timeout; output suppressed')), 100_000);
+    signal?.addEventListener('abort', abort, {once: true});
+    socket.on('error', () => done(new CodedError('broker-unavailable', 'The OXI Op broker service is not reachable')));
+    socket.on('data', chunk => {size += chunk.length; if (size > 8 * 1024 * 1024) done(new CodedError('broker-output', 'Broker response too large')); else chunks.push(chunk);});
+    socket.on('end', () => {
+        let reply: {code?: unknown; stdout?: unknown; error?: unknown};
+        try {reply = JSON.parse(Buffer.concat(chunks).toString('utf8'));}
+        catch {done(new CodedError('broker-protocol', 'Invalid broker response')); return;}
+        if (reply.error === 'not-allowed') {done(new CodedError('broker-refused', 'The broker refused this command')); return;}
+        if (reply.code !== 0 || typeof reply.stdout !== 'string') {done(new CredentialProcessError('process exit ' + (typeof reply.code === 'number' ? reply.code : 'null') + '; output suppressed')); return;}
+        done(undefined, Buffer.from(reply.stdout, 'base64').toString('utf8'));
+    });
+    socket.end(JSON.stringify({args, stdin: Buffer.from(input ?? '', 'utf8').toString('base64')}) + '\n');
+});
