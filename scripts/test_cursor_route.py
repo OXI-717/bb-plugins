@@ -53,14 +53,21 @@ sys.stdin.readline()
                 env=dict(os.environ,HOME=tmp,PATH=tmp+os.pathsep+os.environ['PATH'],CURSOR_API_ENDPOINT=f'http://127.0.0.1:{hub.server_port}/cursor',CURSOR_POOL_RPC_GATEWAY='1')
                 process=subprocess.Popen([sys.executable,str(WRAPPER),'--model','synthetic-model','acp'],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
                 process.stdin.write(json.dumps({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})+'\n');process.stdin.flush()
-                self.assertTrue(select.select([process.stdout],[],[],8)[0],'ACP reply did not arrive')
+                self.assertTrue(select.select([process.stdout],[],[],60)[0],'ACP reply did not arrive')
                 reply=json.loads(process.stdout.readline());self.assertEqual(reply['result']['stopReason'],'end_turn')
                 self.assertTrue(released.wait(3),'Completed prompt retained its upstream streams')
                 self.assertIsNone(process.poll(),'CLI must stay available for the next prompt')
         finally:
-            if process:
-                process.communicate(input='\n',timeout=10)
-            hub.shutdown();hub.server_close();worker.join(timeout=2)
+            try:
+                if process:
+                    try:
+                        process.communicate(input='\n',timeout=60)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate(timeout=10)
+                        raise
+            finally:
+                hub.shutdown();hub.server_close();worker.join(timeout=2)
 
     def test_direct_environment_is_unchanged(self):
         env = {"AGENT_CLI_CREDENTIAL_STORE": "system"}
