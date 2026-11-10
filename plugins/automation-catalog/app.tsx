@@ -199,7 +199,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
       <main className="mx-auto max-w-7xl space-y-4 p-4">
         <header className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h1 className="text-xl font-semibold">Автоматизации</h1>
+            <h1 className="text-xl font-semibold">OXI Automation Catalog</h1>
             <p className="text-xs text-muted-foreground">
               Что выполняется, что проверить и где посмотреть результат
             </p>
@@ -573,7 +573,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "catalog",
-    title: "Каталог автоматизаций",
+    title: "OXI Automation Catalog",
     icon: "Repeat",
     path: "catalog",
     component: CatalogPage,
