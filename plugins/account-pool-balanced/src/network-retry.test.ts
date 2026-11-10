@@ -192,3 +192,45 @@ it.each(['Internal error: [invalid_argument] protocol error: incomplete envelope
  ] as never);
  await fail({errorInfo:null});expect(retry).not.toHaveBeenCalled();await fake.harness.lifecycle.dispose();
 });
+
+it('records the failing retry phase without leaking SDK error text',async()=>{
+ const {fake,retry,eligible,fail}=await setup();
+ eligible.mockRejectedValue(new Error('synthetic-sensitive-value'));
+ await fail();
+ const logs=JSON.stringify(fake.harness.inspection.logEntries);
+ expect(logs).toContain('eligible');expect(logs).toContain('rpc-error');
+ expect(logs).not.toContain('synthetic-sensitive-value');expect(retry).not.toHaveBeenCalled();
+ await fake.harness.lifecycle.dispose();
+});
+it('distinguishes classification refusal from an uncertain scheduling call',async()=>{
+ const {fake,retry,fail}=await setup();
+ await fail({errorInfo:null});
+ expect(JSON.stringify(fake.harness.inspection.logEntries)).toContain('not-retryable');
+ expect(retry).not.toHaveBeenCalled();
+ await fake.harness.lifecycle.dispose();
+});
+
+it('identifies an uncertain scheduling call without sending it again',async()=>{
+ const {fake,retry,fail}=await setup();
+ retry.mockRejectedValue(new Error('synthetic-sensitive-value'));
+ await fail();
+ const entries=fake.harness.inspection.logEntries;
+ const messages=JSON.stringify(entries);
+ expect(messages).toContain('schedule');expect(messages).toContain('rpc-error');
+ expect(messages).not.toContain('synthetic-sensitive-value');
+ expect(entries.length).toBeLessThanOrEqual(12);
+ await fail();expect(retry).toHaveBeenCalledTimes(1);
+ await fake.harness.lifecycle.dispose();
+});
+it('reports a failure after scheduling as unconfirmed rather than queued',async()=>{
+ const {fake,retry,fail}=await setup();
+ retry.mockResolvedValue({ok:true,delivery:'queued',queuedMessageId:'owned-retry'} as never);
+ fake.harness.sdk.stub('threads.get',vi.fn().mockResolvedValueOnce(makeThreadResponse({id:'thread-one',status:'error'})).mockRejectedValue(new Error('synthetic-sensitive-value')));
+ await fail();
+ const diagnostic=fake.harness.inspection.logEntries.filter(entry=>JSON.stringify(entry).includes('Pooler network retry diagnostic'));
+ expect(JSON.stringify(diagnostic.at(-1))).toContain('rpc-error');
+ expect(JSON.stringify(diagnostic.at(-1))).toContain('record');
+ expect(JSON.stringify(diagnostic)).not.toContain('synthetic-sensitive-value');
+ expect(retry).toHaveBeenCalledTimes(1);
+ await fake.harness.lifecycle.dispose();
+});
