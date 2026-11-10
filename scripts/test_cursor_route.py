@@ -19,6 +19,49 @@ spec.loader.exec_module(route)
 
 
 class CursorRouteTest(unittest.TestCase):
+    def test_completed_prompt_releases_open_streams_before_cli_exits(self):
+        import select
+        closed=[]; released=threading.Event()
+        class Hub(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length',0)))
+                self.send_response(200);self.send_header('Transfer-Encoding','chunked')
+                self.send_header('Content-Type','application/connect+proto');self.end_headers()
+                self.wfile.write(b'6\r\n\x00\x00\x00\x00\x01x\r\n');self.wfile.flush()
+                if select.select([self.connection],[],[],5)[0] and self.connection.recv(1)==b'':
+                    closed.append(True)
+                    if len(closed)==2:released.set()
+        hub=http.server.ThreadingHTTPServer(('127.0.0.1',0),Hub)
+        worker=threading.Thread(target=hub.serve_forever,daemon=True);worker.start()
+        process=None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cli=Path(tmp)/'cursor-agent'
+                cli.write_text('#!'+sys.executable+'\n'+"""import http.client,json,os,sys
+from urllib.parse import urlsplit
+r=json.loads(sys.stdin.readline());url=urlsplit(os.environ['CURSOR_API_ENDPOINT']);connections=[]
+for _ in range(2):
+ c=http.client.HTTPConnection(url.hostname,url.port,timeout=5)
+ c.request('POST','/agent.v1.AgentService/RunSSE',body=b'probe');response=c.getresponse()
+ assert response.read1(6)==b'\\x00\\x00\\x00\\x00\\x01x'
+ connections.append((c,response))
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'}}),flush=True)
+sys.stdin.readline()
+""")
+                cli.chmod(0o755)
+                env=dict(os.environ,HOME=tmp,PATH=tmp+os.pathsep+os.environ['PATH'],CURSOR_API_ENDPOINT=f'http://127.0.0.1:{hub.server_port}/cursor',CURSOR_POOL_RPC_GATEWAY='1')
+                process=subprocess.Popen([sys.executable,str(WRAPPER),'--model','synthetic-model','acp'],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                process.stdin.write(json.dumps({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})+'\n');process.stdin.flush()
+                self.assertTrue(select.select([process.stdout],[],[],8)[0],'ACP reply did not arrive')
+                reply=json.loads(process.stdout.readline());self.assertEqual(reply['result']['stopReason'],'end_turn')
+                self.assertTrue(released.wait(3),'Completed prompt retained its upstream streams')
+                self.assertIsNone(process.poll(),'CLI must stay available for the next prompt')
+        finally:
+            if process:
+                process.communicate(input='\n',timeout=10)
+            hub.shutdown();hub.server_close();worker.join(timeout=2)
+
     def test_direct_environment_is_unchanged(self):
         env = {"AGENT_CLI_CREDENTIAL_STORE": "system"}
         self.assertEqual(route.build_env(env), env)
@@ -472,6 +515,68 @@ class CursorGlobalOptionsTest(unittest.TestCase):
             if mode=='reused-id':state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
             original={'id':1,'error':{'code':-1 if mode=='wrong-code' else -32603,'message':'unrelated' if mode=='different-message' else text}}
             self.assertIs(state.child(original),original,mode)
+
+class CursorPromptStreamReleaseTest(unittest.TestCase):
+    def test_terminal_reply_releases_all_streams_of_its_prompt(self):
+        state=route.AcpPoolFailures(); closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        for n in range(2):
+            token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+            state.register_model_stream(token,lambda n=n:closed.append(n))
+        original={'id':1,'result':{'stopReason':'end_turn'}}
+        self.assertIs(state.child(original),original); self.assertEqual(closed,[0,1])
+        self.assertEqual(len(state.model_streams),0)
+
+    def test_late_registration_cannot_survive_its_completed_prompt(self):
+        state=route.AcpPoolFailures(); closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        old=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.child({'id':1,'result':{'stopReason':'end_turn'}})
+        state.client({'id':2,'method':'session/prompt','params':{'sessionId':'one'}})
+        current=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.register_model_stream(current,lambda:closed.append('new'))
+        state.register_model_stream(old,lambda:closed.append('old'))
+        self.assertEqual(closed,['old'])
+        state.child({'id':1,'result':{}});self.assertEqual(closed,['old'])
+        state.child({'id':2,'result':{}});self.assertEqual(closed,['old','new'])
+
+    def test_cancel_and_unrelated_messages_are_scoped(self):
+        state=route.AcpPoolFailures();closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        token=state.begin_model_request('agent.v1.AgentService/RunSSE');state.register_model_stream(token,lambda:closed.append(1))
+        state.client({'method':'session/cancel','params':{'sessionId':'other'}})
+        state.child({'method':'session/update','params':{}});state.child({'id':99,'result':{}})
+        self.assertEqual(closed,[])
+        state.client({'method':'session/cancel','params':{'sessionId':'one'}});self.assertEqual(closed,[1])
+
+    def test_reused_live_id_and_unattributed_streams_do_not_abort_new_work(self):
+        state=route.AcpPoolFailures();closed=[]
+        prompt={'id':1,'method':'session/prompt','params':{'sessionId':'one'}}
+        state.client(prompt);old=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.register_model_stream(old,lambda:closed.append('old'))
+        state.client(prompt);new=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.register_model_stream(new,lambda:closed.append('new'))
+        state.register_model_stream(None,lambda:closed.append('unknown'))
+        state.child({'id':1,'result':{}});self.assertEqual(closed,[])
+
+    def test_socket_registry_is_bounded_and_cleanup_failure_preserves_reply(self):
+        state=route.AcpPoolFailures();closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        def broken(): raise OSError('synthetic')
+        state.register_model_stream(token,broken)
+        for _ in range(100):state.register_model_stream(token,lambda:closed.append(1))
+        self.assertLessEqual(len(state.model_streams),64)
+        original={'id':1,'result':{'stopReason':'end_turn'}}
+        self.assertIs(state.child(original),original)
+        self.assertEqual(len(closed),63);self.assertFalse(state.model_streams)
+
+    def test_finished_body_unregisters_without_closing_or_retry(self):
+        state=route.AcpPoolFailures();closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        key=state.register_model_stream(state.begin_model_request('agent.v1.AgentService/RunSSE'),lambda:closed.append(1))
+        state.unregister_model_stream(key);state.child({'id':1,'error':{'code':-1,'message':'synthetic'}})
+        self.assertEqual(closed,[])
 
 class CursorAbortedRpcTest(unittest.TestCase):
     def test_exact_aborted_rpc_requires_current_interruption(self):
