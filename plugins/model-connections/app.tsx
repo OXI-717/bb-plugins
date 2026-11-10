@@ -417,7 +417,7 @@ function HeaderButton() {
       }
     >
       <Icon name="Layers" className="mc-icon" />
-      <span>Модели</span>
+      <span>OXI Model Connections</span>
     </button>
   );
 }
