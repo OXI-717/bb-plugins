@@ -300,6 +300,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
         }
         if(primaryIds.has(threadId))return;
       }
+      throw new FederationError('federation_owner_unavailable',503,'Thread ownership could not be established on the configured servers.');
     })();
     resolvingThreads.set(threadId,task);
     try{await task;}finally{resolvingThreads.delete(threadId);}

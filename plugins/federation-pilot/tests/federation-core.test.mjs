@@ -405,3 +405,14 @@ test('short route preserves a primary thread and refuses primary failures',async
  t.fed.dispose();
  }
 });
+
+test('unavailable remote discovery never forwards reads or mutations to primary',async()=>{
+ for(const method of ['GET','POST']){
+ const t=setup({primary:{'GET /api/v1/threads/thr_cold01':R({},404)},remote:{'GET /api/v1/threads/thr_cold01':R({},503)}});
+ t.env.win.location.href='http://primary.invalid/threads/thr_cold01';
+ const response=await t.fetch('/api/v1/threads/thr_cold01/messages',{method});
+ assert.equal(response.status,503);
+ assert.equal(t.env.primaryCalls().some(c=>c.path.endsWith('/messages')),false);
+ t.fed.dispose();
+ }
+});
