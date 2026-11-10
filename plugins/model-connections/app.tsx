@@ -248,7 +248,7 @@ export function ConnectionsPanel({
     <section className="mc-root" aria-label="Выбор модели">
       <header className="mc-header">
         <div>
-          <h2>Модели</h2>
+          <h2>OXI Model Connections</h2>
           <p>Выберите подключение и модель</p>
         </div>
         <button
@@ -413,7 +413,7 @@ function HeaderButton() {
       type="button"
       className="mc-header-button"
       onClick={() =>
-        navigate.openThreadPanel({ actionId: "connections", title: "Модели" })
+        navigate.openThreadPanel({ actionId: "connections", title: "OXI Model Connections" })
       }
     >
       <Icon name="Layers" className="mc-icon" />
@@ -424,31 +424,31 @@ function HeaderButton() {
 export default definePluginApp((app) => {
   app.slots.experimental_threadHeaderAction({
     id: "models",
-    title: "Модели",
+    title: "OXI Model Connections",
     component: HeaderButton,
   });
   app.slots.threadPanelAction({
     id: "connections",
-    title: "Модели",
+    title: "OXI Model Connections",
     component: ({ threadId }: PluginThreadPanelProps) => (
       <ConnectionsPanel threadId={threadId} />
     ),
     run: ({ openPanel }) => {
-      openPanel({ title: "Модели" });
+      openPanel({ title: "OXI Model Connections" });
     },
   });
   app.slots.experimental_newThreadPanelAction({
     id: "connections",
-    title: "Модели",
+    title: "OXI Model Connections",
     component: ({ projectId }) => <ConnectionsPanel projectId={projectId} />,
     run: ({ openPanel }) => {
-      openPanel({ title: "Модели" });
+      openPanel({ title: "OXI Model Connections" });
     },
   });
   app.slots.navPanel({
     id: "connections",
     path: "models",
-    title: "Модели",
+    title: "OXI Model Connections",
     icon: "Layers",
     component: () => <ConnectionsPanel />,
   });

@@ -1,6 +1,6 @@
 # OXI Public Plugins for BB
 
-Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory and versioned release tags. GitHub Release immutability is enabled for releases published after 0.3.0; the earlier 0.3.0 release is not protected retroactively. All nine plugins use OXI display names and compatible per-plugin semver release tracking.
+Open-source plugins for [BB](https://github.com/get-bb/bb). Each plugin has its own directory and versioned release tags. GitHub Release immutability is enabled for releases published after 0.3.0; the earlier 0.3.0 release is not protected retroactively. This change prepares OXI display names and compatible per-plugin semver tracking for all nine plugins. The prepared versions become available only after their release tags are published.
 
 ## OXI 1Password
 

@@ -19,7 +19,7 @@ function check(mutate = () => {}, env = {}) {
       writeFileSync(file, JSON.stringify(data));
     };
     mutate(edit);
-    return spawnSync(process.execPath, [checker, root], { env: { ...process.env, GITHUB_REF_TYPE: 'branch', ...env }, encoding: 'utf8' });
+    return spawnSync(process.execPath, [checker, root], { env: { ...process.env, GITHUB_REF_TYPE: 'branch', ...env }, encoding: 'utf8', timeout: 10000 });
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 test('all packages and a matching release tag pass', () => {
