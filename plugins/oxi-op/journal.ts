@@ -1,5 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
+import {CodedError, errorCode} from './errors.js';
 
 type Storage = {get<T>(key: string): Promise<T | undefined>; set(key: string, value: unknown): Promise<void>; list(prefix?: string): Promise<string[]>};
 type Context = {projectId: string; threadId: string};
@@ -67,10 +68,12 @@ export function createJournal(storage: Storage) {
                 await save();
                 return value;
             } catch (error) {
-                if (error instanceof OperationFailure) row.failureCode = error.code;
+                const code = error instanceof OperationFailure ? error.code : errorCode(error);
+                if (code) row.failureCode = code;
                 row.state = row.state === 'running' ? 'needs-review' : 'failed';
                 await save();
                 if (error instanceof OperationFailure) throw error;
+                if (code) throw new CodedError(code, '1Password operation did not complete (' + code + '). Inspect oxi-op history before retrying.');
                 throw new Error('1Password operation did not complete. Inspect oxi-op history before retrying; an interrupted write may need recovery.');
             }
         },

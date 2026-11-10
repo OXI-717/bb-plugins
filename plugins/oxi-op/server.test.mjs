@@ -498,7 +498,12 @@ function fleet(t,{offline=[],sessionHost='linux-server',environmentId='example-e
    hosts:{get:async({hostId})=>({id:hostId,name:'Machine '+hostId,status:offline.includes(hostId)?'disconnected':'connected'})},
    plugins:{callRpc:notify??(async()=>{throw new Error('push-notifications is not installed');})},
   },
-  experimental_callHostRpc:callHost??(()=>({completed:true})),
+  experimental_callHostRpc:x=>{
+   const handler=callHost??(()=>({completed:true}));
+   // Program checks pass unless a test answers them itself.
+   if(x.method==='programAvailable'){try{const r=handler(x);if(r&&typeof r.available==='boolean')return r;}catch{}return {available:true};}
+   return handler(x);
+  },
  });
  plugin(host.bb);t.after(()=>host.harness.lifecycle.dispose());return host.harness;
 }
@@ -546,7 +551,7 @@ test('agent keys refuse unlisted machines, critical vaults and reserved variable
  await assert.rejects(h.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'../a',field:'b'}}},context));
  const missing=fleet(t,{routes:[agentRoute],tokens:{}});
  assert.equal(JSON.parse(await missing.behavior.callAgentTool('oxi_op_exec',{argv:['x'],keys:{K:{item:'a',field:'b'}}},context)).completed,false);
- assert.equal(h.inspection.experimental_hostRpcCalls.length+missing.inspection.experimental_hostRpcCalls.length,0);
+ assert.equal([...h.inspection.experimental_hostRpcCalls,...missing.inspection.experimental_hostRpcCalls].filter(c=>c.method!=='programAvailable').length,0);
  assert.throws(()=>routeSchema.parse({...route,...owner,allowAgentCommands:true}));
  assert.throws(()=>routeSchema.parse({...agentRoute,requireApproval:true}));
 });
@@ -767,6 +772,7 @@ test('a one-off critical command needs the owner card, reads on the owner Mac an
  const calls=[];
  const h=fleet(t,{offline:['mac-air'],sessionHost:'linux-server',routes:[{...route,...owner,hostId:'mac-max'}],callHost:({method,input,hostId})=>{
   calls.push({method,hostId,input});
+  if(method==='programAvailable')return {available:input.program!=='missing-program'};
   if(method==='resolveKeys')return {bindings:{SSHPASS:'synthetic-root-password'}};
   if(method==='execResolved')return {exitCode:0,output:'ok <concealed>',truncated:false,timedOut:false,escapedProcess:false};
   throw new Error('unexpected');
@@ -774,18 +780,20 @@ test('a one-off critical command needs the owner card, reads on the owner Mac an
  const work=h.behavior.callAgentTool('oxi_op_exec',{argv:['sshpass','-e','ssh','root@example.test','uptime'],keys:{SSHPASS:{item:'Example server root',field:'password'}},profile:'default'},context);
  await setImmediate();await setImmediate();
  const form=h.inspection.pendingInteractions[0];
- assert.equal(form.timeoutMs,60_000);assert.equal(calls.length,0);
+ assert.equal(form.timeoutMs,60_000);assert.deepEqual(calls.map(c=>c.method),['programAvailable'],'only the program check runs before the card');
  assert(form.payload.purpose.includes('sshpass -e ssh root@example.test uptime')&&form.payload.purpose.includes('Machine linux-server'));
  assert.deepEqual(form.payload.secrets,[{variable:'SSHPASS',item:'Example server root',field:'password'}]);
  h.behavior.submitInteraction(form.id,{approved:true});
  const result=JSON.parse(await work);
  assert.equal(result.exitCode,0);assert(!JSON.stringify(result).includes('synthetic-root-password'));
- assert.deepEqual(calls.map(c=>[c.method,c.hostId]),[['resolveKeys','mac-max'],['execResolved','linux-server']]);
- assert.equal(calls[1].input.cwd,'/work/example');
+ assert.deepEqual(calls.map(c=>[c.method,c.hostId]),[['programAvailable','linux-server'],['resolveKeys','mac-max'],['execResolved','linux-server']]);
+ assert.equal(calls[2].input.cwd,'/work/example');
+ const missing=JSON.parse(await h.behavior.callAgentTool('oxi_op_exec',{argv:['missing-program'],keys:{K:{item:'a',field:'b'}},profile:'default'},context));
+ assert.equal(missing.code,'command-not-found');assert.equal(h.inspection.pendingInteractions.length,0,'no card for a program that cannot start');
  assert(!(await h.behavior.runCli(['history'],context)).stdout.includes('synthetic-root-password'));
  const cancelled=h.behavior.callAgentTool('oxi_op_exec',{argv:['true'],keys:{K:{item:'a',field:'b'}},profile:'default'},context);await setImmediate();await setImmediate();
  h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);await cancelled;
- assert.equal(calls.length,2,'a declined card reads nothing');
+ assert.equal(calls.filter(c=>c.method==='resolveKeys').length,1,'a declined card reads nothing');
 });
 const vid=x=>x.padEnd(26,'a');
 test('tidy shows every step on one card and refuses to delete a vault a route still uses',async t=>{
