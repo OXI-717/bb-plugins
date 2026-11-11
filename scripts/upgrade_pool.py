@@ -152,7 +152,7 @@ def confirm_interrupt():
     return False
 
 
-def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=900):
+def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=900, include_native=False):
     start = time.monotonic()
     next_report = start
     stable = 0
@@ -162,6 +162,9 @@ def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=9
         count = pool['inFlight']
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             raise UpgradeError('Invalid in-flight request count')
+        native_count = native_in_flight() if include_native else 0
+        transport_count = model_activity() if include_native else 0
+        count += native_count + transport_count
         stable = stable + 1 if count == 0 else 0
         if stable == 3:
             say('Pool idle: three checks passed.')
@@ -170,6 +173,8 @@ def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=9
         if now >= next_report:
             say(f'Idle wait: {int(now - start)} / {deadline_seconds} seconds')
             report_pool(pool, say)
+            if native_count:
+                say(f'Native processes awaiting confirmed stop: {native_count}')
             next_report = now + 60
         if offer_interrupt and count and not asked and (prompt_now or now - start >= 300):
             asked = True
@@ -208,9 +213,26 @@ def backup_state(data, destination, pool, source, info, config):
         'keep BB stopped and use the saved source metadata with BB support. No destructive reinstall is automated.\n')
 
 
+def model_activity():
+    value = bb('pool', 'maintenance', 'status')
+    activity = value.get('transportInFlight')
+    if type(activity) is not int or activity < 0:
+        raise UpgradeError('Model transport activity is unavailable; update refused')
+    return activity
+
+
+def native_in_flight():
+    value = bb('pool', 'native', 'status')
+    leases = value.get('leases')
+    if not isinstance(leases, list):
+        raise UpgradeError('Native executor inventory is unavailable; update refused')
+    return len(leases)
+
+
 def verify_pause(args):
     if getattr(args, 'pause_sessions', False):
-        from pool_session_pause import verify_hold
+        from pool_session_pause import verify_hold, verify_model_hold
+        verify_model_hold(bb('pool', 'maintenance', 'status'), args.maintenance_owner)
         verify_hold(bb('pool-maintenance', 'status'), args.maintenance_owner)
 
 
@@ -234,12 +256,14 @@ def perform(args, data, output, say):
     verify_pause(args)
     paused = getattr(args, 'pause_sessions', False)
     forced = wait_idle(say, args.interrupt_now, offer_interrupt=not paused,
-                       deadline_seconds=90 if paused else 900)
+                       deadline_seconds=90 if paused else 900, include_native=paused)
     before = bb('pool', 'status')
     config = bb('plugin', 'config', PLUGIN)['values']
     if not before['accepting'] or (before['inFlight'] and not forced):
         raise UpgradeError('Pool state changed; retry after requests finish')
     verify_pause(args)
+    if paused and (native_in_flight() or model_activity()):
+        raise UpgradeError('Native processes or auxiliary work have not stopped; update refused')
     backup_state(data, output / 'backup', before, source, info, config)
     say('Verified backup created.')
     # Fail closed if a new release or a source/settings change appeared while waiting.
@@ -251,11 +275,14 @@ def perform(args, data, output, say):
     if latest['inFlight'] and not forced:
         raise UpgradeError('New requests arrived during backup; retry')
     verify_pause(args)
+    if paused and (native_in_flight() or model_activity()):
+        raise UpgradeError('Native processes or auxiliary work appeared during backup; update refused')
     say(f'Updating to {target} using BB plugin update.')
     run('bb', 'plugin', 'update', PLUGIN, '--yes', timeout=600)
     after_info = installed()
     after_source = source_info()
     after = bb('pool', 'status')
+    verify_pause(args)
     if (after_info['version'] != target or not after_source.get('history')
             or after_source['history'][0]['version'] != sha):
         raise UpgradeError('Updated version or commit differs from verified release; inspect backup/RECOVERY.txt')
@@ -337,17 +364,31 @@ def main():
                         if checked == 'ALREADY_CURRENT':
                             result = checked
                         else:
+                            # A legacy server must fail before acquiring the BB queue hold.
+                            status = bb('pool', 'maintenance', 'status')
+                            if (not isinstance(status, dict) or status.get('schemaVersion') != 1
+                                    or status.get('scope') != 'all-model-clients'
+                                    or type(status.get('transportInFlight')) is not int
+                                    or status['transportInFlight'] < 0 or 'lease' not in status):
+                                raise UpgradeError('All-client model pause API unavailable; no sessions paused')
                             pause = SessionPause(output / 'sessions.json', bb, say)
                             try:
                                 pause.acquire_hold()
                                 args.maintenance_owner = pause.state['operationId']
+                                # Record and stop BB turns before model interruption can
+                                # make them disappear from the running-session inventory.
                                 pause.stop()
+                                pause.acquire_model_hold()
+                                pause.interrupt_model_requests()
                                 result = perform(args, data, output, say)
                             finally:
                                 try:
-                                    pause.resume()
+                                    pause.release_model_hold()
                                 finally:
-                                    pause.release_hold()
+                                    try:
+                                        pause.resume()
+                                    finally:
+                                        pause.release_hold()
                     elif args.wait_idle:
                         wait_idle(say, offer_interrupt=False)
                         result = 'IDLE_PASS'

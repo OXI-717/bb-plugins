@@ -6,7 +6,7 @@ Run on the BB server host, from a checkout of this repository:
 git pull --ff-only
 bash scripts/upgrade-pool.sh --sandbox
 bash scripts/upgrade-pool.sh --check
-bash scripts/upgrade-pool.sh
+bash scripts/upgrade-pool.sh --pause-sessions
 ```
 
 Requirements: `bb`, `git`, Python 3.9+ and a local BB connection. The entrypoint
@@ -42,7 +42,9 @@ Before update, a private directory under BB's backups contains an online SQLite
 backup, copied secrets, account/routing inventory, configuration and previous
 source metadata. A process lock prevents simultaneous updater runs. Source,
 release, configuration and idle state are rechecked immediately before update.
-New traffic can still arrive after that check; BB owns reload and draining.
+The session-pause mode also holds a persisted all-client admission barrier through
+backup, reload and verification. The idle-only mode has no such barrier; BB owns
+reload and draining if new traffic arrives after its final check.
 A release published between final validation and BB's resolution cannot be pinned
 with the current CLI; a different resulting SHA fails post-update verification.
 
@@ -76,10 +78,12 @@ independent plugin holds the session queue while the pool itself is reloaded.
 Use `bash scripts/upgrade-pool.sh --pause-sessions --version X.Y.Z` from a separate
 BB machine terminal. Stopping the initiating session must not kill the executor.
 
-After release/server preflight, acquire an exclusive 30-minute hold on new BB
+After release/server preflight and model-pause API validation, hold new BB
 dispatches across **all projects and hosts**, then snapshot active/starting
 sessions through the unpaginated public threads.listRunning API. Stop current
-turns with history/provider settings retained. The hook queues starts, follow-ups,
+turns with history/provider settings retained. Only after that saved stop does the
+updater acquire the model hold, which interrupts model and auxiliary traffic.
+The hook queues starts, follow-ups,
 steers and retries, instead of rejecting them. Queue cards and sidebar clocks
 show the reason. No concurrency limits change.
 
@@ -87,10 +91,26 @@ The existing upgrade lock, verified backup, immutable release/source verificatio
 settings and post-update checks remain mandatory. Forced pool interruption stays
 disabled; drain is bounded to 90 seconds. Before wait, backup and update, the owned
 hold must have 15 minutes remaining. Missing/foreign/expiring hold refuses update.
-External HTTP clients are outside the BB queue and can still cause a guarded abort.
+The pool admission hold covers external clients as well as BB: new model calls
+return a provider-native 503 with `x-bb-pool-error: POOL_MAINTENANCE` and
+`Retry-After: 30`. Budget/readiness routes report paused. Routing, account opt-ins,
+scheduler state and VPN policy remain unchanged. External schedulers can still
+tick; their pool model requests cannot dispatch. Direct traffic outside this pool
+is outside this boundary.
+
+Admission rechecks immediately before every upstream send. Acquisition cancels
+old admission generations, active streams and auxiliary transport; queued or
+half-prepared inference cannot redispatch after release. The updater also waits
+for credential/quota work and native leases to finish. Native acquisition, poll
+and unlock admission refuse, but confirmed release/cancellation remains available.
+An unconfirmed native process stops the update; its lease is never force-cleared.
+A request already sent can have an ambiguous outcome and is never replayed by
+this updater. The model hold is persisted before acknowledgement and loaded before
+new routes are exposed after reload. Missing or malformed ownership evidence
+refuses the update.
 Do not unload this plugin during an operation: core may clear orphaned waits.
 
-On success or ordinary failure, queue continuations for unchanged stopped sessions
+On success or ordinary failure, release only the owned model hold, then queue continuations for unchanged stopped sessions
 without provider/model overrides, then release the owned hold and recheck the queue.
 Previously idle sessions do not start unless they have real queued user work.
 Already queued user work is preserved without adding a redundant continuation.
@@ -109,3 +129,28 @@ Queued messages carry the finite deadline; core re-attempts after expiry without
 a daemon, cron or watchdog. Stopped sessions without queued work need explicit
 recovery. Lease state survives plugin restart and expiry is checked at startup.
 No recovery is promised while BB is not running. No prompts or credentials in receipts.
+
+
+## Update from the pool interface
+
+Pooler 0.4.79+ includes **Обновить Pooler** in its settings. It launches the same
+accepted `--pause-sessions` updater in a BB machine terminal on the server host.
+The terminal survives pool reload and does not belong to a stopped agent thread.
+Before launch, a private operation directory receives a fixed copy of the updater
+and its Python modules. Its working directory is outside the managed Git cache,
+so removal of the previous checkout cannot break verification or recovery.
+The browser supplies no command, host, version or file path. The installed Git
+source must retain this repository's scripts, and `pool-maintenance` must be enabled.
+An unchanged immutable release performs only preflight and leaves work running.
+
+A durable operation receipt prevents double-clicks and survives reopening the UI.
+After an uncertain terminal-create response, the controller searches only the
+operation UUID title on its recorded host; it never automatically starts a second
+updater. Missing/ambiguous terminal evidence remains `unknown`, requiring inspection
+of the BB machine terminal and private recovery receipt. A failed or disconnected
+terminal is not reported as a successful update.
+
+Bootstrapping from an older pool without the model-admission API requires its
+previously accepted updater and a coordinated idle window once. The new updater
+refuses the missing API before stopping sessions; it never claims that old external
+clients were paused. Subsequent CLI and interface updates use both barriers.

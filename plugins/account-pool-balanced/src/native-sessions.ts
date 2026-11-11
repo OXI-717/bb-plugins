@@ -177,7 +177,9 @@ export class NativeSessions {
     if(!lease||lease.state!=='uncertain')throw new NativeSessionError(409,'native-not-uncertain');
     this.event(lease,'attested-stopped');this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
   });}
+  admissionCheck: () => void = () => {};
   async request(caller:NativeCaller,raw:unknown):Promise<NativeReply>{const input=nativeRequestSchema.parse(raw);
+    if(input.action!=='release'&&input.action!=='unlock-cancel')this.admissionCheck();
     if(input.action==='unlock-start')return this.startUnlock(caller,input.leaseId);
     if(input.action==='unlock-cancel')return this.cancelUnlock(caller,input.leaseId);
     let checkedHost:string|undefined;
@@ -198,6 +200,7 @@ export class NativeSessions {
       this.event(lease,lease.state==='queued'?'cancelled':'released');
       this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
     }
+    this.admissionCheck();
     if(!this.state.managed)throw new NativeSessionError(503,'native-not-managed');
     let lease:Lease;
     if(input.action==='acquire'){
@@ -240,6 +243,7 @@ export class NativeSessions {
   private async startUnlock(caller:NativeCaller,leaseId:string){
     await this.request(caller,{action:'poll',leaseId}); // Same admission/Guard checks, no new authority.
     const issued=await this.serial(()=>{
+      this.admissionCheck();
       const lease=this.owned(caller,leaseId);
       if(!this.state.managed||lease.state!=='active'||lease.kind!=='task'||!lease.executor.execution||!lease.executor.unlock)
         throw new NativeSessionError(403,'native-unlock-denied');
@@ -256,6 +260,7 @@ export class NativeSessions {
     const done=(async()=>{
       let completed=false;
       try{
+        this.admissionCheck();
         await Promise.race([this.launchUnlock(issued.requestId,abort.signal),new Promise<never>((_,reject)=>{
           abort.signal.addEventListener('abort',()=>reject(new Error('native-unlock-cancelled')),{once:true});
         })]);completed=!abort.signal.aborted;
@@ -278,6 +283,7 @@ export class NativeSessions {
   async claimUnlock(requestId:string){
     const before=this.currentUnlock(requestId);await this.admit(before.executor.hostId,before.caller);
     return this.serial(()=>{
+      this.admissionCheck();
       const lease=this.currentUnlock(requestId);
       if(lease.unlock!.state!=='issued')throw new NativeSessionError(409,'native-unlock-consumed');
       lease.unlock!.state='consumed';

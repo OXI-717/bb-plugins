@@ -1,3 +1,4 @@
+import {PoolUpdatePanel} from './pool-update-panel';
 import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
 import {AccountEmailForm} from './account-email-form';
@@ -1467,6 +1468,7 @@ function AccountPoolSettings() {
     );
   return (
     <div className="w-full space-y-6">
+      <PoolUpdatePanel />
       <p className="text-xs text-subtle-foreground/75">
         Хаб {status?.accepting ? "принимает" : "не принимает"} ·{" "}
         {status?.inFlight ?? 0} в работе · используют {hubHosts}
