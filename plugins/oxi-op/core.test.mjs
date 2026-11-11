@@ -531,6 +531,32 @@ test('references keep CRLF, comments and empty values, and refuse links and plan
   assert.equal(await readFile(target,'utf8'),'S=synthetic-s\n','the real file is untouched');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('a locked file is reported by code, left as it is, and leaves no rewritten copy behind',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ if(process.getuid?.()===0)return t.skip('root ignores folder permissions');
+ const {mkdtemp,writeFile,readFile,readdir,chmod,rm,mkdir}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');const {execFileSync}=await import('node:child_process');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-lock-'));const ro=join(dir,'ro');await mkdir(ro);
+ const flagged=join(dir,'flagged.env');const doc=join(ro,'key.json');const env=join(ro,'app.env');
+ try{
+  const v=fakeVault();
+  await writeFile(flagged,'A=synthetic-a\n');await writeFile(doc,'{"k":"synthetic"}');await writeFile(env,'B=synthetic-b\n');
+  const plan=[{file:doc,title:'Doc',kind:'document'},{file:env,title:'Env',kind:'env'}];
+  if(process.platform==='darwin')plan.push({file:flagged,title:'Flagged',kind:'env'});
+  const imported=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
+  assert(imported.results.every(r=>r.state==='imported'));
+  // A read-only folder refuses both the rewrite and the removal; macOS also has the immutable flag.
+  await chmod(ro,0o555);
+  if(process.platform==='darwin')execFileSync('chflags',['uchg',flagged]);
+  const done=await replaceWithReferences(v.run,{},'vault-1',plan.map((p,i)=>({...p,itemId:imported.results[i].itemId})));
+  assert.deepEqual(done.results.map(r=>[r.state,r.code]),plan.map(()=>['failed','file-locked']));
+  assert.equal(await readFile(doc,'utf8'),'{"k":"synthetic"}');assert.equal(await readFile(env,'utf8'),'B=synthetic-b\n');
+  if(process.platform==='darwin')assert.equal(await readFile(flagged,'utf8'),'A=synthetic-a\n');
+  assert.deepEqual((await readdir(dir)).filter(n=>n.includes('.oxi-op-')),[],'no rewritten copy is left next to a locked file');
+ }finally{
+  if(process.platform==='darwin')try{execFileSync('chflags',['nouchg',flagged]);}catch{}
+  await chmod(ro,0o755).catch(()=>{});await rm(dir,{recursive:true,force:true});
+ }
+});
 test('an empty assignment followed by a comment stays empty and untouched',()=>{
  assert.deepEqual(parseEnv('EMPTY= # intentionally unset\nA=1'),{entries:[{key:'A',value:'1'}],ambiguous:false});
 });
