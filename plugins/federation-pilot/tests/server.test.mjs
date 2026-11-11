@@ -7,13 +7,14 @@ function harness(store=new Map()){
  const config={enabled:true,servers:JSON.stringify(remotes)};
  const calls=[],routes=new Map(),signals=new Map(),sockets=new Map(),tools=new Map();let dispose,cli;
  const primaryIds=new Set(),primaryErrors=new Map(),remoteIds={alpha:new Set(['proj_alpha','thr_alpha','env_alpha']),beta:new Set(['proj_beta','thr_beta'])};
- const failures=new Map(),moved=new Set();let generation=0;
+ const failures=new Map(),moved=new Set();let generation=0,onProbe=()=>{};
  const get=async args=>{if(args.hostId==='host_bridge')return {id:args.hostId,status:'connected'};const id=Object.values(args)[0];if(primaryErrors.has(id))throw primaryErrors.get(id);if(primaryIds.has(id))return {id};throw Object.assign(Error('not found'),{status:404});};
  const bb={rpc:{register:()=>{}},cli:{register:value=>cli=value},agents:{registerTool:value=>tools.set(value.name,value),configure:()=>{}},storage:{kv:{get:async key=>store.get(key),set:async(key,value)=>{store.set(key,value)}}},settings:{define:()=>({get:async()=>config})},sdk:Object.fromEntries(['threads','projects','hosts','environments'].map(k=>[k,{get}])),log:{warn:()=>{}},onDispose:fn=>dispose=fn,
   hosts:{experimental_client:()=>({experimental_onSignal:(k,fn)=>signals.set(k,fn),experimental_onWorkerExit:()=>{},call:async(method,input)=>{
    calls.push({method,...input});
    if(method==='imageUpload')return {status:201,contentType:'application/json',bodyBase64:Buffer.from(JSON.stringify({type:'localImage',sourceProjectId:input.projectId,path:'image.png',name:'image.png',mimeType:input.mimeType,sizeBytes:Buffer.from(input.bytesBase64,'base64').length})).toString('base64')};
    if(method!=='request')return {ok:true,id:input.id};const peer=input.sshTarget.split('-')[1];
+   if(input.path==='/api/v1/projects/proj_'+peer)await onProbe();
    if(failures.has(peer))throw Error(failures.get(peer));let result,status=200;
    if(input.path==='/api/v1/sidebar-bootstrap')result={projects:[{id:`proj_${peer}`,name:peer,threads:moved.has(`thr_${peer}`)?[]:[{id:`thr_${peer}`,projectId:`proj_${peer}`,title:`generation ${generation}`}]}]};
    else if(input.method==='GET'&&input.path.startsWith('/api/v1/threads?'))result=[{id:`thr_${peer}`,projectId:`proj_${peer}`,title:'Saved thread'}];
@@ -28,7 +29,7 @@ function harness(store=new Map()){
   const url=`http://primary.invalid${path}`;
   return routes.get(`${method} ${path}`)({req:{json:async()=>body,url,raw:new Request(url,{method,...(method==='POST'?{body:JSON.stringify(body),headers:{'content-type':'application/json'}}:{})})},json:(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}})});
  }
- return {config,calls,moved,primaryIds,primaryErrors,remoteIds,failures,signals,sockets,remotes,request,tools,cli,dispose:()=>dispose(),next:()=>generation++};
+ return {setProbe:fn=>onProbe=fn,config,calls,moved,primaryIds,primaryErrors,remoteIds,failures,signals,sockets,remotes,request,tools,cli,dispose:()=>dispose(),next:()=>generation++};
 }
 const send=(id='thr_alpha')=>({serverId:'alpha',method:'POST',path:`/api/v1/threads/${id}/send`,body:'{"input":"private text"}'});
 
@@ -117,4 +118,14 @@ test('registered agent CLI and tools use explicit read permission and GETs only'
   assert.ok(h.calls.every(c=>c.method==='GET'&&c.body===null));
   h.calls.length=0;h.primaryIds.add('thr_alpha');assert.equal((await tool.execute({serverId:'alpha',projectId:'proj_alpha',threadId:'thr_alpha'},ctx)).isError,true);assert.ok(!h.calls.some(c=>c.path.includes('/events')));
  }finally{await h.dispose();}
+});
+
+test('actual upstream blocks config changed during the awaited probe',async()=>{
+ for(const field of ['allowWrites','sshTarget']){const h=harness();try{
+  h.setProbe(()=>{h.remotes[0][field]=field==='allowWrites'?false:'replacement-alpha';h.config.servers=JSON.stringify(h.remotes);});
+  assert.equal((await h.request('/proxy',send())).status,503);
+  assert.equal(h.calls.filter(c=>c.body).length,0);
+  assert.equal(h.calls.filter(c=>c.path==='/api/v1/sidebar-bootstrap').length,0);
+  assert.equal(h.calls.filter(c=>c.method==='imageUpload'||c.method==='handoffUpload').length,0);
+ }finally{await h.dispose();}}
 });

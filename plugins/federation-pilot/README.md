@@ -156,7 +156,11 @@ Tunnel reuse checks the SSH child and loopback listener. Broken resources are
 replaced at most once per acquisition; concurrent callers share establishment.
 The SSH child owns a worker retention lease. Idle cleanup preserves active
 WebSockets; socket closure, configuration reconciliation and plugin disposal
-release resources. Configuration reconciliation runs every five seconds.
+release resources. Configuration is inspected every five seconds; reconciliation
+only runs when the destination set changes, with at most five attempts after
+failure. Socket cleanup and child exits address the exact tunnel generation,
+so late cleanup cannot close its replacement. Configuration is revalidated
+after waiting for a probe, immediately before any request or upload.
 
 After two minutes of continuous outage, the plugin attempts one standard BB
 push notification. Successful delivery suppresses further notices until recovery;

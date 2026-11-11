@@ -1,5 +1,6 @@
+import {createReconciler} from './reconcile.ts';
 import {z} from 'zod';
-import {createRecovery,failureKind,failureLabels} from './recovery.ts';
+import {ConfigurationChangedError,createRecovery,failureKind,failureLabels} from './recovery.ts';
 import {randomUUID,createHash} from 'node:crypto';
 import type {BbPluginApi,ExperimentalPluginWebSocket} from '@get-bb/plugin-sdk';
 import {hostContract,hostSignals,requestSchema} from './contract.ts';
@@ -50,7 +51,9 @@ export default function plugin(bb:BbPluginApi){
    notify:async()=>{const r=await bb.sdk.plugins.callRpc({pluginId:'push-notifications',method:'notifications.send',input:{title:'OXI Federation: connection unavailable',body:'Automatic recovery is running. Check Federation connection status.'},outputSchema:z.object({ok:z.literal(true),channels:z.array(z.string())}),signal:AbortSignal.timeout(10000)});if(!r.channels.length)throw Error('No notification channel');},
   });monitors.set(c.serverId,{key:keyOf(c),c,recovery});return recovery;
  }
- async function upstream(c:RemoteConfig,method:string,path:string,body:string|null=null){if(stopped||keyOf(await selected(c.serverId))!==keyOf(c))throw Error('Federation configuration changed');return monitor(c).run(method,signal=>host.call('request',{sshTarget:c.sshTarget,port:c.remotePort,...requestSchema.parse({method,path,body})},{hostId:c.bridgeHostId,signal,timeoutMs:30000}));}
+ async function assertCurrent(c:RemoteConfig){try{if(stopped||keyOf(await selected(c.serverId))!==keyOf(c))throw Error();}catch{throw new ConfigurationChangedError('Federation configuration changed');}}
+ async function upstream(c:RemoteConfig,method:string,path:string,body:string|null=null){if(stopped||keyOf(await selected(c.serverId))!==keyOf(c))throw Error('Federation configuration changed');return monitor(c).run(method,async signal=>{await assertCurrent(c);return host.call('request',{sshTarget:c.sshTarget,port:c.remotePort,...requestSchema.parse({method,path,body})},{hostId:c.bridgeHostId,signal,timeoutMs:30000});});}
+ const reconciler=createReconciler((hostId,keys,signal)=>host.call('reconcile',{keys},{hostId,signal,timeoutMs:5000}));
  let configTimer:ReturnType<typeof setTimeout>|null=null,connectionTopology='';
  async function refreshConnections(){
   try{const all=await configurations();if(stopped)return;
@@ -58,7 +61,7 @@ export default function plugin(bb:BbPluginApi){
    const topology=JSON.stringify(active);if(topology===connectionTopology)return;connectionTopology=topology;
    const bridges=new Set([...monitors.values()].map(e=>e.c.bridgeHostId));
    for(const [id,e]of monitors)if(!active.some(c=>c.serverId===id&&keyOf(c)===e.key)){e.recovery.dispose();monitors.delete(id);}
-   await Promise.all([...bridges].map(hostId=>host.call('reconcile',{keys:active.filter(c=>c.bridgeHostId===hostId).map(c=>c.sshTarget+':'+c.remotePort)},{hostId,timeoutMs:5000}).catch(()=>{})));
+   for(const hostId of bridges)reconciler.update(hostId,active.filter(c=>c.bridgeHostId===hostId).map(c=>c.sshTarget+':'+c.remotePort));
    if(stopped)return;
    for(const c of active){const r=monitor(c);if(r.state.status==='connecting')void r.check().catch(()=>{});}
   }catch{}finally{if(!stopped)configTimer=setTimeout(refreshConnections,5000);}
@@ -130,7 +133,7 @@ export default function plugin(bb:BbPluginApi){
  }
  registerAgentReads(bb,createAgentReads({configurations,exclusive,get:json}));
  const handoffs=createHandoffs({configurations,selected,exclusive,get:json,
-  upload:(c,input)=>monitor(c).run('POST',signal=>host.call('handoffUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId,signal})),
+  upload:(c,input)=>monitor(c).run('POST',async signal=>{await assertCurrent(c);return host.call('handoffUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId,signal});}),
   create:(c,body)=>upstream(c,'POST','/api/v1/threads',body),
   load:id=>bb.storage.kv.get(`handoff:${id}`),save:(id,value)=>bb.storage.kv.set(`handoff:${id}`,value),
  });
@@ -141,7 +144,7 @@ export default function plugin(bb:BbPluginApi){
   handoffCommit:input=>handoffs.commit(input),handoffStatus:input=>handoffs.status(input),
  });
  registerImageRoutes(bb,{selected,exclusive,
-  upload:(c,input)=>monitor(c).run('POST',signal=>host.call('imageUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId,signal})),
+  upload:(c,input)=>monitor(c).run('POST',async signal=>{await assertCurrent(c);return host.call('imageUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId,signal});}),
   get:(c,path)=>upstream(c,'GET',path),
  });
  bb.http.route('GET','/config',async ctx=>{try{const c=await configurations();return ctx.json({enabled:c.enabled,servers:c.servers.map(publicServer)});}catch{return ctx.json({enabled:false,servers:[],error:'Invalid server settings'},400);}});
@@ -213,5 +216,5 @@ export default function plugin(bb:BbPluginApi){
    async onClose(){ended=true;early.length=0;await closeClient(id);},
   };
  });
- bb.onDispose(async()=>{stopped=true;if(configTimer!==null)clearTimeout(configTimer);for(const e of monitors.values())e.recovery.dispose();monitors.clear();clearInterval(heartbeat);for(const [id,c]of clients){c.socket.close(1001,'Federation disabled');await closeClient(id);}});
+ bb.onDispose(async()=>{stopped=true;reconciler.dispose();if(configTimer!==null)clearTimeout(configTimer);for(const e of monitors.values())e.recovery.dispose();monitors.clear();clearInterval(heartbeat);for(const [id,c]of clients){c.socket.close(1001,'Federation disabled');await closeClient(id);}});
 }

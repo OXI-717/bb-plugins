@@ -1,3 +1,4 @@
+export class ConfigurationChangedError extends Error {}
 // Bounded, per-destination recovery. Only probes and explicitly safe reads repeat.
 export type FailureKind='bridge_offline'|'bridge_unavailable'|'ssh_unavailable'|'remote_bb_unavailable';
 export function failureKind(error:unknown):FailureKind {
@@ -38,7 +39,7 @@ export function createRecovery(deps:{probe:(signal:AbortSignal)=>Promise<void>,n
   await ready();
   const limit=method==='GET'||method==='HEAD'?2:1;
   for(let attempt=0;;attempt++)try{const value=await action(controller.signal);if(!active())throw Error('Federation monitor disposed');return value;}
-  catch(error){if(!active())throw Error('Federation monitor disposed');failed(error);if(attempt+1>=limit)throw Error(`federation:${failureKind(error)}`);
+  catch(error){if(error instanceof ConfigurationChangedError)throw error;if(!active())throw Error('Federation monitor disposed');failed(error);if(attempt+1>=limit)throw Error(`federation:${failureKind(error)}`);
    // One immediate health probe permits at most one retry of this safe read.
    await check();
   }
