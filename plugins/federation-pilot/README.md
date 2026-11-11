@@ -133,16 +133,17 @@ archive, deletion, activation or source-agent wake. Remote attachment bytes are
 not exposed. Continuation creation is a separate authorized action; existing
 one-attempt commit and saved-status reconciliation rules remain in force.
 
-### Connection recovery (0.2.8 release candidate)
+### Connection recovery
 
 The configured bridge machine remains the only SSH origin. The plugin never
 moves a bridge to another host, changes authentication or network settings, or
 starts an agent to repair connectivity.
 
-The connection status disclosure shows bridge machine offline, bridge worker
-unavailable, SSH unavailable, or remote BB unavailable, plus last successful
-probe, outage duration, and next check. `GET /connections` exposes the same
-bounded state. A successful probe verifies the configured project identity.
+Connection status stays in the existing session indicator; no floating panel
+is added over the conversation or composer (including mobile screens).
+`GET /connections` exposes bridge machine offline, bridge worker unavailable,
+SSH unavailable, or remote BB unavailable, plus last successful probe, outage
+duration, and next check. A successful probe verifies the configured project identity.
 Health probes are single-flight per configured server. Failed probes back off
 from one second to a 60-second cap with jitter; healthy connections are checked
 every 30 seconds. Pending recovery deadlines are not postponed by user traffic.
