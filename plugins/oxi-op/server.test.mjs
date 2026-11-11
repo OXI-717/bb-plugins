@@ -837,3 +837,20 @@ test('a critical command is shown in full or refused, and tidy rechecks routes a
  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});
  assert.equal((await work).exitCode,1,'a vault routed while the card waited is not deleted');
 });
+test('migration shows every file on one card and targets the named vault',async t=>{
+ const calls=[];
+ const h=fleet(t,{offline:['mac-air'],routes:[{...route,...owner,hostId:'mac-max'}],callHost:({method,input,hostId})=>{calls.push({method,hostId,input});return {results:input.entries.map(e=>({file:e.file,title:e.title,kind:e.kind,state:'imported',keys:['A']}))};}});
+ const plan=[{file:'/Users/someone/cc/proj/app.env',title:'App env',kind:'env'},{file:'/Users/someone/cc/proj/id.key',title:'Key',kind:'document'}];
+ assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','import','--vault','bad','--vault-label','X','--plan',JSON.stringify(plan)],context)).exitCode,1);
+ const work=h.behavior.runCli(['migrate','--profile','default','--mode','import','--vault',vid('target'),'--vault-label','Example Project','--plan',JSON.stringify(plan)],context);await setImmediate();await setImmediate();
+ const form=h.inspection.pendingInteractions[0];
+ assert.equal(form.timeoutMs,600_000);assert.equal(calls.length,0);
+ assert(form.payload.purpose.includes('~/cc/proj/app.env → «App env»')&&form.payload.purpose.includes('~/cc/proj/id.key → «Key» (файл целиком)'));
+ assert(!form.payload.purpose.includes('/Users/someone'));
+ h.behavior.submitInteraction(form.id,{approved:true});
+ const out=JSON.parse((await work).stdout);
+ assert.deepEqual(out.results.map(r=>r.state),['imported','imported']);
+ assert.equal(calls[0].hostId,'mac-max');assert.equal(calls[0].input.route.vaultId,vid('target'));assert.equal(calls[0].input.mode,'import');
+ const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
+ assert.equal(row.kind,'migrate');assert(!JSON.stringify(row).includes('/Users/someone'),'the journal keeps states, not paths');
+});

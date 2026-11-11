@@ -36,6 +36,7 @@ TIMEOUT = 90
 ALLOWED = {
     "item": {"list", "get", "create", "edit", "delete", "move", "template"},
     "vault": {"list", "get", "create", "delete"},
+    "document": {"create", "get"},
     "read": None,
     "service-account": {"create"},
     "account": {"list", "get"},

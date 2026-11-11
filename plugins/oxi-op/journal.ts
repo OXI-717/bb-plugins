@@ -4,13 +4,14 @@ import {CodedError, errorCode} from './errors.js';
 
 type Storage = {get<T>(key: string): Promise<T | undefined>; set(key: string, value: unknown): Promise<void>; list(prefix?: string): Promise<string[]>};
 type Context = {projectId: string; threadId: string};
-type Kind = 'automate' | 'exec' | 'overview' | 'tidy' | 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
+type Kind = 'automate' | 'exec' | 'overview' | 'tidy' | 'migrate' | 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
 type State = 'preparing' | 'awaiting-approval' | 'running' | 'completed' | 'cancelled' | 'failed' | 'needs-review' | 'interrupted';
 type Record = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; failureCode?: string; result?: unknown};
 export type Progress = (state: 'awaiting-approval' | 'running', approved?: boolean) => Promise<void>;
 
 // Persist only these metadata shapes; never persist form input or raw errors.
 const results = {
+    migrate: z.object({results: z.array(z.object({state: z.string(), code: z.string().optional()}))}),
     tidy: z.object({results: z.array(z.object({kind: z.string(), ok: z.boolean(), code: z.string().optional(), same: z.boolean().optional(), sameUsername: z.boolean().optional()}))}),
     // Only the summary is kept; the full map is returned to the caller and never stored.
     overview: z.object({vaultTotal: z.number().int(), complete: z.boolean()}),
