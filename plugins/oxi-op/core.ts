@@ -530,7 +530,8 @@ function parseEnvLine(raw: string): EnvLine | undefined {
     }
     const hash = rest.search(/\s#/);
     const value = hash >= 0 ? rest.slice(0, hash).trimEnd() : rest;
-    return {prefix, key, separator, value, comment: hash >= 0 ? rest.slice(value.length) : '', ambiguous: /[$`"'\\]/.test(value)};
+    // A hash without a space before it (abc#x) is a comment to dotenv but part of the value to a shell.
+    return {prefix, key, separator, value, comment: hash >= 0 ? rest.slice(value.length) : '', ambiguous: /[$`"'\\#]/.test(value)};
 }
 export function parseEnv(text: string): {entries: EnvEntry[]; ambiguous: boolean} {
     const entries = new Map<string, string>();

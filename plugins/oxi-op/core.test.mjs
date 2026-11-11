@@ -440,6 +440,10 @@ test('the env reader keeps plain values, unquotes, skips comments and marks ambi
  const r=parseEnv('# c\nexport A=1\nB="two words"\nC=three # note\nEMPTY=\nD=\'q\'\n');
  assert.deepEqual(r,{entries:[{key:'A',value:'1'},{key:'B',value:'two words'},{key:'C',value:'three'},{key:'D',value:'q'}],ambiguous:false});
  assert.equal(parseEnv('KEY="-----BEGIN\nabc"').ambiguous,true);
+ // dotenv reads TOKEN=abc#comment as abc, a shell as abc#comment: keep such a file whole.
+ assert.equal(parseEnv('TOKEN=abc#comment\n').ambiguous,true);
+ assert.deepEqual(parseEnv('TOKEN=abc #comment\n'),{entries:[{key:'TOKEN',value:'abc'}],ambiguous:false});
+ assert.deepEqual(parseEnv('TOKEN="abc#x"\n'),{entries:[{key:'TOKEN',value:'abc#x'}],ambiguous:false});
  assert.equal(parseEnv('just text').ambiguous,true);
 });
 function fakeVault(){
