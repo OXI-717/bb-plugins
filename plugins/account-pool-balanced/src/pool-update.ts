@@ -1,5 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import fs from 'node:fs/promises';
+import {constants} from 'node:fs';
 import path from 'node:path';
 import type {BbPluginApi} from '@get-bb/plugin-sdk';
 import {z} from 'zod';
@@ -63,12 +64,22 @@ export class PoolUpdate {
     if (!(await bb.sdk.plugins.list()).plugins.some(value=>value.id==='pool-maintenance'&&value.enabled))
       throw Error('Enable the session maintenance plugin before updating the pool');
     const value: UpdateState = {operationId: randomUUID(), startedAt: this.now(), hostId, terminalId: null, state: 'starting'};
+    // BB removes the previous Git checkout during update. Freeze this accepted
+    // updater outside that cache, including its imports and working directory.
+    const operationRoot=path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'updates',value.operationId);
+    await fs.mkdir(operationRoot,{recursive:true,mode:0o700});
+    for(const name of ['upgrade-pool.sh','upgrade_pool.py','pool_session_pause.py','upgrade_pool_sandbox.py']){
+      const target=path.join(operationRoot,name);
+      await fs.copyFile(path.join(path.dirname(script),name),target,constants.COPYFILE_EXCL);
+      await fs.chmod(target,0o600);
+    }
+    const frozenScript=path.join(operationRoot,'upgrade-pool.sh');
     await bb.storage.kv.set(KEY, value);
     try {
       const terminal = await bb.sdk.terminals.create({cols:100,rows:28,
         title:`Pool update ${value.operationId}`,
-        scope:{kind:'host_path',hostId,cwd:plugin.rootDir},
-        start:{mode:'command',command:`env BB_SERVER_URL=${quote(loopback.origin)} bash ${quote(script)} --pause-sessions`}});
+        scope:{kind:'host_path',hostId,cwd:operationRoot},
+        start:{mode:'command',command:`env BB_SERVER_URL=${quote(loopback.origin)} bash ${quote(frozenScript)} --pause-sessions`}});
       const next: UpdateState = {...value,terminalId:terminal.id,state:'running'};
       await bb.storage.kv.set(KEY,next);
       return next;

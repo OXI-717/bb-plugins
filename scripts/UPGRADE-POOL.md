@@ -136,6 +136,9 @@ No recovery is promised while BB is not running. No prompts or credentials in re
 Pooler 0.4.79+ includes **Обновить Pooler** in its settings. It launches the same
 accepted `--pause-sessions` updater in a BB machine terminal on the server host.
 The terminal survives pool reload and does not belong to a stopped agent thread.
+Before launch, a private operation directory receives a fixed copy of the updater
+and its Python modules. Its working directory is outside the managed Git cache,
+so removal of the previous checkout cannot break verification or recovery.
 The browser supplies no command, host, version or file path. The installed Git
 source must retain this repository's scripts, and `pool-maintenance` must be enabled.
 An unchanged immutable release performs only preflight and leaves work running.
