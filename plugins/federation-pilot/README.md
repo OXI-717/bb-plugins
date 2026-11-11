@@ -121,3 +121,14 @@ attachments to a ready remote environment. See [contract and limits](HANDOFF.md)
 This does not enroll remote machines or enable agent consumers.
 
 BB 0.49 short thread links (`/threads/<id>`) are resolved through validated remote reads after the primary server confirms absence. Local threads retain priority; failures are not treated as absence.
+
+### Same-server continuation source
+
+`handoffSource` is a bounded read RPC for the companion Handoff plugin. It requires
+an explicit server/project/thread tuple, configured project membership, enabled
+writes for this user-initiated flow, and no primary identity collision. Membership
+and connection configuration are checked before and after each ordered event page.
+Invalid identity, ordering or page size fails closed. It performs no create,
+archive, deletion, activation or source-agent wake. Remote attachment bytes are
+not exposed. Continuation creation is a separate authorized action; existing
+one-attempt commit and saved-status reconciliation rules remain in force.
