@@ -838,19 +838,22 @@ test('a critical command is shown in full or refused, and tidy rechecks routes a
  assert.equal((await work).exitCode,1,'a vault routed while the card waited is not deleted');
 });
 test('migration shows every file on one card, grouped by vault, and calls each vault in turn',async t=>{
+ const H=['','Users','someone'].join('/');
  const calls=[];
  const h=fleet(t,{offline:['mac-air'],routes:[{...route,...owner,hostId:'mac-max'}],callHost:({method,input,hostId})=>{calls.push({method,hostId,input});return {results:input.entries.map(e=>({file:e.file,title:e.title,kind:e.kind,state:'imported',keys:['A']}))};}});
- const plan=[{file:'/Users/someone/cc/proj/app.env',title:'App env',kind:'env',vaultId:vid('one'),vaultLabel:'Project One'},{file:'/Users/someone/cc/proj/id.key',title:'Key',kind:'document',vaultId:vid('one'),vaultLabel:'Project One'},{file:'/Users/someone/cc/two/b.env',title:'B',kind:'env',vaultId:vid('two'),vaultLabel:'Project Two'}];
+ const plan=[{file:H+'/cc/proj/app.env',title:'App env',kind:'env',vaultId:vid('one'),vaultLabel:'Project One'},{file:H+'/cc/proj/id.key',title:'Key',kind:'document',vaultId:vid('one'),vaultLabel:'Project One'},{file:H+'/cc/two/b.env',title:'B',kind:'env',vaultId:vid('two'),vaultLabel:'Project Two'}];
  assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','import','--plan',JSON.stringify([{...plan[0],vaultId:'bad'}])],context)).exitCode,1);
+ assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','import','--plan',JSON.stringify([plan[0],{...plan[1],title:'App env'}])],context)).exitCode,1,'duplicate titles in one vault are refused');
+ assert.equal(h.inspection.pendingInteractions.length,0);
  const work=h.behavior.runCli(['migrate','--profile','default','--mode','import','--plan',JSON.stringify(plan)],context);await setImmediate();await setImmediate();
  const form=h.inspection.pendingInteractions[0];
  assert.equal(form.timeoutMs,600_000);assert.equal(calls.length,0);
  assert(form.payload.purpose.includes('Сейф «Project One»:\n  ~/cc/proj/app.env\n  ~/cc/proj/id.key (файл целиком)')&&form.payload.purpose.includes('Сейф «Project Two»:\n  ~/cc/two/b.env'));
- assert(!form.payload.purpose.includes('/Users/someone'));
+ assert(!form.payload.purpose.includes(H));
  h.behavior.submitInteraction(form.id,{approved:true});
  const out=JSON.parse((await work).stdout);
  assert.deepEqual(out.results.map(r=>r.state),['imported','imported','imported']);
  assert.deepEqual(calls.map(c=>[c.hostId,c.input.route.vaultId,c.input.entries.length,c.input.mode]),[['mac-max',vid('one'),2,'import'],['mac-max',vid('two'),1,'import']]);
  const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
- assert.equal(row.kind,'migrate');assert(!JSON.stringify(row).includes('/Users/someone'),'the journal keeps states, not paths');
+ assert.equal(row.kind,'migrate');assert(!JSON.stringify(row).includes(H),'the journal keeps states, not paths');
 });

@@ -462,6 +462,12 @@ export default function plugin(bb: BbPluginApi) {
     async function migrate(profile: string, mode: 'import' | 'reference', rawPlan: string, ctx: OperationContext) {
         const entries = z.array(z.object({file: z.string().regex(/^\/[^\0]*$/), title: z.string().min(1).max(160), kind: z.enum(['env', 'document']), vaultId: z.string().regex(/^[a-z0-9]{26}$/), vaultLabel: z.string().min(1).max(160)}).strict()).min(1).max(200).parse(JSON.parse(rawPlan));
         const vaults = [...new Map(entries.map(e => [e.vaultId, e.vaultLabel]))];
+        for (const [vaultId] of vaults) {
+            const part = entries.filter(e => e.vaultId === vaultId);
+            if (part.length > 100) throw new Error('At most 100 files per vault in one run');
+            if (new Set(part.map(e => e.title)).size !== part.length) throw new Error('Titles must be unique within a vault');
+            if (new Set(part.map(e => e.vaultLabel)).size !== 1) throw new Error('One label per vault');
+        }
         const {route: configured} = await accessFor(ctx.projectId, profile);
         if (configured.authentication !== 'desktop' || !configured.requireApproval) throw new Error('Migration requires approved owner desktop access');
         const home = (path: string) => path.replace(/^\/(Users|home)\/[^/]+/, '~');
@@ -479,10 +485,13 @@ export default function plugin(bb: BbPluginApi) {
             await progress('awaiting-approval', true);
             await requireCredentialHost(route, ctx);
             await progress('running', true);
-            const results = [];
+            // Each vault runs on its own; a failure there is reported for its files and the
+            // results of the other vaults are kept.
+            const results: {file: string; state: string; code?: string}[] = [];
             for (const [vaultId, vaultLabel] of vaults) {
                 const part = entries.filter(e => e.vaultId === vaultId).map(({file, title, kind}) => ({file, title, kind}));
-                results.push(...(await host.call('importFiles', {route: {...route, vaultId, vaultLabel}, mode, entries: part}, {hostId: credentialHost(route), signal: ctx.signal})).results);
+                try {results.push(...(await host.call('importFiles', {route: {...route, vaultId, vaultLabel}, mode, entries: part}, {hostId: credentialHost(route), signal: ctx.signal})).results);}
+                catch (error) {results.push(...part.map(e => ({file: e.file, state: 'failed', code: 'vault-' + (errorCode(error) ?? 'failed')})));}
             }
             return JSON.stringify({results});
         }, mode === 'import' ? 'Перенос ключей в 1Password' : 'Очистка после переноса');

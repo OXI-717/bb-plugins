@@ -471,7 +471,7 @@ test('files are imported once, compared by value, and replaced by references onl
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('a service note replaces its previous version, which goes to the archive',async()=>{
- const items=new Map([['old',{id:'old',title:'Registry'}]]);const archived=[];let n=0;
+ const items=new Map([['old',{id:'old',title:'Registry',category:'SECURE_NOTE'}],['cred',{id:'cred',title:'Server',category:'LOGIN'}]]);const archived=[];let n=0;
  const run=async(_b,args,_e,input)=>{
   if(args[0]==='item'&&args[1]==='list')return JSON.stringify([...items.values()]);
   if(args[0]==='item'&&args[1]==='create'){const p=args[args.indexOf('--template')+1];const t=JSON.parse(p==='/dev/stdin'?input:(await import('node:fs')).readFileSync(p,'utf8'));const id='n'+(++n);items.set(id,{id,title:t.title,text:t.fields[0].value});return JSON.stringify({id});}
@@ -479,5 +479,38 @@ test('a service note replaces its previous version, which goes to the archive',a
   throw new Error('unexpected '+args.join(' '));};
  const r=await runTidy(run,{},[{kind:'note',vaultId:'v'.padEnd(26,'a'),item:'Registry',text:'Scheme v2'}]);
  assert.deepEqual(r.results,[{kind:'note',ok:true}]);assert.deepEqual(archived,['old']);
- assert.deepEqual([...items.values()].map(x=>[x.title,x.text]),[['Registry','Scheme v2']]);
+ assert.deepEqual([...items.values()].filter(x=>x.title==='Registry').map(x=>x.text),['Scheme v2']);
+ const refused=await runTidy(run,{},[{kind:'note',vaultId:'v'.padEnd(26,'a'),item:'Server',text:'x'}]);
+ assert.deepEqual(refused.results[0],{kind:'note',ok:false,code:'not-a-note'});
+});
+test('the env reader refuses what a loader could read differently',()=>{
+ assert.equal(parseEnv('A="x\\ny"').ambiguous,true,'escapes in double quotes');
+ assert.equal(parseEnv('A="${HOST}/db"').ambiguous,true,'expansion in double quotes');
+ assert.equal(parseEnv('A=$HOME/x').ambiguous,true,'expansion unquoted');
+ assert.equal(parseEnv('A=1\nA=2').ambiguous,true,'duplicate keys');
+ assert.deepEqual(parseEnv("A='lit $x \\n'\r\nB=2 # c\r\n"),{entries:[{key:'A',value:'lit $x \\n'},{key:'B',value:'2'}],ambiguous:false});
+});
+test('references keep CRLF, comments and empty values, and refuse links and planned env files kept as documents',async()=>{
+ const {mkdtemp,writeFile,readFile,symlink,link,rm,access}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-ref-'));
+ try{
+  const v=fakeVault();
+  const crlf=join(dir,'win.env');await writeFile(crlf,'KEY=synthetic-a # note\r\nEMPTY=""\r\n',{mode:0o600});
+  const amb=join(dir,'pem.env');await writeFile(amb,'PEM="-----BEGIN\nsynthetic\n-----END"\n');
+  const plan=[{file:crlf,title:'Win',kind:'env'},{file:amb,title:'Pem',kind:'env'}];
+  const imported=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
+  assert.deepEqual(imported.results.map(r=>[r.state,r.kind]),[['imported','env'],['imported','document']]);
+  const done=await replaceWithReferences(v.run,{},'vault-1',plan.map((p,i)=>({...p,itemId:imported.results[i].itemId})));
+  assert.deepEqual(done.results.map(r=>[r.state,r.code??null]),[['referenced',null],['skipped','kept-as-document']]);
+  assert.equal(await readFile(crlf,'utf8'),'KEY=op://vault-1/'+imported.results[0].itemId+'/Environment/KEY # note\r\nEMPTY=""\r\n');
+  await access(amb);
+  const target=join(dir,'real.env');await writeFile(target,'S=synthetic-s\n');
+  const sl=join(dir,'link.env');await symlink(target,sl);
+  const hl=join(dir,'hard.env');await link(target,hl);
+  const imp2=await importFiles(v.run,{},'vault-1',[{file:target,title:'Real',kind:'env'}],undefined,'darwin');
+  const id=imp2.results[0].itemId;
+  const linked=await replaceWithReferences(v.run,{},'vault-1',[{file:sl,title:'Real',kind:'env',itemId:id},{file:hl,title:'Real',kind:'env',itemId:id}]);
+  assert.deepEqual(linked.results.map(r=>r.code),['symlink','hard-link']);
+  assert.equal(await readFile(target,'utf8'),'S=synthetic-s\n','the real file is untouched');
+ }finally{await rm(dir,{recursive:true,force:true});}
 });
