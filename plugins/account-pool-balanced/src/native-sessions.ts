@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
 import {accountProjectsSchema, type AccountProjects} from './contracts.js';
 import {nativeProjectsSchema, summarizeNativeAccounts} from './native-accounts.js';
@@ -10,6 +10,7 @@ export const nativeExecutionSchema=z.object({
 }).strict();
 export const nativeExecutorSchema = z.object({
   id, accountId: id, hostId: id,
+  label:z.string().trim().min(1).max(120).optional(),
   // These are server-authenticated callers, never a host/project header.
   callerIds: z.array(id).min(1).max(16),
   catalogCallerIds: z.array(id).max(16).default([]),
@@ -40,6 +41,7 @@ type Lease = z.infer<typeof leaseSchema>;
 const eventSchema = z.object({at:z.number(),event:z.enum(['queued','active','uncertain','released','cancelled','attested-stopped']),executorId:id,accountId:id,hostId:id,projectId:id.nullable()});
 const stateSchema = z.object({
   managed:z.boolean(), executors:z.array(nativeExecutorSchema).max(32),
+  preferredExecutors:z.record(id,id).refine(value=>Object.keys(value).length<=32).default({}),
   leases:z.array(leaseSchema).max(128), events:z.array(eventSchema).max(256),
 }).strict();
 type State = z.infer<typeof stateSchema>;
@@ -61,7 +63,7 @@ export class NativeSessionError extends Error {constructor(readonly status:numbe
  * Only acknowledged termination or explicit operator attestation releases it.
  */
 export class NativeSessions {
-  private state:State={managed:false,executors:[],leases:[],events:[]};
+  private state:State={managed:false,executors:[],leases:[],events:[],preferredExecutors:{}};
   private tail:Promise<unknown>=Promise.resolve();
   private failed=false;
   private unlockJobs=new Map<string,{abort:AbortController;done:Promise<void>}>();
@@ -107,11 +109,26 @@ export class NativeSessions {
   async available(caller:NativeCaller){return this.serial(()=>this.state.managed&&this.state.executors.some(e=>this.allowed(e,caller)));}
   async executorFor(caller:NativeCaller){return this.serial(()=>{
     const matches=this.state.executors.filter(e=>this.allowed(e,caller));
-    return matches.length===1?matches[0].id:null;
+    return this.choose(matches);
   });}
   async catalogExecutorFor(hostId:string){return this.serial(()=>{
     const matches=this.state.executors.filter(e=>e.enabled&&e.hostId===hostId&&e.catalogCallerIds.length>0);
-    return matches.length===1?matches[0].id:null;
+    return this.choose(matches);
+  });}
+  private choose(matches:Executor[]){
+    if(matches.length===1)return matches[0].id;
+    const preferred=matches.filter(e=>this.state.preferredExecutors[e.hostId]===e.id);
+    return preferred.length===1?preferred[0].id:null;
+  }
+  private selectionRevision(){return createHash('sha256').update(JSON.stringify([this.state.executors,this.state.preferredExecutors])).digest('hex');}
+  async prefer(executorId:string,expectedRevision:string){return this.serial(()=>{
+    if(this.selectionRevision()!==expectedRevision)throw new NativeSessionError(409,'native-selection-changed');
+    const executor=this.state.executors.find(e=>e.id===executorId&&e.enabled);
+    if(!executor)throw new NativeSessionError(404,'native-executor-not-found');
+    this.state.preferredExecutors=Object.fromEntries(Object.entries(this.state.preferredExecutors)
+      .filter(([hostId,id])=>this.state.executors.some(e=>e.id===id&&e.hostId===hostId)));
+    this.state.preferredExecutors[executor.hostId]=executor.id;
+    return null;
   });}
   async configure(value:unknown){const executor=nativeExecutorSchema.parse(value);return this.serial(()=>{
     if(executor.unlock&&!executor.execution)throw new NativeSessionError(400,'native-unlock-unprepared');
@@ -137,13 +154,21 @@ export class NativeSessions {
         if(!a.enabled||!b.enabled||(a.accountId!==accountId&&b.accountId!==accountId))continue;
         if(!a.callerIds.some(id=>b.callerIds.includes(id))&&!a.catalogCallerIds.some(id=>b.catalogCallerIds.includes(id)))continue;
         const as=scope(a),bs=scope(b);
-        if(as===null||bs===null||as.some(id=>bs.includes(id)))throw new NativeSessionError(409,'native-projects-ambiguous');
+        if(as===null||bs===null||as.some(id=>bs.includes(id))){
+          const preferred=next.find(e=>e.id===this.state.preferredExecutors[a.hostId]);
+          if(a.hostId!==b.hostId||!preferred?.enabled||preferred.hostId!==a.hostId)throw new NativeSessionError(409,'native-projects-ambiguous');
+          const ps=scope(preferred), overlap=as===null?bs:bs===null?as:as.filter(id=>bs.includes(id));
+          if((overlap===null&&ps!==null)||(overlap!==null&&ps!==null&&overlap.some(id=>!ps.includes(id)))
+            ||a.callerIds.some(id=>b.callerIds.includes(id)&&!preferred.callerIds.includes(id))
+            ||a.catalogCallerIds.some(id=>b.catalogCallerIds.includes(id)&&!preferred.catalogCallerIds.includes(id))
+            ||a.autopilotAllowed&&b.autopilotAllowed&&!preferred.autopilotAllowed)throw new NativeSessionError(409,'native-projects-ambiguous');
+        }
       }
       this.state.executors=next;
       return null;
     });
   }
-  async accounts(){return this.serial(()=>summarizeNativeAccounts(this.state));}
+  async accounts(){return this.serial(()=>({...summarizeNativeAccounts(this.state),selectionRevision:this.selectionRevision()}));}
   async snapshot(){return this.serial(()=>({managed:this.state.managed,executors:this.state.executors,
     leases:this.state.leases.map(({id,executor,caller,kind,state,deadline,createdAt})=>({id,executorId:executor.id,accountId:executor.accountId,hostId:executor.hostId,projectId:caller.projectId,kind,state,deadline,createdAt})),
     events:this.state.events,budget:'unknown' as const}));}
