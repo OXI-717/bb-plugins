@@ -1,14 +1,14 @@
 {
   "name": "bb-plugin-automation-catalog",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "type": "module",
   "engines": {
     "bb": ">=0.43.3",
     "bbPluginSdk": ">=0.4.104 <0.7.0"
   },
   "bb": {
-    "name": "Automation Catalog",
-    "description": "One catalog for automations across schedulers, hosts and teams.",
+    "name": "OXI Automation Catalog",
+    "description": "Track automations, source freshness and execution history across schedulers and hosts.",
     "branding": {
       "icon": "Repeat"
     },
@@ -58,7 +58,7 @@
   },
   "license": "MIT",
   "private": true,
-  "description": "One catalog for automations across schedulers, hosts and teams.",
+  "description": "Track automations, source freshness and execution history across schedulers and hosts.",
   "scripts": {
     "build": "bb plugin build .",
     "typecheck": "tsc --noEmit",

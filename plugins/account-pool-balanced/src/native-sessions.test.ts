@@ -10,6 +10,56 @@ const acquire=(executorId='mac-official',sessionId=randomUUID())=>({action:'acqu
 const poll=(leaseId:string)=>({action:'poll',leaseId});
 const release=(leaseId:string)=>({action:'release',leaseId,stopped:true});
 
+it('selects an explicit second account without rebinding active processes, and persists the choice',async()=>{
+  const {sessions,kv}=await fixture();
+  const active=await sessions.request(caller,acquire());
+  await sessions.configure({...executor,id:'second',accountId:'subscription-two',label:'Second Google',catalogCallerIds:['catalog-two']});
+  expect(await sessions.executorFor(caller)).toBeNull();
+  const first=await sessions.accounts();
+  await sessions.prefer('second',first.selectionRevision);
+  expect(await sessions.executorFor(caller)).toBe('second');
+  expect(await sessions.executorFor({...caller,hostId:'foreign'})).toBeNull();
+  expect(await sessions.executorFor({...caller,projectId:'foreign'})).toBeNull();
+  expect((await sessions.request(caller,poll(active.leaseId!))).accountId).toBe('subscription-one');
+  const second=await sessions.request(caller,acquire('second'));
+  expect(second).toMatchObject({state:'active',accountId:'subscription-two'});
+  expect((await sessions.accounts()).accounts[1]).toMatchObject({label:'Second Google',executors:[{id:'second',preferred:true}]});
+  await expect(sessions.prefer(executor.id,first.selectionRevision)).rejects.toThrow('native-selection-changed');
+  await expect(sessions.prefer('unknown',(await sessions.accounts()).selectionRevision)).rejects.toThrow('native-executor-not-found');
+  const next=new NativeSessions(kv);await next.initialize();
+  expect(await next.executorFor(caller)).toBe('second');
+  expect((await next.snapshot()).leases.every(l=>l.state==='uncertain')).toBe(true);
+});
+
+it('keeps catalog authority and disabled accounts separate from account preference',async()=>{
+  const {sessions}=await fixture();
+  await sessions.configure({...executor,catalogCallerIds:['catalog-one']});
+  await sessions.configure({...executor,id:'second',accountId:'subscription-two',catalogCallerIds:['catalog-two']});
+  expect(await sessions.catalogExecutorFor('mac')).toBeNull();
+  await sessions.prefer('second',(await sessions.accounts()).selectionRevision);
+  expect(await sessions.catalogExecutorFor('mac')).toBe('second');
+  await expect(sessions.request({hostId:'catalog-one',projectId:'project-one'},{...acquire('second'),kind:'catalog'})).rejects.toThrow('native-executor-denied');
+  await sessions.configure({...executor,id:'disabled',enabled:false});
+  await expect(sessions.prefer('disabled',(await sessions.accounts()).selectionRevision)).rejects.toThrow('native-executor-not-found');
+});
+
+it('allows shared project controls only when the explicit choice covers the overlap',async()=>{
+  const {sessions}=await fixture();
+  await sessions.configure({...executor,id:'second',accountId:'subscription-two'});
+  const all={onlySelected:false,rules:[]};
+  let account=(await sessions.accounts()).accounts[1];
+  await expect(sessions.setProjects('subscription-two',all,account.projectsRevision)).rejects.toThrow('native-projects-ambiguous');
+  await sessions.prefer('second',(await sessions.accounts()).selectionRevision);
+  await sessions.setProjects('subscription-two',all,account.projectsRevision);
+  expect(await sessions.executorFor(caller)).toBe('second');
+  const current=await sessions.snapshot();
+  await sessions.configure({...executor,id:'unrelated',accountId:'subscription-three',callerIds:['foreign']});
+  await sessions.prefer('unrelated',(await sessions.accounts()).selectionRevision);
+  account=(await sessions.accounts()).accounts[1];
+  await expect(sessions.setProjects('subscription-two',all,account.projectsRevision)).rejects.toThrow('native-projects-ambiguous');
+  expect((await sessions.snapshot()).leases).toEqual(current.leases);
+});
+
 describe('prepared native execution binding',()=>{
   const execution={runtimeId:'runtime-one',gatewayId:'gateway-one',runtimeSha256:'a'.repeat(64),profile:{id:'fixture-exit',version:1}};
   it('requires explicit server preparation and returns an immutable account/host/runtime/profile/lease authority',async()=>{
@@ -54,8 +104,13 @@ describe('official native session admission',()=>{
   });
   it('denies foreign host, project, unbound project and unapproved autopilot before acquiring',async()=>{
     const {sessions}=await fixture();
+    await sessions.configure({...executor,id:'second',accountId:'subscription-two'});
+    await sessions.prefer('second',(await sessions.accounts()).selectionRevision);
     for(const denied of [{...caller,hostId:'foreign'},{...caller,projectId:'foreign'},{...caller,projectId:null},{...caller,purpose:'autopilot' as const}])
+    {
       await expect(sessions.request(denied,acquire())).rejects.toThrow('native-executor-denied');
+      expect(await sessions.executorFor(denied)).toBeNull();
+    }
     expect((await sessions.snapshot()).leases).toHaveLength(0);
   });
   it('serializes two hosts sharing a subscription, FIFO, no active preemption',async()=>{
@@ -185,7 +240,7 @@ it('projects registered subscriptions without exposing execution authority, and 
   await sessions.configure({...executor,id:'disabled-official',accountId:'subscription-two',enabled:false});
   await sessions.request(caller,acquire());
   await sessions.request({...caller,hostId:'worker'},acquire('worker-official'));
-  expect(await sessions.accounts()).toEqual({managed:true,accounts:[
+  expect(await sessions.accounts()).toEqual({managed:true,selectionRevision:expect.any(String),accounts:[
     {accountId:'subscription-one',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'mac-official',enabled:true,autopilotAllowed:false},{id:'worker-official',enabled:true,autopilotAllowed:true}],active:1,queued:1,uncertain:0},
     {accountId:'subscription-two',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'disabled-official',enabled:false,autopilotAllowed:false}],active:0,queued:0,uncertain:0},
   ]});

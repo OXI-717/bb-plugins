@@ -1,8 +1,8 @@
 {
   "name": "bb-plugin-oxi-projects",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
-  "description": "Project tasks, repositories and agent sessions inside BB, with optional integrations.",
+  "description": "Manage project tasks, repositories and agent sessions with optional GitHub, Linear and Jira integrations.",
   "type": "module",
   "license": "MIT",
   "author": "Mateo Cerquetella",
@@ -30,8 +30,8 @@
     "bbPluginSdk": ">=0.5.9"
   },
   "bb": {
-    "name": "BB Projects",
-    "description": "Tasks, repositories and agent sessions for each project",
+    "name": "OXI Projects",
+    "description": "Manage project tasks, repositories and agent sessions with optional GitHub, Linear and Jira integrations.",
     "branding": {
       "icon": "./assets/icon.svg"
     },

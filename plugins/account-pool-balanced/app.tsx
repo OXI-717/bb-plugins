@@ -1595,11 +1595,11 @@ function AccountPoolSettings() {
             {provider.id === "agy" ? nativeAccounts?.accounts.map(account => (
               <div key={account.accountId} className="space-y-2 border-b border-border py-3 last:border-b-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <button type="button" className="text-sm font-medium text-foreground hover:underline" onClick={() => setNativeSettings(account.accountId)}>Google · Antigravity</button>
+                  <button type="button" className="text-sm font-medium text-foreground hover:underline" onClick={() => setNativeSettings(account.accountId)}>Google · {account.label ?? "Antigravity"}</button>
                   <SettingsBadge>{!nativeAccounts.managed ? "Управляемый режим выключен" : account.uncertain > 0 ? "Требуется проверка остановки" : account.executors.some(executor => executor.enabled) ? "Настроен" : "Исполнители выключены"}</SettingsBadge>
                 </div>
                 <p className="break-all text-xs text-muted-foreground">Подписка: {account.accountId}</p>
-                <ul className="space-y-1 text-xs text-muted-foreground">{account.executors.map(executor => <li key={executor.id} className="break-words">{executor.id} · {executor.enabled ? "включён" : "выключен"} · автопилот {executor.autopilotAllowed ? "разрешён" : "выключен"}</li>)}</ul>
+                <ul className="space-y-1 text-xs text-muted-foreground">{account.executors.map(executor => <li key={executor.id} className="flex flex-wrap items-center gap-2 break-words"><span>{executor.id} · {executor.enabled ? "включён" : "выключен"} · автопилот {executor.autopilotAllowed ? "разрешён" : "выключен"}</span>{executor.preferred ? <SettingsBadge>Выбран для новых сессий</SettingsBadge> : executor.enabled && nativeAccounts.selectionRevision ? <Button size="sm" disabled={pending !== null} aria-label={`Выбрать ${executor.id}`} onClick={() => void run('native-prefer',async()=>{await rpc.call('native.prefer',{executorId:executor.id,expectedRevision:nativeAccounts.selectionRevision!});await refreshNative();})}>Использовать</Button> : null}</li>)}</ul>
                 <p className="text-xs text-muted-foreground">В работе: {account.active}; в очереди: {account.queued}; остановка не подтверждена: {account.uncertain}.</p>
                 <p className="text-xs text-muted-foreground">Лимит здесь не измеряется. Состояние входа проверяет официальный клиент на машине исполнителя.</p>
               </div>

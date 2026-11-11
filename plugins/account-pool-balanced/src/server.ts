@@ -356,7 +356,7 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url),egress,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision)),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision)),
     );
     registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId));
     registerUsageSource(bb, hub);

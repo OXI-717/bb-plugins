@@ -3,15 +3,15 @@
   "schemaVersion": 1,
   "name": "oxi-public",
   "displayName": "OXI Public Plugins",
-  "description": "\u041f\u043b\u0430\u0433\u0438\u043d\u044b BB, \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043c\u044b\u0435 OXI.",
+  "description": "Open-source BB plugins maintained by OXI.",
   "plugins": [
     {
       "id": "account-pool-balanced",
       "icon": {
         "url": "./icons/account-pool.svg"
       },
-      "displayName": "\u041f\u0443\u043b \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u043e\u0432 (balanced)",
-      "description": "\u0411\u0430\u043b\u0430\u043d\u0441\u0438\u0440\u043e\u0432\u043a\u0430 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u043e\u0432, \u043b\u0438\u043c\u0438\u0442\u044b \u0438 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u044b\u0435 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u044b \u0434\u043b\u044f \u0430\u0433\u0435\u043d\u0442\u043e\u0432 BB.",
+      "displayName": "OXI Account Pool",
+      "description": "Balance provider accounts, track quotas and switch to reserve accounts for BB agents.",
       "author": {
         "name": "OXI",
         "github": "OXI-717"
@@ -24,7 +24,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/account-pool-balanced",
-          "range": "^0.4.76",
+          "range": "^0.4.78",
           "tagPrefix": "account-pool-balanced/"
         }
       }
@@ -34,8 +34,8 @@
       "icon": {
         "url": "./icons/automation-catalog.svg"
       },
-      "displayName": "Automation Catalog",
-      "description": "One catalog for automations across schedulers, hosts and teams.",
+      "displayName": "OXI Automation Catalog",
+      "description": "Track automations, source freshness and execution history across schedulers and hosts.",
       "author": {
         "name": "OXI",
         "github": "OXI-717"
@@ -48,7 +48,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/automation-catalog",
-          "range": "^0.1.17",
+          "range": "^0.1.18",
           "tagPrefix": "automation-catalog/"
         }
       }
@@ -58,8 +58,8 @@
       "icon": {
         "url": "./icons/vpn-guard.svg"
       },
-      "displayName": "VPN Guard",
-      "description": "\u0417\u0430\u0449\u0438\u0442\u0430 \u0430\u0433\u0435\u043d\u0442\u043e\u0432 \u043f\u043e VPN \u0438 \u0440\u0443\u0447\u043d\u043e\u0439 \u0431\u043b\u043e\u043a / VPN protection and manual block",
+      "displayName": "OXI VPN Guard",
+      "description": "Hold protected agent requests when the VPN is unavailable or a manual block is active.",
       "author": {
         "name": "OXI",
         "github": "OXI-717"
@@ -72,15 +72,15 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/vpn-guard",
-          "range": "^0.1.19",
+          "range": "^0.1.20",
           "tagPrefix": "vpn-guard/"
         }
       }
     },
     {
       "id": "oxi-projects",
-      "displayName": "BB Projects",
-      "description": "Project tasks, repositories and agent sessions, with optional integrations.",
+      "displayName": "OXI Projects",
+      "description": "Manage project tasks, repositories and agent sessions with optional GitHub, Linear and Jira integrations.",
       "author": {
         "name": "OXI",
         "github": "OXI-717"
@@ -96,7 +96,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/oxi-projects",
-          "range": "^0.2.5",
+          "range": "^0.2.6",
           "tagPrefix": "oxi-projects/"
         }
       },
@@ -109,8 +109,8 @@
       "icon": {
         "url": "./icons/model-connections.svg"
       },
-      "displayName": "\u041c\u043e\u0434\u0435\u043b\u0438 \u0438 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f",
-      "description": "\u0412\u044b\u0431\u043e\u0440 \u043c\u043e\u0434\u0435\u043b\u0435\u0439: \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u044f \u0438 Pooler, \u0431\u0435\u0437 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0439 \u044f\u0434\u0440\u0430 BB.",
+      "displayName": "OXI Model Connections",
+      "description": "Choose local and pooled model connections with search and per-machine visibility settings.",
       "author": {
         "name": "OXI",
         "github": "OXI-717"
@@ -123,15 +123,15 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/model-connections",
-          "range": "^0.1.0",
+          "range": "^0.1.1",
           "tagPrefix": "model-connections/"
         }
       }
     },
     {
       "id": "auto-archive",
-      "displayName": "Auto Archive",
-      "description": "Preview and archive quiet thread trees with handoff and workspace protection.",
+      "displayName": "OXI Auto Archive",
+      "description": "Preview and archive quiet thread trees with workspace guards and handoff protection.",
       "author": {
         "name": "Shane Logsdon; OXI-717 fork",
         "github": "OXI-717"
@@ -147,15 +147,15 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/auto-archive",
-          "range": "^0.2.4",
+          "range": "^0.2.5",
           "tagPrefix": "auto-archive/"
         }
       }
     },
     {
       "id": "federation-pilot",
-      "displayName": "BB Federation (experimental)",
-      "description": "Independent BB servers in one native thread tree. Experimental SSH bridge.",
+      "displayName": "OXI Federation (experimental)",
+      "description": "Browse independent BB servers in one thread tree through configured experimental SSH bridges.",
       "author": {
         "name": "OXI",
         "github": "OXI-717"
@@ -172,7 +172,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/federation-pilot",
-          "range": "^0.2.5",
+          "range": "^0.2.7",
           "tagPrefix": "federation-pilot/"
         }
       }
@@ -182,8 +182,8 @@
       "icon": {
         "url": "./icons/pool-maintenance.svg"
       },
-      "displayName": "Pool Maintenance",
-      "description": "Queues sessions during bounded pool maintenance without changing limits.",
+      "displayName": "OXI Pool Maintenance",
+      "description": "Queue BB messages during bounded pool maintenance without changing concurrency limits.",
       "author": {
         "name": "OXI",
         "github": "OXI-717"
@@ -196,15 +196,15 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/pool-maintenance",
-          "range": "^0.1.0",
+          "range": "^0.1.1",
           "tagPrefix": "pool-maintenance/"
         }
       }
     },
     {
       "id": "oxi-op",
-      "displayName": "OXI OP",
-      "description": "Project-scoped 1Password intake and approved credential use for BB agents.",
+      "displayName": "OXI 1Password",
+      "description": "Give BB agents project-scoped 1Password access with separate routine and administrative profiles.",
       "author": {
         "name": "OXI",
         "github": "OXI-717"

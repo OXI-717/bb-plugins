@@ -1,14 +1,14 @@
 {
   "name": "bb-plugin-federation-pilot",
-  "version": "0.2.5",
+  "version": "0.2.7",
   "type": "module",
   "engines": {
     "bb": ">=0.46",
     "bbPluginSdk": ">=0.6.49"
   },
   "bb": {
-    "name": "BB Federation (experimental)",
-    "description": "Work with independent BB servers in one native thread tree.",
+    "name": "OXI Federation (experimental)",
+    "description": "Browse independent BB servers in one thread tree through configured experimental SSH bridges.",
     "branding": {
       "icon": "Network"
     },
