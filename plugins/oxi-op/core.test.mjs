@@ -514,3 +514,23 @@ test('references keep CRLF, comments and empty values, and refuse links and plan
   assert.equal(await readFile(target,'utf8'),'S=synthetic-s\n','the real file is untouched');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('an empty assignment followed by a comment stays empty and untouched',()=>{
+ assert.deepEqual(parseEnv('EMPTY= # intentionally unset\nA=1'),{entries:[{key:'A',value:'1'}],ambiguous:false});
+});
+test('a file changed while 1Password is consulted is neither deleted nor overwritten',async()=>{
+ const {mkdtemp,writeFile,readFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-race-'));
+ try{
+  const v=fakeVault();
+  const envFile=join(dir,'a.env');await writeFile(envFile,'K=synthetic-old\n');
+  const keyFile=join(dir,'k.key');await writeFile(keyFile,'synthetic-old-key');
+  const plan=[{file:envFile,title:'A',kind:'env'},{file:keyFile,title:'K',kind:'document'}];
+  const imported=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
+  const racing=async(b,args,e,i)=>{if(args[0]==='item'&&args[1]==='get'){await writeFile(envFile,'K=synthetic-rotated\n');await writeFile(keyFile,'synthetic-rotated-key');}return v.run(b,args,e,i);};
+  const done=await replaceWithReferences(racing,{},'vault-1',plan.map((p,i)=>({...p,itemId:imported.results[i].itemId})));
+  assert.equal(done.results[0].code,'changed-during-run');
+  assert(['changed-during-run','values-differ'].includes(done.results[1].code),'the key file changed before or during its check');
+  assert(done.results.every(r=>r.state==='failed'));
+  assert.equal(await readFile(envFile,'utf8'),'K=synthetic-rotated\n');assert.equal(await readFile(keyFile,'utf8'),'synthetic-rotated-key');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

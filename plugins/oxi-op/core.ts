@@ -517,6 +517,7 @@ function parseEnvLine(raw: string): EnvLine | undefined {
     const m = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.-]*)(\s*=\s*)(.*?)\s*$/.exec(raw);
     if (!m) return undefined;
     const [, prefix, key, separator, rest] = m;
+    if (rest.startsWith('#')) return {prefix, key, separator, value: '', comment: rest, ambiguous: false};
     const quote = rest[0];
     if (quote === '"' || quote === "'") {
         const end = rest.indexOf(quote, 1);
@@ -620,10 +621,17 @@ export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv,
             if (!info.isFile()) throw new CodedError('not-a-file', 'Not a regular file');
             if (info.nlink > 1) throw new CodedError('hard-link', 'Hard-linked files are not rewritten');
             const bytes = await readFile(entry.file);
+            // The file may change while 1Password is consulted; act only on the exact snapshot checked.
+            const unchanged = async () => {
+                const now = await lstat(entry.file);
+                if (now.ino !== info.ino || now.dev !== info.dev || now.size !== info.size || now.mtimeMs !== info.mtimeMs || sha(await readFile(entry.file)) !== sha(bytes))
+                    throw new CodedError('changed-during-run', 'The file changed during the run; nothing was changed');
+            };
             const stored = JSON.parse(await op(['item', 'get', entry.itemId, '--vault', vaultId, '--reveal', '--format=json']));
             if (stored.category === 'DOCUMENT') {
                 if (entry.kind !== 'document') {results.push({file: entry.file, state: 'skipped', code: 'kept-as-document'}); continue;}
                 if (!await documentMatches(op, vaultId, entry.itemId, bytes)) throw new CodedError('values-differ', 'Vault copy differs');
+                await unchanged();
                 await unlink(entry.file);
                 results.push({file: entry.file, state: 'removed'});
                 continue;
@@ -648,6 +656,8 @@ export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv,
             const temp = entry.file + '.oxi-op-' + process.pid;
             await writeFile(temp, text, {mode: info.mode & 0o777, flag: 'wx'});
             await chmod(temp, info.mode & 0o777);
+            try {await unchanged();}
+            catch (error) {await rm(temp, {force: true}); throw error;}
             await rename(temp, entry.file);
             results.push({file: entry.file, state: 'referenced', keys: replaced});
         } catch (error) {results.push({file: entry.file, state: 'failed', code: errorCode(error) ?? 'failed'});}
