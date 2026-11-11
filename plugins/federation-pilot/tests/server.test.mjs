@@ -8,7 +8,7 @@ function harness(store=new Map()){
  const calls=[],routes=new Map(),signals=new Map(),sockets=new Map(),tools=new Map();let dispose,cli;
  const primaryIds=new Set(),primaryErrors=new Map(),remoteIds={alpha:new Set(['proj_alpha','thr_alpha','env_alpha']),beta:new Set(['proj_beta','thr_beta'])};
  const failures=new Map(),moved=new Set();let generation=0;
- const get=async args=>{const id=Object.values(args)[0];if(primaryErrors.has(id))throw primaryErrors.get(id);if(primaryIds.has(id))return {id};throw Object.assign(Error('not found'),{status:404});};
+ const get=async args=>{if(args.hostId==='host_bridge')return {id:args.hostId,status:'connected'};const id=Object.values(args)[0];if(primaryErrors.has(id))throw primaryErrors.get(id);if(primaryIds.has(id))return {id};throw Object.assign(Error('not found'),{status:404});};
  const bb={rpc:{register:()=>{}},cli:{register:value=>cli=value},agents:{registerTool:value=>tools.set(value.name,value),configure:()=>{}},storage:{kv:{get:async key=>store.get(key),set:async(key,value)=>{store.set(key,value)}}},settings:{define:()=>({get:async()=>config})},sdk:Object.fromEntries(['threads','projects','hosts','environments'].map(k=>[k,{get}])),log:{warn:()=>{}},onDispose:fn=>dispose=fn,
   hosts:{experimental_client:()=>({experimental_onSignal:(k,fn)=>signals.set(k,fn),experimental_onWorkerExit:()=>{},call:async(method,input)=>{
    calls.push({method,...input});
@@ -41,7 +41,7 @@ test('registered image route uses the selected bridge and actual primary/neighbo
   h.primaryIds.delete('proj_alpha');h.remoteIds.beta.add('proj_alpha');assert.equal((await h.request('/image-upload',input)).status,503);
   h.remoteIds.beta.delete('proj_alpha');h.failures.set('beta','offline');assert.equal((await h.request('/image-upload',input)).status,503);
   assert.equal(h.calls.filter(c=>c.method==='imageUpload').length,0);
-  h.failures.clear();assert.equal((await h.request('/image-upload',input)).status,201);
+  h.failures.clear();await h.request('/check',null,'GET');assert.equal((await h.request('/image-upload',input)).status,201);
   const uploads=h.calls.filter(c=>c.method==='imageUpload');assert.equal(uploads.length,1);assert.equal(uploads[0].sshTarget,'remote-alpha');assert.equal(uploads[0].projectId,'proj_alpha');
  }finally{await h.dispose();}
 });
@@ -58,7 +58,7 @@ test('actual handler refuses other-remote collision or uncertain ownership, but 
  const h=harness();try{
   h.remoteIds.beta.add('thr_alpha');assert.equal((await h.request('/proxy',send())).status,503);assert.ok(!h.calls.some(c=>c.body));
   h.remoteIds.beta.delete('thr_alpha');h.failures.set('beta','offline');assert.equal((await h.request('/proxy',send())).status,503);assert.ok(!h.calls.some(c=>c.body));
-  h.failures.clear();assert.equal((await h.request('/proxy',send())).status,200);assert.equal(h.calls.filter(c=>c.body).length,1);assert.equal(h.calls.find(c=>c.body).sshTarget,'remote-alpha');
+  h.failures.clear();await h.request('/check',null,'GET');assert.equal((await h.request('/proxy',send())).status,200);assert.equal(h.calls.filter(c=>c.body).length,1);assert.equal(h.calls.find(c=>c.body).sshTarget,'remote-alpha');
  }finally{await h.dispose();}
 });
 test('fresh list is never stale and a created thread can be subscribed immediately',async()=>{

@@ -4,12 +4,11 @@ import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { promisify } from 'node:util';
 import { assertSafeSshConfig, SSH_OPTIONS } from './ssh-policy.ts';
 import { hostContract, hostSignals } from './contract.ts';
+import {createTunnelCache} from './tunnel-cache.ts';
 import {uploadImage} from './image-upload.ts';
 import {uploadHandoffFile,handoffHostPayload} from './handoff-upload.ts';
 
 // The SSH child belongs to this host worker. No shell, enrollment or agent runs.
-type Tunnel={child:ChildProcess|null,pending:Promise<number>};
-const tunnels=new Map<string,Tunnel>();
 const socketDestinations=new Map<string,string>();
 const runFile=promisify(execFile);
 const sockets = new Map<string, WebSocket>();
@@ -28,33 +27,31 @@ async function listening(port:number): Promise<boolean> {
     socket.setTimeout(150,()=>done(false));socket.once('error',()=>done(false));socket.once('connect',()=>done(true));
   });
 }
-async function ensureTunnel(target:string,port:number):Promise<number> {
-  const key=`${target}:${port}`;
-  const previous=tunnels.get(key);if(previous)return previous.pending;
-  const entry:Tunnel={child:null,pending:Promise.resolve(0)};
-  tunnels.set(key,entry);
-  entry.pending=(async()=>{
-    const result=await runFile('ssh',['-G',target],{timeout:5000,maxBuffer:256*1024});
-    assertSafeSshConfig(result.stdout);
-    const localPort=await freePort();
-    const process=spawn('ssh',['-N','-T',...SSH_OPTIONS,'-o','BatchMode=yes','-o','ExitOnForwardFailure=yes','-o','ConnectTimeout=8',
-      '-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','ControlMaster=no','-o','ControlPath=none',
-      '-L',`127.0.0.1:${localPort}:127.0.0.1:${port}`,target],{stdio:['ignore','ignore','pipe']});
-    entry.child=process;
-    let failed=false;
-    process.once('error',()=>{failed=true;});
-    process.once('exit',()=>{failed=true;if(tunnels.get(key)===entry){tunnels.delete(key);for(const [id,s]of sockets)if(socketDestinations.get(id)===key)s.close(4001,'SSH disconnected');}});
-    // Drain SSH diagnostics; never include command output or credentials in browser errors.
-    process.stderr?.resume();
-    const deadline=Date.now()+10000;
-    while(Date.now()<deadline && !failed){
-      if(await listening(localPort)) return localPort;
-      await new Promise(resolve=>setTimeout(resolve,100));
-    }
-    process.kill('SIGTERM');throw Error('SSH connection unavailable; check the selected bridge machine');
-  })().catch(e=>{if(tunnels.get(key)===entry)tunnels.delete(key);throw e;});
-  return entry.pending;
-}
+let retain:()=>{dispose():Promise<void>};
+const tunnels=createTunnelCache({listening,open:async(key,signal)=>{
+ const split=key.lastIndexOf(':'),target=key.slice(0,split),port=Number(key.slice(split+1));
+ const lease=retain();let child:ChildProcess|null=null,closed=false;
+ const close=()=>{if(closed)return;closed=true;child?.kill('SIGTERM');void lease.dispose();};
+ signal.addEventListener('abort',close,{once:true});
+ try{
+  const result=await runFile('ssh',['-G',target],{timeout:5000,maxBuffer:256*1024,signal});
+  assertSafeSshConfig(result.stdout);
+  const localPort=await freePort();signal.throwIfAborted();
+  child=spawn('ssh',['-N','-T',...SSH_OPTIONS,'-o','BatchMode=yes','-o','ExitOnForwardFailure=yes','-o','ConnectTimeout=8',
+   '-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-o','ControlMaster=no','-o','ControlPath=none',
+   '-L',`127.0.0.1:${localPort}:127.0.0.1:${port}`,target],{stdio:['ignore','ignore','pipe']});
+  let failed=false;child.once('error',()=>{failed=true;close();});
+  child.once('exit',()=>{failed=true;close();for(const [id,s]of sockets)if(socketDestinations.get(id)===key)s.close(4001,'SSH disconnected');});
+  child.stderr?.resume();
+  const deadline=Date.now()+10000;
+  while(Date.now()<deadline&&!failed&&!signal.aborted){
+   if(await listening(localPort))return {port:localPort,alive:()=>!failed&&!closed,close:()=>{signal.removeEventListener('abort',close);close();},pinned:()=>[...socketDestinations.values()].includes(key)};
+   await new Promise(resolve=>setTimeout(resolve,100));
+  }
+  throw Error('federation:ssh_unavailable');
+ }catch{close();signal.removeEventListener('abort',close);throw Error('federation:ssh_unavailable');}
+}});
+function ensureTunnel(target:string,port:number){return tunnels.get(`${target}:${port}`);}
 function validPath(path:string):boolean {
   return path.startsWith('/api/v1/') && !/[\\\r\n#]/.test(path) && !/%2f|%5c|%2e/i.test(path)
     && !path.split('?')[0].split('/').some(s=>s==='.'||s==='..');
@@ -64,24 +61,29 @@ export default experimental_defineHostEntry({
   contract:hostContract,
   experimental_signals:hostSignals,
   handlers:{
+    async reconcile({keys}){tunnels.reconcile(keys);return {ok:true};},
     async handoffUpload(input,context){
+      retain=()=>context.experimental_retainWorker();
       const payload=handoffHostPayload(input);
       const port=await ensureTunnel(input.sshTarget,input.port);
       return uploadHandoffFile(port,payload,AbortSignal.any([context.signal,context.lifecycle.signal,AbortSignal.timeout(20000)]));
     },
     async imageUpload(input,context){
+      retain=()=>context.experimental_retainWorker();
       const port=await ensureTunnel(input.sshTarget,input.port);
       return uploadImage(port,input,AbortSignal.any([context.signal,context.lifecycle.signal,AbortSignal.timeout(20000)]));
     },
     async request(input,context){
+      retain=()=>context.experimental_retainWorker();
       if(!validPath(input.path)) throw Error('Invalid upstream path');
       const port=await ensureTunnel(input.sshTarget,input.port);
-      const response=await fetch(`http://127.0.0.1:${port}${input.path}`,{
+      let response:Response;try{response=await fetch(`http://127.0.0.1:${port}${input.path}`,{
         method:input.method,redirect:'error',
         headers:input.body===null?{}:{'content-type':'application/json'},
         body:input.body??undefined,
         signal:AbortSignal.any([context.signal,context.lifecycle.signal,AbortSignal.timeout(20000)]),
       });
+      }catch{tunnels.invalidate(`${input.sshTarget}:${input.port}`);throw Error('federation:remote_bb_unavailable');}
       const chunks:Uint8Array[]=[];let size=0;
       if(response.body){
         const reader=response.body.getReader();
@@ -91,6 +93,7 @@ export default experimental_defineHostEntry({
       return {status:response.status,contentType:response.headers.get('content-type')??'application/octet-stream',bodyBase64:Buffer.concat(chunks).toString('base64')};
     },
     async connect(input,context){
+      retain=()=>context.experimental_retainWorker();
       if(sockets.has(input.id)) throw Error('Duplicate connection');
       const port=await ensureTunnel(input.sshTarget,input.port);
       const lease=context.experimental_retainWorker();
@@ -103,7 +106,7 @@ export default experimental_defineHostEntry({
         if(data.length<=65536) void context.experimental_emitSignal('frame',{id:input.id,data}).catch(()=>{});
       });
       ws.addEventListener('close',()=>{
-        sockets.delete(input.id);socketDestinations.delete(input.id);lease.dispose();context.lifecycle.signal.removeEventListener('abort',close);
+        sockets.delete(input.id);socketDestinations.delete(input.id);if(![...socketDestinations.values()].includes(input.sshTarget+':'+input.port))tunnels.invalidate(input.sshTarget+':'+input.port);lease.dispose();context.lifecycle.signal.removeEventListener('abort',close);
         void context.experimental_emitSignal('closed',{id:input.id}).catch(()=>{});
       },{once:true});
       try{
@@ -119,5 +122,5 @@ export default experimental_defineHostEntry({
     async send({id,data}){const ws=sockets.get(id);if(!ws||ws.readyState!==1)return {ok:false};ws.send(data);return {ok:true};},
     async disconnect({id}){sockets.get(id)?.close(1000,'Client closed');return {ok:true};},
   },
-  async dispose(){for(const socket of sockets.values())socket.close();sockets.clear();for(const entry of tunnels.values())entry.child?.kill('SIGTERM');tunnels.clear();socketDestinations.clear();},
+  async dispose(){for(const socket of sockets.values())socket.close();sockets.clear();tunnels.dispose();socketDestinations.clear();},
 });

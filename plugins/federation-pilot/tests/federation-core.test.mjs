@@ -286,7 +286,7 @@ test("federated socket: routing, readiness, policy, row status, backoff, catch-u
     r.serverOpen(); // bridge reachable, upstream still down
     r.close(4001);
   }
-  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+  for(const [i,cap]of [1000,2000,4000,8000,16000,30000,30000].entries())assert.ok(delays[i]>=0.8*cap&&delays[i]<=cap);
   for (let i = 0; i < 3; i++) t.env.runTimers(); // exhaust bounded nudges; next retry fires
   const back = t.env.FakeWS.all.at(-1);
   back.serverOpen();

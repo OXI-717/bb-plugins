@@ -1,3 +1,5 @@
+import {z} from 'zod';
+import {createRecovery,failureKind,failureLabels} from './recovery.ts';
 import {randomUUID,createHash} from 'node:crypto';
 import type {BbPluginApi,ExperimentalPluginWebSocket} from '@get-bb/plugin-sdk';
 import {hostContract,hostSignals,requestSchema} from './contract.ts';
@@ -32,7 +34,37 @@ export default function plugin(bb:BbPluginApi){
  async function configurations(){const s=await settings.get();return {enabled:s.enabled,servers:parseServers(s.servers,s)};}
  async function selected(serverId:string){const all=await configurations();if(!all.enabled)throw Error('Federation disabled');const c=all.servers.find(c=>c.serverId===serverId);if(!c)throw Error('Unknown or disabled remote');return c;}
  const keyOf=(c:RemoteConfig)=>JSON.stringify(c);
- async function upstream(c:RemoteConfig,method:string,path:string,body:string|null=null){return host.call('request',{sshTarget:c.sshTarget,port:c.remotePort,...requestSchema.parse({method,path,body})},{hostId:c.bridgeHostId});}
+ const monitors=new Map<string,{key:string,c:RemoteConfig,recovery:ReturnType<typeof createRecovery>}>();
+ let stopped=false;
+ function monitor(c:RemoteConfig){
+  let entry=monitors.get(c.serverId);if(entry?.key===keyOf(c))return entry.recovery;
+  entry?.recovery.dispose();
+  const recovery=createRecovery({
+   probe:async signal=>{
+    let bridge;try{bridge=await bb.sdk.hosts.get({hostId:c.bridgeHostId});}catch{throw Error('federation:bridge_offline');}
+    if(bridge.status!=='connected')throw Error('federation:bridge_offline');
+    const r=await host.call('request',{sshTarget:c.sshTarget,port:c.remotePort,method:'GET',path:'/api/v1/projects/'+c.projectId,body:null},{hostId:c.bridgeHostId,signal,timeoutMs:30000});
+    if(r.status!==200)throw Error('federation:remote_bb_unavailable');
+    try{if(JSON.parse(Buffer.from(r.bodyBase64,'base64').toString()).id!==c.projectId)throw Error();}catch{throw Error('federation:remote_bb_unavailable');}
+   },
+   notify:async()=>{const r=await bb.sdk.plugins.callRpc({pluginId:'push-notifications',method:'notifications.send',input:{title:'OXI Federation: connection unavailable',body:'Automatic recovery is running. Check Federation connection status.'},outputSchema:z.object({ok:z.literal(true),channels:z.array(z.string())}),signal:AbortSignal.timeout(10000)});if(!r.channels.length)throw Error('No notification channel');},
+  });monitors.set(c.serverId,{key:keyOf(c),c,recovery});return recovery;
+ }
+ async function upstream(c:RemoteConfig,method:string,path:string,body:string|null=null){if(stopped||keyOf(await selected(c.serverId))!==keyOf(c))throw Error('Federation configuration changed');return monitor(c).run(method,signal=>host.call('request',{sshTarget:c.sshTarget,port:c.remotePort,...requestSchema.parse({method,path,body})},{hostId:c.bridgeHostId,signal,timeoutMs:30000}));}
+ let configTimer:ReturnType<typeof setTimeout>|null=null,connectionTopology='';
+ async function refreshConnections(){
+  try{const all=await configurations();if(stopped)return;
+   const active=all.enabled?all.servers:[];
+   const topology=JSON.stringify(active);if(topology===connectionTopology)return;connectionTopology=topology;
+   const bridges=new Set([...monitors.values()].map(e=>e.c.bridgeHostId));
+   for(const [id,e]of monitors)if(!active.some(c=>c.serverId===id&&keyOf(c)===e.key)){e.recovery.dispose();monitors.delete(id);}
+   await Promise.all([...bridges].map(hostId=>host.call('reconcile',{keys:active.filter(c=>c.bridgeHostId===hostId).map(c=>c.sshTarget+':'+c.remotePort)},{hostId,timeoutMs:5000}).catch(()=>{})));
+   if(stopped)return;
+   for(const c of active){const r=monitor(c);if(r.state.status==='connecting')void r.check().catch(()=>{});}
+  }catch{}finally{if(!stopped)configTimer=setTimeout(refreshConnections,5000);}
+ }
+ configTimer=setTimeout(refreshConnections,0);
+ bb.http.route('GET','/connections',ctx=>ctx.json({servers:[...monitors].map(([serverId,e])=>({serverId,...e.recovery.state}))}));
  async function json(c:RemoteConfig,path:string){const r=await upstream(c,'GET',path);if(r.status>=300)throw Error(`Remote API ${r.status}: GET ${path}`);return JSON.parse(Buffer.from(r.bodyBase64,'base64').toString('utf8'));}
  async function primaryExists(id:string){
   try{
@@ -98,7 +130,7 @@ export default function plugin(bb:BbPluginApi){
  }
  registerAgentReads(bb,createAgentReads({configurations,exclusive,get:json}));
  const handoffs=createHandoffs({configurations,selected,exclusive,get:json,
-  upload:(c,input)=>host.call('handoffUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId}),
+  upload:(c,input)=>monitor(c).run('POST',signal=>host.call('handoffUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId,signal})),
   create:(c,body)=>upstream(c,'POST','/api/v1/threads',body),
   load:id=>bb.storage.kv.get(`handoff:${id}`),save:(id,value)=>bb.storage.kv.set(`handoff:${id}`,value),
  });
@@ -109,13 +141,13 @@ export default function plugin(bb:BbPluginApi){
   handoffCommit:input=>handoffs.commit(input),handoffStatus:input=>handoffs.status(input),
  });
  registerImageRoutes(bb,{selected,exclusive,
-  upload:(c,input)=>host.call('imageUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId}),
+  upload:(c,input)=>monitor(c).run('POST',signal=>host.call('imageUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId,signal})),
   get:(c,path)=>upstream(c,'GET',path),
  });
  bb.http.route('GET','/config',async ctx=>{try{const c=await configurations();return ctx.json({enabled:c.enabled,servers:c.servers.map(publicServer)});}catch{return ctx.json({enabled:false,servers:[],error:'Invalid server settings'},400);}});
  bb.http.route('GET','/diagnostics',ctx=>ctx.json({failures}));
  bb.http.route('GET','/check',async ctx=>{
-  const cfg=await configurations();const rows=await Promise.all(cfg.servers.map(async c=>{try{const d=await inventory(c,true);return {serverId:c.serverId,ok:true,projectId:c.projectId,threads:d.inventory.threads.size};}catch(e){return {serverId:c.serverId,ok:false,error:String(e)};}}));
+  const cfg=await configurations();const rows=await Promise.all(cfg.servers.map(async c=>{try{await monitor(c).check();const d=await inventory(c,true);return {serverId:c.serverId,ok:true,projectId:c.projectId,threads:d.inventory.threads.size};}catch(e){return {serverId:c.serverId,ok:false,error:failureLabels[failureKind(e)]};}}));
   return ctx.json({ok:rows.length>0&&rows.every(r=>r.ok),servers:rows});
  });
  bb.http.route('POST','/proxy',async ctx=>{
@@ -139,7 +171,7 @@ export default function plugin(bb:BbPluginApi){
    if(method!=='GET'&&method!=='HEAD')data.at=0;
    if(method==='POST'&&url.pathname==='/api/v1/threads'&&r.status<300){const created=JSON.parse(Buffer.from(r.bodyBase64,'base64').toString());if(created.projectId!==c.projectId||typeof created.id!=='string')throw Error('Invalid created thread');await exclusive(c,[created.id]);i.threads.add(created.id);if(created.environmentId)i.environments.add(created.environmentId);}
    return new Response([204,205,304].includes(r.status)?null:Buffer.from(r.bodyBase64,'base64'),{status:r.status,headers:{'content-type':r.contentType,'cache-control':'no-store'}});
-  }catch(e){if(e instanceof PrimaryCollisionError){const response=ctx.json({error:{code:'federation_primary_owner',message:e.message}},409);response.headers.set('x-bb-federation-primary',e.id);return response;}d.error=String(e).slice(0,500);failures.push(d);if(failures.length>30)failures.shift();bb.log.warn(`Federation request failed (${d.serverId}): ${d.error}`);return ctx.json({error:{code:'federation_unavailable',message:String(e)}},503);}
+  }catch(e){if(e instanceof PrimaryCollisionError){const response=ctx.json({error:{code:'federation_primary_owner',message:e.message}},409);response.headers.set('x-bb-federation-primary',e.id);return response;}d.error=failureLabels[failureKind(e)];failures.push(d);if(failures.length>30)failures.shift();bb.log.warn(`Federation request failed (${d.serverId}): ${d.error}`);return ctx.json({error:{code:'federation_unavailable',message:d.error}},503);}
  });
  host.experimental_onSignal('frame',({hostId,payload})=>{
   const client=clients.get(payload.id);if(!client||client.config.bridgeHostId!==hostId||client.closed)return;
@@ -181,5 +213,5 @@ export default function plugin(bb:BbPluginApi){
    async onClose(){ended=true;early.length=0;await closeClient(id);},
   };
  });
- bb.onDispose(async()=>{clearInterval(heartbeat);for(const [id,c]of clients){c.socket.close(1001,'Federation disabled');await closeClient(id);}});
+ bb.onDispose(async()=>{stopped=true;if(configTimer!==null)clearTimeout(configTimer);for(const e of monitors.values())e.recovery.dispose();monitors.clear();clearInterval(heartbeat);for(const [id,c]of clients){c.socket.close(1001,'Federation disabled');await closeClient(id);}});
 }
