@@ -472,7 +472,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
         if(acceptRemote(m,c.peer)){state.counters.wsAccepted++;this._emit(new win.MessageEvent("message",{data:String(e.data)}));}
         else {state.counters.wsDropped++;log("ws-remote-dropped",{serverId:c.peer.serverId,type:m?.type,entity:m?.entity});}
       });
-      r.addEventListener("close",()=>{if(c.ws!==r)return;c.ws=null;c.ready=false;if(this._closed)return;setRemoteState(c.peer,"offline");state.needsCatchUp=true;const delay=Math.min(RETRY_MAX_MS,RETRY_MIN_MS*2**c.attempt++);c.timer=win.setTimeout(()=>{c.timer=null;this._openRemote(c);},delay);});
+      r.addEventListener("close",()=>{if(c.ws!==r)return;c.ws=null;c.ready=false;if(this._closed)return;setRemoteState(c.peer,"offline");state.needsCatchUp=true;const delay=Math.round(Math.min(RETRY_MAX_MS,RETRY_MIN_MS*2**Math.min(c.attempt++,6))*(0.8+0.2*Math.random()));c.timer=win.setTimeout(()=>{c.timer=null;this._openRemote(c);},delay);});
     }
     _catchUp(peer){for(const id of peer.ids)if(isRemote(id)){if(id.startsWith("thr_"))this._refreshThread(id);if(id.startsWith("host_"))this._refreshHost(id);}this._emitJson({type:"changed",entity:"project",id:peer.projectId,changes:["threads-changed","project-updated"]});}
     _refreshHost(id){this._emitJson({type:'changed',entity:'host',id,changes:['host-connected']});}

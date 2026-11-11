@@ -132,3 +132,42 @@ Invalid identity, ordering or page size fails closed. It performs no create,
 archive, deletion, activation or source-agent wake. Remote attachment bytes are
 not exposed. Continuation creation is a separate authorized action; existing
 one-attempt commit and saved-status reconciliation rules remain in force.
+
+### Connection recovery (0.2.8 release candidate)
+
+The configured bridge machine remains the only SSH origin. The plugin never
+moves a bridge to another host, changes authentication or network settings, or
+starts an agent to repair connectivity.
+
+The connection status disclosure shows bridge machine offline, bridge worker
+unavailable, SSH unavailable, or remote BB unavailable, plus last successful
+probe, outage duration, and next check. `GET /connections` exposes the same
+bounded state. A successful probe verifies the configured project identity.
+Health probes are single-flight per configured server. Failed probes back off
+from one second to a 60-second cap with jitter; healthy connections are checked
+every 30 seconds. Pending recovery deadlines are not postponed by user traffic.
+
+A safe GET/HEAD can run at most twice, with a successful health probe before its
+one retry. Writes, messages, creates and uploads are never retransmitted after
+an ambiguous result. Realtime subscriptions reconnect independently with capped
+jitter and catch up via reads; outbound user messages are not queued for replay.
+
+Tunnel reuse checks the SSH child and loopback listener. Broken resources are
+replaced at most once per acquisition; concurrent callers share establishment.
+The SSH child owns a worker retention lease. Idle cleanup preserves active
+WebSockets; idle expiry after socket closure, configuration reconciliation and plugin disposal
+release resources. Configuration is inspected every five seconds; reconciliation
+only runs when the destination set changes, with at most five attempts after
+failure. Socket cleanup and child exits address the exact tunnel generation,
+so late cleanup cannot close its replacement. Configuration is revalidated
+after waiting for a probe, immediately before any request or upload.
+
+After two minutes of continuous outage, the plugin attempts one standard BB
+push notification. Successful delivery suppresses further notices until recovery;
+failed delivery can be retried on a later health check. Notification settings
+and availability remain owned by the installed push-notifications plugin.
+Diagnostics expose categories, never raw SSH stderr.
+
+Synthetic tests cover outage/recovery, single-flight backoff, safe-read retry
+bounds, once-only mutation attempts, notification deduplication, pinned tunnels,
+and timer disposal. Live bridge failure injection is deliberately excluded.
