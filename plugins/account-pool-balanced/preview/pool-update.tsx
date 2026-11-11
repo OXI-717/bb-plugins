@@ -5,7 +5,7 @@ import {readFileSync} from 'node:fs';
 import {PoolUpdateView} from '../pool-update-panel';
 (globalThis as typeof globalThis & {React:typeof React}).React=React;
 const base={operationId:'11111111-1111-4111-8111-111111111111',startedAt:1,hostId:'host-one',terminalId:'terminal-one'};
-const content=<main className="space-y-6">
+const content=<main data-bb-plugin="account-pool-balanced" className="space-y-6">
   <PoolUpdateView operation={null} busy={false} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={{...base,state:'running'}} busy={true} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={{...base,state:'succeeded'}} busy={false} error={null} onStart={()=>{}}/>

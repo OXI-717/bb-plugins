@@ -733,12 +733,13 @@ export class AccountPoolHub {
               secret,
               adapter,
               trace, attempt, route,
-              {signal,purpose,projectId,family,freeTier,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
+              {purpose,projectId,family,freeTier,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
                 switched = lastDispatchedAccount !== null && lastDispatchedAccount !== selected.account.id;
                 if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'dispatched'});
                 lastDispatchedAccount = selected.account.id;
                 distinctAccounts.add(selected.account.id);
               }},
+              signal,
             );
           } catch (error) {
             if (pacing !== null) {
@@ -1501,9 +1502,10 @@ export class AccountPoolHub {
     secret: AccountSecret,
     adapter: ProviderAdapter,
     trace: Trace, attempt: number, route:AccountRoute,
-    admission: {signal:AbortSignal;purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;deadline:number;onDispatch?:()=>void},
+    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;deadline:number;onDispatch?:()=>void},
+    signal: AbortSignal,
   ): Promise<UpstreamResult> {
-    const admissionSignal = admission.signal;
+    const admissionSignal = signal;
     const deadline = admission.deadline;
     const cooldown = () => {
       const hold = admission.freeTier
