@@ -71,6 +71,7 @@ const HELP = [
   "  bb pool readiness [--project <id>] [--json]",
   '  bb pool native status --json',
   '  bb pool native configure <executor-json>',
+  '  bb pool native prefer <executor-id>',
   '  bb pool native mode <managed|off>',
   '  bb pool native attest-stopped <lease-id> --confirmed',
   "  bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]",
@@ -493,6 +494,7 @@ export function registerPoolCli(
           let result:object;
           if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=await nativeSessions.snapshot();
           else if(argv[1]==='configure'&&argv.length===3)result=await nativeSessions.configure(JSON.parse(argv[2]!));
+          else if(argv[1]==='prefer'&&argv.length===3){await nativeSessions.prefer(argv[2]!, (await nativeSessions.accounts()).selectionRevision);result={executorId:argv[2]!};}
           else if(argv[1]==='mode'&&argv.length===3&&['managed','off'].includes(argv[2]!))result=await nativeSessions.setManaged(argv[2]==='managed');
           else if(argv[1]==='attest-stopped'&&argv.length===4&&argv[3]==='--confirmed')result=await nativeSessions.attestStopped(argv[2]!);
           else throw Error(HELP);

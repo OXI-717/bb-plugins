@@ -37,8 +37,21 @@ precedence over that legacy list. Caller/host, catalog-only and automation permi
 network checks, prepared runtime bindings and host workspace limits still apply.
 
 Use the SAME subscription identifier for executors sharing one real Google
-account; do not infer identity from a path or copy a native profile. Only one
-enabled executor may match a host/project for BB auto-selection. Additional
+account; do not infer identity from a path or copy a native profile. Multiple
+accounts on one host require an explicit preferred executor. Choose **Use** on
+the account card or run `bb pool native prefer <executor-id>`. The choice is
+stored separately from admitted process bindings, so existing sessions keep
+their account and queued work is not rebound. A stale UI revision refuses;
+unknown/disabled executors cannot be selected. With no explicit preference,
+ambiguous matches still refuse. Optional executor `label` identifies the account
+in the UI without exposing private profile paths or caller credentials.
+
+The host launcher must separately contain an explicit private profile reference
+for each selected executor. Pooler cannot turn an unprepared host profile into
+another account. Selection still filters project, caller, catalog and automation
+permissions before considering the preference; it does not grant any access.
+This is operator selection for future sessions, without quota-driven rotation.
+Additional
 standalone callers require existing server-issued project/purpose-bound clients;
 project IDs and caller-provided host headers do not create authority. Every
 executor host must be enrolled. Machine login contexts remain host-local.

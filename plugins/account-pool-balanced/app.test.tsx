@@ -189,6 +189,16 @@ describe("Account Pool settings", () => {
     await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.setProjects',input:{accountId:'subscription-one',projects:{...projects,onlySelected:false},expectedRevision:'a'.repeat(64)}}));
   });
 
+  it('shows a named second Google account and selects only through the revision-bound action',async()=>{
+    const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[{
+      accountId:'subscription-two',label:'Second Google',projects:{onlySelected:false,rules:[]},projectsRevision:'a'.repeat(64),mixedProjects:false,
+      executors:[{id:'second-host',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0,
+    }]}),"native.prefer":()=>null});
+    expect(await slot.findByRole('button',{name:'Google · Second Google'})).toBeTruthy();
+    fireEvent.click(await slot.findByRole('button',{name:'Выбрать second-host'}));
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.prefer',input:{executorId:'second-host',expectedRevision:'b'.repeat(64)}}));
+  });
+
   it("shows one official Google subscription across executors without an OAuth sign-in", async () => {
     const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
       {id: "official-desktop", enabled: true, autopilotAllowed: false},
