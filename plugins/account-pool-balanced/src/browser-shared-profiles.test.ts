@@ -24,7 +24,7 @@ async function fixture() {
   };
   return { heliumRoot, registryFile, options, launches };
 }
-function oldIsolated(f: ReturnType<typeof fixture>) {
+function oldIsolated(f: Awaited<ReturnType<typeof fixture>>) {
   const entry = { profileDirectory: 'Profile 1', profileName: 'Claude · a@example.test', createdAt: 1, isolated: true };
   const sourceRoot = path.join(f.heliumRoot, 'Pool Accounts', 'Profile 1'), source = path.join(sourceRoot, 'Profile 1');
   mkdirSync(source, { recursive: true });
