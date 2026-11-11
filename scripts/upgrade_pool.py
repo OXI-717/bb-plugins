@@ -364,20 +364,31 @@ def main():
                         if checked == 'ALREADY_CURRENT':
                             result = checked
                         else:
+                            # A legacy server must fail before acquiring the BB queue hold.
+                            status = bb('pool', 'maintenance', 'status')
+                            if (not isinstance(status, dict) or status.get('schemaVersion') != 1
+                                    or status.get('scope') != 'all-model-clients'
+                                    or type(status.get('transportInFlight')) is not int
+                                    or status['transportInFlight'] < 0 or 'lease' not in status):
+                                raise UpgradeError('All-client model pause API unavailable; no sessions paused')
                             pause = SessionPause(output / 'sessions.json', bb, say)
                             try:
                                 pause.acquire_hold()
                                 args.maintenance_owner = pause.state['operationId']
-                                pause.acquire_model_hold()
+                                # Record and stop BB turns before model interruption can
+                                # make them disappear from the running-session inventory.
                                 pause.stop()
+                                pause.acquire_model_hold()
                                 pause.interrupt_model_requests()
                                 result = perform(args, data, output, say)
                             finally:
-                                pause.release_model_hold()
                                 try:
-                                    pause.resume()
+                                    pause.release_model_hold()
                                 finally:
-                                    pause.release_hold()
+                                    try:
+                                        pause.resume()
+                                    finally:
+                                        pause.release_hold()
                     elif args.wait_idle:
                         wait_idle(say, offer_interrupt=False)
                         result = 'IDLE_PASS'

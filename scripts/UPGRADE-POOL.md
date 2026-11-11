@@ -78,10 +78,12 @@ independent plugin holds the session queue while the pool itself is reloaded.
 Use `bash scripts/upgrade-pool.sh --pause-sessions --version X.Y.Z` from a separate
 BB machine terminal. Stopping the initiating session must not kill the executor.
 
-After release/server preflight, acquire exclusive 30-minute holds on model
-admission and new BB dispatches across **all projects and hosts**, then snapshot active/starting
+After release/server preflight and model-pause API validation, hold new BB
+dispatches across **all projects and hosts**, then snapshot active/starting
 sessions through the unpaginated public threads.listRunning API. Stop current
-turns with history/provider settings retained. The hook queues starts, follow-ups,
+turns with history/provider settings retained. Only after that saved stop does the
+updater acquire the model hold, which interrupts model and auxiliary traffic.
+The hook queues starts, follow-ups,
 steers and retries, instead of rejecting them. Queue cards and sidebar clocks
 show the reason. No concurrency limits change.
 

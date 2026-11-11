@@ -308,6 +308,50 @@ class MaintenanceIntegrationTests(unittest.TestCase):
             self.assertEqual(calls, [True, False])
             self.assertEqual(fake.threads['thread-a']['status'], 'active')
 
+    def test_missing_model_pause_api_never_holds_queue_or_stops_sessions(self):
+        for response in (None, {}, {'schemaVersion': 1, 'scope': 'all-hosts-all-projects'}):
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as directory:
+                data = Path(directory) / 'plugins' / upgrade.PLUGIN
+                data.mkdir(parents=True)
+                (data / 'data.db').touch()
+                fake = FakeBB()
+                def bb(*args):
+                    if args == ('status',):
+                        return {'dataDir': directory}
+                    if args == ('pool', 'maintenance', 'status'):
+                        if response is None:
+                            raise RuntimeError('Unknown legacy command')
+                        return response
+                    return fake(*args)
+                with patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', return_value='PREFLIGHT_PASS') as perform, patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(upgrade.main(), 1)
+                self.assertEqual(perform.call_count, 1)
+                self.assertEqual(fake.calls, [])
+                self.assertIsNone(fake.lease)
+
+    def test_model_pause_follows_saved_stop_and_release_failure_still_cleans_queue(self):
+        for fail_release in (False, True):
+            with self.subTest(fail_release=fail_release), tempfile.TemporaryDirectory() as directory:
+                data = Path(directory) / 'plugins' / upgrade.PLUGIN
+                data.mkdir(parents=True)
+                (data / 'data.db').touch()
+                fake = FakeBB()
+                def bb(*args):
+                    if args == ('status',):
+                        return {'dataDir': directory}
+                    if args[:3] == ('pool', 'maintenance', 'acquire'):
+                        self.assertEqual(fake.threads['thread-a']['status'], 'idle')
+                        receipt = next((Path(directory) / 'backups').glob('*/sessions.json'))
+                        self.assertEqual(json.loads(receipt.read_text())['sessions'][0]['action'], 'stopped')
+                    if fail_release and args[:3] == ('pool', 'maintenance', 'release'):
+                        raise RuntimeError('synthetic model release failure')
+                    return fake(*args)
+                with patch('pool_session_pause.running_threads', fake.running), patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', side_effect=lambda args, *rest: 'PREFLIGHT_PASS' if args.check else 'UPGRADED'), patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(upgrade.main(), int(fail_release))
+                self.assertIsNone(fake.lease)
+                self.assertEqual(fake.threads['thread-a']['status'], 'active')
+                self.assertEqual(len([c for c in fake.calls if c[:2] == ('thread', 'tell')]), 1)
+
     def test_preflight_failure_never_stops_sessions(self):
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory) / 'plugins' / upgrade.PLUGIN
@@ -323,6 +367,21 @@ class MaintenanceIntegrationTests(unittest.TestCase):
 
 class ModelMaintenanceTests(unittest.TestCase):
     setUp = SessionPauseTests.setUp
+    def test_recovery_model_release_failure_still_attempts_continuation_and_queue_release(self):
+        self.pause.acquire_hold()
+        self.pause.stop()
+        self.pause.acquire_model_hold()
+        original = self.bb
+        def failed(*args):
+            if args[:3] == ('pool', 'maintenance', 'status'):
+                raise RuntimeError('synthetic unavailable pool')
+            return original(*args)
+        recovered = SessionPause(self.path, failed, lambda _: None, running=self.bb.running)
+        with self.assertRaisesRegex(RuntimeError, 'unavailable pool'):
+            recovered.recover()
+        self.assertIsNone(self.bb.lease)
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
+
     def test_both_barriers_restore_in_order_and_preserve_foreign_pauses(self):
         self.pause.acquire_hold()
         self.pause.acquire_model_hold()

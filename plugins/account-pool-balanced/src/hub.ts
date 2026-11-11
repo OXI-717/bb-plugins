@@ -614,7 +614,8 @@ export class AccountPoolHub {
     purpose?: "autopilot",
     maintenanceSignal?: AbortSignal,
   ): Promise<Response> {
-    const signal = AbortSignal.any([request.signal, this.stopped.signal,...(maintenanceSignal?[maintenanceSignal]:[])]);
+    const requestLifetime = AbortSignal.any([request.signal,...(maintenanceSignal?[maintenanceSignal]:[])]);
+    const signal = AbortSignal.any([requestLifetime, this.stopped.signal]);
     const attempted = new Set<string>();
     const routing: RoutingAttempt = {
       binding: null,
@@ -739,7 +740,7 @@ export class AccountPoolHub {
                 lastDispatchedAccount = selected.account.id;
                 distinctAccounts.add(selected.account.id);
               }},
-              signal,
+              signal, requestLifetime,
             );
           } catch (error) {
             if (pacing !== null) {
@@ -1503,7 +1504,7 @@ export class AccountPoolHub {
     adapter: ProviderAdapter,
     trace: Trace, attempt: number, route:AccountRoute,
     admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;deadline:number;onDispatch?:()=>void},
-    signal: AbortSignal,
+    signal: AbortSignal, requestLifetime: AbortSignal,
   ): Promise<UpstreamResult> {
     const admissionSignal = signal;
     const deadline = admission.deadline;
@@ -1530,7 +1531,7 @@ export class AccountPoolHub {
     const slotRelease = await gate.acquire(account.id, admissionSignal, cooldown, deadline);
     if (waiting) this.observe(trace,{event:'queue-wait',attempt,accountId:account.id,durationMs:Math.max(0,this.options.now()-queuedAt)});
     const controller = new AbortController();
-    const abortFromRequest = () => controller.abort(admissionSignal.reason);
+    const abortFromRequest = () => controller.abort(requestLifetime.reason);
     this.activeControllers.add(controller);
     this.increment(account.id);
     let released = false;
@@ -1539,7 +1540,7 @@ export class AccountPoolHub {
     const release = (outcome: "complete"|"error"|"canceled" = "complete") => {
       if (released) return;
       released = true;
-      admissionSignal.removeEventListener("abort", abortFromRequest);
+      requestLifetime.removeEventListener("abort", abortFromRequest);
       controller.signal.removeEventListener("abort", abortRelease);
       this.activeControllers.delete(controller);
       this.decrement(account.id);
@@ -1550,8 +1551,8 @@ export class AccountPoolHub {
     // Abort is terminal even when nobody reads or cancels the response body.
     const abortRelease=()=>release("canceled");
     controller.signal.addEventListener("abort", abortRelease, { once: true });
-    if (admissionSignal.aborted) abortFromRequest();
-    else admissionSignal.addEventListener("abort", abortFromRequest, { once: true });
+    if (requestLifetime.aborted) abortFromRequest();
+    else requestLifetime.addEventListener("abort", abortFromRequest, { once: true });
     try {
       const upstreamBody = new ArrayBuffer(body.byteLength);
       new Uint8Array(upstreamBody).set(body);

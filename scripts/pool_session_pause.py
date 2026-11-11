@@ -201,11 +201,13 @@ class SessionPause:
         self.state = json.loads(self.path.read_text())
         if self.state.get('schemaVersion') != 1 or not isinstance(self.state.get('sessions'), list):
             raise ValueError('Unsupported session operation receipt')
-        self.release_model_hold()
         try:
-            self.resume()
+            self.release_model_hold()
         finally:
-            self.release_hold()
+            try:
+                self.resume()
+            finally:
+                self.release_hold()
 
 
 def verify_hold(value, owner, now=None):
