@@ -155,7 +155,7 @@ jitter and catch up via reads; outbound user messages are not queued for replay.
 Tunnel reuse checks the SSH child and loopback listener. Broken resources are
 replaced at most once per acquisition; concurrent callers share establishment.
 The SSH child owns a worker retention lease. Idle cleanup preserves active
-WebSockets; socket closure, configuration reconciliation and plugin disposal
+WebSockets; idle expiry after socket closure, configuration reconciliation and plugin disposal
 release resources. Configuration is inspected every five seconds; reconciliation
 only runs when the destination set changes, with at most five attempts after
 failure. Socket cleanup and child exits address the exact tunnel generation,

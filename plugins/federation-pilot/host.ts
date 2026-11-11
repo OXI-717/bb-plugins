@@ -108,7 +108,7 @@ export default experimental_defineHostEntry({
         if(data.length<=65536) void context.experimental_emitSignal('frame',{id:input.id,data}).catch(()=>{});
       });
       ws.addEventListener('close',()=>{
-        sockets.delete(input.id);socketDestinations.delete(input.id);socketGenerations.delete(input.id);if(![...socketGenerations.values()].includes(tunnel.generation!))tunnels.invalidate(input.sshTarget+':'+input.port,tunnel.generation);lease.dispose();context.lifecycle.signal.removeEventListener('abort',close);
+        sockets.delete(input.id);socketDestinations.delete(input.id);socketGenerations.delete(input.id);lease.dispose();context.lifecycle.signal.removeEventListener('abort',close);
         void context.experimental_emitSignal('closed',{id:input.id}).catch(()=>{});
       },{once:true});
       try{

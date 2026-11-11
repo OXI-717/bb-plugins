@@ -20,7 +20,9 @@ export function createTunnelCache(deps:{open:(key:string,signal:AbortSignal)=>Pr
    return get(key,replacements-1);
   }
   if(entry.abort.signal.aborted)throw Error('federation:ssh_unavailable');
-  if(entry.timer!==null)clearTimer(entry.timer);entry.timer=setTimer(()=>{if(entries.get(key)===entry&&!resource.pinned?.())remove(key);},90000);
+  if(entry.timer!==null)clearTimer(entry.timer);
+  const idle=()=>{if(entries.get(key)!==entry)return;if(resource.pinned?.()){entry.timer=setTimer(idle,90000);return;}remove(key);};
+  entry.timer=setTimer(idle,90000);
   return resource;
  }
  return {get,invalidate:remove,reconcile(keys:string[]){for(const key of entries.keys())if(!keys.includes(key))remove(key);},dispose(){disposed=true;for(const key of entries.keys())remove(key);}};
