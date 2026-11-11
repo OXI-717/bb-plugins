@@ -470,3 +470,14 @@ test('files are imported once, compared by value, and replaced by references onl
   await assert.rejects(access(keyFile));
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('a service note replaces its previous version, which goes to the archive',async()=>{
+ const items=new Map([['old',{id:'old',title:'Registry'}]]);const archived=[];let n=0;
+ const run=async(_b,args,_e,input)=>{
+  if(args[0]==='item'&&args[1]==='list')return JSON.stringify([...items.values()]);
+  if(args[0]==='item'&&args[1]==='create'){const p=args[args.indexOf('--template')+1];const t=JSON.parse(p==='/dev/stdin'?input:(await import('node:fs')).readFileSync(p,'utf8'));const id='n'+(++n);items.set(id,{id,title:t.title,text:t.fields[0].value});return JSON.stringify({id});}
+  if(args[0]==='item'&&args[1]==='delete'){archived.push(args[2]);items.delete(args[2]);return '';}
+  throw new Error('unexpected '+args.join(' '));};
+ const r=await runTidy(run,{},[{kind:'note',vaultId:'v'.padEnd(26,'a'),item:'Registry',text:'Scheme v2'}]);
+ assert.deepEqual(r.results,[{kind:'note',ok:true}]);assert.deepEqual(archived,['old']);
+ assert.deepEqual([...items.values()].map(x=>[x.title,x.text]),[['Registry','Scheme v2']]);
+});

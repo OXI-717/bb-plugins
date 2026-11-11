@@ -409,6 +409,7 @@ export default function plugin(bb: BbPluginApi) {
         const describe = (step: z.infer<typeof tidyStepSchema>) => step.kind === 'same' ? 'Сравнить ' + label(step.a.vaultId) + ' / ' + step.a.item + ' и ' + label(step.b.vaultId) + ' / ' + step.b.item + ' по значению (без показа); при различии — остановиться'
             : step.kind === 'move' ? 'Перенести ' + step.item + ' из ' + label(step.vaultId) + ' в ' + label(step.toVaultId)
             : step.kind === 'archive' ? 'Убрать в архив ' + step.item + ' в ' + label(step.vaultId) + ' (можно восстановить)'
+            : step.kind === 'note' ? 'Записать служебную заметку «' + step.item + '» в ' + label(step.vaultId) + ' (прежняя уходит в архив):\n' + step.text
             : 'Удалить пустой сейф ' + label(step.vaultId) + ' (только если пуст, включая архив)';
         return journal.run('tidy', profile, ctx, async progress => {
             const route = await credentialTarget(configured, ctx);

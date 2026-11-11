@@ -413,7 +413,8 @@ export type TidyStep =
     | {kind: 'same'; a: {vaultId: string; item: string}; b: {vaultId: string; item: string}}
     | {kind: 'move'; vaultId: string; item: string; toVaultId: string}
     | {kind: 'archive'; vaultId: string; item: string}
-    | {kind: 'delete-vault'; vaultId: string};
+    | {kind: 'delete-vault'; vaultId: string}
+    | {kind: 'note'; vaultId: string; item: string; text: string};
 const digest = async (value: string) => (await import('node:crypto')).createHash('sha256').update(value).digest('hex');
 // Owner-approved structural clean-up. Steps run in order and stop at the first failure or at a
 // comparison that differs; values are compared by hash inside this process and never returned.
@@ -448,6 +449,14 @@ export async function runTidy(run: Runner, env: NodeJS.ProcessEnv, steps: TidySt
             } else if (step.kind === 'archive') {
                 const found = await findOne(step.vaultId, step.item);
                 await op(['item', 'delete', found.id, '--vault', step.vaultId, '--archive']);
+                results.push({kind: step.kind, ok: true});
+            } else if (step.kind === 'note') {
+                // A non-secret service note: archive the previous version (recoverable), then create it anew.
+                const items = JSON.parse((await op(['item', 'list', '--vault', step.vaultId, '--format=json'])).trim() || '[]').filter((x: {title: string}) => x.title === step.item);
+                if (items.length > 1) throw new CodedError('ambiguous-item', 'Item must match at most one entry');
+                const template = {title: step.item, category: 'SECURE_NOTE', fields: [{id: 'notesPlain', type: 'STRING', purpose: 'NOTES', label: 'notesPlain', value: step.text}]};
+                await withTemplateFile(JSON.stringify(template), process.platform, (path, input) => run('op', ['item', 'create', '--template', path, '--vault', step.vaultId, '--format=json'], env, input === undefined ? undefined : JSON.stringify(input), signal));
+                if (items.length === 1) await op(['item', 'delete', items[0].id, '--vault', step.vaultId, '--archive']);
                 results.push({kind: step.kind, ok: true});
             } else {
                 const left = JSON.parse((await op(['item', 'list', '--vault', step.vaultId, '--include-archive', '--format=json'])).trim() || '[]');

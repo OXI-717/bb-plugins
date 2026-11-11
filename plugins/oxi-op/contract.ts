@@ -12,6 +12,7 @@ export const tidyStepSchema = z.discriminatedUnion('kind', [
     z.object({kind: z.literal('move'), vaultId: vaultRef, item: itemRef, toVaultId: vaultRef}).strict(),
     z.object({kind: z.literal('archive'), vaultId: vaultRef, item: itemRef}).strict(),
     z.object({kind: z.literal('delete-vault'), vaultId: vaultRef}).strict(),
+    z.object({kind: z.literal('note'), vaultId: vaultRef, item: itemRef, text: z.string().min(1).max(20000)}).strict(),
 ]);
 export const routeSchema = z.object({
     projectId: z.string().min(1),
