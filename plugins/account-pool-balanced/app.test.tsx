@@ -168,6 +168,7 @@ function render(
       rpc: {
         "status.get": () => status(accounts),
         "config.get": () => config(),
+        "update.status": () => null,
         "native.accounts": () => ({managed: false, accounts: []}),
         ...extraRpc,
       },
@@ -177,6 +178,23 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it('starts the server updater from the pool interface and blocks repeated clicks',async()=>{
+    const operation={operationId:'11111111-1111-4111-8111-111111111111',hostId:'host-one',terminalId:'terminal-one',startedAt:1,state:'running'};
+    const start=vi.fn(async()=>operation);
+    const slot=render([],{"update.start":start,"update.status":()=>start.mock.calls.length?operation:null});
+    const button=await slot.findByRole('button',{name:'Обновить Pooler'});
+    fireEvent.click(button);
+    await slot.findByText('Подготовка и обновление выполняются. Работа возобновится автоматически.');
+    expect(slot.getByRole('button',{name:'Проверяю обновление…'}).hasAttribute('disabled')).toBe(true);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(slot.getByText(/Приостановит сессии и запросы автопилота/)).toBeTruthy();
+  });
+  it('recovers update progress after reopening the interface',async()=>{
+    const slot=render([],{"update.status":()=>({operationId:'11111111-1111-4111-8111-111111111111',hostId:'host-one',terminalId:'terminal-one',startedAt:1,state:'running'})});
+    await slot.findByText('Подготовка и обновление выполняются. Работа возобновится автоматически.');
+    expect(slot.getByRole('button',{name:'Проверяю обновление…'}).hasAttribute('disabled')).toBe(true);
+  });
+
   it('opens the native card and saves the existing all-projects control',async()=>{
     const projects={onlySelected:true,rules:[{projectId:'project-one',role:'inherit' as const}]};
     const slot=render([],{"native.accounts":()=>({managed:true,accounts:[{accountId:'subscription-one',projects,projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.setProjects":()=>null});

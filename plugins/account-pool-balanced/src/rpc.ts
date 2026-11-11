@@ -1,3 +1,5 @@
+import {maintenanceStatusSchema, type PoolMaintenance} from './maintenance.js';
+import {updateStatusSchema, type PoolUpdate} from './pool-update.js';
 import { egressProfileSchema, egressStateSchema, type AccountEgress } from "./account-egress.js";
 import {nativeProjectsSchema, nativeAccountsSchema, type NativeAccounts} from "./native-accounts.js";
 import type {AgyOAuthLogin} from "./agy-oauth-login.js";
@@ -55,6 +57,9 @@ const browserOpenInputSchema = z.object({
 export type BrowserOpenInput = z.infer<typeof browserOpenInputSchema>;
 
 export const accountPoolRpcContract = defineRpcContract({
+  "maintenance.status": {input:z.null(), output:maintenanceStatusSchema},
+  "update.status": {input:z.null(), output:updateStatusSchema},
+  "update.start": {input:z.null(), output:updateStatusSchema},
   "native.setProjects": {input:z.object({accountId:z.string().min(1).max(80),projects:nativeProjectsSchema,expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
   "native.accounts": {input: z.null(), output: nativeAccountsSchema},
   "native.prefer": {input:z.object({executorId:z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
@@ -199,8 +204,13 @@ export function createRpcHandlers(
   nativeAccounts: () => Promise<NativeAccounts> = async () => ({managed: false, accounts: []}),
   nativeSetProjects: (accountId:string,projects:import('./contracts.js').AccountProjects,revision:string)=>Promise<null> = async()=>{throw Error('Native project settings unavailable');},
   nativePrefer:(executorId:string,revision:string)=>Promise<null> = async()=>{throw Error('Native account selection unavailable');},
+  maintenance?: Pick<PoolMaintenance,'status'>,
+  update?: Pick<PoolUpdate,'status'|'start'>,
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
+    "maintenance.status":()=>{if(!maintenance)throw Error('Maintenance unavailable');return maintenance.status();},
+    "update.status":()=>update?.status()??null,
+    "update.start":()=>{if(!update)throw Error('Updater unavailable');return update.start();},
     "native.accounts": () => nativeAccounts(),
     "native.prefer": ({executorId,expectedRevision}) => nativePrefer(executorId,expectedRevision),
     "native.setProjects": ({accountId,projects,expectedRevision}) => nativeSetProjects(accountId,projects,expectedRevision),

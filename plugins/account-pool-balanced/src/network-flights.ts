@@ -1,3 +1,4 @@
+import type {PoolMaintenance} from './maintenance.js';
 import type {PoolProvider} from './contracts.js';
 
 export type StreamIdentity={requestId:string;threadId:string|null};
@@ -13,7 +14,7 @@ export class NetworkFlights {
     }
     return false;
   }
-  constructor(private readonly upstream:typeof fetch,private readonly stop:()=>AbortSignal,private readonly check:(provider:PoolProvider)=>Promise<void>,private readonly selectFetch:(provider:PoolProvider,drainable:boolean)=>typeof fetch=()=>upstream) {}
+  constructor(private readonly upstream:typeof fetch,private readonly stop:()=>AbortSignal,private readonly check:(provider:PoolProvider)=>Promise<void>,private readonly selectFetch:(provider:PoolProvider,drainable:boolean)=>typeof fetch=()=>upstream,private maintenance?:PoolMaintenance) {}
   get size(){return this.active.size;}
   async enforce() {
     for(const provider of new Set(this.active.values())) {
@@ -23,10 +24,12 @@ export class NetworkFlights {
     }
   }
   async fetch(provider:PoolProvider,input:RequestInfo|URL,init?:RequestInit,drainable=false,admit?: (send:()=>Promise<Response>)=>Promise<Response>,requestCheck?:()=>Promise<void>, accountFetch?:typeof fetch,onBodyError?:(error:unknown,bytesRead:number)=>void,identity?:StreamIdentity):Promise<Response> {
+    const maintenanceSignal=this.maintenance?.signal;
+    this.maintenance?.assertAllowed();
     const check=requestCheck??(()=>this.check(provider));
     await check();
     const owner=new AbortController();
-    const signal=AbortSignal.any([owner.signal,...(drainable?[]:[this.stop()]),...(init?.signal?[init.signal]:[]),...(input instanceof Request?[input.signal]:[])]);
+    const signal=AbortSignal.any([owner.signal,...(maintenanceSignal?[maintenanceSignal]:[]),...(drainable?[]:[this.stop()]),...(init?.signal?[init.signal]:[]),...(input instanceof Request?[input.signal]:[])]);
     signal.throwIfAborted();
     this.active.set(owner,provider);
     let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
@@ -45,7 +48,7 @@ export class NetworkFlights {
     signal.addEventListener('abort',abort,{once:true});
     let response:Response|undefined;
     try {
-      const send=()=>{signal.throwIfAborted();return (accountFetch??this.selectFetch(provider,drainable))(input,{...init,signal});};
+      const send=()=>{signal.throwIfAborted();this.maintenance?.assertAllowed();return (accountFetch??this.selectFetch(provider,drainable))(input,{...init,signal});};
       response=await (admit?admit(send):send());
       signal.throwIfAborted();
       await check();
