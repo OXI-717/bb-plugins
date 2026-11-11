@@ -1,3 +1,4 @@
+import {mountConnectionStatus} from './connection-status.mjs';
 import { createFederation, loadConfig } from './federation-core.mjs';
 
 // Server reloads with an unchanged app hash do not remount content scripts.
@@ -7,6 +8,7 @@ export async function mountFederation(context, win, pluginId, deps = {}) {
   const readConfig = deps.readConfig ?? loadConfig;
   const createTransport = deps.createTransport ?? createFederation;
   const configWindow = { fetch: win.fetch.bind(win) };
+  const disposeStatus=win.document?.body?mountConnectionStatus(win,pluginId,context.signal):()=>{};
   let stopped = false, timer = null, current = null, fingerprint = null;
   const owner = { dispose, generation: context.generation };
   win.__federationPilotMount = owner;
@@ -19,6 +21,7 @@ export async function mountFederation(context, win, pluginId, deps = {}) {
   function dispose() {
     if (stopped) return;
     stopped = true;
+    disposeStatus();
     if (timer !== null) win.clearTimeout(timer);
     context.signal.removeEventListener('abort', dispose);
     clearTransport();

@@ -47,7 +47,7 @@ export default function plugin(bb: BbPluginApi) {
     // BB resumes an idle agent for a fulfilled tool result, including a reported failure.
     const toolOutcome = async (work: () => Promise<string>) => {
         try {return await work();}
-        catch (error) {if(error instanceof OperationFailure)return JSON.stringify({completed:false,code:error.code,message:error.message});if(errorCode(error)==='project-not-connected')return JSON.stringify({completed:false,code:'project_not_connected',message:'This BB project or access profile is not connected to 1Password in Oxi Op, so no form was opened and nothing was requested. Ask the owner to connect it in Oxi Op. Never ask for passwords in chat.'});return JSON.stringify({completed: false, message: 'Operation failed. Inspect oxi_op_history before retrying; no secret values are included.'});}
+        catch (error) {if(error instanceof OperationFailure)return JSON.stringify({completed:false,code:error.code,message:error.message});const coded=errorCode(error);if(coded&&coded!=='project-not-connected')return JSON.stringify({completed:false,code:coded,message:'Operation failed ('+coded+'). Inspect oxi_op_history before retrying; no secret values are included.'});if(coded==='project-not-connected')return JSON.stringify({completed:false,code:'project_not_connected',message:'This BB project or access profile is not connected to 1Password in Oxi Op, so no form was opened and nothing was requested. Ask the owner to connect it in Oxi Op. Never ask for passwords in chat.'});return JSON.stringify({completed: false, message: 'Operation failed. Inspect oxi_op_history before retrying; no secret values are included.'});}
     };
     const accessFor = async (projectId: string, profile: string) => {
         const values = await settings.get();
@@ -98,7 +98,7 @@ export default function plugin(bb: BbPluginApi) {
         for (const candidate of desktopHosts) {
             try {
                 const machine = await bb.sdk.hosts.get({hostId: candidate.hostId, signal: ctx.signal});
-                if (machine.id === candidate.hostId && machine.status === 'connected') return {...rest, credentialHostId: candidate.hostId, opBinary: candidate.opBinary};
+                if (machine.id === candidate.hostId && machine.status === 'connected') return {...rest, credentialHostId: candidate.hostId, opBinary: candidate.opBinary, ...(candidate.opBroker ? {opBroker: candidate.opBroker} : {})};
             } catch {}
         }
         throw new OperationFailure('credential_host_offline');
@@ -519,6 +519,8 @@ export default function plugin(bb: BbPluginApi) {
         if (configured.authentication !== 'desktop' || !configured.requireApproval) throw new Error('Critical access needs an owner-approved desktop profile');
         const session = await sessionMachine(ctx);
         await requireHost(session.hostId, 'execution', ctx);
+        // Refuse before the card: approving a command that cannot start would read the password for nothing.
+        if (!(await host.call('programAvailable', {program: argv[0], ...(session.cwd ? {cwd: session.cwd} : {})}, {hostId: session.hostId, signal: ctx.signal})).available) throw new CodedError('command-not-found', 'The program ' + argv[0].slice(0, 80) + ' was not found on the session machine; no card was shown and no password was read');
         // The owner must see exactly what receives the password: the full command or nothing.
         const commandLine = argv.map(a => /[\s"'\\]/.test(a) ? JSON.stringify(a) : a).join(' ');
         if (commandLine.length > 1500) throw new CodedError('command-too-long', 'A command with a critical password must fit on the approval card (1500 characters); put longer logic in a reviewed script file');
