@@ -8154,6 +8154,33 @@ describe('trusted automation account admission', () => {
     cursor:CURSOR_PROXIED_PATHS.filter(p=>p!=='auth/exchange_user_api_key').map(p=>`/cursor/${p}`),
     devin:DEVIN_PROXIED_PATHS.map(p=>`/devin/${p}`),
   };
+  it.each(['claude','codex','kimi','zai','opencode-go','cursor','devin'] as const)('maintenance fences external %s clients on every route without changing routing',async provider=>{
+    const outbound=vi.fn(async()=>Response.json({accessToken:'synthetic-minted',refreshToken:'synthetic-renewal'}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider,source:provider==='codex'?'import':undefined,options:{fetch:outbound,importCodexCredentials:async()=>({accessToken:'synthetic',refreshToken:'refresh',idToken:null,accountId:'fixture',email:'fixture@example.com',expiresAt:Date.now()+3600000})}});
+    const token=await issued(fixture);
+    await allow(fixture);
+    const owner='11111111-1111-4111-8111-111111111111';
+    const pause=await fixture.host.harness.behavior.runCli(['maintenance','acquire','--owner',owner,'--json']);
+    expect(pause.exitCode).toBe(0);
+    const snapshot=JSON.parse(pause.stdout);
+    expect(snapshot).toMatchObject({scope:'all-model-clients',lease:{owner}});
+    outbound.mockClear();
+    for(const route of routes[provider]){
+      const response=await fixture.host.harness.behavior.fetchHttp(route==='/v1/models'?'GET':'POST',route,{headers:{...authHeaders(token),authorization:`${provider==='devin'?'Basic':'Bearer'} ${token}`,'x-api-key':token},...(route==='/v1/models'?{}:{body:'{}'})});
+      expect(response.status,route).toBe(503);
+      expect(response.headers.get('x-bb-pool-error'),route).toBe('POOL_MAINTENANCE');
+      expect(response.headers.get('retry-after')).toBe('30');
+      await response.text();
+    }
+    expect(outbound).not.toHaveBeenCalled();
+    const readiness=await fixture.host.harness.behavior.callRpc('readiness.get',{projectId:'project-one'}) as Array<{provider:string;reason:string}>;
+    expect(readiness.find(row=>row.provider===provider)?.reason).toBe('paused');
+    expect((await fixture.host.harness.behavior.runCli(['maintenance','release','--owner','22222222-2222-4222-8222-222222222222','--json'])).exitCode).toBe(1);
+    expect(await fixture.host.harness.behavior.callRpc('maintenance.status',null)).toEqual(snapshot);
+    expect((await fixture.host.harness.behavior.runCli(['maintenance','release','--owner',owner,'--json'])).exitCode).toBe(0);
+    const restored=await fixture.host.harness.behavior.callRpc('status.get',null) as {routing:Record<string,boolean>};
+    expect(restored.routing[provider]).toBe(true);
+  });
   it.each(['claude','codex','kimi','zai','opencode-go','cursor','devin'] as const)('enforces opt-in on reachable %s routes and retains ordinary requests',async provider=>{
     const outbound=vi.fn(async()=>Response.json({accessToken:'synthetic-minted',refreshToken:'synthetic-renewal'}));
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider,source:provider==='codex'?'import':undefined,options:{fetch:outbound,importCodexCredentials:async()=>({accessToken:'synthetic',refreshToken:'refresh',idToken:null,accountId:'fixture',email:'fixture@example.com',expiresAt:Date.now()+3600000})}});
@@ -8806,4 +8833,57 @@ it.each(['application/connect+proto','text/event-stream'])('wires an exact authe
  expect((await two.body!.getReader().read()).value).toEqual(new Uint8Array([0,0,0]));
  expect((await append.body!.getReader().read()).value).toEqual(new Uint8Array([0,0,0]));
  expect(outbound.mock.calls.filter(([r])=>(r instanceof Request?r.url:String(r)).endsWith('/RunSSE'))).toHaveLength(2);
+});
+
+
+describe('maintenance races and existing streams',()=>{
+  const owner='11111111-1111-4111-8111-111111111111';
+  const pause=(f:Fixture)=>f.host.harness.behavior.runCli(['maintenance','acquire','--owner',owner,'--json']);
+  const resume=(f:Fixture)=>f.host.harness.behavior.runCli(['maintenance','release','--owner',owner,'--json']);
+  it('does not dispatch a request admitted before a pause after the pause is released',async()=>{
+    let hold=false,entered=false;
+    let release!:()=>void;
+    const waiting=new Promise<void>(resolve=>{release=resolve;});
+    const outbound=vi.fn(async()=>Response.json({ok:true}));
+    const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound,vpnPayload:async timestamp=>{if(hold){entered=true;await waiting;}return vpnProof(timestamp,'connected');}}});
+    outbound.mockClear();hold=true;
+    const pending=f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    await vi.waitFor(()=>expect(entered).toBe(true));
+    expect((await pause(f)).exitCode).toBe(0);
+    expect((await resume(f)).exitCode).toBe(0);
+    hold=false;release();
+    const response=await pending;
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-bb-pool-error')).toBe('POOL_MAINTENANCE');
+    expect(outbound).not.toHaveBeenCalled();
+    const fresh=await f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    expect(fresh.status).toBe(200);await fresh.text();
+    expect(outbound).toHaveBeenCalledTimes(1);
+  });
+  it('cancels active streams and queued work without replaying inference',async()=>{
+    const canceled=vi.fn();
+    const outbound=vi.fn(async()=>new Response(new ReadableStream({cancel:canceled})));
+    const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    await f.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:1});
+    outbound.mockClear();
+    const first=await f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    const reader=first.body!.getReader();
+    const reading=reader.read().catch(()=>({done:true,value:undefined}));
+    const queued=f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    await vi.waitFor(async()=>{
+      const accounts=await f.host.harness.behavior.callRpc('account.list',null) as AccountSummary[];
+      expect(accounts[0]?.queuedRequests).toBeGreaterThan(0);
+    });
+    expect((await pause(f)).exitCode).toBe(0);
+    const denied=await queued;
+    expect(denied.status).toBe(503);
+    expect(denied.headers.get('x-bb-pool-error')).toBe('POOL_MAINTENANCE');
+    await reading;
+    await vi.waitFor(()=>expect(canceled).toHaveBeenCalledTimes(1));
+    expect(outbound).toHaveBeenCalledTimes(1);
+    const status=await f.host.harness.behavior.callRpc('status.get',null) as {inFlight:number};
+    expect(status.inFlight).toBe(0);
+    await resume(f);
+    expect(outbound).toHaveBeenCalledTimes(1);
+  });
 });

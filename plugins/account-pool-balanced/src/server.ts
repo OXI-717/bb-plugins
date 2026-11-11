@@ -1,3 +1,5 @@
+import {PoolMaintenance} from './maintenance.js';
+import {PoolUpdate} from './pool-update.js';
 import {serverGuardRead,runGuardProbe,type GuardServerAccess} from './guard-server.js';
 import {registerNativeUnlockRpc} from "./native-unlock-rpc.js";
 import { AccountEgress } from "./account-egress.js";
@@ -139,6 +141,10 @@ export function createAccountPoolPlugin(
     const accounts = new AccountStore(bb.storage.kv, secretDir);
     await accounts.initialize();
     const now = options.now ?? Date.now;
+    let maintenanceActivity=()=>0;
+    const maintenance = new PoolMaintenance(value=>bb.storage.kv.set('model-maintenance-v1',value),now,()=>maintenanceActivity());
+    await maintenance.initialize(await bb.storage.kv.get('model-maintenance-v1'));
+    const update = new PoolUpdate(bb,now);
     const nativeSessions=new NativeSessions(bb.storage.kv,now,async(hostId,caller)=>{
       if(!(await routing.isProviderEnabled('agy')))throw Error('Native AGY routing disabled');
       if(!(await bb.sdk.hosts.list()).some(host=>host.id===hostId))throw Error('Native executor host not enrolled');
@@ -152,6 +158,7 @@ export function createAccountPoolPlugin(
       await bb.sdk.plugins.callRpc({pluginId:'oxi-op',method:'runPreparedTask',input:{requestId},
         outputSchema:z.object({completed:z.literal(true)}).strict(),signal});
     });
+    nativeSessions.admissionCheck=()=>{if(maintenance.status().lease)throw new NativeSessionError(503,'POOL_MAINTENANCE');};
     await nativeSessions.initialize();
     registerNativeUnlockRpc(bb,nativeSessions);
     bb.onDispose(()=>nativeSessions.close());
@@ -201,6 +208,7 @@ export function createAccountPoolPlugin(
       decision:(hostId,provider,signal)=>bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal}),
     };
     const hub = createHub({
+      maintenance,
       accountRoute:(accountId,sessionKey)=>egress.acquire(accountId,sessionKey),
       pinnedRouteAccount:sessionKey=>egress.pinnedAccount(sessionKey),
       nativeAgyManaged:()=>nativeSessions.managed(),
@@ -324,6 +332,13 @@ export function createAccountPoolPlugin(
       localOpen:async(query,url)=>openAccountBrowser({accounts:await operations.list(),query,url,dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId,vpnStatusFile:config.get().vpnStatusFile}),
       localList:async()=>listBrowserProfiles({accounts:await operations.list(),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
     });
+    maintenanceActivity=()=>hub.maintenanceActivity();
+    const maintenanceApi = {
+      status:()=>maintenance.status(),
+      acquire:(owner:string)=>maintenance.acquire(owner),
+      release:(owner:string)=>maintenance.release(owner),
+      interrupt:async(owner:string)=>{hub.interruptForMaintenance(owner);return maintenance.status();},
+    };
     bb.rpc.register(
       accountPoolRpcContract,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
@@ -356,9 +371,9 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url),egress,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision)),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId));
+    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi);
     registerUsageSource(bb, hub);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);

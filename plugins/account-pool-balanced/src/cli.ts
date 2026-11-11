@@ -1,3 +1,5 @@
+import type {PoolMaintenance} from './maintenance.js';
+import {z} from 'zod';
 import type {CursorStream} from './network-flights.js';
 import {guardProbeSchema,type GuardProbeInput, type runGuardProbe} from './guard-server.js';
 import type { AccountEgress } from "./account-egress.js";
@@ -42,6 +44,7 @@ interface ParsedFlags {
 }
 
 const HELP = [
+  "  bb pool maintenance <status|acquire|interrupt|release> [--owner <uuid>] --json",
   "Usage:",
   "  bb pool egress status --json",
   "  bb pool egress configure <profile-json>",
@@ -365,6 +368,7 @@ export function registerPoolCli(
   egress?: AccountEgress,
   guardProbe?:(input:GuardProbeInput)=>ReturnType<typeof runGuardProbe>,
   streamProbe?:(threadId:string,requestId?:string)=>{streams:CursorStream[];interrupted?:boolean},
+  maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
 ): void {
   bb.cli.register({
     name: "pool",
@@ -480,6 +484,16 @@ export function registerPoolCli(
     ],
     async run(argv, ctx): Promise<PluginCliResult> {
       try {
+        if(argv[0]==='maintenance'){
+          if(!maintenance)throw Error('Model maintenance unavailable');
+          let result:object;
+          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=maintenance.status();
+          else if(['acquire','release','interrupt'].includes(argv[1]!)&&argv.length===5&&argv[2]==='--owner'&&argv[4]==='--json'){
+            const owner=z.uuid().parse(argv[3]);
+            result=await maintenance[argv[1] as 'acquire'|'release'|'interrupt'](owner);
+          }else throw Error(HELP);
+          return {exitCode:0,stdout:json(result)};
+        }
         if(argv[0]==='egress'){
           if(!egress)throw Error('Egress management unavailable.');
           if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')return {exitCode:0,stdout:JSON.stringify(egress.snapshot(),null,2)+'\n'};

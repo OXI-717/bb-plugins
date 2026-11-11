@@ -22,6 +22,7 @@ class FakeBB:
         }
         self.calls = []
         self.lease = None
+        self.model_lease = None
         self.fail_stop = False
         self.ambiguous_send = False
 
@@ -31,6 +32,17 @@ class FakeBB:
 
     def __call__(self, *args):
         self.calls.append(args)
+        if args[:2] == ('pool', 'maintenance'):
+            if args[2] == 'acquire':
+                self.model_lease = {'owner': args[4], 'expiresAt': time.time()*1000+1_800_000}
+            elif args[2] == 'release':
+                if self.model_lease and self.model_lease['owner'] != args[4]:
+                    raise RuntimeError('foreign pause')
+                self.model_lease = None
+            elif args[2] == 'interrupt':
+                if not self.model_lease or self.model_lease['owner'] != args[4]:
+                    raise RuntimeError('foreign pause')
+            return {'schemaVersion': 1, 'scope': 'all-model-clients', 'transportInFlight': 0, 'lease': self.model_lease}
         if args[0] == 'pool-maintenance':
             if args[1] == 'acquire':
                 self.lease = {'owner': args[3], 'expiresAt': time.time()*1000+1_800_000}
@@ -307,6 +319,59 @@ class MaintenanceIntegrationTests(unittest.TestCase):
             with patch('pool_session_pause.running_threads', fake.running), patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', side_effect=RuntimeError('preflight failed')), patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(upgrade.main(), 1)
             self.assertFalse(any(c[1] == 'stop' for c in fake.calls))
+
+
+class ModelMaintenanceTests(unittest.TestCase):
+    setUp = SessionPauseTests.setUp
+    def test_both_barriers_restore_in_order_and_preserve_foreign_pauses(self):
+        self.pause.acquire_hold()
+        self.pause.acquire_model_hold()
+        self.pause.stop()
+        self.pause.interrupt_model_requests()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'idle')
+        self.assertIsNotNone(self.bb.model_lease)
+        self.pause.release_model_hold()
+        self.pause.resume()
+        self.pause.release_hold()
+        self.assertIsNone(self.bb.model_lease)
+        self.assertIsNone(self.bb.lease)
+        release = next(i for i, c in enumerate(self.bb.calls) if c[:3] == ('pool', 'maintenance', 'release'))
+        send = next(i for i, c in enumerate(self.bb.calls) if c[:2] == ('thread', 'tell'))
+        self.assertLess(release, send)
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
+
+    def test_recovery_releases_only_its_model_pause_before_continuing(self):
+        self.pause.acquire_hold()
+        self.pause.acquire_model_hold()
+        self.pause.stop()
+        self.bb.model_lease['owner'] = 'foreign-operation'
+        self.pause.recover()
+        self.assertEqual(self.bb.model_lease['owner'], 'foreign-operation')
+        self.assertFalse(any(c[:3] == ('pool', 'maintenance', 'release') for c in self.bb.calls))
+
+    def test_crash_after_model_pause_receipt_recovers_without_duplicate_send(self):
+        self.pause.acquire_hold()
+        self.pause.acquire_model_hold()
+        self.pause.stop()
+        recovered = SessionPause(self.path, self.bb, lambda _: None, running=self.bb.running)
+        recovered.recover()
+        recovered.recover()
+        self.assertIsNone(self.bb.model_lease)
+        self.assertEqual(len([c for c in self.bb.calls if c[:2] == ('thread', 'tell')]), 1)
+
+    def test_missing_or_expiring_model_barrier_refuses_update(self):
+        from pool_session_pause import verify_model_hold
+        good = {'schemaVersion': 1, 'scope': 'all-model-clients', 'transportInFlight': 0, 'lease': {'owner': 'owner-a', 'expiresAt': 1_800_000}}
+        verify_model_hold(good, 'owner-a', now=0)
+        for bad in [None, {}, {**good, 'scope': 'all-hosts-all-projects'}, {**good, 'lease': None}, {**good, 'lease': {'owner':'owner-a','expiresAt':899_999}}]:
+            with self.assertRaises(RuntimeError):
+                verify_model_hold(bad, 'owner-a', now=0)
+
+    def test_native_lease_is_not_treated_as_an_idle_pool(self):
+        times=iter([0,0,0,1,2,3])
+        with patch.object(upgrade, 'bb', return_value={'inFlight':0,'accounts':[]}), patch.object(upgrade, 'native_in_flight', return_value=1), patch.object(upgrade, 'model_activity', return_value=0), patch.object(upgrade.time, 'sleep'), patch.object(upgrade, 'report_pool'), patch.object(upgrade.time, 'monotonic', side_effect=lambda:next(times)):
+            with self.assertRaises(upgrade.UpgradeError):
+                upgrade.wait_idle(lambda _: None, offer_interrupt=False, deadline_seconds=2, include_native=True)
 
 
 if __name__ == '__main__':

@@ -85,6 +85,31 @@ class SessionPause:
             self.state['admission'] = 'not-owned-or-expired'
         self.save()
 
+    def acquire_model_hold(self):
+        self.state['modelAdmission'] = 'acquire-intent'
+        self.save()
+        value = self.bb('pool', 'maintenance', 'acquire', '--owner', self.state['operationId'])
+        verify_model_hold(value, self.state['operationId'])
+        self.state['modelAdmission'] = 'held'
+        self.save()
+        self.say('All model clients paused, including external automation workers.')
+
+    def interrupt_model_requests(self):
+        value = self.bb('pool', 'maintenance', 'interrupt', '--owner', self.state['operationId'])
+        verify_model_hold(value, self.state['operationId'])
+
+    def release_model_hold(self):
+        if 'modelAdmission' not in self.state:
+            return
+        value = self.bb('pool', 'maintenance', 'status')
+        lease = value.get('lease')
+        if lease is not None and lease.get('owner') == self.state['operationId']:
+            self.bb('pool', 'maintenance', 'release', '--owner', self.state['operationId'])
+            self.state['modelAdmission'] = 'released'
+        else:
+            self.state['modelAdmission'] = 'not-owned-or-expired'
+        self.save()
+
     def stop(self):
         # The CLI thread list is paginated; never use it as a complete inventory.
         rows = self.running()
@@ -176,6 +201,7 @@ class SessionPause:
         self.state = json.loads(self.path.read_text())
         if self.state.get('schemaVersion') != 1 or not isinstance(self.state.get('sessions'), list):
             raise ValueError('Unsupported session operation receipt')
+        self.release_model_hold()
         try:
             self.resume()
         finally:
@@ -191,3 +217,11 @@ def verify_hold(value, owner, now=None):
             or not math.isfinite(lease['expiresAt'])
             or lease['expiresAt'] - now < 900_000):
         raise RuntimeError('Maintenance dispatch pause is missing, foreign or expiring; update refused')
+
+
+def verify_model_hold(value, owner, now=None):
+    # Reuse the strict owner and remaining-time validation with a distinct scope.
+    if (not isinstance(value, dict) or value.get('scope') != 'all-model-clients'
+            or type(value.get('transportInFlight')) is not int or value['transportInFlight'] < 0):
+        raise RuntimeError('All-client model pause is unavailable; nothing updated')
+    verify_hold({**value, 'scope': 'all-hosts-all-projects'}, owner, now=now)

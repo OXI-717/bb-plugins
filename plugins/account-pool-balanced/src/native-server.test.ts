@@ -93,3 +93,27 @@ it('saves native projects through RPC and contributes the executor for a future 
     await expect(host.harness.behavior.callRpc('native.setProjects',input)).rejects.toThrow();
   }finally{await host.harness.lifecycle.dispose();}
 });
+
+
+it('maintenance denies native acquire and poll while allowing confirmed cleanup',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  try{
+    await createAccountPoolPlugin({fetch:vi.fn(async()=>new Response('{}'))})(host.bb);
+    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+    await host.harness.behavior.runCli(['native','configure',JSON.stringify(executor)]);
+    await host.harness.behavior.runCli(['native','mode','managed']);
+    const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
+    const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
+    const request=(input:object)=>host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${token}`},body:JSON.stringify(input)});
+    const acquired=await request({action:'acquire',executorId:'native-one',sessionId:randomUUID()});
+    const lease=await acquired.json();expect(acquired.status).toBe(200);
+    const owner='11111111-1111-4111-8111-111111111111';
+    expect((await host.harness.behavior.runCli(['maintenance','acquire','--owner',owner,'--json'])).exitCode).toBe(0);
+    for(const input of [{action:'poll',leaseId:lease.leaseId},{action:'acquire',executorId:'native-one',sessionId:randomUUID()}]){
+      const denied=await request(input);expect(denied.status).toBe(503);expect(await denied.json()).toEqual({error:'POOL_MAINTENANCE'});
+    }
+    expect(JSON.parse((await host.harness.behavior.runCli(['native','status','--json'])).stdout).leases).toHaveLength(1);
+    expect((await request({action:'release',leaseId:lease.leaseId,stopped:true})).status).toBe(200);
+    expect(JSON.parse((await host.harness.behavior.runCli(['native','status','--json'])).stdout).leases).toHaveLength(0);
+  }finally{await host.harness.lifecycle.dispose();}
+});
