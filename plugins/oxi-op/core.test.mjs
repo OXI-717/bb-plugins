@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
@@ -380,4 +380,46 @@ test('tidy compares by hash, stops when values differ, and deletes only an empty
  vaults[id('vd')]=[{id:'z',title:'Keep'}];
  const refused=await runTidy(run,{},[{kind:'delete-vault',vaultId:id('vd')}]);
  assert.deepEqual(refused.results[0],{kind:'delete-vault',ok:false,code:'vault-not-empty'});
+});
+test('the broker service runs allowed op calls, refuses others and passes input',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ const {mkdtemp,writeFile,chmod,rm,stat}=await import('node:fs/promises');const {join}=await import('node:path');const {spawn}=await import('node:child_process');
+ const dir=await mkdtemp('/tmp/oxop-');const sock=join(dir,'s','broker.sock');const fake=join(dir,'op');
+ await writeFile(fake,'#!/bin/sh\nfor a in "$@"; do [ "$a" = "fail" ] && exit 5; done\nprintf "%s|" "$@"; printf "stdin=%s" "$(cat)"; printf " bio=%s tok=%s" "$OP_BIOMETRIC_UNLOCK_ENABLED" "${OP_SERVICE_ACCOUNT_TOKEN:-none}"\n');await chmod(fake,0o755);
+ const broker=spawn('python3',[new URL('./broker/op_broker.py',import.meta.url).pathname,'--op',fake,'--socket',sock],{stdio:'ignore',env:{...process.env,OP_SERVICE_ACCOUNT_TOKEN:'synthetic-leak'}});
+ try{
+  for(let i=0;i<100;i++){try{await stat(sock);break;}catch{await new Promise(r=>setTimeout(r,50));}}
+  assert.equal((await stat(sock)).mode&0o777,0o600);assert.equal((await stat(join(dir,'s'))).mode&0o777,0o700);
+  const run=brokerRunner(sock);
+  const out=await run('op',['--account','A','item','get','x','--format=json'],{},'hello');
+  assert.equal(out,'--account|A|item|get|x|--format=json|stdin=hello bio=true tok=none');
+  await assert.rejects(run('op',['--account','A','run','--','sh'],{}),e=>e.message.includes('[broker-refused]'));
+  await assert.rejects(run('op',['item','list'],{}),e=>e.message.includes('[broker-refused]'));
+  await assert.rejects(run('op',['--account','A','fail'],{}),e=>e.message.includes('[broker-refused]'));
+  await assert.rejects(run('op',['--account','A','item','list','fail'],{}),e=>e.message.includes('[op-exit]')&&e.message.includes('process exit 5'));
+ }finally{broker.kill('SIGTERM');await new Promise(r=>setTimeout(r,200));await rm(dir,{recursive:true,force:true});}
+ await assert.rejects(brokerRunner(sock)('op',['--account','A','whoami'],{}),e=>e.message.includes('[broker-unavailable]'));
+});
+test('agent commands find programs like a login shell and report a missing one by code',async()=>{
+ assert(commandPath('/usr/bin:/bin').split(':').includes('/opt/homebrew/bin'));
+ assert.equal(commandPath('/a:/opt/homebrew/bin').split(':').filter(x=>x==='/opt/homebrew/bin').length,1);
+ assert.equal(await programAvailable('sh'),true);assert.equal(await programAvailable('definitely-not-a-program-xyz'),false);
+ await assert.rejects(runCommand('definitely-not-a-program-xyz',[],{PATH:'/usr/bin'},undefined,1000),e=>e.message.includes('[command-not-found]'));
+});
+test('cancelling a broker call stops the running op before it can finish a change',async t=>{
+ if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
+ const {mkdtemp,writeFile,chmod,rm,stat,access}=await import('node:fs/promises');const {join}=await import('node:path');const {spawn}=await import('node:child_process');
+ const dir=await mkdtemp('/tmp/oxop-');const sock=join(dir,'s','b.sock');const fake=join(dir,'op');const mark=join(dir,'changed');
+ await writeFile(fake,'#!/bin/sh\nsleep 1.5\ntouch '+mark+'\necho done\n');await chmod(fake,0o755);
+ const broker=spawn('python3',[new URL('./broker/op_broker.py',import.meta.url).pathname,'--op',fake,'--socket',sock],{stdio:'ignore'});
+ try{
+  for(let i=0;i<100;i++){try{await stat(sock);break;}catch{await new Promise(r=>setTimeout(r,50));}}
+  const controller=new AbortController();
+  const pending=brokerRunner(sock)('op',['--account','A','vault','delete','v'],{},undefined,controller.signal).catch(e=>e.message);
+  await new Promise(r=>setTimeout(r,300));controller.abort();
+  assert((await pending).includes('[cancelled]'));
+  await new Promise(r=>setTimeout(r,2000));
+  await assert.rejects(access(mark),'the cancelled command must not complete its change');
+  assert.equal(await brokerRunner(sock)('op',['--account','A','whoami'],{}),'done\n','the broker keeps serving after a cancellation');
+ }finally{broker.kill('SIGTERM');await new Promise(r=>setTimeout(r,200));await rm(dir,{recursive:true,force:true});}
 });

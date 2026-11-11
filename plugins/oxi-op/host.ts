@@ -3,8 +3,12 @@ import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
 import { contract, type Route } from './contract.js';
 import { CodedError } from './errors.js';
-import { runProcess, runOwnedProcess, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults, execResolved, runTidy } from './core.js';
+import { runProcess, runOwnedProcess, brokerRunner, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults, execResolved, runTidy, programAvailable } from './core.js';
 const pending = new Set<string>();
+// Owner-approved (desktop) op calls go through the OXI Op broker service when the route names
+// one, so macOS and 1Password authorise one long-lived service instead of each call.
+const runOp = (route: Route): typeof runProcess => (binary, args, env, input, signal) =>
+    route.authentication === 'desktop' && route.opBroker ? brokerRunner(route.opBroker)(binary, args, env, input, signal) : runProcess(binary, args, env, input, signal);
 async function environment(route: Route, signal: AbortSignal, serviceAccountToken?: string) {
     if (signal.aborted)
         throw new Error('Operation cancelled');
@@ -19,7 +23,7 @@ async function environment(route: Route, signal: AbortSignal, serviceAccountToke
 }
 export default experimental_defineHostEntry({ contract, handlers: {
         resolve: async ({route, operation}, ctx) => {
-            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
             return {bindings: await readOperationBindings(runner, await environment(route, ctx.signal), route, operation, ctx.signal)};
         },
         execute: async ({route, operation, bindings}, ctx) => {
@@ -29,22 +33,22 @@ export default experimental_defineHostEntry({ contract, handlers: {
         },
         provisionVault: async ({route, projectId, name, existingVaultId}, ctx) => {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Project setup requires owner desktop approval');
-            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
             return provisionProjectVault(runner, await environment(route, ctx.signal), projectId, name, ctx.signal, existingVaultId);
         },
         issueServiceAccounts: async ({route, ...request}, ctx) => {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Service account issuance requires owner desktop approval');
-            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
             return issueServiceAccounts(runner, await environment(route, ctx.signal), request, ctx.signal);
         },
         listKeys: async ({route, serviceAccountToken}, ctx) => {
             if (route.authentication !== 'service-account') throw new Error('Key listing requires a service account');
-            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, args, env, input, signal);
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, args, env, input, signal);
             return listVaultKeys(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, ctx.signal);
         },
         exec: async ({route, serviceAccountToken, argv, keys, cwd, timeoutSeconds}, ctx) => {
             if (route.authentication !== 'service-account' || route.requireApproval || !route.allowAgentCommands) throw new Error('Agent commands are not enabled for this access profile');
-            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, args, env, input, signal);
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, args, env, input, signal);
             return execWithKeys(runner, runCommand, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, argv, keys, cwd, timeoutSeconds * 1000, ctx.signal);
         },
         describeScope: async ({opBinary, serviceAccountToken}, ctx) => {
@@ -56,7 +60,7 @@ export default experimental_defineHostEntry({ contract, handlers: {
         deleteSelftest: async ({route, serviceAccountToken, title}, ctx) => {
             if (route.authentication !== 'service-account') throw new Error('Self-test cleanup requires a service account');
             const env = await environment(route, ctx.signal, serviceAccountToken);
-            const op = async (args: string[]) => runProcess(route.opBinary, args, env, undefined, ctx.signal);
+            const op = async (args: string[]) => runOp(route)(route.opBinary, args, env, undefined, ctx.signal);
             const items = JSON.parse(await op(['item', 'list', '--vault', route.vaultId, '--format=json'])).filter((x: {title: string}) => x.title === title);
             for (const item of items) await op(['item', 'delete', item.id, '--vault', route.vaultId]);
             if (JSON.parse(await op(['item', 'list', '--vault', route.vaultId, '--format=json'])).some((x: {title: string}) => x.title === title)) throw new Error('Self-test cleanup could not be confirmed');
@@ -64,15 +68,16 @@ export default experimental_defineHostEntry({ contract, handlers: {
         },
         probeScope: async ({route, serviceAccountToken}, ctx) => {
             if (route.authentication !== 'service-account') throw new Error('Scope probes require a service account');
-            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, args, env, input, signal);
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, args, env, input, signal);
             return probeServiceScope(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, ctx.signal);
         },
+        programAvailable: async ({program, cwd}) => ({available: await programAvailable(program.startsWith('./') || (program.includes('/') && !program.startsWith('/')) ? (cwd ? cwd + '/' + program : program) : program)}),
         resolveKeys: async ({route, keys}, ctx) => {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Critical keys require approved desktop access');
             const env = await environment(route, ctx.signal);
             const bindings: Record<string, string> = {};
             for (const [variable, key] of Object.entries(keys)) {
-                try {bindings[variable] = await runProcess(route.opBinary, ['--account', route.accountId!, 'read', '--no-newline', 'op://' + route.vaultId + '/' + key.item + '/' + key.field], env, undefined, ctx.signal);}
+                try {bindings[variable] = await runOp(route)(route.opBinary, ['--account', route.accountId!, 'read', '--no-newline', 'op://' + route.vaultId + '/' + key.item + '/' + key.field], env, undefined, ctx.signal);}
                 catch {throw new CodedError('key-unreadable', 'A requested key could not be read');}
             }
             return {bindings};
@@ -80,13 +85,13 @@ export default experimental_defineHostEntry({ contract, handlers: {
         execResolved: async ({argv, bindings, cwd, timeoutSeconds}, ctx) => execResolved(runCommand, argv, bindings, cwd, timeoutSeconds * 1000, ctx.signal),
         tidy: async ({route, steps}, ctx) => {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Clean-up requires owner desktop approval');
-            const runner: typeof runProcess = (_binary, args, env, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
             return runTidy(runner, await environment(route, ctx.signal), steps, ctx.signal);
         },
         overview: async ({route, serviceVaultIds, registryTitle}, ctx) => {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Vault overview requires owner desktop approval');
             const env = await environment(route, ctx.signal);
-            const runner: typeof runProcess = (_binary, args, values, input, signal) => runProcess(route.opBinary, ['--account', route.accountId!, ...args], values, input, signal);
+            const runner: typeof runProcess = (_binary, args, values, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], values, input, signal);
             const ids = new Set(serviceVaultIds);
             // A missing or unreadable registry narrows the map; it is reported instead of failing it.
             let registryRead = !registryTitle;
@@ -104,10 +109,10 @@ export default experimental_defineHostEntry({ contract, handlers: {
             if (route.authentication !== 'desktop') throw new Error('Registry inventory requires explicit owner desktop access');
             const env = await environment(route, ctx.signal);
             const args = ['--account', route.accountId!];
-            const registry = JSON.parse(await runProcess(route.opBinary, [...args, 'item', 'get', registryTitle, '--vault', route.vaultId, '--format=json', '--reveal'], env, undefined, ctx.signal));
+            const registry = JSON.parse(await runOp(route)(route.opBinary, [...args, 'item', 'get', registryTitle, '--vault', route.vaultId, '--format=json', '--reveal'], env, undefined, ctx.signal));
             const notes = String(registry.notesPlain ?? '') + '\n' + (registry.fields ?? []).filter((x: {id: string}) => x.id === 'notesPlain').map((x: {value: string}) => x.value).join('\n');
             const ids = new Set(notes.match(/\b[a-z2-7]{26}\b/g) ?? []);
-            const vaults = JSON.parse(await runProcess(route.opBinary, [...args, 'vault', 'list', '--format=json'], env, undefined, ctx.signal));
+            const vaults = JSON.parse(await runOp(route)(route.opBinary, [...args, 'vault', 'list', '--format=json'], env, undefined, ctx.signal));
             return {vaults: vaults.filter((x: {id: string}) => ids.has(x.id)).map((x: {id: string; name: string}) => ({id: x.id, name: x.name}))};
         },
         verify: async ({route, serviceAccountToken}, ctx) => {
@@ -115,7 +120,7 @@ export default experimental_defineHostEntry({ contract, handlers: {
             const title = 'OXI OP verification ' + randomUUID();
             const username = 'synthetic-verification';
             const password = randomUUID();
-            const runner: typeof runProcess = (binary, args, values, input, signal) => runProcess(route.opBinary, route.authentication === 'desktop' ? ['--account', route.accountId!, ...args] : args, values, input, signal);
+            const runner: typeof runProcess = (binary, args, values, input, signal) => runOp(route)(route.opBinary, route.authentication === 'desktop' ? ['--account', route.accountId!, ...args] : args, values, input, signal);
             let itemId: string | undefined;
             let failure: unknown;
             try {
@@ -142,7 +147,7 @@ export default experimental_defineHostEntry({ contract, handlers: {
         },
         check: async ({ route, serviceAccountToken }, ctx) => {
             const env = await environment(route, ctx.signal, serviceAccountToken);
-            const result = await runProcess(route.opBinary, [...(route.authentication === 'desktop' ? ['--account', route.accountId!] : []), 'vault', 'get', route.vaultId, '--format=json'], env, undefined, ctx.signal);
+            const result = await runOp(route)(route.opBinary, [...(route.authentication === 'desktop' ? ['--account', route.accountId!] : []), 'vault', 'get', route.vaultId, '--format=json'], env, undefined, ctx.signal);
             try {
                 if (JSON.parse(result).id !== route.vaultId)
                     throw new Error();
@@ -157,7 +162,7 @@ export default experimental_defineHostEntry({ contract, handlers: {
             if (pending.has(key))
                 throw new Error('This item is already being stored');
             pending.add(key);
-            const runner: typeof runProcess = (binary, args, env, input, signal) => runProcess(route.opBinary, route.authentication === 'desktop' ? ['--account', route.accountId!, ...args] : args, env, input, signal);
+            const runner: typeof runProcess = (binary, args, env, input, signal) => runOp(route)(route.opBinary, route.authentication === 'desktop' ? ['--account', route.accountId!, ...args] : args, env, input, signal);
             try {
                 return await storeCredential(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, title, username, password, ctx.signal);
             }
