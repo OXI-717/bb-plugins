@@ -409,6 +409,7 @@ export default function plugin(bb: BbPluginApi) {
         const describe = (step: z.infer<typeof tidyStepSchema>) => step.kind === 'same' ? 'Сравнить ' + label(step.a.vaultId) + ' / ' + step.a.item + ' и ' + label(step.b.vaultId) + ' / ' + step.b.item + ' по значению (без показа); при различии — остановиться'
             : step.kind === 'move' ? 'Перенести ' + step.item + ' из ' + label(step.vaultId) + ' в ' + label(step.toVaultId)
             : step.kind === 'archive' ? 'Убрать в архив ' + step.item + ' в ' + label(step.vaultId) + ' (можно восстановить)'
+            : step.kind === 'note' ? 'Записать служебную заметку «' + step.item + '» в ' + label(step.vaultId) + ' (прежняя уходит в архив):\n' + step.text
             : 'Удалить пустой сейф ' + label(step.vaultId) + ' (только если пуст, включая архив)';
         return journal.run('tidy', profile, ctx, async progress => {
             const route = await credentialTarget(configured, ctx);
@@ -454,6 +455,46 @@ export default function plugin(bb: BbPluginApi) {
         }
         for (const [, list] of perProject) if (list.length > 1) findings.push({code: 'project-has-several-vaults', vault: list.join(', ')});
         return findings;
+    }
+    // Migration of local secret files: one card per run lists every file. Import writes each file
+    // as one item and compares every value; the reference run then replaces imported values in
+    // the files with op:// references and removes imported key files, only where values match.
+    async function migrate(profile: string, mode: 'import' | 'reference', rawPlan: string, ctx: OperationContext) {
+        const entries = z.array(z.object({file: z.string().regex(/^\/[^\0]*$/), title: z.string().min(1).max(160), kind: z.enum(['env', 'document']), vaultId: z.string().regex(/^[a-z0-9]{26}$/), vaultLabel: z.string().min(1).max(160)}).strict()).min(1).max(200).parse(JSON.parse(rawPlan));
+        const vaults = [...new Map(entries.map(e => [e.vaultId, e.vaultLabel]))];
+        for (const [vaultId] of vaults) {
+            const part = entries.filter(e => e.vaultId === vaultId);
+            if (part.length > 100) throw new Error('At most 100 files per vault in one run');
+            if (new Set(part.map(e => e.title)).size !== part.length) throw new Error('Titles must be unique within a vault');
+            if (new Set(part.map(e => e.vaultLabel)).size !== 1) throw new Error('One label per vault');
+        }
+        const {route: configured} = await accessFor(ctx.projectId, profile);
+        if (configured.authentication !== 'desktop' || !configured.requireApproval) throw new Error('Migration requires approved owner desktop access');
+        const home = (path: string) => path.replace(/^\/(Users|home)\/[^/]+/, '~');
+        return journal.run('migrate', profile, ctx, async progress => {
+            const route = await credentialTarget(configured, ctx);
+            await requireCredentialHost(route, ctx);
+            const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
+            const list = vaults.map(([id, label]) => 'Сейф «' + label + '»:\n' + entries.filter(e => e.vaultId === id).map(e => '  ' + home(e.file) + (e.kind === 'document' ? ' (файл целиком)' : '')).join('\n')).join('\n');
+            const purpose = mode === 'import'
+                ? 'Перенести ' + entries.length + ' файлов в 1Password. Каждое значение после записи сверяется; файлы на диске не меняются.\n' + list
+                : 'Только для уже перенесённых и совпадающих значений: заменить их в файлах ссылками op:// и удалить файлы-ключи. Файл не трогается, если что-то не совпало. Открытых копий не остаётся.\n' + list;
+            await progress('awaiting-approval');
+            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: (mode === 'import' ? 'Перенос в 1Password: ' : 'Очистка после переноса: ') + entries.length + ' файлов', payload: {mode: 'approve', title: mode === 'import' ? 'Перенести ключи в 1Password' : 'Заменить ключи ссылками', purpose, profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: 'Перенос ключей', hostId: credentialHost(route), ...display, vaultId: vaults[0][0], vaultLabel: vaults.map(v => v[1]).join(', '), secrets: []}, describeSubmission: () => ({title: 'Secret migration approved (no values)'})}, {signal: ctx.signal});
+            if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
+            await progress('awaiting-approval', true);
+            await requireCredentialHost(route, ctx);
+            await progress('running', true);
+            // Each vault runs on its own; a failure there is reported for its files and the
+            // results of the other vaults are kept.
+            const results: {file: string; state: string; code?: string}[] = [];
+            for (const [vaultId, vaultLabel] of vaults) {
+                const part = entries.filter(e => e.vaultId === vaultId).map(({file, title, kind}) => ({file, title, kind}));
+                try {results.push(...(await host.call('importFiles', {route: {...route, vaultId, vaultLabel}, mode, entries: part}, {hostId: credentialHost(route), signal: ctx.signal})).results);}
+                catch (error) {results.push(...part.map(e => ({file: e.file, state: 'failed', code: 'vault-' + (errorCode(error) ?? 'failed')})));}
+            }
+            return JSON.stringify({results});
+        }, mode === 'import' ? 'Перенос ключей в 1Password' : 'Очистка после переноса');
     }
     const profileParameter = z.string().min(1).max(80).default('default');
     bb.agents.registerTool({ name: 'oxi_op_store', description: 'Request a credential in a private BB form and save it to the current project vault and configured access profile. Passwords must never be supplied in tool arguments. Missing routing requires project setup; never fall back to Keychain, chat or shell password commands.', parameters: z.object({ title: z.string().min(1).max(160), username: z.string().max(200).default(''), profile: profileParameter }).strict(), execute: ({ title, username, profile }, ctx) => toolOutcome(() => store(title, username, profile, ctx)) });
@@ -656,6 +697,7 @@ export default function plugin(bb: BbPluginApi) {
             overview:cliCommand({summary:'Approve a metadata-only map of service vaults; prints it after approval',options:{notify:notifyOption,profile:{type:'string',description:'Owner desktop setup profile',required:true},registry:{type:'string',description:'Service registry item title in the setup vault'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>overview(input.options.profile,input.options.registry,context));}}),
             doctor:cliCommand({summary:'Check vault structure against the Oxi Op scheme after one approval; prints findings first',options:{profile:{type:'string',description:'Owner desktop setup profile',required:true},registry:{type:'string',description:'Service registry item title in the setup vault'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const result=await interactiveCli({projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal},false,()=>overview(input.options.profile,input.options.registry,{projectId:ctx.projectId!,threadId:ctx.threadId!,signal:ctx.signal}));if(result.stdout.startsWith('{')){const report=JSON.parse(result.stdout);result.stdout=JSON.stringify({ok:report.findings.length===0&&report.complete,findings:report.findings,complete:report.complete});}return result;}}),
             tidy:cliCommand({summary:'Approve an ordered clean-up plan: compare by value, move, archive, delete empty unused vaults',options:{notify:notifyOption,profile:{type:'string',description:'Owner desktop setup profile',required:true},plan:{type:'string',description:'JSON array of steps (same, move, archive, delete-vault)',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>tidy(input.options.profile,input.options.plan,context));}}),
+            migrate:cliCommand({summary:'Approve importing local secret files into vaults, or replacing imported values with op:// references',options:{notify:notifyOption,profile:{type:'string',description:'Owner desktop setup profile',required:true},mode:{type:'string',description:'import or reference',required:true},plan:{type:'string',description:'JSON array of {file, title, kind: env|document, vaultId, vaultLabel}',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const mode=z.enum(['import','reference']).parse(input.options.mode);const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>migrate(input.options.profile,mode,input.options.plan,context));}}),
             'connect-many':cliCommand({summary:'Approve a bounded explicit list of project vault connections',options:{notify:notifyOption,projects:{type:'string',description:'JSON array of projectId and optional exact existingVaultId',required:true},profile:{type:'string',description:'Existing owner desktop setup profile',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectMany(input.options.projects,input.options.profile,context));}}),
             connect: cliCommand({summary:'Approve creating a dedicated vault and default project route',options:{notify:notifyOption,project:{type:'string',description:'Exact target BB project ID',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>connectProject(input.options.project,input.options.profile,context));}}),
             'display-status':cliCommand({summary:'Read form rendering receipts for this session; never contacts 1Password',async run(_,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const keys=await bb.storage.kv.list(receiptPrefix(ctx.projectId,ctx.threadId));const rows=await Promise.all(keys.map(k=>bb.storage.kv.get<Receipt>(k)));return {exitCode:0,stdout:JSON.stringify(rows.filter(Boolean).sort((a,b)=>b!.mountedAt.localeCompare(a!.mountedAt)).slice(0,20))};}}),

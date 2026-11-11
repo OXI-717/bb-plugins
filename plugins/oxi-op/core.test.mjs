@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable,parseEnv,importFiles,replaceWithReferences} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
@@ -383,7 +383,7 @@ test('tidy compares by hash, stops when values differ, and deletes only an empty
 });
 test('the broker service runs allowed op calls, refuses others and passes input',async t=>{
  if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
- const {mkdtemp,writeFile,chmod,rm,stat}=await import('node:fs/promises');const {join}=await import('node:path');const {spawn}=await import('node:child_process');
+ const {mkdtemp,writeFile,readFile,chmod,rm,stat}=await import('node:fs/promises');const {join}=await import('node:path');const {spawn}=await import('node:child_process');
  const dir=await mkdtemp('/tmp/oxop-');const sock=join(dir,'s','broker.sock');const fake=join(dir,'op');
  await writeFile(fake,'#!/bin/sh\nfor a in "$@"; do [ "$a" = "fail" ] && exit 5; done\nprintf "%s|" "$@"; printf "stdin=%s" "$(cat)"; printf " bio=%s tok=%s" "$OP_BIOMETRIC_UNLOCK_ENABLED" "${OP_SERVICE_ACCOUNT_TOKEN:-none}"\n');await chmod(fake,0o755);
  const broker=spawn('python3',[new URL('./broker/op_broker.py',import.meta.url).pathname,'--op',fake,'--socket',sock],{stdio:'ignore',env:{...process.env,OP_SERVICE_ACCOUNT_TOKEN:'synthetic-leak'}});
@@ -393,12 +393,25 @@ test('the broker service runs allowed op calls, refuses others and passes input'
   const run=brokerRunner(sock);
   const out=await run('op',['--account','A','item','get','x','--format=json'],{},'hello');
   assert.equal(out,'--account|A|item|get|x|--format=json|stdin=hello bio=true tok=none');
+  // op reads a FIFO stdin as an item template, so the broker hands input over on a socket (as the
+  // BB host does) and a call without input gets /dev/null.
+  assert.equal(await run('op',['--account','A','item','edit','x','title=y'],{}),'--account|A|item|edit|x|title=y|stdin= bio=true tok=none');
+  const original=await readFile(fake);
+  await writeFile(fake,'#!/bin/sh\nif [ -c /dev/stdin ]; then echo null; elif [ -p /dev/stdin ]; then echo fifo; elif [ -S /dev/stdin ]; then echo socket; else echo other; fi\n');
+  assert.equal(await run('op',['--account','A','item','edit','x'],{}),'null\n');
+  assert.equal(await run('op',['--account','A','item','create','--template','/dev/stdin'],{},'{}'),'socket\n');
+  await writeFile(fake,original);
   await assert.rejects(run('op',['--account','A','run','--','sh'],{}),e=>e.message.includes('[broker-refused]'));
   await assert.rejects(run('op',['item','list'],{}),e=>e.message.includes('[broker-refused]'));
   await assert.rejects(run('op',['--account','A','fail'],{}),e=>e.message.includes('[broker-refused]'));
   await assert.rejects(run('op',['--account','A','item','list','fail'],{}),e=>e.message.includes('[op-exit]')&&e.message.includes('process exit 5'));
  }finally{broker.kill('SIGTERM');await new Promise(r=>setTimeout(r,200));await rm(dir,{recursive:true,force:true});}
  await assert.rejects(brokerRunner(sock)('op',['--account','A','whoami'],{}),e=>e.message.includes('[broker-unavailable]'));
+});
+test('a direct op call gets /dev/null without input and a socket with it, like the broker',async()=>{
+ const probe=['-c','if [ -c /dev/stdin ]; then echo null; elif [ -p /dev/stdin ]; then echo fifo; elif [ -S /dev/stdin ]; then echo socket; else echo other; fi'];
+ assert.equal(await runProcess('/bin/sh',probe,{}),'null\n');
+ assert.equal(await runProcess('/bin/sh',probe,{},'{}'),'socket\n');
 });
 test('agent commands find programs like a login shell and report a missing one by code',async()=>{
  assert(commandPath('/usr/bin:/bin').split(':').includes('/opt/homebrew/bin'));
@@ -422,4 +435,119 @@ test('cancelling a broker call stops the running op before it can finish a chang
   await assert.rejects(access(mark),'the cancelled command must not complete its change');
   assert.equal(await brokerRunner(sock)('op',['--account','A','whoami'],{}),'done\n','the broker keeps serving after a cancellation');
  }finally{broker.kill('SIGTERM');await new Promise(r=>setTimeout(r,200));await rm(dir,{recursive:true,force:true});}
+});
+test('the env reader keeps plain values, unquotes, skips comments and marks ambiguous files',()=>{
+ const r=parseEnv('# c\nexport A=1\nB="two words"\nC=three # note\nEMPTY=\nD=\'q\'\n');
+ assert.deepEqual(r,{entries:[{key:'A',value:'1'},{key:'B',value:'two words'},{key:'C',value:'three'},{key:'D',value:'q'}],ambiguous:false});
+ assert.equal(parseEnv('KEY="-----BEGIN\nabc"').ambiguous,true);
+ // dotenv reads TOKEN=abc#comment as abc, a shell as abc#comment: keep such a file whole.
+ assert.equal(parseEnv('TOKEN=abc#comment\n').ambiguous,true);
+ assert.deepEqual(parseEnv('TOKEN=abc #comment\n'),{entries:[{key:'TOKEN',value:'abc'}],ambiguous:false});
+ assert.deepEqual(parseEnv('TOKEN="abc#x"\n'),{entries:[{key:'TOKEN',value:'abc#x'}],ambiguous:false});
+ assert.equal(parseEnv('just text').ambiguous,true);
+});
+function fakeVault(){
+ const items=new Map();let n=0;const docs=new Map();
+ const run=async(_b,args,_e,input)=>{
+  const [g,a]=args;
+  if(g==='item'&&a==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));
+  if(g==='item'&&a==='create'){const p=args[args.indexOf('--template')+1];const t=JSON.parse(p==='/dev/stdin'?input:(await import('node:fs')).readFileSync(p,'utf8'));const id='i'+(++n);items.set(id,t);return JSON.stringify({id});}
+  if(g==='item'&&a==='get')return JSON.stringify(items.get(args[2]));
+  if(g==='document'&&a==='create'){const id='d'+(++n);const bytes=(await import('node:fs')).readFileSync(args[2]);items.set(id,{title:args[args.indexOf('--title')+1],category:'DOCUMENT'});docs.set(id,bytes);return JSON.stringify({uuid:id});}
+  if(g==='document'&&a==='get'){(await import('node:fs')).writeFileSync(args[args.indexOf('--out-file')+1],docs.get(args[2]));return '';}
+  throw new Error('unexpected '+args.join(' '));
+ };
+ return {run,items,docs};
+}
+test('files are imported once, compared by value, and replaced by references only after a match',async()=>{
+ const {mkdtemp,writeFile,readFile,stat,access,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-import-'));
+ try{
+  const envFile=join(dir,'app.env');await writeFile(envFile,'# app\nAPI_KEY=synthetic-api\nURL=https://example.test\nEMPTY=\n',{mode:0o600});
+  const keyFile=join(dir,'id.key');await writeFile(keyFile,'synthetic-private-key-bytes');
+  const v=fakeVault();
+  const plan=[{file:envFile,title:'App env',kind:'env'},{file:keyFile,title:'Backup key',kind:'document'}];
+  const first=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
+  assert.deepEqual(first.results.map(r=>[r.state,r.kind,r.keys??null]),[['imported','env',['API_KEY','URL']],['imported','document',null]]);
+  assert(!JSON.stringify(first).includes('synthetic'));
+  const again=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
+  assert.deepEqual(again.results.map(r=>r.state),['already-imported','already-imported']);
+  assert.equal(v.items.size,2,'a rerun creates nothing new');
+  await writeFile(envFile,'API_KEY=changed\nURL=https://example.test\n');
+  assert.equal((await importFiles(v.run,{},'vault-1',plan.slice(0,1),undefined,'darwin')).results[0].state,'differs');
+  const refused=await replaceWithReferences(v.run,{},'vault-1',[{...plan[0],itemId:first.results[0].itemId}]);
+  assert.deepEqual(refused.results[0],{file:envFile,state:'failed',code:'values-differ'});
+  assert.equal(await readFile(envFile,'utf8'),'API_KEY=changed\nURL=https://example.test\n','nothing is rewritten when values differ');
+  await writeFile(envFile,'# app\nAPI_KEY=synthetic-api\nURL=https://example.test\nEMPTY=\n',{mode:0o600});
+  const done=await replaceWithReferences(v.run,{},'vault-1',plan.map((p,i)=>({...p,itemId:first.results[i].itemId})));
+  assert.deepEqual(done.results.map(r=>r.state),['referenced','removed']);
+  const text=await readFile(envFile,'utf8');
+  assert(!text.includes('synthetic'));assert(text.includes('API_KEY=op://vault-1/'+first.results[0].itemId+'/Environment/API_KEY'));assert(text.includes('# app')&&text.includes('EMPTY='));
+  assert.equal((await stat(envFile)).mode&0o777,0o600);
+  await assert.rejects(access(keyFile));
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('a service note replaces its previous version, which goes to the archive',async()=>{
+ const items=new Map([['old',{id:'old',title:'Registry',category:'SECURE_NOTE'}],['cred',{id:'cred',title:'Server',category:'LOGIN'}]]);const archived=[];let n=0;
+ const run=async(_b,args,_e,input)=>{
+  if(args[0]==='item'&&args[1]==='list')return JSON.stringify([...items.values()]);
+  if(args[0]==='item'&&args[1]==='create'){const p=args[args.indexOf('--template')+1];const t=JSON.parse(p==='/dev/stdin'?input:(await import('node:fs')).readFileSync(p,'utf8'));const id='n'+(++n);items.set(id,{id,title:t.title,text:t.fields[0].value});return JSON.stringify({id});}
+  if(args[0]==='item'&&args[1]==='delete'){archived.push(args[2]);items.delete(args[2]);return '';}
+  throw new Error('unexpected '+args.join(' '));};
+ const r=await runTidy(run,{},[{kind:'note',vaultId:'v'.padEnd(26,'a'),item:'Registry',text:'Scheme v2'}]);
+ assert.deepEqual(r.results,[{kind:'note',ok:true}]);assert.deepEqual(archived,['old']);
+ assert.deepEqual([...items.values()].filter(x=>x.title==='Registry').map(x=>x.text),['Scheme v2']);
+ const refused=await runTidy(run,{},[{kind:'note',vaultId:'v'.padEnd(26,'a'),item:'Server',text:'x'}]);
+ assert.deepEqual(refused.results[0],{kind:'note',ok:false,code:'not-a-note'});
+});
+test('the env reader refuses what a loader could read differently',()=>{
+ assert.equal(parseEnv('A="x\\ny"').ambiguous,true,'escapes in double quotes');
+ assert.equal(parseEnv('A="${HOST}/db"').ambiguous,true,'expansion in double quotes');
+ assert.equal(parseEnv('A=$HOME/x').ambiguous,true,'expansion unquoted');
+ assert.equal(parseEnv('A=1\nA=2').ambiguous,true,'duplicate keys');
+ assert.deepEqual(parseEnv("A='lit $x \\n'\r\nB=2 # c\r\n"),{entries:[{key:'A',value:'lit $x \\n'},{key:'B',value:'2'}],ambiguous:false});
+});
+test('references keep CRLF, comments and empty values, and refuse links and planned env files kept as documents',async()=>{
+ const {mkdtemp,writeFile,readFile,symlink,link,rm,access}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-ref-'));
+ try{
+  const v=fakeVault();
+  const crlf=join(dir,'win.env');await writeFile(crlf,'KEY=synthetic-a # note\r\nEMPTY=""\r\n',{mode:0o600});
+  const amb=join(dir,'pem.env');await writeFile(amb,'PEM="-----BEGIN\nsynthetic\n-----END"\n');
+  const plan=[{file:crlf,title:'Win',kind:'env'},{file:amb,title:'Pem',kind:'env'}];
+  const imported=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
+  assert.deepEqual(imported.results.map(r=>[r.state,r.kind]),[['imported','env'],['imported','document']]);
+  const done=await replaceWithReferences(v.run,{},'vault-1',plan.map((p,i)=>({...p,itemId:imported.results[i].itemId})));
+  assert.deepEqual(done.results.map(r=>[r.state,r.code??null]),[['referenced',null],['skipped','kept-as-document']]);
+  assert.equal(await readFile(crlf,'utf8'),'KEY=op://vault-1/'+imported.results[0].itemId+'/Environment/KEY # note\r\nEMPTY=""\r\n');
+  await access(amb);
+  const target=join(dir,'real.env');await writeFile(target,'S=synthetic-s\n');
+  const sl=join(dir,'link.env');await symlink(target,sl);
+  const hl=join(dir,'hard.env');await link(target,hl);
+  const imp2=await importFiles(v.run,{},'vault-1',[{file:target,title:'Real',kind:'env'}],undefined,'darwin');
+  const id=imp2.results[0].itemId;
+  const linked=await replaceWithReferences(v.run,{},'vault-1',[{file:sl,title:'Real',kind:'env',itemId:id},{file:hl,title:'Real',kind:'env',itemId:id}]);
+  assert.deepEqual(linked.results.map(r=>r.code),['symlink','hard-link']);
+  assert.equal(await readFile(target,'utf8'),'S=synthetic-s\n','the real file is untouched');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('an empty assignment followed by a comment stays empty and untouched',()=>{
+ assert.deepEqual(parseEnv('EMPTY= # intentionally unset\nA=1'),{entries:[{key:'A',value:'1'}],ambiguous:false});
+});
+test('a file changed while 1Password is consulted is neither deleted nor overwritten',async()=>{
+ const {mkdtemp,writeFile,readFile,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-race-'));
+ try{
+  const v=fakeVault();
+  const envFile=join(dir,'a.env');await writeFile(envFile,'K=synthetic-old\n');
+  const keyFile=join(dir,'k.key');await writeFile(keyFile,'synthetic-old-key');
+  const plan=[{file:envFile,title:'A',kind:'env'},{file:keyFile,title:'K',kind:'document'}];
+  const imported=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
+  const racing=async(b,args,e,i)=>{if(args[0]==='item'&&args[1]==='get'){await writeFile(envFile,'K=synthetic-rotated\n');await writeFile(keyFile,'synthetic-rotated-key');}return v.run(b,args,e,i);};
+  const done=await replaceWithReferences(racing,{},'vault-1',plan.map((p,i)=>({...p,itemId:imported.results[i].itemId})));
+  assert.equal(done.results[0].code,'changed-during-run');
+  assert(['changed-during-run','values-differ'].includes(done.results[1].code),'the key file changed before or during its check');
+  assert(done.results.every(r=>r.state==='failed'));
+  assert.equal(await readFile(envFile,'utf8'),'K=synthetic-rotated\n');assert.equal(await readFile(keyFile,'utf8'),'synthetic-rotated-key');
+ }finally{await rm(dir,{recursive:true,force:true});}
 });

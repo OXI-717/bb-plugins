@@ -3,7 +3,7 @@ import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
 import { contract, type Route } from './contract.js';
 import { CodedError } from './errors.js';
-import { runProcess, runOwnedProcess, brokerRunner, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults, execResolved, runTidy, programAvailable } from './core.js';
+import { runProcess, runOwnedProcess, brokerRunner, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults, execResolved, runTidy, programAvailable, importFiles, replaceWithReferences } from './core.js';
 const pending = new Set<string>();
 // Owner-approved (desktop) op calls go through the OXI Op broker service when the route names
 // one, so macOS and 1Password authorise one long-lived service instead of each call.
@@ -70,6 +70,20 @@ export default experimental_defineHostEntry({ contract, handlers: {
             if (route.authentication !== 'service-account') throw new Error('Scope probes require a service account');
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, args, env, input, signal);
             return probeServiceScope(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, ctx.signal);
+        },
+        importFiles: async ({route, mode, entries}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Migration requires owner desktop approval');
+            const runner: typeof runProcess = (binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            const env = await environment(route, ctx.signal);
+            // The card names the vault; it must really be that vault.
+            const vault = JSON.parse(await runner('op', ['vault', 'get', route.vaultId, '--format=json'], env, undefined, ctx.signal));
+            if (vault.id !== route.vaultId || vault.name !== route.vaultLabel) throw new CodedError('vault-identity', 'The target vault name differs from the one shown on the card');
+            if (mode === 'import') return importFiles(runner, env, route.vaultId, entries, ctx.signal);
+            const items = JSON.parse((await runner('op', ['item', 'list', '--vault', route.vaultId, '--format=json'], env, undefined, ctx.signal)).trim() || '[]') as {id: string; title: string}[];
+            const resolved = entries.map(e => ({...e, itemId: items.filter(x => x.title === e.title).length === 1 ? items.find(x => x.title === e.title)!.id : ''}));
+            const missing = resolved.filter(e => !e.itemId).map(e => ({file: e.file, state: 'failed', code: 'item-not-found'}));
+            const done = await replaceWithReferences(runner, env, route.vaultId, resolved.filter(e => e.itemId), ctx.signal);
+            return {results: [...missing, ...done.results]};
         },
         programAvailable: async ({program, cwd}) => ({available: await programAvailable(program.startsWith('./') || (program.includes('/') && !program.startsWith('/')) ? (cwd ? cwd + '/' + program : program) : program)}),
         resolveKeys: async ({route, keys}, ctx) => {
