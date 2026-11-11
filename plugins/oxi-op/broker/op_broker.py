@@ -83,17 +83,40 @@ class Handler(socketserver.StreamRequestHandler):
         if not allowed(args):
             self.reply({"code": 2, "error": "not-allowed"})
             return
+        # op treats a FIFO on stdin as a piped item template: an empty pipe breaks `item edit` and a
+        # pipe next to `--template /dev/stdin` breaks `item create`. Input therefore arrives on a
+        # socket, as it does from the BB host process, and a call without input gets /dev/null.
+        feed = child = None
         try:
-            # No input means no pipe: op reads a piped stdin as an item template (item edit fails).
-            proc = subprocess.Popen([self.op_binary, *args], stdin=subprocess.PIPE if data else subprocess.DEVNULL,
+            if data:
+                feed, child = socket.socketpair()
+            proc = subprocess.Popen([self.op_binary, *args], stdin=child.fileno() if child else subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child_env(), start_new_session=False)
         except OSError:
+            for end in (feed, child):
+                if end:
+                    end.close()
             self.reply({"code": 127, "error": "spawn-failed"})
             return
+        finally:
+            if child:
+                child.close()
+
+        def run() -> None:
+            if feed:
+                try:
+                    feed.sendall(data)
+                    feed.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                finally:
+                    feed.close()
+            result.update(out=proc.communicate()[0])
+
         # The caller keeps its side open while it waits; a closed connection means it cancelled,
         # and the command must stop before it can finish a change nobody is waiting for.
         result: dict = {}
-        worker = threading.Thread(target=lambda: result.update(out=proc.communicate(data if data else None)[0]), daemon=True)
+        worker = threading.Thread(target=run, daemon=True)
         worker.start()
         deadline = time.monotonic() + TIMEOUT
         while worker.is_alive():

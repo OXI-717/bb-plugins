@@ -4,7 +4,7 @@ import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,read
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
-const templateOf=(args,input)=>{const i=args.indexOf('--template');return JSON.parse(i<0?input:readFileSync(args[i+1],'utf8'));};
+const templateOf=(args,input)=>{const path=args[args.indexOf('--template')+1];return JSON.parse(path==='/dev/stdin'?input:readFileSync(path,'utf8'));};
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
 test('unknown and duplicate projects fail closed',()=>{
  assert.throws(()=>resolveRoute([route],'other'));
@@ -214,16 +214,15 @@ test('key listing returns titles and field labels only',async()=>{
 test('on Linux the item template goes through a private file that is removed afterwards',async()=>{
  const {statSync,existsSync,readFileSync}=await import('node:fs');
  let seen;
- const result=await withTemplateFile('{"title":"synthetic"}','linux',async(templateArgs,input)=>{
-  assert.equal(input,undefined);assert.equal(templateArgs.length,2);assert.equal(templateArgs[0],'--template');const path=templateArgs[1];
+ const result=await withTemplateFile('{"title":"synthetic"}','linux',async(path,input)=>{
+  assert.equal(input,undefined);assert.notEqual(path,'/dev/stdin');
   assert.equal(statSync(path).mode&0o777,0o600);assert.equal(statSync(path.replace(/\/item\.json$/,'')).mode&0o777,0o700);
   assert.equal(readFileSync(path,'utf8'),'{"title":"synthetic"}');seen=path;return 'created';
  });
  assert.equal(result,'created');assert(!existsSync(seen));
- await assert.rejects(withTemplateFile('{}','linux',async ([,path])=>{seen=path;throw new Error('synthetic failure');}));
+ await assert.rejects(withTemplateFile('{}','linux',async path=>{seen=path;throw new Error('synthetic failure');}));
  assert(!existsSync(seen));
- // macOS: piped template without --template; `--template /dev/stdin` fails behind the broker's plain pipe.
- assert.deepEqual(await withTemplateFile('{"a":1}','darwin',async(templateArgs,input)=>[templateArgs,input]),[[],{a:1}]);
+ assert.deepEqual(await withTemplateFile('{"a":1}','darwin',async(path,input)=>[path,input]),['/dev/stdin',{a:1}]);
 });
 test('a Linux store never passes the password in arguments',async()=>{
  const calls=[];let stored;
@@ -384,7 +383,7 @@ test('tidy compares by hash, stops when values differ, and deletes only an empty
 });
 test('the broker service runs allowed op calls, refuses others and passes input',async t=>{
  if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
- const {mkdtemp,writeFile,chmod,rm,stat}=await import('node:fs/promises');const {join}=await import('node:path');const {spawn}=await import('node:child_process');
+ const {mkdtemp,writeFile,readFile,chmod,rm,stat}=await import('node:fs/promises');const {join}=await import('node:path');const {spawn}=await import('node:child_process');
  const dir=await mkdtemp('/tmp/oxop-');const sock=join(dir,'s','broker.sock');const fake=join(dir,'op');
  await writeFile(fake,'#!/bin/sh\nfor a in "$@"; do [ "$a" = "fail" ] && exit 5; done\nprintf "%s|" "$@"; printf "stdin=%s" "$(cat)"; printf " bio=%s tok=%s" "$OP_BIOMETRIC_UNLOCK_ENABLED" "${OP_SERVICE_ACCOUNT_TOKEN:-none}"\n');await chmod(fake,0o755);
  const broker=spawn('python3',[new URL('./broker/op_broker.py',import.meta.url).pathname,'--op',fake,'--socket',sock],{stdio:'ignore',env:{...process.env,OP_SERVICE_ACCOUNT_TOKEN:'synthetic-leak'}});
@@ -394,12 +393,14 @@ test('the broker service runs allowed op calls, refuses others and passes input'
   const run=brokerRunner(sock);
   const out=await run('op',['--account','A','item','get','x','--format=json'],{},'hello');
   assert.equal(out,'--account|A|item|get|x|--format=json|stdin=hello bio=true tok=none');
-  // No input means no pipe: op would read an empty piped stdin as an item template.
+  // op reads a FIFO stdin as an item template, so the broker hands input over on a socket (as the
+  // BB host does) and a call without input gets /dev/null.
   assert.equal(await run('op',['--account','A','item','edit','x','title=y'],{}),'--account|A|item|edit|x|title=y|stdin= bio=true tok=none');
-  await writeFile(fake,'#!/bin/sh\n[ -c /dev/stdin ] && echo null || echo pipe\n');
+  const original=await readFile(fake);
+  await writeFile(fake,'#!/bin/sh\nif [ -c /dev/stdin ]; then echo null; elif [ -p /dev/stdin ]; then echo fifo; elif [ -S /dev/stdin ]; then echo socket; else echo other; fi\n');
   assert.equal(await run('op',['--account','A','item','edit','x'],{}),'null\n');
-  assert.equal(await run('op',['--account','A','item','create','--vault','v'],{},'{}'),'pipe\n');
-  await writeFile(fake,'#!/bin/sh\nfor a in "$@"; do [ "$a" = "fail" ] && exit 5; done\nprintf "%s|" "$@"; printf "stdin=%s" "$(cat)"; printf " bio=%s tok=%s" "$OP_BIOMETRIC_UNLOCK_ENABLED" "${OP_SERVICE_ACCOUNT_TOKEN:-none}"\n');
+  assert.equal(await run('op',['--account','A','item','create','--template','/dev/stdin'],{},'{}'),'socket\n');
+  await writeFile(fake,original);
   await assert.rejects(run('op',['--account','A','run','--','sh'],{}),e=>e.message.includes('[broker-refused]'));
   await assert.rejects(run('op',['item','list'],{}),e=>e.message.includes('[broker-refused]'));
   await assert.rejects(run('op',['--account','A','fail'],{}),e=>e.message.includes('[broker-refused]'));
@@ -407,10 +408,10 @@ test('the broker service runs allowed op calls, refuses others and passes input'
  }finally{broker.kill('SIGTERM');await new Promise(r=>setTimeout(r,200));await rm(dir,{recursive:true,force:true});}
  await assert.rejects(brokerRunner(sock)('op',['--account','A','whoami'],{}),e=>e.message.includes('[broker-unavailable]'));
 });
-test('a direct op call without input gets no stdin pipe',async()=>{
- const probe=['-c','[ -c /dev/stdin ] && echo null || echo pipe'];
+test('a direct op call gets /dev/null without input and a socket with it, like the broker',async()=>{
+ const probe=['-c','if [ -c /dev/stdin ]; then echo null; elif [ -p /dev/stdin ]; then echo fifo; elif [ -S /dev/stdin ]; then echo socket; else echo other; fi'];
  assert.equal(await runProcess('/bin/sh',probe,{}),'null\n');
- assert.equal(await runProcess('/bin/sh',probe,{},'{}'),'pipe\n');
+ assert.equal(await runProcess('/bin/sh',probe,{},'{}'),'socket\n');
 });
 test('agent commands find programs like a login shell and report a missing one by code',async()=>{
  assert(commandPath('/usr/bin:/bin').split(':').includes('/opt/homebrew/bin'));
@@ -446,7 +447,7 @@ function fakeVault(){
  const run=async(_b,args,_e,input)=>{
   const [g,a]=args;
   if(g==='item'&&a==='list')return JSON.stringify([...items].map(([id,x])=>({id,title:x.title})));
-  if(g==='item'&&a==='create'){const i=args.indexOf('--template');const t=JSON.parse(i<0?input:(await import('node:fs')).readFileSync(args[i+1],'utf8'));const id='i'+(++n);items.set(id,t);return JSON.stringify({id});}
+  if(g==='item'&&a==='create'){const p=args[args.indexOf('--template')+1];const t=JSON.parse(p==='/dev/stdin'?input:(await import('node:fs')).readFileSync(p,'utf8'));const id='i'+(++n);items.set(id,t);return JSON.stringify({id});}
   if(g==='item'&&a==='get')return JSON.stringify(items.get(args[2]));
   if(g==='document'&&a==='create'){const id='d'+(++n);const bytes=(await import('node:fs')).readFileSync(args[2]);items.set(id,{title:args[args.indexOf('--title')+1],category:'DOCUMENT'});docs.set(id,bytes);return JSON.stringify({uuid:id});}
   if(g==='document'&&a==='get'){(await import('node:fs')).writeFileSync(args[args.indexOf('--out-file')+1],docs.get(args[2]));return '';}
@@ -486,7 +487,7 @@ test('a service note replaces its previous version, which goes to the archive',a
  const items=new Map([['old',{id:'old',title:'Registry',category:'SECURE_NOTE'}],['cred',{id:'cred',title:'Server',category:'LOGIN'}]]);const archived=[];let n=0;
  const run=async(_b,args,_e,input)=>{
   if(args[0]==='item'&&args[1]==='list')return JSON.stringify([...items.values()]);
-  if(args[0]==='item'&&args[1]==='create'){const i=args.indexOf('--template');const t=JSON.parse(i<0?input:(await import('node:fs')).readFileSync(args[i+1],'utf8'));const id='n'+(++n);items.set(id,{id,title:t.title,text:t.fields[0].value});return JSON.stringify({id});}
+  if(args[0]==='item'&&args[1]==='create'){const p=args[args.indexOf('--template')+1];const t=JSON.parse(p==='/dev/stdin'?input:(await import('node:fs')).readFileSync(p,'utf8'));const id='n'+(++n);items.set(id,{id,title:t.title,text:t.fields[0].value});return JSON.stringify({id});}
   if(args[0]==='item'&&args[1]==='delete'){archived.push(args[2]);items.delete(args[2]);return '';}
   throw new Error('unexpected '+args.join(' '));};
  const r=await runTidy(run,{},[{kind:'note',vaultId:'v'.padEnd(26,'a'),item:'Registry',text:'Scheme v2'}]);

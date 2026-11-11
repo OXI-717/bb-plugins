@@ -92,19 +92,17 @@ const runWith = (ownSession: (env: NodeJS.ProcessEnv) => boolean): Runner => asy
 };
 export const runProcess: Runner = runWith(env => env.OP_BIOMETRIC_UNLOCK_ENABLED !== 'true');
 export const runOwnedProcess: Runner = runWith(() => true);
-// How an item template reaches `op item create`. On macOS the template is piped to stdin without
-// --template: `--template /dev/stdin` fails when stdin is a plain pipe (the OXI Op Broker), while a
-// piped template works for every runner. op on Linux rejects a piped template (exit 9), so there the
+// op on Linux rejects a template read from /dev/stdin (exit 9); macOS accepts it. On Linux the
 // template goes to a 0600 file in a private 0700 directory, memory-backed (XDG_RUNTIME_DIR or /dev/shm)
-// when available, removed immediately after the call. `use` receives the extra arguments and the input.
-export async function withTemplateFile<T>(json: string, platform: NodeJS.Platform, use: (templateArgs: string[], input?: unknown) => Promise<T>) {
-    if (platform !== 'linux') return use([], JSON.parse(json));
+// when available, removed immediately after the call.
+export async function withTemplateFile<T>(json: string, platform: NodeJS.Platform, use: (path: string, input?: unknown) => Promise<T>) {
+    if (platform !== 'linux') return use('/dev/stdin', JSON.parse(json));
     const directory = await mkdtemp(join(process.env.XDG_RUNTIME_DIR || (existsSync('/dev/shm') ? '/dev/shm' : tmpdir()), 'oxi-op-'));
     try {
         await chmod(directory, 0o700);
         const path = join(directory, 'item.json');
         await writeFile(path, json, {mode: 0o600, flag: 'wx'});
-        return await use(['--template', path]);
+        return await use(path);
     } finally {await rm(directory, {recursive: true, force: true});}
 }
 export async function storeCredential(run: Runner, env: NodeJS.ProcessEnv, vault: string, title: string, username: string, password: string, signal?: AbortSignal, platform: NodeJS.Platform = process.platform) {
@@ -131,7 +129,7 @@ export async function storeCredential(run: Runner, env: NodeJS.ProcessEnv, vault
             if (!field) throw new CodedError('template-fields', 'Login template is missing a required field');
             field.value = value;
         }
-        const item = await withTemplateFile(JSON.stringify(template), platform, (templateArgs, input) => op(['item', 'create', ...templateArgs, '--vault', vault, '--format=json'], input));
+        const item = await withTemplateFile(JSON.stringify(template), platform, (path, input) => op(['item', 'create', '--template', path, '--vault', vault, '--format=json'], input));
         itemId = item.id;
     }
     if (typeof itemId !== 'string' || !itemId)
@@ -459,7 +457,7 @@ export async function runTidy(run: Runner, env: NodeJS.ProcessEnv, steps: TidySt
                 if (items.length > 1) throw new CodedError('ambiguous-item', 'Item must match at most one entry');
                 if (items.length === 1 && items[0].category !== 'SECURE_NOTE') throw new CodedError('not-a-note', 'Only a service note can be replaced');
                 const template = {title: step.item, category: 'SECURE_NOTE', fields: [{id: 'notesPlain', type: 'STRING', purpose: 'NOTES', label: 'notesPlain', value: step.text}]};
-                await withTemplateFile(JSON.stringify(template), process.platform, (templateArgs, input) => run('op', ['item', 'create', ...templateArgs, '--vault', step.vaultId, '--format=json'], env, input === undefined ? undefined : JSON.stringify(input), signal));
+                await withTemplateFile(JSON.stringify(template), process.platform, (path, input) => run('op', ['item', 'create', '--template', path, '--vault', step.vaultId, '--format=json'], env, input === undefined ? undefined : JSON.stringify(input), signal));
                 if (items.length === 1) await op(['item', 'delete', items[0].id, '--vault', step.vaultId, '--archive']);
                 results.push({kind: step.kind, ok: true});
             } else {
@@ -586,7 +584,7 @@ export async function importFiles(run: Runner, env: NodeJS.ProcessEnv, vaultId: 
                         {id: 'notesPlain', type: 'STRING', purpose: 'NOTES', label: 'notesPlain', value: 'Imported by Oxi Op from a local environment file.'},
                         ...values.map(v => ({id: 'env-' + v.key, label: v.key, type: 'CONCEALED', value: v.value, section: {id: 'env', label: envSectionLabel}})),
                     ]};
-                    const created = await withTemplateFile(JSON.stringify(template), platform, (templateArgs, input) => op(['item', 'create', ...templateArgs, '--vault', vaultId, '--format=json'], input === undefined ? undefined : JSON.stringify(input)));
+                    const created = await withTemplateFile(JSON.stringify(template), platform, (path, input) => op(['item', 'create', '--template', path, '--vault', vaultId, '--format=json'], input === undefined ? undefined : JSON.stringify(input)));
                     itemId = JSON.parse(created).id;
                     existing.push({id: itemId!, title: entry.title});
                 }
