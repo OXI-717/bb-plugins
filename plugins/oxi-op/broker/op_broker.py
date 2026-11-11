@@ -84,15 +84,16 @@ class Handler(socketserver.StreamRequestHandler):
             self.reply({"code": 2, "error": "not-allowed"})
             return
         try:
-            proc = subprocess.Popen([self.op_binary, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                    stderr=subprocess.DEVNULL, env=child_env(), start_new_session=False)
+            # No input means no pipe: op reads a piped stdin as an item template (item edit fails).
+            proc = subprocess.Popen([self.op_binary, *args], stdin=subprocess.PIPE if data else subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child_env(), start_new_session=False)
         except OSError:
             self.reply({"code": 127, "error": "spawn-failed"})
             return
         # The caller keeps its side open while it waits; a closed connection means it cancelled,
         # and the command must stop before it can finish a change nobody is waiting for.
         result: dict = {}
-        worker = threading.Thread(target=lambda: result.update(out=proc.communicate(data)[0]), daemon=True)
+        worker = threading.Thread(target=lambda: result.update(out=proc.communicate(data if data else None)[0]), daemon=True)
         worker.start()
         deadline = time.monotonic() + TIMEOUT
         while worker.is_alive():
