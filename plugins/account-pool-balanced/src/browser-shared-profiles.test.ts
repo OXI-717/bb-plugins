@@ -1,3 +1,4 @@
+import {browserFixture} from './browser-test-fixture.js';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -11,8 +12,8 @@ const accounts = [
   { id: 'synthetic-a', provider: 'claude', email: 'a@example.test', label: 'A' },
   { id: 'synthetic-b', provider: 'kimi', email: 'b@example.test', label: 'B' },
 ] as AccountSummary[];
-function fixture() {
-  const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'pool-shared-'))), heliumRoot = path.join(dir, 'helium'), dataDir = path.join(dir, 'data');
+async function fixture() {
+  const {heliumRoot,dataDir}=await browserFixture();
   const registryFile = path.join(dataDir, 'plugins', 'account-pool-balanced', 'browser-profiles', 'registry.json');
   mkdirSync(heliumRoot); mkdirSync(path.dirname(registryFile), { recursive: true });
   const launches: any[] = [];
@@ -37,7 +38,7 @@ function oldIsolated(f: ReturnType<typeof fixture>) {
 }
 describe('shared native profile store', () => {
   it('registers all accounts in one native picker and launches the common root', async () => {
-    const f = fixture(); await openAccountBrowser(f.options); const rows = await listBrowserProfiles(f.options);
+    const f = await fixture(); await openAccountBrowser(f.options); const rows = await listBrowserProfiles(f.options);
     expect(rows.every(r => r.exists && path.dirname(r.profileDir) === f.heliumRoot)).toBe(true);
     const cache = JSON.parse(readFileSync(path.join(f.heliumRoot, 'Local State'), 'utf8')).profile.info_cache;
     expect(Object.values(cache).map((v: any) => v.name).sort()).toEqual(['Claude · a@example.test', 'Kimi · b@example.test']);
@@ -45,7 +46,7 @@ describe('shared native profile store', () => {
     expect(f.launches[0].profileDirectories.sort()).toEqual(rows.map(r => r.profileDirectory).sort());
   });
   it('migrates current isolated data once, preserving original copies and unrelated picker entries', async () => {
-    const f = fixture(), source = oldIsolated(f), first = await openAccountBrowser(f.options);
+    const f = await fixture(), source = oldIsolated(f), first = await openAccountBrowser(f.options);
     expect(path.dirname(first.profileDir)).toBe(f.heliumRoot); expect(first.profileDir).not.toBe(path.join(f.heliumRoot, 'Profile 1'));
     expect(readFileSync(path.join(first.profileDir, 'opaque'), 'utf8')).toBe('current authorization fixture');
     expect(readFileSync(path.join(f.heliumRoot, 'Profile 1', 'opaque'), 'utf8')).toBe('old native fixture');
@@ -57,19 +58,19 @@ describe('shared native profile store', () => {
     expect(readFileSync(path.join(first.profileDir, 'opaque'), 'utf8')).toBe('newer native data');
   });
   it('checks VPN even when starting with Kimi because the picker can switch to protected accounts', async () => {
-    const f = fixture();
+    const f = await fixture();
     await expect(openAccountBrowser({ ...f.options, query: accounts[1]!.id,
       readVpn: async () => ({ state: 'unknown', assurance: 'unverified', reason: 'missing', updatedAt: null, probeAt: null } as const),
     })).rejects.toThrow(/verified_ipv4/);
     expect(f.launches).toHaveLength(0); expect(existsSync(f.registryFile)).toBe(false);
   });
   it('refuses to mutate any profile while an unmanaged or legacy browser is running', async () => {
-    const f = fixture(); oldIsolated(f); const before = readFileSync(f.registryFile, 'utf8');
+    const f = await fixture(); oldIsolated(f); const before = readFileSync(f.registryFile, 'utf8');
     await expect(openAccountBrowser({ ...f.options, listRunning: async () => [42] })).rejects.toThrow(/clos|running/i);
     expect(readFileSync(f.registryFile, 'utf8')).toBe(before); expect(f.launches).toHaveLength(0);
   });
   it('rejects missing or symlinked source profiles without using stale native data', async () => {
-    const f = fixture(); oldIsolated(f); const registry = JSON.parse(readFileSync(f.registryFile, 'utf8'));
+    const f = await fixture(); oldIsolated(f); const registry = JSON.parse(readFileSync(f.registryFile, 'utf8'));
     registry[accounts[0]!.id].profileDirectory = 'Profile 2'; writeFileSync(f.registryFile, JSON.stringify(registry));
     await expect(openAccountBrowser(f.options)).rejects.toThrow(); expect(f.launches).toHaveLength(0);
     mkdirSync(path.join(f.heliumRoot, 'Pool Accounts', 'Profile 2'), { recursive: true });
@@ -77,7 +78,7 @@ describe('shared native profile store', () => {
     await expect(openAccountBrowser(f.options)).rejects.toThrow(); expect(f.launches).toHaveLength(0);
   });
   it('recovers after registry commit fails without overwriting the completed native copy', async () => {
-    const f = fixture(); oldIsolated(f);
+    const f = await fixture(); oldIsolated(f);
     const realRename = (await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')).rename;
     let failed = false;
     vi.mocked(promises.rename).mockImplementation(async (a, b) => {
@@ -99,14 +100,14 @@ describe('shared native profile store', () => {
     } finally { vi.mocked(promises.rename).mockImplementation(realRename); }
   });
   it('rejects incompatible encryption metadata before copying a profile', async () => {
-    const f = fixture(); oldIsolated(f);
+    const f = await fixture(); oldIsolated(f);
     writeFileSync(path.join(f.heliumRoot, 'Pool Accounts', 'Profile 1', 'Local State'), JSON.stringify({ os_crypt: { encrypted_key: 'synthetic-only' } }));
     const before = readFileSync(f.registryFile, 'utf8');
     await expect(openAccountBrowser(f.options)).rejects.toThrow(/encryption/);
     expect(readFileSync(f.registryFile, 'utf8')).toBe(before); expect(f.launches).toHaveLength(0);
   });
   it('does not replace an unknown directory at a planned migration destination', async () => {
-    const f = fixture(); oldIsolated(f);
+    const f = await fixture(); oldIsolated(f);
     mkdirSync(path.join(f.heliumRoot, 'Profile 101'));
     writeFileSync(path.join(f.heliumRoot, 'Profile 101', 'opaque'), 'foreign data');
     writeFileSync(path.join(path.dirname(f.registryFile), 'native-migration-plan.json'), JSON.stringify({

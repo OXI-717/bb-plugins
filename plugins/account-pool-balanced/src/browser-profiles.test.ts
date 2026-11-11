@@ -1,3 +1,5 @@
+import {browserFixture, fixtureLockPort} from './browser-test-fixture.js';
+import {createServer as createLeaseServer} from 'node:net';
 import { execFile, spawn as spawnProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { EventEmitter } from "node:events";
@@ -79,10 +81,7 @@ const geoFetcher = () => Promise.resolve({ timezone: "Europe/Amsterdam", city: "
 const verifiedVpn = () => Promise.resolve(VERIFIED);
 const noRunning = () => Promise.resolve([]);
 
-function sandbox(): { dataDir: string; heliumRoot: string } {
-  const root = mkdtempSync(path.join(tmpdir(), "pool-browser-test-"));
-  return { dataDir: path.join(root, "data"), heliumRoot: path.join(root, "helium") };
-}
+const sandbox = browserFixture;
 
 function baseOptions(box: { dataDir: string; heliumRoot: string }) {
   return {
@@ -180,8 +179,21 @@ describe("fetchExitGeo", () => {
 });
 
 describe("profile naming and allocation", () => {
+  it("chooses another synthetic root when its real lease port is occupied", async () => {
+    const busy = await browserFixture();
+    const server=createLeaseServer();
+    await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen({host:'127.0.0.1',port:fixtureLockPort(busy.heliumRoot),exclusive:true},resolve);});
+    let calls=0;
+    try{
+      const replacement=await browserFixture();
+      const box=await browserFixture(()=>++calls===1?busy:replacement);
+      expect(box).toEqual(replacement);expect(calls).toBe(2);
+      await ensureProfile(ACCOUNTS[0]!,{heliumRoot:box.heliumRoot,registryFile:path.join(box.dataDir,'registry.json')});
+      expect(server.listening).toBe(true);
+    }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));}
+  });
   it("allocates distinct profiles and retains both accounts on concurrent first use", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const registryFile = path.join(box.dataDir, "registry.json");
     const entries = await Promise.all(ACCOUNTS.slice(0, 2).map(account =>
       ensureProfile(account, { heliumRoot: box.heliumRoot, registryFile })));
@@ -194,7 +206,7 @@ describe("profile naming and allocation", () => {
     }
   });
   it("refuses malformed registry without overwriting it", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const registryFile = path.join(box.dataDir, "registry.json");
     mkdirSync(box.dataDir, { recursive: true });
     writeFileSync(registryFile, "broken");
@@ -202,7 +214,7 @@ describe("profile naming and allocation", () => {
     expect(readFileSync(registryFile, "utf8")).toBe("broken");
   });
   it("serializes independent CLI processes and repeated allocation without lost bindings", async () => {
-    const box = sandbox(); const registryFile = path.join(box.dataDir, "registry.json");
+    const box = await sandbox(); const registryFile = path.join(box.dataDir, "registry.json");
     const script = `import { ensureProfile } from './src/browser-profiles.ts';
       await ensureProfile(JSON.parse(process.argv[1]), JSON.parse(process.argv[2]));`;
     const run = promisify(execFile);
@@ -222,7 +234,7 @@ describe("profile naming and allocation", () => {
     expect(nextProfileDirectory(["Default", "Profile 1", "Profile 3"])).toBe("Profile 4");
   });
   it("creates Preferences and registers the native picker on first use", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
     const entry = await ensureProfile(ACCOUNTS[0]!, {
       heliumRoot: box.heliumRoot,
@@ -275,7 +287,7 @@ describe("browserExecutableCandidates", () => {
 
 describe("openAccountBrowser", () => {
   it.each(["claude", "codex", "kimi", "zai", "opencode-go", "cursor", "devin"] as const)("uses the default destination for %s and reuses its profile", async (provider) => {
-    const box = sandbox();
+    const box = await sandbox();
     const selected = account({ id: ACCOUNTS[0]!.id, provider, label: "Synthetic", email: "person@example.test" });
     const options = { ...baseOptions(box), accounts: [selected], query: selected.id, readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
     const first = await openAccountBrowser(options);
@@ -284,7 +296,7 @@ describe("openAccountBrowser", () => {
     expect(second.profileDir).toBe(first.profileDir);
   });
   it("enables native restore once for every managed profile before launch", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const registryFile = path.join(box.dataDir, "plugins/account-pool-balanced/browser-profiles/registry.json");
     for (const selected of ACCOUNTS) {
       const entry = await ensureProfile(selected, { heliumRoot: box.heliumRoot, registryFile });
@@ -301,7 +313,7 @@ describe("openAccountBrowser", () => {
     expect(JSON.parse(readFileSync(first, "utf8"))).toEqual({ session: { restore_on_startup: 5 }, userChanged: true });
   });
   it("leaves malformed startup preferences untouched and does not launch", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const registryFile = path.join(box.dataDir, "plugins/account-pool-balanced/browser-profiles/registry.json");
     const entry = await ensureProfile(ACCOUNTS[0]!, { heliumRoot: box.heliumRoot, registryFile });
     const file = path.join(box.heliumRoot, entry.profileDirectory, "Preferences");
@@ -314,7 +326,7 @@ describe("openAccountBrowser", () => {
     expect(transportImpl).not.toHaveBeenCalled();
   });
   it("preserves saved browsing data and startup preferences on repeated opens", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const options = { ...baseOptions(box), query: ACCOUNTS[0]!.id, readVpn: verifiedVpn, fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl };
     const first = await openAccountBrowser(options);
     mkdirSync(path.join(first.profileDir, "Sessions"), { recursive: true });
@@ -330,7 +342,7 @@ describe("openAccountBrowser", () => {
     for (const [name, bytes] of Object.entries(saved)) expect(readFileSync(path.join(first.profileDir, name), "utf8")).toBe(bytes);
   });
   it("refuses guarded providers without verified VPN evidence", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     await expect(
       openAccountBrowser({
         ...baseOptions(box),
@@ -342,7 +354,7 @@ describe("openAccountBrowser", () => {
     ).rejects.toThrow(/verified_ipv4/);
   });
   it("fails closed when the exit timezone is unknown for a guarded account", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     await expect(
       openAccountBrowser({
         ...baseOptions(box),
@@ -354,14 +366,14 @@ describe("openAccountBrowser", () => {
     ).rejects.toThrow(/timezone/);
   });
   it("refuses an isolated browser without a live supervisor", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     await expect(openAccountBrowser({
       ...baseOptions(box), query: "a@example.test", readVpn: verifiedVpn,
       fetcher: geoFetcher, listRunning: async () => [42], spawnImpl: fakeSpawn().spawnImpl,
     })).rejects.toThrow(/without a live transport supervisor/);
   });
   it("reuses existing native profile data without making another copy", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
     const entry = { profileDirectory: "Profile 1", profileName: "Claude · a@example.test", createdAt: 1 };
     const source = path.join(box.heliumRoot, entry.profileDirectory);
@@ -380,7 +392,7 @@ describe("openAccountBrowser", () => {
     expect(readFileSync(path.join(source, "fixture-state"), "utf8")).toBe("new settings");
   });
   it.each(["final", "alias", "isolated"])("checks real native processes before migration (%s)", async mode => {
-    const box = sandbox(); const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
+    const box = await sandbox(); const registryFile = path.join(box.dataDir, "plugins", "account-pool-balanced", "browser-profiles", "registry.json");
     mkdirSync(path.join(box.heliumRoot, "Profile 1"), { recursive: true });
     mkdirSync(path.dirname(registryFile), { recursive: true });
     writeFileSync(path.join(box.heliumRoot, "Profile 1", "Preferences"), JSON.stringify({ custom: true }));
@@ -404,7 +416,7 @@ describe("openAccountBrowser", () => {
     } finally { native.kill(); await new Promise(resolve => native.once("exit", resolve)); }
   });
   it("launches Helium with the native profile and the exit timezone", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const { spawnImpl, captured } = fakeSpawn();
     const result = await openAccountBrowser({
       ...baseOptions(box),
@@ -424,13 +436,13 @@ describe("openAccountBrowser", () => {
     expect(launch.args).toContain("--user-data-dir=" + realpathSync(box.heliumRoot));
   });
   it("requires verified VPN for the shared browser even when selecting Kimi", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     await expect(openAccountBrowser({ ...baseOptions(box), query: "kimi",
       readVpn: () => Promise.resolve(UNVERIFIED), fetcher: geoFetcher, spawnImpl: fakeSpawn().spawnImpl,
     })).rejects.toThrow(/verified_ipv4/);
   });
   it("honours an explicit --url", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const { spawnImpl, captured } = fakeSpawn();
     await openAccountBrowser({
       ...baseOptions(box),
@@ -442,7 +454,7 @@ describe("openAccountBrowser", () => {
     expect(captured[0]?.args.at(-1)).toBe("https://example.test/settings");
   });
   it("throws when no Helium executable exists", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     await expect(
       openAccountBrowser({
         ...baseOptions(box),
@@ -454,7 +466,7 @@ describe("openAccountBrowser", () => {
     ).rejects.toThrow(/Helium executable not found/);
   });
   it("throws when the browser exits during launch", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const impl = () => {
       const child = new FakeChild();
       queueMicrotask(() => child.emit("exit", 1));
@@ -473,7 +485,7 @@ describe("openAccountBrowser", () => {
 
 describe("listBrowserProfiles", () => {
   it("joins accounts with the registry", async () => {
-    const box = sandbox();
+    const box = await sandbox();
     const { spawnImpl } = fakeSpawn();
     await openAccountBrowser({
       ...baseOptions(box),
