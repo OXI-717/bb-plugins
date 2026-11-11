@@ -613,6 +613,17 @@ export async function importFiles(run: Runner, env: NodeJS.ProcessEnv, vaultId: 
 // comments, line endings and mode kept); files planned as documents are removed. A file is only
 // touched when the vault still holds identical values. Symbolic and hard links are refused so no
 // other path keeps the plaintext. An env file stored as a document is never removed.
+// The OS may refuse to change a file (macOS immutable flag set when a project is frozen, a read-only
+// folder or volume). That is reported by code and never retried or forced: unlocking is the owner's call.
+const lockedCodes = new Set(['EPERM', 'EACCES', 'EROFS']);
+async function fsStep<T>(step: () => Promise<T>) {
+    try {return await step();}
+    catch (error) {
+        if (lockedCodes.has((error as NodeJS.ErrnoException)?.code ?? '')) throw new CodedError('file-locked', 'The file or its folder is locked against changes; nothing was changed');
+        throw error;
+    }
+}
+const fileFailure = (error: unknown) => errorCode(error) ?? (typeof (error as NodeJS.ErrnoException)?.code === 'string' ? 'fs-' + (error as NodeJS.ErrnoException).code!.toLowerCase() : 'failed');
 export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, entries: (ImportEntry & {itemId: string})[], signal?: AbortSignal) {
     const op = async (args: string[]) => run('op', args, env, undefined, signal);
     const results: {file: string; state: 'referenced' | 'removed' | 'skipped' | 'failed'; code?: string; keys?: number}[] = [];
@@ -634,7 +645,7 @@ export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv,
                 if (entry.kind !== 'document') {results.push({file: entry.file, state: 'skipped', code: 'kept-as-document'}); continue;}
                 if (!await documentMatches(op, vaultId, entry.itemId, bytes)) throw new CodedError('values-differ', 'Vault copy differs');
                 await unchanged();
-                await unlink(entry.file);
+                await fsStep(() => unlink(entry.file));
                 results.push({file: entry.file, state: 'removed'});
                 continue;
             }
@@ -656,13 +667,15 @@ export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv,
             }).join('\n');
             if (replaced !== checked.size) throw new CodedError('rewrite-incomplete', 'Not every checked value could be rewritten; nothing was changed');
             const temp = entry.file + '.oxi-op-' + process.pid;
-            await writeFile(temp, text, {mode: info.mode & 0o777, flag: 'wx'});
-            await chmod(temp, info.mode & 0o777);
-            try {await unchanged();}
-            catch (error) {await rm(temp, {force: true}); throw error;}
-            await rename(temp, entry.file);
+            await fsStep(() => writeFile(temp, text, {mode: info.mode & 0o777, flag: 'wx'}));
+            // The rewritten copy never outlives a failed step.
+            try {
+                await chmod(temp, info.mode & 0o777);
+                await unchanged();
+                await fsStep(() => rename(temp, entry.file));
+            } catch (error) {await rm(temp, {force: true}); throw error;}
             results.push({file: entry.file, state: 'referenced', keys: replaced});
-        } catch (error) {results.push({file: entry.file, state: 'failed', code: errorCode(error) ?? 'failed'});}
+        } catch (error) {results.push({file: entry.file, state: 'failed', code: fileFailure(error)});}
     }
     return {results};
 }
