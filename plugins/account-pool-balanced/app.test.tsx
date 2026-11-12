@@ -1136,9 +1136,18 @@ describe("Account Pool settings", () => {
     const codeCopyButton = await slot.findByRole("button", {
       name: "Скопировать код входа Codex",
     });
-    // Busy CI workers can spend longer than the 1.5-second success indicator
-    // inside React act. Control its clock after the async dialog is ready.
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // Control only the success indicator. Switching the entire mounted Radix
+    // dialog to fake timers can race its existing real timers on busy workers.
+    const schedule = globalThis.setTimeout;
+    let expire: (() => void) | undefined;
+    let expirationTimer: ReturnType<typeof setTimeout> | undefined;
+    const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((...[callback, delay, ...args]: Parameters<typeof setTimeout>) => {
+      if (delay !== 1500 || typeof callback !== "function") return schedule(callback, delay, ...args);
+      expect(expire).toBeUndefined();
+      expire = () => callback(...args);
+      expirationTimer = schedule(() => {}, 60_000);
+      return expirationTimer;
+    }) as typeof setTimeout);
     try {
       await act(async () => {
         fireEvent.click(codeCopyButton);
@@ -1147,9 +1156,12 @@ describe("Account Pool settings", () => {
       expect(writeText).toHaveBeenCalledWith("ABCD-1234");
       expect(slot.getByText("Код входа скопирован")).toBeTruthy();
       expect(codeCopyButton.querySelector('[data-icon="Check"]')).not.toBeNull();
-      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(expire).toBeTypeOf("function");
+      clearTimeout(expirationTimer);
+      act(() => expire!());
       expect(slot.queryByText("Код входа скопирован")).toBeNull();
       expect(codeCopyButton.querySelector('[data-icon="Check"]')).toBeNull();
+      timerSpy.mockRestore();
 
       await act(async () => {
         fireEvent.click(slot.getByRole("button", { name: "Скопировать ссылку авторизации Codex" }));
@@ -1157,7 +1169,8 @@ describe("Account Pool settings", () => {
       });
       expect(writeText).toHaveBeenCalledWith("https://auth.openai.com/codex/device");
     } finally {
-      vi.useRealTimers();
+      clearTimeout(expirationTimer);
+      timerSpy.mockRestore();
     }
   });
 
