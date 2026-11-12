@@ -554,10 +554,42 @@ test('references keep CRLF, comments and empty values, and refuse links and plan
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('the archive keeps the path relative to home and refuses odd paths',()=>{
- assert.equal(archiveTarget('/arc','/home/u/cc/p/.env','/home/u'),'/arc/cc/p/.env');
- assert.equal(archiveTarget('/arc','/srv/x/key.json','/home/u'),'/arc/srv/x/key.json');
- assert.throws(()=>archiveTarget('/arc','/home/u/../etc/passwd','/home/u'),/archive-path/);
- assert.throws(()=>archiveTarget('/arc','/','/home/u'),/archive-path/);
+ const U=['','users-root','u'].join('/');
+ assert.equal(archiveTarget('/arc',U+'/cc/p/.env',U),'/arc/cc/p/.env');
+ assert.equal(archiveTarget('/arc','/srv/x/key.json',U),'/arc/srv/x/key.json');
+ assert.throws(()=>archiveTarget('/arc',U+'/../etc/passwd',U),/archive-path/);
+ assert.throws(()=>archiveTarget('/arc','/',U),/archive-path/);
+});
+test('a key file never leaves the archive through a link and never replaces an archived file',async()=>{
+ const {mkdtemp,writeFile,readFile,rm,mkdir,symlink,access}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const {contract}=await import('./dist/test/contract.js');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-arc-'));
+ try{
+  const v=fakeVault();
+  const src=join(dir,'src');await mkdir(src);const outside=join(dir,'outside');await mkdir(outside);
+  const a=join(src,'a.key');const b=join(src,'b.key');const c=join(src,'c.key');
+  await writeFile(a,'synthetic-a');await writeFile(b,'synthetic-b');await writeFile(c,'synthetic-c');
+  const plan=[{file:a,title:'A',kind:'document'},{file:b,title:'B',kind:'document'},{file:c,title:'C',kind:'document'}];
+  const imported=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
+  const withIds=plan.map((p,i)=>({...p,itemId:imported.results[i].itemId}));
+  // A link planted inside the archive path is refused; the key stays put and nothing lands outside.
+  const archive=join(dir,'archive');const first=src.replace(/^\/+/,'').split('/')[0];
+  await mkdir(archive);await symlink(outside,join(archive,first));
+  const linked=await replaceWithReferences(v.run,{},'vault-1',withIds.slice(0,1),undefined,archive);
+  assert.deepEqual(linked.results.map(r=>[r.state,r.code]),[['failed','archive-link']]);
+  await access(a);
+  // A file that appears in the archive while 1Password is consulted is never overwritten.
+  const clean=join(dir,'clean');const bTarget=join(clean,b.replace(/^\/+/,''));
+  const racing=async(...args)=>{const out=await v.run(...args);if(args[1][0]==='document'&&args[1][1]==='get'){await mkdir(join(bTarget,'..'),{recursive:true});await writeFile(bTarget,'already-archived');}return out;};
+  const raced=await replaceWithReferences(racing,{},'vault-1',withIds.slice(1,2),undefined,clean);
+  assert.deepEqual(raced.results.map(r=>[r.state,r.code]),[['failed','archive-exists']]);
+  assert.equal(await readFile(bTarget,'utf8'),'already-archived');assert.equal(await readFile(b,'utf8'),'synthetic-b');
+  // A successful move passes the strict RPC result schema.
+  const moved=await replaceWithReferences(v.run,{},'vault-1',withIds.slice(2),undefined,clean);
+  assert.equal(moved.results[0].state,'moved');
+  contract.importFiles.output.parse(moved);
+  await assert.rejects(access(c));assert.equal(await readFile(moved.results[0].movedTo,'utf8'),'synthetic-c');
+ }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('a locked file is reported by code, left as it is, and leaves no rewritten copy behind',async t=>{
  if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');

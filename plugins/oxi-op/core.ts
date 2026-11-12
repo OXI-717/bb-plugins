@@ -3,10 +3,10 @@ import { createConnection } from 'node:net';
 import { CodedError, errorCode } from './errors.js';
 export { CodedError, errorCode } from './errors.js';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdtemp, mkdir, writeFile, rm, chmod, readFile, lstat, rename } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, chmod, readFile, lstat, rename, link, unlink } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import type {Route} from './contract.js';
 class CredentialProcessError extends CodedError {constructor(message: string) {super('op-exit', message);}}
 
@@ -646,6 +646,31 @@ export function archiveTarget(archiveDir: string, file: string, home = homedir()
     if (!rel || rel.split('/').some(part => part === '..' || part === '')) throw new CodedError('archive-path', 'The file path cannot be placed in the archive folder');
     return join(archiveDir, rel);
 }
+// Archive folders are created one level at a time and never followed through a link: the root and
+// every folder below it must be a real directory, so a planted link cannot carry a key elsewhere.
+async function privateArchiveDir(archiveDir: string, target: string) {
+    await fsStep(() => mkdir(archiveDir, {recursive: true, mode: 0o700}));
+    let dir = archiveDir;
+    for (const part of ['', ...relative(archiveDir, dirname(target)).split('/').filter(Boolean)]) {
+        if (part) {
+            dir = join(dir, part);
+            await fsStep(() => mkdir(dir, {mode: 0o700})).catch(error => {if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw error;});
+        }
+        const info = await lstat(dir);
+        if (info.isSymbolicLink() || !info.isDirectory()) throw new CodedError('archive-link', 'A folder in the archive path is a link or not a folder');
+    }
+    await fsStep(() => chmod(archiveDir, 0o700));
+}
+// Move without ever replacing what is already there: a hard link fails if the name exists, and the
+// original name is removed only after the link is in place (undone if that removal fails).
+async function moveNoClobber(source: string, target: string) {
+    await fsStep(() => link(source, target)).catch(error => {
+        if ((error as NodeJS.ErrnoException)?.code === 'EEXIST') throw new CodedError('archive-exists', 'A file with this path is already in the archive folder');
+        throw error;
+    });
+    try {await fsStep(() => unlink(source));}
+    catch (error) {await unlink(target).catch(() => {}); throw error;}
+}
 // Imported key files are never deleted: with an archive folder they are moved there (0700 folders,
 // same name and relative path), without one they stay where they are.
 export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, entries: (ImportEntry & {itemId: string})[], signal?: AbortSignal, archiveDir?: string) {
@@ -670,12 +695,9 @@ export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv,
                 if (!archiveDir) {results.push({file: entry.file, state: 'skipped', code: 'no-archive-dir'}); continue;}
                 if (!await documentMatches(op, vaultId, entry.itemId, bytes)) throw new CodedError('values-differ', 'Vault copy differs');
                 const target = archiveTarget(archiveDir, entry.file);
-                await fsStep(() => mkdir(archiveDir, {recursive: true, mode: 0o700}));
-                await fsStep(() => chmod(archiveDir, 0o700));
-                await fsStep(() => mkdir(dirname(target), {recursive: true, mode: 0o700}));
-                if (await lstat(target).then(() => true, () => false)) throw new CodedError('archive-exists', 'A file with this path is already in the archive folder');
+                await privateArchiveDir(archiveDir, target);
                 await unchanged();
-                await fsStep(() => rename(entry.file, target));
+                await moveNoClobber(entry.file, target);
                 results.push({file: entry.file, state: 'moved', movedTo: target});
                 continue;
             }
