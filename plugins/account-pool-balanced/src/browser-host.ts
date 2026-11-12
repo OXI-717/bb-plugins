@@ -11,7 +11,7 @@ const accountSchema=z.object({id:z.string().uuid(),provider:providerSchema,label
 export type BrowserAccount=z.infer<typeof accountSchema>;
 const accountsSchema=z.array(accountSchema).max(256).refine(a=>new Set(a.map(x=>x.id)).size===a.length);
 const urlSchema=z.string().max(8192).refine(s=>{try{safeBrowserUrl(s);return true;}catch{return false;}});
-const openInput=z.object({accounts:accountsSchema,accountId:z.string().uuid(),url:urlSchema.optional(),proxyUrl:z.string().max(4096).optional()}).strict();
+const openInput=z.object({accounts:accountsSchema,routedAccountIds:z.array(z.string().uuid()).max(256).optional(),accountId:z.string().uuid(),url:urlSchema.optional(),proxyUrl:z.string().max(4096).optional()}).strict();
 const listInput=z.object({accounts:accountsSchema,routedAccountIds:z.array(z.string().uuid()).max(256).optional()}).strict();
 const rowSchema=z.object({accountId:z.string(),provider:z.string(),label:z.string(),email:z.string().nullable(),profileName:z.string(),profileDirectory:z.string(),profileDir:z.string(),exists:z.boolean(),updatedAt:z.number().nullable()}).strict();
 export const browserHostContract=defineRpcContract({
@@ -45,7 +45,7 @@ export function createBrowserRouter(options:BrowserRouterOptions){
    const onboarding:BrowserAccount={id:'01f92891-506b-4b5c-b164-035d69bf8288',provider:'agy',label:'Antigravity sign-in',email:null};
    const accounts=await inventory();
    if(accounts.some(a=>a.id===onboarding.id))throw Error('Onboarding profile identity collision');
-   const input=openInput.parse({accounts:[...accounts,onboarding],accountId:onboarding.id,url});
+   const input=openInput.parse({accounts:[...accounts,onboarding],...(options.routedAccountIds?{routedAccountIds:options.routedAccountIds()}:{}),accountId:onboarding.id,url});
    await target(id);
    try{return browserHostContract.open.output.parse(await options.callHost('open',input,id));}
    catch{throw Error('Remote sign-in browser did not confirm launch. Check the Mac before retrying. On first sign-in, close Helium once to prepare the new profile, then click sign-in again.');}
@@ -55,7 +55,8 @@ export function createBrowserRouter(options:BrowserRouterOptions){
    const accounts=await inventory();const account=resolveAccount(accounts,query);
    if(id===null){await options.localOpen(account.id,url);return {opened:true};}
    const proxyUrl=await options.proxyForAccount?.(account.id);
-   const input=openInput.parse({accounts,accountId:account.id,...(url===undefined?{}:{url}),...(proxyUrl?{proxyUrl}:{})});
+   const routedAccountIds=options.routedAccountIds?.();
+   const input=openInput.parse({accounts,...(routedAccountIds?{routedAccountIds}:{}),accountId:account.id,...(url===undefined?{}:{url}),...(proxyUrl?{proxyUrl}:{})});
    await target(id);
    try{return browserHostContract.open.output.parse(await options.callHost('open',input,id));}
    catch{throw Error('Remote account browser did not confirm launch. Check the Mac before retrying.');}
@@ -96,7 +97,7 @@ export function createMacBrowserHandlers(deps:{
    const dataDir=await local();const evidence=await deps.readEvidence();
    if(evidence.state!=='connected'||evidence.assurance!=='verified_ipv4')throw Error('Verified Mac VPN is required for the shared account browser.');
    signal?.throwIfAborted();
-   await deps.open({accounts:input.accounts,query:input.accountId,url:input.url,proxyUrl:input.proxyUrl,dataDir,pluginId:'account-pool-balanced'});
+   await deps.open({accounts:input.accounts,routedAccountIds:input.routedAccountIds,query:input.accountId,url:input.url,proxyUrl:input.proxyUrl,dataDir,pluginId:'account-pool-balanced'});
    return {opened:true};
   },
   async list(raw:z.infer<typeof listInput>){

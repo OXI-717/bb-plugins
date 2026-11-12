@@ -286,6 +286,26 @@ describe("browserExecutableCandidates", () => {
 });
 
 describe("openAccountBrowser", () => {
+  it('excludes assigned accounts from shared registration and retained native picker without deleting their data',async()=>{
+    const box=await sandbox();const launches:any[]=[];
+    const options={...baseOptions(box),query:ACCOUNTS[0]!.id,fetcher:geoFetcher,transportImpl:async(value:any)=>{launches.push(value);}};
+    const retained=await openAccountBrowser(options);
+    writeFileSync(path.join(retained.profileDir,'retained-session'),'synthetic-session');
+    const other=ACCOUNTS[1]!;
+    await openAccountBrowser({...options,query:other.id,routedAccountIds:[ACCOUNTS[0]!.id]});
+    expect(launches[1].profileDirectories).not.toContain(launches[0].profileDirectory);
+    expect(launches[1].routeKey).not.toBe(launches[0].routeKey);
+    const state=JSON.parse(readFileSync(path.join(box.heliumRoot,'Local State'),'utf8'));
+    expect(state.profile.info_cache[launches[0].profileDirectory]).toBeUndefined();
+    expect(readFileSync(path.join(retained.profileDir,'retained-session'),'utf8')).toBe('synthetic-session');
+    const registry=JSON.parse(readFileSync(path.join(box.dataDir,'plugins/account-pool-balanced/browser-profiles/registry.json'),'utf8'));
+    expect(registry[ACCOUNTS[0]!.id]).toBeTruthy();
+    await expect(openAccountBrowser({...options,routedAccountIds:[ACCOUNTS[0]!.id]})).rejects.toThrow('proxy is required');
+    const fresh=await sandbox();let freshLaunch:any;
+    await openAccountBrowser({...baseOptions(fresh),query:other.id,routedAccountIds:[ACCOUNTS[0]!.id],fetcher:geoFetcher,transportImpl:async(value:any)=>{freshLaunch=value;}});
+    expect(freshLaunch.profileDirectories).toHaveLength(ACCOUNTS.length-1);
+  });
+
   it('allocates only the selected account in a separate root for a bound proxy, without changing shared profiles',async()=>{
     const box=await sandbox();let launch:any;
     const options={...baseOptions(box),query:ACCOUNTS[0]!.id,proxyUrl:'http://fixture:synthetic@proxy.example:18444/',fetcher:geoFetcher,transportImpl:async(value:any)=>{launch=value;}};

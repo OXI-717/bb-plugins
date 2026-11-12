@@ -107,9 +107,9 @@ async function boot(cfg){
    const message=data;data='';
    Promise.resolve().then(async()=>{
     const cmd=JSON.parse(message);
-    if(!negotiated&&cmd.type==='hello'){negotiated=true;s.write(JSON.stringify({protocol:5,navigation:'native-file',profiles:'native'})+'\n');return;}
+    if(!negotiated&&cmd.type==='hello'){negotiated=true;s.write(JSON.stringify({protocol:6,navigation:'native-file',profiles:'native'})+'\n');return;}
     s.removeAllListeners('data');
-    if(!negotiated||cmd.protocol!==5)throw new Error('Close this account browser and reopen it after updating Pooler.');
+    if(!negotiated||cmd.protocol!==6)throw new Error('Close this account browser and reopen it after updating Pooler.');
     if(cmd.routeKey!==cfg.routeKey)throw new Error('Close this account browser before changing its proxy.');
     if(cmd.timezone!==cfg.timezone||cmd.executable!==cfg.executable||!primary||primary.exitCode!==null)throw new Error('Close this account browser window before changing its exit timezone or executable.');
     if(typeof cmd.url!=='string')throw new Error('Invalid browser URL.');

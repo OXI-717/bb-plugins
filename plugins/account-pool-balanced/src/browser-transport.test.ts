@@ -197,6 +197,15 @@ describe("detached browser supervisor", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]).not.toContain("synthetic-private");
   });
+  it('refuses a protocol-five shared worker before sending a URL or route policy',async()=>{
+    const options=await fixture();options.profileDirectories=['Profile 1'];options.routeKey='new-routing-policy';
+    const requests:string[]=[];
+    const legacy=createServer(socket=>socket.on('data',data=>{requests.push(data.toString());socket.write(JSON.stringify({protocol:5,navigation:'native-file',profiles:'native'})+'\n');}));
+    await new Promise<void>(resolve=>legacy.listen(options.socketPath,resolve));await chmod(options.socketPath,0o600);
+    cleanup.push(()=>new Promise<void>(resolve=>legacy.close(()=>resolve())));
+    await expect(handoffBrowser({...options,url:'https://login.example/?state=synthetic-private'})).rejects.toThrow(/close|reopen/i);
+    expect(requests).toHaveLength(1);expect(requests[0]).not.toContain('synthetic-private');expect(requests[0]).not.toContain('new-routing-policy');
+  });
   it("redacts protocol errors that echo the authorization URL", async () => {
     const options = await fixture({ FIXTURE_CDP_MODE: "error" });
     options.url = "https://login.example/?state=synthetic-private";

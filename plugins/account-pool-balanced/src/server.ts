@@ -339,7 +339,7 @@ export function createAccountPoolPlugin(
       callHost:(method,input,hostId)=>method==='open'
         ? browserHost.call('open',browserHostContract.open.input.parse(input),{hostId,timeoutMs:60000})
         : browserHost.call('list',browserHostContract.list.input.parse(input),{hostId,timeoutMs:10000}),
-      localOpen:async(query,url)=>openAccountBrowser({accounts:await operations.list(),query,url,proxyUrl:await egress.browserProxy(query),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId,vpnStatusFile:config.get().vpnStatusFile}),
+      localOpen:async(query,url)=>openAccountBrowser({accounts:await operations.list(),routedAccountIds:Object.keys(egress.snapshot().bindings),query,url,proxyUrl:await egress.browserProxy(query),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId,vpnStatusFile:config.get().vpnStatusFile}),
       localList:async()=>listBrowserProfiles({accounts:await operations.list(),routedAccountIds:Object.keys(egress.snapshot().bindings),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
     });
     maintenanceActivity=()=>hub.maintenanceActivity();

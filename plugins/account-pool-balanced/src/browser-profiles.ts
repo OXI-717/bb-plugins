@@ -520,6 +520,7 @@ async function migrateToNative(options: EnsureProfileOptions, assertClosed: () =
 export interface OpenAccountBrowserOptions {
   accounts: readonly BrowserAccount[];
   query: string;
+  routedAccountIds?:readonly string[]|undefined;
   proxyUrl?: string | undefined;
   url?: string | undefined;
   dataDir: string;
@@ -553,8 +554,11 @@ export async function openAccountBrowser(
   options: OpenAccountBrowserOptions,
 ): Promise<OpenAccountBrowserResult> {
   let root = options.heliumRoot ?? heliumDataRoot(options.platformName ?? currentPlatform());
+  const selected=resolveAccount(options.accounts,options.query);
+  if(!options.proxyUrl&&options.routedAccountIds?.includes(selected.id))throw Error('Assigned account browser proxy is required.');
+  if(!options.proxyUrl)options={...options,accounts:options.accounts.filter(a=>!options.routedAccountIds?.includes(a.id))};
   if(options.proxyUrl){
-    const account=resolveAccount(options.accounts,options.query);
+    const account=selected;
     const proxyUrl=parseProxyUrl(options.proxyUrl).href;
     root=path.join(root,'Pool Routed Accounts',account.id);
     options={...options,proxyUrl,accounts:[account],dataDir:path.join(options.dataDir,'account-browser-routes',account.id)};
@@ -607,9 +611,11 @@ async function openAccountBrowserLocked(
   const socketPath = path.join(tmpdir(), `bb-pool-${createHash("sha256").update(root).digest("hex").slice(0, 24)}.sock`);
   let registry = await readRegistry(registryFile);
   let entry = registry[account.id];
+  const selectable=()=>Object.entries(registry).filter(([id,e])=>!e.isolated&&(!!options.proxyUrl||!options.routedAccountIds?.includes(id))).map(([,e])=>e);
   const launchFor = (selected: RegistryEntry): TransportLaunch => ({
-    root, socketPath, executable, ...(options.proxyUrl?{proxyUrl:options.proxyUrl,routeKey:createHash("sha256").update(options.proxyUrl).digest("hex")} : {}),profileDirectory: selected.profileDirectory,
-    profileDirectories: Object.values(registry).filter(e => !e.isolated).map(e => e.profileDirectory),
+    root, socketPath, executable, ...(options.proxyUrl?{proxyUrl:options.proxyUrl}:{}),
+    routeKey:createHash("sha256").update(JSON.stringify([options.proxyUrl??null,selectable().map(e=>e.profileDirectory).sort()])).digest("hex"),profileDirectory: selected.profileDirectory,
+    profileDirectories: selectable().map(e => e.profileDirectory),
     timezone, url, settleMs: options.settleMs ?? 800, env: options.env ?? process.env,
   });
   if (entry && !entry.isolated && !options.transportImpl && !options.spawnImpl) {
@@ -638,7 +644,17 @@ async function openAccountBrowserLocked(
   registry = await readRegistry(registryFile);
   entry = registry[account.id]!;
   await assertClosed();
-  await syncLocalStateProfiles(root, Object.values(registry));
+  await syncLocalStateProfiles(root, selectable());
+  if(!options.proxyUrl&&options.routedAccountIds?.length){
+    const blocked=new Set(options.routedAccountIds.flatMap(id=>registry[id]?[registry[id]!.profileDirectory]:[]));
+    const file=path.join(root,'Local State'),state=await readObject(file),cache=nativeProfileCache(state);
+    for(const directory of blocked)delete cache[directory];
+    const profile=state.profile as Record<string,unknown>;
+    profile.info_cache=cache;
+    if(typeof profile.last_used==='string'&&blocked.has(profile.last_used))profile.last_used=entry.profileDirectory;
+    if(Array.isArray(profile.last_active_profiles))profile.last_active_profiles=profile.last_active_profiles.filter(p=>!blocked.has(p));
+    await writeJsonAtomic(file,state);
+  }
   const launch = launchFor(entry);
   await removeStaleBrowserSocket(socketPath);
   if (options.transportImpl) await options.transportImpl(launch);
