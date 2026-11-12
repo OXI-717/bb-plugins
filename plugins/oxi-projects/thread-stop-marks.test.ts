@@ -36,6 +36,13 @@ it('does not read active, unavailable or hidden threads',async()=>{
  const read=vi.fn(async()=>stopped);const tracker=createThreadStopMarks(read,()=>{});
  tracker.sync([thread('thr_active',1,'active'),{...thread('thr_hidden'),isHidden:true},{...thread('thr_offline'),runtimeStatus:'waiting-for-host'}]);await tick();expect(read).not.toHaveBeenCalled();tracker.retryUnknown();await tick();expect(read).not.toHaveBeenCalled();tracker.dispose();
 });
+it('caps failed reads at three until the thread metadata changes',async()=>{
+ const read=vi.fn().mockRejectedValue(Error('unavailable'));const tracker=createThreadStopMarks(read,()=>{});
+ tracker.sync([thread()]);await tick();
+ for(let i=0;i<8;i++){tracker.retryUnknown();await tick();}
+ expect(read).toHaveBeenCalledTimes(3);
+ tracker.sync([thread('thr_example',2)]);await tick();expect(read).toHaveBeenCalledTimes(4);tracker.dispose();
+});
 it('aborts timed out reads and retries without publishing their late result',async()=>{
  vi.useFakeTimers();let signal!:AbortSignal;let finish!:(events:StopBoundary[])=>void;
  const changed=vi.fn();const read=vi.fn((_id:string,s:AbortSignal)=>{signal=s;return new Promise<StopBoundary[]>(resolve=>{finish=resolve;});});

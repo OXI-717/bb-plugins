@@ -5,7 +5,7 @@ export function isStoppedBoundary(events:readonly StopBoundary[]):boolean {
  const last=events[0];
  return last?.type==='system/thread/interrupted'&&last.data!==null&&typeof last.data==='object'&&'reason' in last.data&&last.data.reason==='manual-stop';
 }
-type Entry={key:string;stopped:boolean;unknown:boolean;controller:AbortController|null};
+type Entry={key:string;stopped:boolean;unknown:boolean;attempts:number;controller:AbortController|null};
 
 /** Bounded, per-client cache. A restart clears the mark before any async read. */
 export function createThreadStopMarks(read:(id:string,signal:AbortSignal)=>Promise<readonly StopBoundary[]>,changed:(ids:ReadonlySet<string>)=>void){
@@ -15,7 +15,7 @@ export function createThreadStopMarks(read:(id:string,signal:AbortSignal)=>Promi
   while(!disposed&&running<4&&pending.size){
    const id=pending.values().next().value!;pending.delete(id);
    const entry=entries.get(id);if(!entry||entry.controller)continue;
-   const controller=new AbortController();entry.controller=controller;running++;
+   const controller=new AbortController();entry.controller=controller;entry.attempts++;running++;
    const timeout=setTimeout(()=>controller.abort(),8000);
    void Promise.resolve().then(()=>read(id,controller.signal)).then(events=>{
     if(disposed||controller.signal.aborted||entries.get(id)!==entry)return;
@@ -37,12 +37,12 @@ export function createThreadStopMarks(read:(id:string,signal:AbortSignal)=>Promi
     const previous=entries.get(thread.id);if(previous?.key===key)continue;
     previous?.controller?.abort();pending.delete(thread.id);
     const idle=thread.status==='idle'&&thread.runtimeStatus==='idle';
-    entries.set(thread.id,{key,stopped:false,unknown:idle,controller:null});
+    entries.set(thread.id,{key,stopped:false,unknown:idle,attempts:0,controller:null});
     if(idle)pending.add(thread.id);
    }
    publish();drain();
   },
-  retryUnknown(){if(disposed)return;for(const [id,entry] of entries)if(entry.unknown&&!entry.controller)pending.add(id);drain();},
+  retryUnknown(){if(disposed)return;for(const [id,entry] of entries)if(entry.unknown&&!entry.controller&&entry.attempts<3)pending.add(id);drain();},
   dispose(){if(disposed)return;disposed=true;for(const entry of entries.values())entry.controller?.abort();entries.clear();pending.clear();publish();}
  };
 }
