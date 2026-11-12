@@ -3,10 +3,10 @@ import { createConnection } from 'node:net';
 import { CodedError, errorCode } from './errors.js';
 export { CodedError, errorCode } from './errors.js';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdtemp, writeFile, rm, chmod, readFile, lstat, unlink, rename } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdtemp, mkdir, writeFile, rm, chmod, readFile, lstat, rename } from 'node:fs/promises';
+import { tmpdir, homedir } from 'node:os';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import type {Route} from './contract.js';
 class CredentialProcessError extends CodedError {constructor(message: string) {super('op-exit', message);}}
 
@@ -640,9 +640,17 @@ async function fsStep<T>(step: () => Promise<T>) {
     }
 }
 const fileFailure = (error: unknown) => errorCode(error) ?? (typeof (error as NodeJS.ErrnoException)?.code === 'string' ? 'fs-' + (error as NodeJS.ErrnoException).code!.toLowerCase() : 'failed');
-export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, entries: (ImportEntry & {itemId: string})[], signal?: AbortSignal) {
+// Where an imported key file goes: its path under the owner's archive folder, relative to home.
+export function archiveTarget(archiveDir: string, file: string, home = homedir()) {
+    const rel = file.startsWith(home + '/') ? file.slice(home.length + 1) : file.replace(/^\/+/, '');
+    if (!rel || rel.split('/').some(part => part === '..' || part === '')) throw new CodedError('archive-path', 'The file path cannot be placed in the archive folder');
+    return join(archiveDir, rel);
+}
+// Imported key files are never deleted: with an archive folder they are moved there (0700 folders,
+// same name and relative path), without one they stay where they are.
+export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, entries: (ImportEntry & {itemId: string})[], signal?: AbortSignal, archiveDir?: string) {
     const op = async (args: string[]) => run('op', args, env, undefined, signal);
-    const results: {file: string; state: 'referenced' | 'removed' | 'skipped' | 'failed'; code?: string; keys?: number}[] = [];
+    const results: {file: string; state: 'referenced' | 'moved' | 'skipped' | 'failed'; code?: string; keys?: number; movedTo?: string}[] = [];
     for (const entry of entries) {
         try {
             const info = await lstat(entry.file);
@@ -659,10 +667,16 @@ export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv,
             const stored = JSON.parse(await op(['item', 'get', entry.itemId, '--vault', vaultId, '--reveal', '--format=json']));
             if (stored.category === 'DOCUMENT') {
                 if (entry.kind !== 'document') {results.push({file: entry.file, state: 'skipped', code: 'kept-as-document'}); continue;}
+                if (!archiveDir) {results.push({file: entry.file, state: 'skipped', code: 'no-archive-dir'}); continue;}
                 if (!await documentMatches(op, vaultId, entry.itemId, bytes)) throw new CodedError('values-differ', 'Vault copy differs');
+                const target = archiveTarget(archiveDir, entry.file);
+                await fsStep(() => mkdir(archiveDir, {recursive: true, mode: 0o700}));
+                await fsStep(() => chmod(archiveDir, 0o700));
+                await fsStep(() => mkdir(dirname(target), {recursive: true, mode: 0o700}));
+                if (await lstat(target).then(() => true, () => false)) throw new CodedError('archive-exists', 'A file with this path is already in the archive folder');
                 await unchanged();
-                await fsStep(() => unlink(entry.file));
-                results.push({file: entry.file, state: 'removed'});
+                await fsStep(() => rename(entry.file, target));
+                results.push({file: entry.file, state: 'moved', movedTo: target});
                 continue;
             }
             if (entry.kind !== 'env') throw new CodedError('kind-mismatch', 'Planned kind differs from the stored item');

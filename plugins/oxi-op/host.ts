@@ -71,7 +71,7 @@ export default experimental_defineHostEntry({ contract, handlers: {
             const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, args, env, input, signal);
             return probeServiceScope(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, ctx.signal);
         },
-        importFiles: async ({route, mode, entries}, ctx) => {
+        importFiles: async ({route, mode, entries, archiveDir}, ctx) => {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Migration requires owner desktop approval');
             const runner: typeof runProcess = (binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
             const env = await environment(route, ctx.signal);
@@ -82,7 +82,7 @@ export default experimental_defineHostEntry({ contract, handlers: {
             const items = JSON.parse((await runner('op', ['item', 'list', '--vault', route.vaultId, '--format=json'], env, undefined, ctx.signal)).trim() || '[]') as {id: string; title: string}[];
             const resolved = entries.map(e => ({...e, itemId: items.filter(x => x.title === e.title).length === 1 ? items.find(x => x.title === e.title)!.id : ''}));
             const missing = resolved.filter(e => !e.itemId).map(e => ({file: e.file, state: 'failed', code: 'item-not-found'}));
-            const done = await replaceWithReferences(runner, env, route.vaultId, resolved.filter(e => e.itemId), ctx.signal);
+            const done = await replaceWithReferences(runner, env, route.vaultId, resolved.filter(e => e.itemId), ctx.signal, archiveDir);
             return {results: [...missing, ...done.results]};
         },
         programAvailable: async ({program, cwd}) => ({available: await programAvailable(program.startsWith('./') || (program.includes('/') && !program.startsWith('/')) ? (cwd ? cwd + '/' + program : program) : program)}),

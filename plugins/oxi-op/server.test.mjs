@@ -856,4 +856,19 @@ test('migration shows every file on one card, grouped by vault, and calls each v
  assert.deepEqual(calls.map(c=>[c.hostId,c.input.route.vaultId,c.input.entries.length,c.input.mode]),[['mac-max',vid('one'),2,'import'],['mac-max',vid('two'),1,'import']]);
  const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
  assert.equal(row.kind,'migrate');assert(!JSON.stringify(row).includes(H),'the journal keeps states, not paths');
+ // Reference mode: key files go to the named archive folder; without one the card says they stay.
+ assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','import','--archive-dir',H+'/cc/moved','--plan',JSON.stringify(plan)],context)).exitCode,1,'an archive folder belongs to reference mode');
+ assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','reference','--archive-dir','relative/dir','--plan',JSON.stringify(plan)],context)).exitCode,1);
+ calls.length=0;
+ const ref=h.behavior.runCli(['migrate','--profile','default','--mode','reference','--archive-dir',H+'/cc/moved','--plan',JSON.stringify(plan)],context);await setImmediate();await setImmediate();
+ const card=h.inspection.pendingInteractions.at(-1);
+ assert(card.payload.purpose.includes('переместить файлы-ключи в папку ~/cc/moved')&&card.payload.purpose.includes('Ничего не удаляется'));
+ h.behavior.submitInteraction(card.id,{approved:true});await ref;
+ assert(calls.length===2&&calls.every(c=>c.input.mode==='reference'&&c.input.archiveDir===H+'/cc/moved'));
+ calls.length=0;
+ const bare=h.behavior.runCli(['migrate','--profile','default','--mode','reference','--plan',JSON.stringify(plan)],context);await setImmediate();await setImmediate();
+ const bareCard=h.inspection.pendingInteractions.at(-1);
+ assert(bareCard.payload.purpose.includes('не трогать файлы-ключи'));
+ h.behavior.submitInteraction(bareCard.id,{approved:true});await bare;
+ assert(calls.every(c=>!('archiveDir' in c.input)));
 });
