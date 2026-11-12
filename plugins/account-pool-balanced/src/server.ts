@@ -388,11 +388,11 @@ export function createAccountPoolPlugin(
       }, agyLogin, url=>browser.openAgyLogin(url),egress,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update),
     );
     registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi);
-    registerUsageSource(bb, hub, true);
+    registerUsageSource(bb, hub, false);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
       if (readiness.reason === "routing-disabled") return null;
-      if (readiness.ready) return {label: "Ready", statusMessage: "Provider access is ready."};
+      if (readiness.ready) return {label: "Proxied", statusMessage: "Credentials are provided by the Account Pooler hub."};
       if (!("projectId" in context)) return null;
       return {status: "unavailable" as const, label: "Unavailable", statusMessage: "Provider access is unavailable."};
     };

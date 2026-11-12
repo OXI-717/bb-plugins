@@ -1,5 +1,4 @@
 import {AccountDraftForm} from './account-draft-form';
-import {ManagementGate,useManagementGrant,usePoolRpc} from './management-ui';
 import {PoolUpdatePanel} from './pool-update-panel';
 import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
@@ -39,6 +38,7 @@ import {
   definePluginApp,
   useBbNavigate,
   useRealtime,
+  useRpc,
 } from "@get-bb/plugin-sdk/app";
 import { Button } from "./ui/components/ui/button";
 import {
@@ -76,7 +76,7 @@ import type {
   PoolProvider,
   PoolStatus,
 } from "./src/contracts.js";
-import type { ThreadAccountStatus } from "./src/rpc.js";
+import type { ThreadAccountStatus, accountPoolRpcContract } from "./src/rpc.js";
 import type { OAuthLoginStart } from "./src/oauth-login.js";
 import type { CodexDeviceLoginStart } from "./src/codex-device-login.js";
 import {
@@ -1027,11 +1027,11 @@ function ConfigFieldRow({
 }
 
 function AccountPoolSettings() {
-  return <ManagementGate><UnlockedAccountPoolSettings /></ManagementGate>;
+  return <UnlockedAccountPoolSettings />;
 }
 
 function UnlockedAccountPoolSettings() {
-  const rpc = usePoolRpc();
+  const rpc = useRpc<typeof accountPoolRpcContract>();
   const navigate = useBbNavigate();
   const [status, setStatus] = useState<PoolStatus | null>(null);
   const [nativeAccounts, setNativeAccounts] = useState<NativeAccounts | null>(null);
@@ -2747,13 +2747,11 @@ function LoginDialog({
 }
 
 export function ThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
-  const grant = useManagementGrant();
-  if (!grant) return null;
   return <UnlockedThreadAccountIndicator threadId={threadId} isCompactViewport={isCompactViewport} />;
 }
 
 function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
-  const rpc = usePoolRpc();
+  const rpc = useRpc<typeof accountPoolRpcContract>();
   const [status, setStatus] = useState<ThreadAccountStatus | null>(null);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState(false);
