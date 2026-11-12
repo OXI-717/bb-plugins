@@ -2,8 +2,8 @@ import { spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { CodedError, errorCode } from './errors.js';
 export { CodedError, errorCode } from './errors.js';
-import { randomUUID } from 'node:crypto';
-import { mkdtemp, writeFile, rm, chmod } from 'node:fs/promises';
+import { randomUUID, createHash } from 'node:crypto';
+import { mkdtemp, writeFile, rm, chmod, readFile, lstat, unlink, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -85,7 +85,8 @@ export function spawnGroup(binary: string, args: string[], options: {env: NodeJS
 // time. Only service-account and agent processes get their own group for cleanup.
 // A command launched through `op run` holds resolved credentials and always gets its own group.
 const runWith = (ownSession: (env: NodeJS.ProcessEnv) => boolean): Runner => async (binary, args, env, input, signal) => {
-    const result = await spawnGroup(binary, args, {env, input: input ?? '', timeoutMs: 90000, maxBytes: 1048576, overflow: 'fail', includeStderr: false, ownSession: ownSession(env), signal});
+    // No input means no pipe: op reads a piped stdin as an item template.
+    const result = await spawnGroup(binary, args, {env, input, timeoutMs: 90000, maxBytes: 1048576, overflow: 'fail', includeStderr: false, ownSession: ownSession(env), signal});
     if (result.code !== 0 || result.expired) throw new CredentialProcessError('process exit ' + result.code + '; output suppressed');
     return result.output.toString('utf8');
 };
@@ -346,11 +347,27 @@ export async function programAvailable(program: string, pathValue = commandPath(
     for (const candidate of candidates.filter(Boolean)) {try {await access(candidate, constants.X_OK); return true;} catch {}}
     return false;
 }
+// `op read` rejects a reference whose item or field name has characters outside its reference
+// syntax (a Cyrillic title, for example), so a key is taken from the item itself: the item by exact
+// title or ID, the field by exact label (or ID). Each item is fetched once per call; values stay here.
+export type FieldValue = {id?: string; label?: string; value?: unknown};
+export function keyReader(run: Runner, binary: string, env: NodeJS.ProcessEnv, vaultId: string, signal?: AbortSignal) {
+    const items = new Map<string, Promise<{fields?: FieldValue[]}>>();
+    return async (key: KeyReference) => {
+        if (!items.has(key.item)) items.set(key.item, run(binary, ['item', 'get', key.item, '--vault', vaultId, '--reveal', '--format=json'], env, undefined, signal).then(out => JSON.parse(out)));
+        const fields = (await items.get(key.item)!).fields ?? [];
+        const byLabel = fields.filter(f => f.label === key.field);
+        const matches = byLabel.length ? byLabel : fields.filter(f => f.id === key.field);
+        if (matches.length !== 1 || typeof matches[0].value !== 'string' || !matches[0].value) throw new CodedError('key-field', 'The key field is missing, empty or ambiguous');
+        return matches[0].value;
+    };
+}
 export async function execWithKeys(run: Runner, command: CommandRunner, env: NodeJS.ProcessEnv, vaultId: string, argv: string[], keys: Record<string, KeyReference>, cwd: string | undefined, timeoutMs: number, signal?: AbortSignal) {
     const values: Record<string, string> = {};
+    const read = keyReader(run, 'op', env, vaultId, signal);
     for (const [variable, key] of Object.entries(keys)) {
         if (variable.startsWith('OP_') || key.item.includes('/') || key.field.includes('/')) throw new Error('Key reference is not allowed');
-        try {values[variable] = await run('op', ['read', '--no-newline', 'op://' + vaultId + '/' + key.item + '/' + key.field], env, undefined, signal);}
+        try {values[variable] = await read(key);}
         catch {throw new Error('Key ' + key.item + ' / ' + key.field + ' could not be read from the automation vault');}
     }
     const childEnv: NodeJS.ProcessEnv = {...process.env};
@@ -413,7 +430,8 @@ export type TidyStep =
     | {kind: 'same'; a: {vaultId: string; item: string}; b: {vaultId: string; item: string}}
     | {kind: 'move'; vaultId: string; item: string; toVaultId: string}
     | {kind: 'archive'; vaultId: string; item: string}
-    | {kind: 'delete-vault'; vaultId: string};
+    | {kind: 'delete-vault'; vaultId: string}
+    | {kind: 'note'; vaultId: string; item: string; text: string};
 const digest = async (value: string) => (await import('node:crypto')).createHash('sha256').update(value).digest('hex');
 // Owner-approved structural clean-up. Steps run in order and stop at the first failure or at a
 // comparison that differs; values are compared by hash inside this process and never returned.
@@ -448,6 +466,15 @@ export async function runTidy(run: Runner, env: NodeJS.ProcessEnv, steps: TidySt
             } else if (step.kind === 'archive') {
                 const found = await findOne(step.vaultId, step.item);
                 await op(['item', 'delete', found.id, '--vault', step.vaultId, '--archive']);
+                results.push({kind: step.kind, ok: true});
+            } else if (step.kind === 'note') {
+                // A non-secret service note: archive the previous version (recoverable), then create it anew.
+                const items = JSON.parse((await op(['item', 'list', '--vault', step.vaultId, '--format=json'])).trim() || '[]').filter((x: {title: string}) => x.title === step.item);
+                if (items.length > 1) throw new CodedError('ambiguous-item', 'Item must match at most one entry');
+                if (items.length === 1 && items[0].category !== 'SECURE_NOTE') throw new CodedError('not-a-note', 'Only a service note can be replaced');
+                const template = {title: step.item, category: 'SECURE_NOTE', fields: [{id: 'notesPlain', type: 'STRING', purpose: 'NOTES', label: 'notesPlain', value: step.text}]};
+                await withTemplateFile(JSON.stringify(template), process.platform, (path, input) => run('op', ['item', 'create', '--template', path, '--vault', step.vaultId, '--format=json'], env, input === undefined ? undefined : JSON.stringify(input), signal));
+                if (items.length === 1) await op(['item', 'delete', items[0].id, '--vault', step.vaultId, '--archive']);
                 results.push({kind: step.kind, ok: true});
             } else {
                 const left = JSON.parse((await op(['item', 'list', '--vault', step.vaultId, '--include-archive', '--format=json'])).trim() || '[]');
@@ -494,3 +521,177 @@ export const brokerRunner = (socketPath: string): Runner => (_binary, args, _env
     // Keep our side open: closing it is how the broker learns a call was cancelled.
     socket.write(JSON.stringify({args, stdin: Buffer.from(input ?? '', 'utf8').toString('base64')}) + '\n');
 });
+
+// ---- Migration of local secret files into a project vault -------------------------------
+// Values are read here, written to 1Password and compared by hash; only names, counts and
+// flags leave this process.
+export type EnvEntry = {key: string; value: string};
+type EnvLine = {prefix: string; key: string; separator: string; value: string; comment: string; ambiguous: boolean};
+// One KEY=VALUE line, read conservatively: anything a shell or dotenv loader could read
+// differently (escapes or $ expansion in double quotes, $ outside quotes, unmatched quotes)
+// is ambiguous, so the file is kept as a whole document and never rewritten.
+function parseEnvLine(raw: string): EnvLine | undefined {
+    const m = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.-]*)(\s*=\s*)(.*?)\s*$/.exec(raw);
+    if (!m) return undefined;
+    const [, prefix, key, separator, rest] = m;
+    if (rest.startsWith('#')) return {prefix, key, separator, value: '', comment: rest, ambiguous: false};
+    const quote = rest[0];
+    if (quote === '"' || quote === "'") {
+        const end = rest.indexOf(quote, 1);
+        if (end < 0) return {prefix, key, separator, value: '', comment: '', ambiguous: true};
+        const value = rest.slice(1, end);
+        const after = rest.slice(end + 1);
+        if (after && !/^\s+#/.test(after)) return {prefix, key, separator, value, comment: '', ambiguous: true};
+        return {prefix, key, separator, value, comment: after, ambiguous: quote === '"' && /[\\$`]/.test(value)};
+    }
+    const hash = rest.search(/\s#/);
+    const value = hash >= 0 ? rest.slice(0, hash).trimEnd() : rest;
+    // A hash without a space before it (abc#x) is a comment to dotenv but part of the value to a shell.
+    return {prefix, key, separator, value, comment: hash >= 0 ? rest.slice(value.length) : '', ambiguous: /[$`"'\\#]/.test(value)};
+}
+export function parseEnv(text: string): {entries: EnvEntry[]; ambiguous: boolean} {
+    const entries = new Map<string, string>();
+    let ambiguous = false;
+    for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line || line.startsWith('#')) continue;
+        const parsed = parseEnvLine(raw);
+        if (!parsed || parsed.ambiguous || entries.has(parsed.key)) {ambiguous = true; continue;}
+        entries.set(parsed.key, parsed.value);
+    }
+    return {entries: [...entries].map(([key, value]) => ({key, value})).filter(e => e.value !== ''), ambiguous};
+}
+const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
+export type ImportEntry = {file: string; title: string; kind: 'env' | 'document'};
+export type ImportResult = {file: string; title: string; kind: 'env' | 'document'; state: 'imported' | 'already-imported' | 'differs' | 'failed' | 'empty'; itemId?: string; keys?: string[]; code?: string};
+const envSectionLabel = 'Environment';
+// Fields of the import section, matched by label so references stay valid.
+function envFields(stored: {fields?: {label?: string; value?: string; section?: {id?: string; label?: string}}[]}) {
+    return new Map<string, string>((stored.fields ?? []).filter(f => f.section?.label === envSectionLabel && typeof f.label === 'string').map(f => [f.label!, f.value ?? '']));
+}
+async function documentMatches(op: (args: string[]) => Promise<string>, vaultId: string, itemId: string, bytes: Buffer) {
+    const dir = await mkdtemp(join(process.env.XDG_RUNTIME_DIR || (existsSync('/dev/shm') ? '/dev/shm' : tmpdir()), 'oxi-op-doc-'));
+    try {
+        const out = join(dir, 'doc');
+        await op(['document', 'get', itemId, '--vault', vaultId, '--out-file', out, '--force']);
+        return sha(await readFile(out)) === sha(bytes);
+    } finally {await rm(dir, {recursive: true, force: true});}
+}
+// Import each file as one item: env files become concealed fields in an "Environment" section,
+// anything else (or an env file the reader cannot parse unambiguously) a document. An existing
+// item with the same title is reused only if every value matches.
+export async function importFiles(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, entries: ImportEntry[], signal?: AbortSignal, platform: NodeJS.Platform = process.platform) {
+    const op = async (args: string[], input?: string) => run('op', args, env, input, signal);
+    const results: ImportResult[] = [];
+    const existing = JSON.parse((await op(['item', 'list', '--vault', vaultId, '--format=json'])).trim() || '[]') as {id: string; title: string}[];
+    for (const entry of entries) {
+        try {
+            const bytes = await readFile(entry.file);
+            const parsed = entry.kind === 'env' ? parseEnv(bytes.toString('utf8')) : undefined;
+            const kind: 'env' | 'document' = parsed && !parsed.ambiguous ? 'env' : 'document';
+            const matches = existing.filter(x => x.title === entry.title);
+            if (matches.length > 1) {results.push({file: entry.file, title: entry.title, kind, state: 'failed', code: 'duplicate-titles'}); continue;}
+            let itemId = matches[0]?.id;
+            const reused = !!itemId;
+            if (kind === 'env') {
+                const values = parsed!.entries;
+                if (!values.length) {results.push({file: entry.file, title: entry.title, kind, state: 'empty'}); continue;}
+                if (!itemId) {
+                    const template = {title: entry.title, category: 'SECURE_NOTE', sections: [{id: 'env', label: envSectionLabel}], fields: [
+                        {id: 'notesPlain', type: 'STRING', purpose: 'NOTES', label: 'notesPlain', value: 'Imported by Oxi Op from a local environment file.'},
+                        ...values.map(v => ({id: 'env-' + v.key, label: v.key, type: 'CONCEALED', value: v.value, section: {id: 'env', label: envSectionLabel}})),
+                    ]};
+                    const created = await withTemplateFile(JSON.stringify(template), platform, (path, input) => op(['item', 'create', '--template', path, '--vault', vaultId, '--format=json'], input === undefined ? undefined : JSON.stringify(input)));
+                    itemId = JSON.parse(created).id;
+                    existing.push({id: itemId!, title: entry.title});
+                }
+                const fields = envFields(JSON.parse(await op(['item', 'get', itemId!, '--vault', vaultId, '--reveal', '--format=json'])));
+                const same = fields.size === values.length && values.every(v => fields.has(v.key) && sha(fields.get(v.key)!) === sha(v.value));
+                results.push({file: entry.file, title: entry.title, kind, state: same ? (reused ? 'already-imported' : 'imported') : 'differs', itemId, keys: values.map(v => v.key)});
+            } else {
+                if (!itemId) {
+                    itemId = JSON.parse(await op(['document', 'create', entry.file, '--vault', vaultId, '--title', entry.title, '--format=json'])).uuid ?? undefined;
+                    if (!itemId) {
+                        const again = JSON.parse((await op(['item', 'list', '--vault', vaultId, '--format=json'])).trim() || '[]').filter((x: {title: string}) => x.title === entry.title);
+                        itemId = again.length === 1 ? again[0].id : undefined;
+                    }
+                    if (!itemId) throw new CodedError('document-unconfirmed', 'Document creation could not be confirmed');
+                    existing.push({id: itemId, title: entry.title});
+                }
+                const same = await documentMatches(op, vaultId, itemId, bytes);
+                results.push({file: entry.file, title: entry.title, kind, state: same ? (reused ? 'already-imported' : 'imported') : 'differs', itemId});
+            }
+        } catch (error) {results.push({file: entry.file, title: entry.title, kind: entry.kind, state: 'failed', code: errorCode(error) ?? 'failed'});}
+    }
+    return {results};
+}
+// After a verified import: in env files every checked value becomes an op:// reference (layout,
+// comments, line endings and mode kept); files planned as documents are removed. A file is only
+// touched when the vault still holds identical values. Symbolic and hard links are refused so no
+// other path keeps the plaintext. An env file stored as a document is never removed.
+// The OS may refuse to change a file (macOS immutable flag set when a project is frozen, a read-only
+// folder or volume). That is reported by code and never retried or forced: unlocking is the owner's call.
+const lockedCodes = new Set(['EPERM', 'EACCES', 'EROFS']);
+async function fsStep<T>(step: () => Promise<T>) {
+    try {return await step();}
+    catch (error) {
+        if (lockedCodes.has((error as NodeJS.ErrnoException)?.code ?? '')) throw new CodedError('file-locked', 'The file or its folder is locked against changes; nothing was changed');
+        throw error;
+    }
+}
+const fileFailure = (error: unknown) => errorCode(error) ?? (typeof (error as NodeJS.ErrnoException)?.code === 'string' ? 'fs-' + (error as NodeJS.ErrnoException).code!.toLowerCase() : 'failed');
+export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, entries: (ImportEntry & {itemId: string})[], signal?: AbortSignal) {
+    const op = async (args: string[]) => run('op', args, env, undefined, signal);
+    const results: {file: string; state: 'referenced' | 'removed' | 'skipped' | 'failed'; code?: string; keys?: number}[] = [];
+    for (const entry of entries) {
+        try {
+            const info = await lstat(entry.file);
+            if (info.isSymbolicLink()) throw new CodedError('symlink', 'Symbolic links are not rewritten; clean the target file instead');
+            if (!info.isFile()) throw new CodedError('not-a-file', 'Not a regular file');
+            if (info.nlink > 1) throw new CodedError('hard-link', 'Hard-linked files are not rewritten');
+            const bytes = await readFile(entry.file);
+            // The file may change while 1Password is consulted; act only on the exact snapshot checked.
+            const unchanged = async () => {
+                const now = await lstat(entry.file);
+                if (now.ino !== info.ino || now.dev !== info.dev || now.size !== info.size || now.mtimeMs !== info.mtimeMs || sha(await readFile(entry.file)) !== sha(bytes))
+                    throw new CodedError('changed-during-run', 'The file changed during the run; nothing was changed');
+            };
+            const stored = JSON.parse(await op(['item', 'get', entry.itemId, '--vault', vaultId, '--reveal', '--format=json']));
+            if (stored.category === 'DOCUMENT') {
+                if (entry.kind !== 'document') {results.push({file: entry.file, state: 'skipped', code: 'kept-as-document'}); continue;}
+                if (!await documentMatches(op, vaultId, entry.itemId, bytes)) throw new CodedError('values-differ', 'Vault copy differs');
+                await unchanged();
+                await fsStep(() => unlink(entry.file));
+                results.push({file: entry.file, state: 'removed'});
+                continue;
+            }
+            if (entry.kind !== 'env') throw new CodedError('kind-mismatch', 'Planned kind differs from the stored item');
+            const fields = envFields(stored);
+            const parsed = parseEnv(bytes.toString('utf8'));
+            if (parsed.ambiguous) throw new CodedError('ambiguous-file', 'File is not a plain env file');
+            const checked = new Map(parsed.entries.map(e => [e.key, e.value]));
+            for (const [key, value] of checked) if (!fields.has(key) || sha(fields.get(key)!) !== sha(value)) throw new CodedError('values-differ', 'Vault copy differs');
+            let replaced = 0;
+            const text = bytes.toString('utf8').split('\n').map(full => {
+                const cr = full.endsWith('\r') ? '\r' : '';
+                const raw = cr ? full.slice(0, -1) : full;
+                if (raw.trim().startsWith('#')) return full;
+                const line = parseEnvLine(raw);
+                if (!line || !checked.has(line.key) || checked.get(line.key) !== line.value) return full;
+                replaced++;
+                return line.prefix + line.key + line.separator + 'op://' + vaultId + '/' + entry.itemId + '/' + envSectionLabel + '/' + line.key + line.comment + cr;
+            }).join('\n');
+            if (replaced !== checked.size) throw new CodedError('rewrite-incomplete', 'Not every checked value could be rewritten; nothing was changed');
+            const temp = entry.file + '.oxi-op-' + process.pid;
+            await fsStep(() => writeFile(temp, text, {mode: info.mode & 0o777, flag: 'wx'}));
+            // The rewritten copy never outlives a failed step.
+            try {
+                await chmod(temp, info.mode & 0o777);
+                await unchanged();
+                await fsStep(() => rename(temp, entry.file));
+            } catch (error) {await rm(temp, {force: true}); throw error;}
+            results.push({file: entry.file, state: 'referenced', keys: replaced});
+        } catch (error) {results.push({file: entry.file, state: 'failed', code: fileFailure(error)});}
+    }
+    return {results};
+}
