@@ -4,6 +4,17 @@ import {mountMachineMarks,createMachineMarkStore} from './machine-marks-dom';
 const config={enabled:true,hosts:{host_mac:{kind:'local' as const},host_main:{kind:'primary' as const}}};
 const tick=()=>new Promise(resolve=>setTimeout(resolve,35));
 afterEach(()=>{document.body.replaceChildren();});
+it('adds stop inside the existing machine glyph, without an extra button or visible label, and clears it on resume',async()=>{
+ const r=row();const store=createMachineMarkStore();const dispose=mountMachineMarks(document,store);
+ const threads=[{id:'thr_a',host:{id:'host_remote',name:'Example remote'}}];
+ store.set(threads,config);await tick();const button=r.querySelector('button')!;const normalColor=button.style.color;
+ store.set(threads,config,new Set(['thr_a']));await tick();
+ expect(r.querySelectorAll('button')).toHaveLength(1);expect(r.querySelectorAll('[data-machine-stop]')).toHaveLength(1);
+ expect(button.querySelector('svg')?.getAttribute('data-machine-glyph')).toBe('cloud');expect(button.textContent).toBe('');
+ expect(button.style.color).not.toBe(normalColor);expect(button.getAttribute('aria-label')).toContain('Остановлена');
+ expect(r.querySelector('.bb-thread-title')?.textContent).toBe('Original title');expect(r.querySelector('[data-status]')?.textContent).toBe('working');
+ store.set(threads,config);await tick();expect(r.querySelector('[data-machine-stop]')).toBeNull();expect(button.style.color).toBe(normalColor);dispose();
+});
 function row(id='thr_a'){
  const el=document.createElement('div');el.innerHTML=`<a data-sidebar-thread-id="${id}" href="/threads/${id}"></a><span><i data-provider-icon>model</i><span class="bb-thread-title">Original title</span></span><i data-status>working</i>`;document.body.append(el);return el;
 }

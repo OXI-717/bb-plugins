@@ -1,15 +1,27 @@
 import {MachineGlyph} from './machine-glyph';
-import React,{useCallback,useEffect,useMemo,useRef,useState} from 'react';
-import {experimental_useSidebarThreads,useRpc,useSettings,type PluginAppBuilder,type PluginThreadHeaderActionProps} from '@get-bb/plugin-sdk/app';
+import React,{useCallback,useEffect,useMemo,useRef,useState,useSyncExternalStore} from 'react';
+import {experimental_useSidebarThreads,useRpc,useSdk,useSettings,type PluginAppBuilder,type PluginThreadHeaderActionProps} from '@get-bb/plugin-sdk/app';
 import {machineMarksContract,type MachineMarksView} from './machine-marks-contract';
 import {defaultMachineMarksConfig,MACHINE_MARKS_SETTING,machineIcons,machineKinds,machineMarkStyle,parseMachineMarksConfig,resolveMachineMark,type MachineHost,type MachineMarksConfig,type MachineRole} from './machine-marks';
 import {machineMarkStore,mountMachineMarks} from './machine-marks-dom';
+import {createThreadStopMarks} from './thread-stop-marks';
 
 const lifecycles={experimental_lifecycles:['active','archived'] as const};
 function useMarkConfig(){const {values}=useSettings();const raw=values?.[MACHINE_MARKS_SETTING];return useMemo(()=>parseMachineMarksConfig(raw),[raw]);}
 export function MachineMarksController(){
  const {threads,status}=experimental_useSidebarThreads(lifecycles);const config=useMarkConfig();
- useEffect(()=>{machineMarkStore.set(status==='ready'?threads:[],config);},[threads,status,config]);
+ const sdk=useSdk();const [stoppedIds,setStoppedIds]=useState<ReadonlySet<string>>(new Set());
+ const renderedIds=useSyncExternalStore(machineMarkStore.subscribeRendered,machineMarkStore.renderedIds,machineMarkStore.renderedIds);
+ const trackerRef=useRef<ReturnType<typeof createThreadStopMarks>|null>(null);
+ const currentThreads=useRef(threads);currentThreads.current=status==='ready'&&config?.enabled?threads.filter(thread=>renderedIds.has(thread.id)):[];
+ useEffect(()=>{
+  const tracker=createThreadStopMarks((threadId,signal)=>sdk.threads.events.list({threadId,signal,order:'desc',limit:'1',types:['turn/started','system/thread/interrupted']}),setStoppedIds);
+  trackerRef.current=tracker;tracker.sync(currentThreads.current);
+  const timer=setInterval(()=>tracker.retryUnknown(),20000);
+  return ()=>{clearInterval(timer);trackerRef.current=null;tracker.dispose();};
+ },[sdk]);
+ useEffect(()=>{trackerRef.current?.sync(currentThreads.current);},[threads,status,config?.enabled,renderedIds]);
+ useEffect(()=>{machineMarkStore.set(status==='ready'?threads:[],config,stoppedIds);},[threads,status,config,stoppedIds]);
  useEffect(()=>()=>machineMarkStore.set([],null),[]);return null;
 }
 export function MachineHeaderMark({threadId}:PluginThreadHeaderActionProps){

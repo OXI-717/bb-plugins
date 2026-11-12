@@ -4,10 +4,14 @@ import {createMachineGlyph} from './machine-glyph';
 type ThreadMachine={id:string;host:MachineHost|null};
 export function createMachineMarkStore(){
  let snapshot=new Map<string,ReturnType<typeof resolveMachineMark>>();const listeners=new Set<()=>void>();
+ let rendered:ReadonlySet<string>=new Set();const renderedListeners=new Set<()=>void>();
  return {
-  set(threads:readonly ThreadMachine[],config:MachineMarksConfig|null){snapshot=new Map(threads.map(t=>[t.id,resolveMachineMark(t.host,config)]));for(const fn of listeners)fn();},
+  set(threads:readonly ThreadMachine[],config:MachineMarksConfig|null,stoppedIds:ReadonlySet<string>=new Set()){snapshot=new Map(threads.map(t=>{const mark=resolveMachineMark(t.host,config);return [t.id,mark&&stoppedIds.has(t.id)?{...mark,stopped:true,label:`${mark.label} · Остановлена`}:mark];}));for(const fn of listeners)fn();},
   get(id:string){return snapshot.get(id)??null;},
-  subscribe(fn:()=>void){listeners.add(fn);return ()=>{listeners.delete(fn);};}
+  subscribe(fn:()=>void){listeners.add(fn);return ()=>{listeners.delete(fn);};},
+  renderedIds(){return rendered;},
+  setRenderedIds(ids:ReadonlySet<string>){if(ids.size===rendered.size&&[...ids].every(id=>rendered.has(id)))return;rendered=new Set(ids);for(const fn of renderedListeners)fn();},
+  subscribeRendered(fn:()=>void){renderedListeners.add(fn);return ()=>{renderedListeners.delete(fn);};}
  };
 }
 export const machineMarkStore=createMachineMarkStore();
@@ -25,10 +29,12 @@ export function mountMachineMarks(doc:Document,store:ReturnType<typeof createMac
  function reconcile(){
   frame=null;if(disposed)return;
   const wanted=new Set<HTMLButtonElement>();
+  const renderedIds=new Set<string>();
   for(const link of Array.from(doc.querySelectorAll<HTMLElement>('[data-sidebar-thread-id]'))){
    const row=link.parentElement;const title=row?.querySelector<HTMLElement>('.bb-thread-title');
    if(!row||!title||!title.parentElement||title.closest('[contenteditable=true]')||title.querySelector('input,textarea,[contenteditable=true]'))continue;
    const mark=store.get(link.dataset.sidebarThreadId??'');if(!mark)continue;
+   renderedIds.add(link.dataset.sidebarThreadId!);
    let button=Array.from(owned).find(b=>b.parentElement===title.parentElement);
    if(!button){
     button=doc.createElement('button');button.type='button';button.dataset.oxiMachineMark='';
@@ -38,16 +44,19 @@ export function mountMachineMarks(doc:Document,store:ReturnType<typeof createMac
     button.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();});
     owned.add(button);title.before(button);
    }
-   if(button.dataset.oxiMachineIcon!==mark.icon){button.replaceChildren(createMachineGlyph(doc,mark.icon));button.dataset.oxiMachineIcon=mark.icon;}
-   if(button.dataset.oxiMachineKind!==mark.kind){Object.assign(button.style,machineMarkStyle(mark.kind));button.dataset.oxiMachineKind=mark.kind;}
+   const glyphKey=`${mark.icon}:${mark.stopped===true}`;
+   if(button.dataset.oxiMachineIcon!==glyphKey){button.replaceChildren(createMachineGlyph(doc,mark.icon,mark.stopped));button.dataset.oxiMachineIcon=glyphKey;}
+   const styleKey=`${mark.kind}:${mark.stopped===true}`;
+   if(button.dataset.oxiMachineKind!==styleKey){Object.assign(button.style,machineMarkStyle(mark.kind,mark.stopped));button.dataset.oxiMachineKind=styleKey;}
    if(button.getAttribute('aria-label')!==mark.label){button.setAttribute('aria-label',mark.label);button.title=mark.label;if(active===button)show(button);}
    wanted.add(button);
   }
   for(const button of owned)if(!wanted.has(button))remove(button);
+  store.setRenderedIds(renderedIds);
  }
  function schedule(){if(!disposed&&frame===null)frame=win!.requestAnimationFrame(reconcile);}
  const observer=new win.MutationObserver(schedule);observer.observe(doc.body,{childList:true,subtree:true,attributes:true,attributeFilter:['data-sidebar-thread-id','class','contenteditable']});
  const unsubscribe=store.subscribe(schedule);const key=(e:KeyboardEvent)=>{if(e.key==='Escape')hide();};
  doc.addEventListener('keydown',key);win.addEventListener('scroll',hide,true);win.addEventListener('resize',hide);schedule();
- return ()=>{if(disposed)return;disposed=true;observer.disconnect();unsubscribe();if(frame!==null)win.cancelAnimationFrame(frame);for(const b of owned)remove(b);tooltip.remove();doc.removeEventListener('keydown',key);win.removeEventListener('scroll',hide,true);win.removeEventListener('resize',hide);};
+ return ()=>{if(disposed)return;disposed=true;observer.disconnect();unsubscribe();if(frame!==null)win.cancelAnimationFrame(frame);for(const b of owned)remove(b);store.setRenderedIds(new Set());tooltip.remove();doc.removeEventListener('keydown',key);win.removeEventListener('scroll',hide,true);win.removeEventListener('resize',hide);};
 }
