@@ -42,3 +42,8 @@ Success returns the native `{type: "localImage", sourceProjectId, path, name, mi
 `GET /image-content` accepts exactly `serverId`, `projectId` and a single stored raster filename in `path`. Traversal, host paths and extra/duplicate parameters are rejected. Every read checks project ownership and current connection identity. The response has a validated raster content type, no-store, nosniff and a restrictive sandbox CSP. Upstream headers and redirects are not forwarded. This endpoint shares the existing installation trust boundary; it is not an external scoped credential or an agent-read permission.
 
 An upload can succeed remotely before a timeout, cancellation or configuration revocation is observed. There is no automatic retry or claim of exactly-once upload. Neither image endpoint enrolls machines, changes SSH forwarding, reads primary files or grants remote-to-primary execution.
+
+
+## Filtered stop metadata
+
+The trusted client may read one latest stop/turn-start boundary through the existing owned-thread events route. The raw encoded-separator check exempts only a single `types` query containing exactly `turn/started,system/thread/interrupted` (either order), with `limit=1` and `order=desc`, for GET/HEAD on an exact thread events path. Encoded route separators, traversal, extra unsafe query values, duplicate filters and foreign ownership remain rejected. This does not change write permission, plugin RPC permission, agent-read settings, SSH forwarding or remote-to-primary access.

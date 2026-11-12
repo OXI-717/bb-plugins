@@ -15,7 +15,16 @@ export function routingIds(path:string,body:unknown):string[]{
 }
 export function classifyRequest(method:string,path:string,body:unknown,i:Inventory,allowWrites:boolean):{ok:true}|{ok:false,reason:string}{
   const no=(reason:string)=>({ok:false as const,reason});
-  if(!path.startsWith('/api/v1/')||/[\\\r\n#]/.test(path)||/%2f|%5c|%2e/i.test(path)||path.split('?')[0].split('/').some(s=>s==='.'||s==='..'))return no('Недопустимый путь');
+  if(!path.startsWith('/api/v1/')||/[\\\r\n#]/.test(path))return no('Недопустимый путь');
+  // SDK event filters encode the slash in event names, not in the route.
+  // Exempt only this bounded metadata read; keep every other raw-path guard.
+  const query=new URL(path,'http://remote.invalid').searchParams;
+  const types=query.getAll('types');
+  const stopMetadata=(method==='GET'||method==='HEAD')&&/^\/api\/v1\/threads\/thr_[a-z0-9]+\/events$/.test(path.split('?')[0])&&
+    types.length===1&&['turn/started,system/thread/interrupted','system/thread/interrupted,turn/started'].includes(types[0]!)&&
+    query.getAll('limit').length===1&&query.get('limit')==='1'&&query.getAll('order').length===1&&query.get('order')==='desc';
+  const guarded=stopMetadata?path.replace(/([?&]types=)[^&#]*/,'$1stop-boundaries'):path;
+  if(!path.startsWith('/api/v1/')||/[\\\r\n#]/.test(path)||/%2f|%5c|%2e/i.test(guarded)||path.split('?')[0].split('/').some(s=>s==='.'||s==='..'))return no('Недопустимый путь');
   const p=new URL(path,'http://remote.invalid').pathname;const read=method==='GET'||method==='HEAD';
   if(!read&&!allowWrites)return no('Пилот работает только для чтения');
   for(const id of routingIds(path,body)){
