@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AccountSecret } from "./contracts.js";
-import { OAuthRefreshRejectedError } from "./provider-adapter.js";
+import { OAuthRefreshRejectedError, TransientOAuthRefreshError } from "./provider-adapter.js";
 
 export const GROK_CHAT_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 export const GROK_REFRESH_URL = "https://auth.x.ai/oauth2/token";
@@ -35,6 +35,13 @@ export async function refreshGrokAccess(input: {
   });
   if (!response.ok) {
     await response.body?.cancel();
+    if (response.status === 429 || response.status >= 500) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      throw new TransientOAuthRefreshError(
+        `Grok token endpoint responded ${response.status}.`,
+        Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1_000 : 0,
+      );
+    }
     throw new OAuthRefreshRejectedError(response.status, null);
   }
   const parsed = refreshResponseSchema.safeParse(
@@ -42,6 +49,12 @@ export async function refreshGrokAccess(input: {
   );
   if (!parsed.success) {
     await response.body?.cancel().catch(() => undefined);
+    if (response.status === 429 || response.status >= 500) {
+      throw new TransientOAuthRefreshError(
+        `Grok token endpoint responded ${response.status} with an unparsable body.`,
+        0,
+      );
+    }
     throw new OAuthRefreshRejectedError(response.status, null);
   }
   return {

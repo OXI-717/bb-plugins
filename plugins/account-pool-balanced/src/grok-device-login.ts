@@ -118,10 +118,11 @@ export class GrokDeviceLogin {
     this.sessions.set(session.sessionId, session);
 
     const deadline = Date.now() + LOGIN_PROMPT_TIMEOUT_MS;
+    // URL and code can arrive in separate output chunks: wait for both,
+    // subject to the deadline and the process exiting early.
     while (
       Date.now() < deadline &&
-      session.verificationUri === null &&
-      session.userCode === null &&
+      (session.verificationUri === null || session.userCode === null) &&
       session.settled === null
     ) await new Promise((resolve) => setTimeout(resolve, 25));
 
