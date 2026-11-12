@@ -3,7 +3,7 @@ import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
 import { contract, type Route } from './contract.js';
 import { CodedError } from './errors.js';
-import { runProcess, runOwnedProcess, brokerRunner, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, runCommand, overviewVaults, execResolved, runTidy, programAvailable, importFiles, replaceWithReferences } from './core.js';
+import { runProcess, runOwnedProcess, brokerRunner, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, keyReader, runCommand, overviewVaults, execResolved, runTidy, programAvailable, importFiles, replaceWithReferences } from './core.js';
 const pending = new Set<string>();
 // Owner-approved (desktop) op calls go through the OXI Op broker service when the route names
 // one, so macOS and 1Password authorise one long-lived service instead of each call.
@@ -90,8 +90,10 @@ export default experimental_defineHostEntry({ contract, handlers: {
             if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Critical keys require approved desktop access');
             const env = await environment(route, ctx.signal);
             const bindings: Record<string, string> = {};
+            const op = runOp(route);
+            const read = keyReader((binary, args, ...rest) => op(binary, ['--account', route.accountId!, ...args], ...rest), route.opBinary, env, route.vaultId, ctx.signal);
             for (const [variable, key] of Object.entries(keys)) {
-                try {bindings[variable] = await runOp(route)(route.opBinary, ['--account', route.accountId!, 'read', '--no-newline', 'op://' + route.vaultId + '/' + key.item + '/' + key.field], env, undefined, ctx.signal);}
+                try {bindings[variable] = await read(key);}
                 catch {throw new CodedError('key-unreadable', 'A requested key could not be read');}
             }
             return {bindings};

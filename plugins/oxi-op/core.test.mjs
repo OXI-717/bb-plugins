@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable,parseEnv,importFiles,replaceWithReferences} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,keyReader,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable,parseEnv,importFiles,replaceWithReferences} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
@@ -185,13 +185,27 @@ test('scope probe requires exactly one visible vault and reports a refused write
  assert.equal(items.size,0);
 });
 
+test('keys are read from the item itself, so titles op read rejects (Cyrillic) still work',async()=>{
+ const calls=[];
+ const item={fields:[{id:'username',label:'username',value:'root'},{id:'password',label:'password',value:'synthetic-root'},{id:'x1',label:'Пароль',value:'synthetic-ru'},{id:'d1',label:'dup',value:'a'},{id:'d2',label:'dup',value:'b'},{id:'e1',label:'empty',value:''}]};
+ const run=async(binary,args)=>{calls.push([binary,...args]);return JSON.stringify(item);};
+ const read=keyReader(run,'/bin/op',{},'vault-1');
+ const title='Пароль root сервера Пример 10.0.0.1';
+ assert.equal(await read({item:title,field:'password'}),'synthetic-root');
+ assert.equal(await read({item:title,field:'Пароль'}),'synthetic-ru');
+ assert.equal(await read({item:title,field:'x1'}),'synthetic-ru','a field ID works too');
+ assert.deepEqual(calls,[['/bin/op','item','get',title,'--vault','vault-1','--reveal','--format=json']],'one fetch per item and call; no op read reference');
+ await assert.rejects(read({item:title,field:'dup'}),e=>e.message.includes('[key-field]'));
+ await assert.rejects(read({item:title,field:'empty'}),e=>e.message.includes('[key-field]'));
+ await assert.rejects(read({item:title,field:'missing'}),e=>e.message.includes('[key-field]'));
+});
 test('agent commands get only requested keys, never the service token, and output is concealed',async()=>{
  const reads=[];
- const run=async(_b,args,env)=>{reads.push(args);assert.equal(env.OP_SERVICE_ACCOUNT_TOKEN,'synthetic-token');return 'synthetic-key-value';};
+ const run=async(_b,args,env)=>{reads.push(args);assert.equal(env.OP_SERVICE_ACCOUNT_TOKEN,'synthetic-token');return JSON.stringify({fields:[{id:'f1',label:'credential',value:'synthetic-key-value'}]});};
  let childEnv,childArgs;
  const command=async(bin,args,env,cwd,timeout)=>{childEnv=env;childArgs=[bin,...args,cwd,timeout];return {exitCode:0,output:'start synthetic-key-value end',truncated:false};};
  const result=await execWithKeys(run,command,{OP_SERVICE_ACCOUNT_TOKEN:'synthetic-token'},'automation-vault',['deploy','--check'],{API_KEY:{item:'Example API',field:'credential'}},'/work/project',5000);
- assert.deepEqual(reads,[['read','--no-newline','op://automation-vault/Example API/credential']]);
+ assert.deepEqual(reads,[['item','get','Example API','--vault','automation-vault','--reveal','--format=json']]);
  assert.equal(childEnv.API_KEY,'synthetic-key-value');
  assert(!Object.keys(childEnv).some(k=>k.startsWith('OP_')));
  assert.deepEqual(childArgs,['deploy','--check','/work/project',5000]);
@@ -201,7 +215,7 @@ test('agent commands get only requested keys, never the service token, and outpu
  await assert.rejects(execWithKeys(async()=>{throw new Error('synthetic-provider-detail');},command,{},'v',['x'],{K:{item:'a',field:'b'}},undefined,1000),e=>!e.message.includes('synthetic-provider-detail'));
 });
 test('a real child process receives the key and the returned output conceals it',async()=>{
- const result=await execWithKeys(async()=>'synthetic-live-value',runCommand,{OP_SERVICE_ACCOUNT_TOKEN:'synthetic-token'},'v',[process.execPath,'-e','console.log(process.env.K, typeof process.env.OP_SERVICE_ACCOUNT_TOKEN); process.exit(3)'],{K:{item:'a',field:'b'}},undefined,10000);
+ const result=await execWithKeys(async()=>JSON.stringify({fields:[{label:'b',value:'synthetic-live-value'}]}),runCommand,{OP_SERVICE_ACCOUNT_TOKEN:'synthetic-token'},'v',[process.execPath,'-e','console.log(process.env.K, typeof process.env.OP_SERVICE_ACCOUNT_TOKEN); process.exit(3)'],{K:{item:'a',field:'b'}},undefined,10000);
  assert.equal(result.exitCode,3);
  assert.equal(result.output.trim(),'<concealed> undefined');
 });
@@ -237,7 +251,7 @@ test('an agent command timeout ends descendants that hold keys',async t=>{
  const source=`const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(file)},String(c.pid));setInterval(()=>{},1000);`;
  let pid;
  try{
-  const result=await execWithKeys(async()=>'synthetic-key',runCommand,{},'v',[process.execPath,'-e',source],{K:{item:'a',field:'b'}},undefined,700);
+  const result=await execWithKeys(async()=>JSON.stringify({fields:[{label:'b',value:'synthetic-key'}]}),runCommand,{},'v',[process.execPath,'-e',source],{K:{item:'a',field:'b'}},undefined,700);
   assert.equal(result.timedOut,true);
   pid=Number(await readFile(file,'utf8'));
   const running=async()=>{try{process.kill(pid,0);}catch{return false;}if(process.platform==='linux'){try{if((await readFile('/proc/'+pid+'/stat','utf8')).split(' ')[2]==='Z')return false;}catch{return false;}}return true;};
