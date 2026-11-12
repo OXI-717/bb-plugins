@@ -13,6 +13,8 @@ import type { AccountSummary } from "./contracts.js";
 import {
   browserExecutableCandidates,
   browserProcessPattern,
+  browserProcessUsesRoot,
+  listRunningHelium,
   ensureProfile,
   fetchExitGeo,
   heliumDataRoot,
@@ -264,6 +266,34 @@ describe("profile naming and allocation", () => {
 });
 
 describe("browserExecutableCandidates", () => {
+  it('ignores only managed routed roots while protecting shared and unmanaged browsers',()=>{
+    const root='/fixture/Helium User Data';
+    const routed=root+'/Pool Routed Accounts/11111111-1111-4111-8111-111111111111';
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+routed+' --profile-directory=Profile 1',root,true)).toBe(false);
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+routed,routed)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+root+' --profile-directory=Profile 1',root,true)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --profile-directory=Profile 1',root,true)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --user-data-dir=/unknown/custom-root',root,true)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+routed+'-suffix',root,true)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+routed+'-suffix',routed)).toBe(false);
+  });
+  it('permits a shared launch while a real routed browser process is alive, retaining unmanaged protection',async()=>{
+    const executable=path.join(tmpdir(),'pool-browser-process-'+Date.now());
+    const root='/fixture/Helium User Data',routed=root+'/Pool Routed Accounts/11111111-1111-4111-8111-111111111111';
+    const children:ReturnType<typeof spawnProcess>[]=[];
+    const launch=async(args:string[])=>{
+      const child=spawnProcess(process.execPath,['-e','setInterval(()=>{},1000)','--',...args],{argv0:executable,stdio:'ignore'});children.push(child);
+      await new Promise<void>((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});return child;
+    };
+    try{
+      const selected=await launch(['--user-data-dir='+routed]);
+      expect(await listRunningHelium(executable)).toContain(selected.pid);
+      expect(await listRunningHelium(executable,root,true)).not.toContain(selected.pid);
+      expect(await listRunningHelium(executable,routed)).toContain(selected.pid);
+      const unmanaged=await launch([]);
+      expect(await listRunningHelium(executable,root,true)).toContain(unmanaged.pid);
+    }finally{await Promise.all(children.map(child=>new Promise<void>(resolve=>{if(child.exitCode!==null)return resolve();child.once('exit',()=>resolve());child.kill();})));}
+  });
   it("matches the browser main process with arguments and escapes the executable", () => {
     const executable = "/fixture/Helium.app/Contents/MacOS/Helium";
     const pattern = new RegExp(browserProcessPattern(executable).replace("[[:space:]]", "\\s"));

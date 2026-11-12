@@ -312,17 +312,28 @@ export function browserProcessPattern(executable: string): string {
   return executable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([[:space:]]|$)";
 }
 
-export async function listRunningHelium(executable = path.join("/Applications", HELIUM_APP_BINARY), root?:string): Promise<number[]> {
+/** Exclude only a positively identified managed routed root. Unknown/unmanaged
+ * processes remain blockers for the shared root, including default launches. */
+export function browserProcessUsesRoot(command:string,root:string,shared=false):boolean{
+  const escape=(value:string)=>value.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const argument="(?:^|[ \t])--user-data-dir(?:=|[ \t]+)";
+  const boundary="(?:[ \t]|$)";
+  if(new RegExp(argument+escape(root)+boundary).test(command))return true;
+  if(!shared)return false;
+  const routed=new RegExp(argument+escape(path.join(root,'Pool Routed Accounts'))+"/[a-f0-9-]{36}"+boundary,'i');
+  return !routed.test(command);
+}
+
+export async function listRunningHelium(executable = path.join("/Applications", HELIUM_APP_BINARY), root?:string, shared=false): Promise<number[]> {
   try {
-    const pattern=browserProcessPattern(executable)+(root?".*--user-data-dir="+root.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"):"");
-    const { stdout } = await execFileAsync("pgrep", ["-f", "--", pattern], {
-      timeout: 2000,
-      maxBuffer: 65536,
+    const { stdout } = await execFileAsync("pgrep", ["-f", "--", browserProcessPattern(executable)], {timeout:2000,maxBuffer:65536});
+    const pids=stdout.split("\n").map(line=>Number(line.trim())).filter(pid=>Number.isSafeInteger(pid)&&pid>0);
+    if(!root||!pids.length)return pids;
+    const processes=await execFileAsync('ps',['-p',pids.join(','),'-o','pid=,command='],{timeout:2000,maxBuffer:65536});
+    return processes.stdout.split('\n').flatMap(line=>{
+      const match=/^\s*(\d+)\s+(.+)$/.exec(line);
+      return match&&pids.includes(Number(match[1]))&&browserProcessUsesRoot(match[2]!,root,shared)?[Number(match[1])]:[];
     });
-    return stdout
-      .split("\n")
-      .map((line) => Number(line.trim()))
-      .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === 1) return [];
     throw new Error("Cannot inspect running browser processes; refusing an unverified timezone handoff.");
@@ -629,7 +640,7 @@ async function openAccountBrowserLocked(
   // A native or older isolated process may be writing either side of migration.
   // Never join it without the current shared supervisor capability.
   const assertClosed = async () => {
-    const running = await (options.listRunning ?? (() => listRunningHelium(executable,options.proxyUrl?root:undefined)))();
+    const running = await (options.listRunning ?? (() => listRunningHelium(executable,root,!options.proxyUrl)))();
     if (running.length) throw new Error("Helium is running without a live transport supervisor for this profile. Close Helium once before updating the shared profile list.");
   };
   await assertClosed();
