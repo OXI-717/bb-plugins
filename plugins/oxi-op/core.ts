@@ -665,7 +665,7 @@ async function privateArchiveDir(archiveDir: string, target: string) {
 // original name is removed only after the link is in place (undone if that removal fails).
 // On another file system (EXDEV) the file is copied with an exclusive create instead, checked
 // byte for byte against the verified snapshot, and only then removed from its old place.
-export async function moveNoClobber(source: string, target: string, bytes: Buffer, mode: number, linkFile: (from: string, to: string) => Promise<void> = link) {
+export async function moveNoClobber(source: string, target: string, bytes: Buffer, mode: number, linkFile: (from: string, to: string) => Promise<void> = link, unchanged: () => Promise<void> = async () => {}) {
     const exists = (error: unknown) => {
         if ((error as NodeJS.ErrnoException)?.code === 'EEXIST') throw new CodedError('archive-exists', 'A file with this path is already in the archive folder');
         throw error;
@@ -679,6 +679,8 @@ export async function moveNoClobber(source: string, target: string, bytes: Buffe
         try {
             await chmod(target, mode & 0o777);
             if (sha(await readFile(target)) !== sha(bytes)) throw new CodedError('archive-copy-differs', 'The archived copy differs from the checked file');
+            // The source may have been replaced while it was copied; then it stays and the copy goes.
+            await unchanged();
         } catch (failure) {await unlink(target).catch(() => {}); throw failure;}
     }
     try {await fsStep(() => unlink(source));}
@@ -711,7 +713,7 @@ export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv,
                 const target = archiveTarget(archiveDir, entry.file);
                 await privateArchiveDir(archiveDir, target);
                 await unchanged();
-                await moveNoClobber(entry.file, target, bytes, info.mode);
+                await moveNoClobber(entry.file, target, bytes, info.mode, link, unchanged);
                 results.push({file: entry.file, state: 'moved', movedTo: target});
                 continue;
             }

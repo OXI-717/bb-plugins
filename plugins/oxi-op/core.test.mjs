@@ -605,6 +605,13 @@ test('across file systems a key file is copied exclusively, checked, then remove
   const dst3=join(dir,'differs.key');
   await assert.rejects(moveNoClobber(src2,dst3,Buffer.from('another-snapshot'),0o100600,crossDevice),/archive-copy-differs/);
   await assert.rejects(access(dst3));assert.equal(await readFile(src2,'utf8'),'synthetic-k2','a copy that does not match is removed and the original kept');
+  // A source replaced during the copy is kept and the copy removed.
+  const dst4=join(dir,'rotated.key');
+  const rotated=async()=>{if(await readFile(src2,'utf8')!=='synthetic-k2')throw Object.assign(new Error('[changed-during-run] changed'),{});};
+  await writeFile(src2,'synthetic-k2');
+  const rotating=async()=>{await writeFile(src2,'synthetic-rotated');await rotated();};
+  await assert.rejects(moveNoClobber(src2,dst4,Buffer.from('synthetic-k2'),0o100600,crossDevice,rotating),/changed-during-run/);
+  await assert.rejects(access(dst4));assert.equal(await readFile(src2,'utf8'),'synthetic-rotated','the rotated source is never deleted');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('a locked file is reported by code, left as it is, and leaves no rewritten copy behind',async t=>{
