@@ -3,9 +3,9 @@ import { createConnection } from 'node:net';
 import { CodedError, errorCode } from './errors.js';
 export { CodedError, errorCode } from './errors.js';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdtemp, mkdir, writeFile, rm, chmod, readFile, lstat, rename, link, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, chmod, readFile, lstat, rename, link, unlink, copyFile } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
-import { existsSync } from 'node:fs';
+import { existsSync, constants as fsConstants } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import type {Route} from './contract.js';
 class CredentialProcessError extends CodedError {constructor(message: string) {super('op-exit', message);}}
@@ -663,13 +663,27 @@ async function privateArchiveDir(archiveDir: string, target: string) {
 }
 // Move without ever replacing what is already there: a hard link fails if the name exists, and the
 // original name is removed only after the link is in place (undone if that removal fails).
-async function moveNoClobber(source: string, target: string) {
-    await fsStep(() => link(source, target)).catch(error => {
+// On another file system (EXDEV) the file is copied with an exclusive create instead, checked
+// byte for byte against the verified snapshot, and only then removed from its old place.
+export async function moveNoClobber(source: string, target: string, bytes: Buffer, mode: number, linkFile: (from: string, to: string) => Promise<void> = link) {
+    const exists = (error: unknown) => {
         if ((error as NodeJS.ErrnoException)?.code === 'EEXIST') throw new CodedError('archive-exists', 'A file with this path is already in the archive folder');
         throw error;
-    });
+    };
+    let copied = false;
+    try {await fsStep(() => linkFile(source, target));}
+    catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'EXDEV') exists(error);
+        await fsStep(() => copyFile(source, target, fsConstants.COPYFILE_EXCL)).catch(exists);
+        copied = true;
+        try {
+            await chmod(target, mode & 0o777);
+            if (sha(await readFile(target)) !== sha(bytes)) throw new CodedError('archive-copy-differs', 'The archived copy differs from the checked file');
+        } catch (failure) {await unlink(target).catch(() => {}); throw failure;}
+    }
     try {await fsStep(() => unlink(source));}
     catch (error) {await unlink(target).catch(() => {}); throw error;}
+    return copied;
 }
 // Imported key files are never deleted: with an archive folder they are moved there (0700 folders,
 // same name and relative path), without one they stay where they are.
@@ -697,7 +711,7 @@ export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv,
                 const target = archiveTarget(archiveDir, entry.file);
                 await privateArchiveDir(archiveDir, target);
                 await unchanged();
-                await moveNoClobber(entry.file, target);
+                await moveNoClobber(entry.file, target, bytes, info.mode);
                 results.push({file: entry.file, state: 'moved', movedTo: target});
                 continue;
             }

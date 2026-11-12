@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,keyReader,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable,parseEnv,importFiles,replaceWithReferences,archiveTarget} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,keyReader,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable,parseEnv,importFiles,replaceWithReferences,archiveTarget,moveNoClobber} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
@@ -589,6 +589,22 @@ test('a key file never leaves the archive through a link and never replaces an a
   assert.equal(moved.results[0].state,'moved');
   contract.importFiles.output.parse(moved);
   await assert.rejects(access(c));assert.equal(await readFile(moved.results[0].movedTo,'utf8'),'synthetic-c');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('across file systems a key file is copied exclusively, checked, then removed',async()=>{
+ const {mkdtemp,writeFile,readFile,rm,access,stat}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-xdev-'));
+ const crossDevice=async()=>{const e=new Error('cross-device link');e.code='EXDEV';throw e;};
+ try{
+  const src=join(dir,'k.key');const dst=join(dir,'moved.key');await writeFile(src,'synthetic-k',{mode:0o600});
+  assert.equal(await moveNoClobber(src,dst,Buffer.from('synthetic-k'),0o100600,crossDevice),true);
+  await assert.rejects(access(src));assert.equal(await readFile(dst,'utf8'),'synthetic-k');assert.equal((await stat(dst)).mode&0o777,0o600);
+  const src2=join(dir,'k2.key');await writeFile(src2,'synthetic-k2');
+  await assert.rejects(moveNoClobber(src2,dst,Buffer.from('synthetic-k2'),0o100600,crossDevice),/archive-exists/);
+  assert.equal(await readFile(dst,'utf8'),'synthetic-k','an archived file is never replaced');assert.equal(await readFile(src2,'utf8'),'synthetic-k2');
+  const dst3=join(dir,'differs.key');
+  await assert.rejects(moveNoClobber(src2,dst3,Buffer.from('another-snapshot'),0o100600,crossDevice),/archive-copy-differs/);
+  await assert.rejects(access(dst3));assert.equal(await readFile(src2,'utf8'),'synthetic-k2','a copy that does not match is removed and the original kept');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 test('a locked file is reported by code, left as it is, and leaves no rewritten copy behind',async t=>{
