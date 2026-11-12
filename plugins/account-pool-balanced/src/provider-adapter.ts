@@ -18,7 +18,7 @@ export class AccountAuthorizationRequiredError extends Error {
     super(message);
   }
   get accountMessage(): string {
-    return `[OAUTH_REAUTH_REQUIRED] ${this.message}${this.oauthCode ? ` OAuth: ${this.oauthCode}.` : ""} Sign in again. HTTP status alone does not establish why the token was rejected.`;
+    return `[OAUTH_REAUTH_REQUIRED] ${this.message}${this.oauthCode ? ` OAuth: ${this.oauthCode}.` : ""} Требуется повторная авторизация / Sign in again. HTTP status alone does not establish why the token was rejected.`;
   }
 }
 
