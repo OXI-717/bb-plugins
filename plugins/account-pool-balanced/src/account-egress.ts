@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
+import { ProxySecrets, parseProxyUrl } from './proxy-secrets.js';
 import { z } from 'zod';
-import { ProxyAgent } from 'undici';
+import { ProxyAgent, buildConnector } from 'undici';
 import type { PoolKvStorage } from './core-storage.js';
 
 const id = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/);
-export const egressProfileSchema = z.object({
+const sshProfileSchema = z.object({
   id, version: z.number().int().positive(), label: z.string().min(1).max(120),
   node: id, hostIds: z.array(id).min(1).max(32),
   transport: z.literal('ssh-connect'),
@@ -18,6 +20,14 @@ export const egressProfileSchema = z.object({
   expectedExit: z.array(z.ipv4()).min(1).max(16),
   assurance: z.literal('proxy-enforced'),
 }).strict();
+const httpProfileSchema = z.object({
+  id, version:z.number().int().positive(),label:z.string().min(1).max(120),
+  hostIds:z.array(id).min(1).max(32),transport:z.literal('http-connect'),
+  endpoint:z.string().max(2048).refine(value=>{try{const u=parseProxyUrl(value);return !u.username&&!u.password;}catch{return false;}}),
+  secretRef:z.string().uuid(), failure:z.literal('closed'),
+}).strict();
+export const egressProfileSchema=z.discriminatedUnion('transport',[sshProfileSchema,httpProfileSchema]);
+export const accountProxyInputSchema=z.object({accountId:z.string().uuid(),url:z.string().min(1).max(4096)}).strict();
 export type EgressProfile = z.infer<typeof egressProfileSchema>;
 const refSchema = z.object({id, version:z.number().int().positive()}).strict();
 export const egressStateSchema = z.object({schema:z.literal(1),profiles:z.array(egressProfileSchema).max(128),
@@ -52,7 +62,7 @@ export class AccountEgress {
   private readonly sessions = new Map<string,{accountId:string;route:AccountRoute}>();
   private mutation:Promise<unknown> = Promise.resolve();
   constructor(private readonly kv:PoolKvStorage,private readonly hostId:()=>Promise<string>,
-    private readonly accountExists:(id:string)=>Promise<boolean>){}
+    private readonly accountExists:(id:string)=>Promise<boolean>,private readonly proxySecrets?:ProxySecrets){}
   async initialize(){
     const stored=await this.kv.get('account-egress-v1');if(stored!==undefined)this.state=egressStateSchema.parse(stored);
     if(decisionCount(this.state)>=4096 || registryBytes(this.state)>=MAX_REGISTRY_BYTES)this.state.assignmentBlocked=true;
@@ -62,7 +72,7 @@ export class AccountEgress {
   pinnedAccount(sessionKey:string):string|null{return this.state.pins[sessionKey]?.accountId??null;}
   validateNativeProfile(ref:{id:string;version:number},hostId:string):void{
     const profile=this.state.profiles.find(p=>p.id===ref.id&&p.version===ref.version);
-    if(!profile||!profile.hostIds.includes(hostId))throw new EgressUnavailable();
+    if(!profile||profile.transport!=='ssh-connect'||!profile.hostIds.includes(hostId))throw new EgressUnavailable();
   }
   private update(change:()=>Promise<void>){
     const next=this.mutation.then(change);this.mutation=next.catch(()=>undefined);return next;
@@ -76,6 +86,20 @@ export class AccountEgress {
     requireRegistrySpace(next);
     await this.kv.set('account-egress-v1',next);this.state=next;
   });}
+  /** Raw URLs enter only through the private operator RPC, never provider env. */
+  async configureProxy(input:unknown){
+    const parsed=accountProxyInputSchema.safeParse(input);
+    if(!parsed.success)throw Error('Invalid account proxy settings.');
+    const {accountId,url}=parsed.data;
+    const u=parseProxyUrl(url);
+    if(!this.proxySecrets || !await this.accountExists(accountId))throw Error('Account proxy unavailable.');
+    const host=await this.hostId(),secretRef=randomUUID();
+    await this.proxySecrets.write(secretRef,u.href);
+    u.username='';u.password='';
+    const ref={id:'proxy-'+secretRef,version:1};
+    await this.configure({...ref,label:('Прокси '+u.hostname).slice(0,120),hostIds:[host],transport:'http-connect',endpoint:u.href,secretRef,failure:'closed'});
+    await this.bind(accountId,ref);
+  }
   bind(accountId:string,ref:z.infer<typeof refSchema>|null){return this.update(async()=>{
     z.string().uuid().parse(accountId);
     if(!await this.accountExists(accountId))throw Error('Account unavailable or its native transport is not supported.');
@@ -105,7 +129,21 @@ export class AccountEgress {
       const profile=Object.freeze(structuredClone(value));
       const key=JSON.stringify(profile);
       let agent=this.agents.get(key);
-      if(!agent){agent=new ProxyAgent({uri:profile.endpoint,allowH2:false});this.agents.set(key,agent);}
+      if(!agent){
+        let uri=profile.endpoint,token:string|undefined;
+        if(profile.transport==='http-connect'){
+          try{
+            if(!this.proxySecrets)throw new EgressUnavailable();
+            const u=parseProxyUrl(await this.proxySecrets.read(profile.secretRef));
+            if(u.username||u.password)token='Basic '+Buffer.from(decodeURIComponent(u.username)+':'+decodeURIComponent(u.password)).toString('base64');
+            u.username='';u.password='';
+            if(u.href!==profile.endpoint)throw new EgressUnavailable();
+          }catch{throw new EgressUnavailable();}
+        }
+        try{agent=new ProxyAgent({uri,token,allowH2:false,connect:{family:4},proxyTls:{family:4} as Parameters<typeof buildConnector>[0],requestTls:{family:4} as Parameters<typeof buildConnector>[0]});}
+        catch{throw new EgressUnavailable();}
+        this.agents.set(key,agent);
+      }
       const dispatcher=agent;
       const send:typeof fetch=async(input,init)=>{
         const url=new URL(input instanceof Request?input.url:String(input));
