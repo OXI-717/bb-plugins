@@ -8,7 +8,7 @@ type DispatchOverrides = Omit<NonNullable<Parameters<typeof makeMessageDispatchH
 };
 function dispatchContext(overrides:DispatchOverrides={}) {
  const {queuedMessage,queuedMessages,...context}=overrides;
- return makeMessageDispatchHookContext({...context,queuedMessages:queuedMessage===undefined?queuedMessages??[]:queuedMessage===null?[]:[queuedMessage]});
+ return makeMessageDispatchHookContext({...context,queuedMessages:queuedMessage===undefined?queuedMessages??[]:queuedMessage===null?[]:[queuedMessage]} as unknown as NonNullable<Parameters<typeof makeMessageDispatchHookContext>[0]>);
 }
 async function setup() {
  const retry=vi.fn(async(_input:unknown)=>({ok:true,delivery:'queued'}) as never);
@@ -123,7 +123,7 @@ it('permits the current owned queued retry and never fences manual retries or or
  const context=dispatchContext({thread:{id:'thread-one',status:'error'},queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
  expect(await hook!(context)).toEqual({action:'proceed'});
  fake.harness.sdk.stub('threads.events.list',async()=>{throw Error('unavailable');});
- expect(await hook!(dispatchContext({...context,queuedMessage:{...context.queuedMessages[0]!,payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Manual retry'}}}))).toEqual({action:'proceed'});
+ expect(await hook!(dispatchContext({...context,queuedMessage:{...(context as {queuedMessages?:[{id:string}]}).queuedMessages![0]!,payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Manual retry'}}}))).toEqual({action:'proceed'});
  expect(await hook!(dispatchContext({...context,queuedMessage:null}))).toEqual({action:'proceed'});await fake.harness.lifecycle.dispose();
 });
 
@@ -188,6 +188,6 @@ it('holds recognizable automatic queue rows when their ownership journal is malf
  const hook=fake.harness.registrations.hooks['message.dispatch']!;
  const context=dispatchContext({queuedMessage:{payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}});
  expect(await hook(context)).toMatchObject({action:'wait'});
- expect(await hook(dispatchContext({...context,queuedMessage:{...context.queuedMessages[0]!,payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Manual retry'}}}))).toEqual({action:'proceed'});
+ expect(await hook(dispatchContext({...context,queuedMessage:{...(context as {queuedMessages?:[{id:string}]}).queuedMessages![0]!,payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Manual retry'}}}))).toEqual({action:'proceed'});
  await fake.harness.lifecycle.dispose();
 });

@@ -70,15 +70,22 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   // Native retries are checked again at queue drain: an RPC can lose its reply
   // before a late row appears, after event/startup cancellation already ran.
   const dispatchReads=new Map<string,Promise<{requestId:string|null;eligible:boolean}>>();
-  bb.experimental_hooks.on('message.dispatch',async context=>{
-    const queued=context.queuedMessages;
+   bb.experimental_hooks.on('message.dispatch',async context=>{
+     // The pinned SDK (0.4.x) types only `queuedMessage`; newer hosts pass the
+     // whole dispatch group as `queuedMessages`. Read both, prefer the group.
+     const withGroup=context as typeof context&{queuedMessages?:readonly NonNullable<(typeof context)['queuedMessage']>[]};
+     const queued:readonly NonNullable<(typeof context)['queuedMessage']>[]=(withGroup.queuedMessages??[]).
+       length?withGroup.queuedMessages!:(context.queuedMessage?[context.queuedMessage]:[]);
     if(!queued.some(entry=>entry.payload.kind==='retry'))return {action:'proceed'};
     if(queued.length!==1)return {action:'reject',message:'Automatic retry cancelled because its dispatch group includes other queued work.'};
     const entry=queued[0]!;
     if(entry.payload.kind!=='retry')return {action:'reject',message:'Automatic retry cancelled because its queued work could not be verified.'};
     const payload=entry.payload;
+    // A row whose reason no longer matches the owned pattern is manual work
+    // (e.g. the user converted an owned retry): never fence it by its id.
+    if(!/^Temporary connection failure\. Retry [123]\/3\.$/.test(payload.reason))return {action:'proceed'};
 
-    if(!claims)return /^Temporary connection failure\. Retry [123]\/3\.$/.test(payload.reason)?{action:'wait',reason:'Pooler retry journal unavailable',sendAt:now()+10_000}:{action:'proceed'};
+    if(!claims)return {action:'wait',reason:'Pooler retry journal unavailable',sendAt:now()+10_000};
     const claim=claims.find(value=>value.threadId===context.thread.id&&(value.queuedMessageId===entry.id||
       (value.originalRequestId===payload.retryOfTurnRequestId&&payload.reason===`Temporary connection failure. Retry ${value.attempt}/3.`)));
     if(!claim)return {action:'proceed'};

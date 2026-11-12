@@ -64,5 +64,5 @@ it.each(['bypass','routing-off','account-disabled'] as const)('cancels queued re
  if(change==='account-disabled')expect(env).toEqual(expect.arrayContaining([expect.objectContaining({name:'OXI_KIMI_BASE_URL'}),expect.objectContaining({name:'KIMI_API_KEY'})]));
  else expect(env).toEqual([]);
  const hook=host.harness.registrations.hooks['message.dispatch']!;
- expect(await hook(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},requestedExecution:{providerId:'acp-opencode-kimi'},queuedMessages:[{id:'retry-one',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}]}))).toMatchObject({action:'reject'});
+ expect(await hook(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},requestedExecution:{providerId:'acp-opencode-kimi'},queuedMessages:[{id:'retry-one',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}]} as unknown as NonNullable<Parameters<typeof makeMessageDispatchHookContext>[0]>))).toMatchObject({action:'reject'});
 });
