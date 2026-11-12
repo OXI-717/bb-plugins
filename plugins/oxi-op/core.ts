@@ -3,10 +3,10 @@ import { createConnection } from 'node:net';
 import { CodedError, errorCode } from './errors.js';
 export { CodedError, errorCode } from './errors.js';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdtemp, writeFile, rm, chmod, readFile, lstat, unlink, rename } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtemp, mkdir, writeFile, rm, chmod, readFile, lstat, rename, link, unlink, copyFile } from 'node:fs/promises';
+import { tmpdir, homedir } from 'node:os';
+import { existsSync, constants as fsConstants } from 'node:fs';
+import { join, dirname, relative } from 'node:path';
 import type {Route} from './contract.js';
 class CredentialProcessError extends CodedError {constructor(message: string) {super('op-exit', message);}}
 
@@ -640,9 +640,58 @@ async function fsStep<T>(step: () => Promise<T>) {
     }
 }
 const fileFailure = (error: unknown) => errorCode(error) ?? (typeof (error as NodeJS.ErrnoException)?.code === 'string' ? 'fs-' + (error as NodeJS.ErrnoException).code!.toLowerCase() : 'failed');
-export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, entries: (ImportEntry & {itemId: string})[], signal?: AbortSignal) {
+// Where an imported key file goes: its path under the owner's archive folder, relative to home.
+export function archiveTarget(archiveDir: string, file: string, home = homedir()) {
+    const rel = file.startsWith(home + '/') ? file.slice(home.length + 1) : file.replace(/^\/+/, '');
+    if (!rel || rel.split('/').some(part => part === '..' || part === '')) throw new CodedError('archive-path', 'The file path cannot be placed in the archive folder');
+    return join(archiveDir, rel);
+}
+// Archive folders are created one level at a time and never followed through a link: the root and
+// every folder below it must be a real directory, so a planted link cannot carry a key elsewhere.
+async function privateArchiveDir(archiveDir: string, target: string) {
+    await fsStep(() => mkdir(archiveDir, {recursive: true, mode: 0o700}));
+    let dir = archiveDir;
+    for (const part of ['', ...relative(archiveDir, dirname(target)).split('/').filter(Boolean)]) {
+        if (part) {
+            dir = join(dir, part);
+            await fsStep(() => mkdir(dir, {mode: 0o700})).catch(error => {if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw error;});
+        }
+        const info = await lstat(dir);
+        if (info.isSymbolicLink() || !info.isDirectory()) throw new CodedError('archive-link', 'A folder in the archive path is a link or not a folder');
+    }
+    await fsStep(() => chmod(archiveDir, 0o700));
+}
+// Move without ever replacing what is already there: a hard link fails if the name exists, and the
+// original name is removed only after the link is in place (undone if that removal fails).
+// On another file system (EXDEV) the file is copied with an exclusive create instead, checked
+// byte for byte against the verified snapshot, and only then removed from its old place.
+export async function moveNoClobber(source: string, target: string, bytes: Buffer, mode: number, linkFile: (from: string, to: string) => Promise<void> = link, unchanged: () => Promise<void> = async () => {}) {
+    const exists = (error: unknown) => {
+        if ((error as NodeJS.ErrnoException)?.code === 'EEXIST') throw new CodedError('archive-exists', 'A file with this path is already in the archive folder');
+        throw error;
+    };
+    let copied = false;
+    try {await fsStep(() => linkFile(source, target));}
+    catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'EXDEV') exists(error);
+        await fsStep(() => copyFile(source, target, fsConstants.COPYFILE_EXCL)).catch(exists);
+        copied = true;
+        try {
+            await chmod(target, mode & 0o777);
+            if (sha(await readFile(target)) !== sha(bytes)) throw new CodedError('archive-copy-differs', 'The archived copy differs from the checked file');
+            // The source may have been replaced while it was copied; then it stays and the copy goes.
+            await unchanged();
+        } catch (failure) {await unlink(target).catch(() => {}); throw failure;}
+    }
+    try {await fsStep(() => unlink(source));}
+    catch (error) {await unlink(target).catch(() => {}); throw error;}
+    return copied;
+}
+// Imported key files are never deleted: with an archive folder they are moved there (0700 folders,
+// same name and relative path), without one they stay where they are.
+export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv, vaultId: string, entries: (ImportEntry & {itemId: string})[], signal?: AbortSignal, archiveDir?: string) {
     const op = async (args: string[]) => run('op', args, env, undefined, signal);
-    const results: {file: string; state: 'referenced' | 'removed' | 'skipped' | 'failed'; code?: string; keys?: number}[] = [];
+    const results: {file: string; state: 'referenced' | 'moved' | 'skipped' | 'failed'; code?: string; keys?: number; movedTo?: string}[] = [];
     for (const entry of entries) {
         try {
             const info = await lstat(entry.file);
@@ -659,10 +708,13 @@ export async function replaceWithReferences(run: Runner, env: NodeJS.ProcessEnv,
             const stored = JSON.parse(await op(['item', 'get', entry.itemId, '--vault', vaultId, '--reveal', '--format=json']));
             if (stored.category === 'DOCUMENT') {
                 if (entry.kind !== 'document') {results.push({file: entry.file, state: 'skipped', code: 'kept-as-document'}); continue;}
+                if (!archiveDir) {results.push({file: entry.file, state: 'skipped', code: 'no-archive-dir'}); continue;}
                 if (!await documentMatches(op, vaultId, entry.itemId, bytes)) throw new CodedError('values-differ', 'Vault copy differs');
+                const target = archiveTarget(archiveDir, entry.file);
+                await privateArchiveDir(archiveDir, target);
                 await unchanged();
-                await fsStep(() => unlink(entry.file));
-                results.push({file: entry.file, state: 'removed'});
+                await moveNoClobber(entry.file, target, bytes, info.mode, link, unchanged);
+                results.push({file: entry.file, state: 'moved', movedTo: target});
                 continue;
             }
             if (entry.kind !== 'env') throw new CodedError('kind-mismatch', 'Planned kind differs from the stored item');

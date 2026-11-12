@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,keyReader,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable,parseEnv,importFiles,replaceWithReferences} from './dist/test/core.js';
+import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,keyReader,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable,parseEnv,importFiles,replaceWithReferences,archiveTarget,moveNoClobber} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
@@ -493,8 +493,16 @@ test('files are imported once, compared by value, and replaced by references onl
   assert.deepEqual(refused.results[0],{file:envFile,state:'failed',code:'values-differ'});
   assert.equal(await readFile(envFile,'utf8'),'API_KEY=changed\nURL=https://example.test\n','nothing is rewritten when values differ');
   await writeFile(envFile,'# app\nAPI_KEY=synthetic-api\nURL=https://example.test\nEMPTY=\n',{mode:0o600});
-  const done=await replaceWithReferences(v.run,{},'vault-1',plan.map((p,i)=>({...p,itemId:first.results[i].itemId})));
-  assert.deepEqual(done.results.map(r=>r.state),['referenced','removed']);
+  const kept=await replaceWithReferences(v.run,{},'vault-1',plan.slice(1).map(p=>({...p,itemId:first.results[1].itemId})));
+  assert.deepEqual(kept.results.map(r=>[r.state,r.code]),[['skipped','no-archive-dir']],'without an archive folder a key file is never touched');
+  await access(keyFile);
+  const archive=join(dir,'archive');
+  const done=await replaceWithReferences(v.run,{},'vault-1',plan.map((p,i)=>({...p,itemId:first.results[i].itemId})),undefined,archive);
+  assert.deepEqual(done.results.map(r=>r.state),['referenced','moved']);
+  const moved=join(archive,keyFile.replace(/^\/+/,''));
+  assert.equal(done.results[1].movedTo,moved);
+  assert.equal(await readFile(moved,'utf8'),'synthetic-private-key-bytes','the key file is moved intact, never deleted');
+  assert.equal((await stat(archive)).mode&0o777,0o700);
   const text=await readFile(envFile,'utf8');
   assert(!text.includes('synthetic'));assert(text.includes('API_KEY=op://vault-1/'+first.results[0].itemId+'/Environment/API_KEY'));assert(text.includes('# app')&&text.includes('EMPTY='));
   assert.equal((await stat(envFile)).mode&0o777,0o600);
@@ -545,6 +553,67 @@ test('references keep CRLF, comments and empty values, and refuse links and plan
   assert.equal(await readFile(target,'utf8'),'S=synthetic-s\n','the real file is untouched');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('the archive keeps the path relative to home and refuses odd paths',()=>{
+ const U=['','users-root','u'].join('/');
+ assert.equal(archiveTarget('/arc',U+'/cc/p/.env',U),'/arc/cc/p/.env');
+ assert.equal(archiveTarget('/arc','/srv/x/key.json',U),'/arc/srv/x/key.json');
+ assert.throws(()=>archiveTarget('/arc',U+'/../etc/passwd',U),/archive-path/);
+ assert.throws(()=>archiveTarget('/arc','/',U),/archive-path/);
+});
+test('a key file never leaves the archive through a link and never replaces an archived file',async()=>{
+ const {mkdtemp,writeFile,readFile,rm,mkdir,symlink,access}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const {contract}=await import('./dist/test/contract.js');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-arc-'));
+ try{
+  const v=fakeVault();
+  const src=join(dir,'src');await mkdir(src);const outside=join(dir,'outside');await mkdir(outside);
+  const a=join(src,'a.key');const b=join(src,'b.key');const c=join(src,'c.key');
+  await writeFile(a,'synthetic-a');await writeFile(b,'synthetic-b');await writeFile(c,'synthetic-c');
+  const plan=[{file:a,title:'A',kind:'document'},{file:b,title:'B',kind:'document'},{file:c,title:'C',kind:'document'}];
+  const imported=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
+  const withIds=plan.map((p,i)=>({...p,itemId:imported.results[i].itemId}));
+  // A link planted inside the archive path is refused; the key stays put and nothing lands outside.
+  const archive=join(dir,'archive');const first=src.replace(/^\/+/,'').split('/')[0];
+  await mkdir(archive);await symlink(outside,join(archive,first));
+  const linked=await replaceWithReferences(v.run,{},'vault-1',withIds.slice(0,1),undefined,archive);
+  assert.deepEqual(linked.results.map(r=>[r.state,r.code]),[['failed','archive-link']]);
+  await access(a);
+  // A file that appears in the archive while 1Password is consulted is never overwritten.
+  const clean=join(dir,'clean');const bTarget=join(clean,b.replace(/^\/+/,''));
+  const racing=async(...args)=>{const out=await v.run(...args);if(args[1][0]==='document'&&args[1][1]==='get'){await mkdir(join(bTarget,'..'),{recursive:true});await writeFile(bTarget,'already-archived');}return out;};
+  const raced=await replaceWithReferences(racing,{},'vault-1',withIds.slice(1,2),undefined,clean);
+  assert.deepEqual(raced.results.map(r=>[r.state,r.code]),[['failed','archive-exists']]);
+  assert.equal(await readFile(bTarget,'utf8'),'already-archived');assert.equal(await readFile(b,'utf8'),'synthetic-b');
+  // A successful move passes the strict RPC result schema.
+  const moved=await replaceWithReferences(v.run,{},'vault-1',withIds.slice(2),undefined,clean);
+  assert.equal(moved.results[0].state,'moved');
+  contract.importFiles.output.parse(moved);
+  await assert.rejects(access(c));assert.equal(await readFile(moved.results[0].movedTo,'utf8'),'synthetic-c');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('across file systems a key file is copied exclusively, checked, then removed',async()=>{
+ const {mkdtemp,writeFile,readFile,rm,access,stat}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-xdev-'));
+ const crossDevice=async()=>{const e=new Error('cross-device link');e.code='EXDEV';throw e;};
+ try{
+  const src=join(dir,'k.key');const dst=join(dir,'moved.key');await writeFile(src,'synthetic-k',{mode:0o600});
+  assert.equal(await moveNoClobber(src,dst,Buffer.from('synthetic-k'),0o100600,crossDevice),true);
+  await assert.rejects(access(src));assert.equal(await readFile(dst,'utf8'),'synthetic-k');assert.equal((await stat(dst)).mode&0o777,0o600);
+  const src2=join(dir,'k2.key');await writeFile(src2,'synthetic-k2');
+  await assert.rejects(moveNoClobber(src2,dst,Buffer.from('synthetic-k2'),0o100600,crossDevice),/archive-exists/);
+  assert.equal(await readFile(dst,'utf8'),'synthetic-k','an archived file is never replaced');assert.equal(await readFile(src2,'utf8'),'synthetic-k2');
+  const dst3=join(dir,'differs.key');
+  await assert.rejects(moveNoClobber(src2,dst3,Buffer.from('another-snapshot'),0o100600,crossDevice),/archive-copy-differs/);
+  await assert.rejects(access(dst3));assert.equal(await readFile(src2,'utf8'),'synthetic-k2','a copy that does not match is removed and the original kept');
+  // A source replaced during the copy is kept and the copy removed.
+  const dst4=join(dir,'rotated.key');
+  const rotated=async()=>{if(await readFile(src2,'utf8')!=='synthetic-k2')throw Object.assign(new Error('[changed-during-run] changed'),{});};
+  await writeFile(src2,'synthetic-k2');
+  const rotating=async()=>{await writeFile(src2,'synthetic-rotated');await rotated();};
+  await assert.rejects(moveNoClobber(src2,dst4,Buffer.from('synthetic-k2'),0o100600,crossDevice,rotating),/changed-during-run/);
+  await assert.rejects(access(dst4));assert.equal(await readFile(src2,'utf8'),'synthetic-rotated','the rotated source is never deleted');
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
 test('a locked file is reported by code, left as it is, and leaves no rewritten copy behind',async t=>{
  if(!['linux','darwin'].includes(process.platform))return t.skip('POSIX only');
  if(process.getuid?.()===0)return t.skip('root ignores folder permissions');
@@ -561,11 +630,12 @@ test('a locked file is reported by code, left as it is, and leaves no rewritten 
   // A read-only folder refuses both the rewrite and the removal; macOS also has the immutable flag.
   await chmod(ro,0o555);
   if(process.platform==='darwin')execFileSync('chflags',['uchg',flagged]);
-  const done=await replaceWithReferences(v.run,{},'vault-1',plan.map((p,i)=>({...p,itemId:imported.results[i].itemId})));
+  const done=await replaceWithReferences(v.run,{},'vault-1',plan.map((p,i)=>({...p,itemId:imported.results[i].itemId})),undefined,join(dir,'archive'));
   assert.deepEqual(done.results.map(r=>[r.state,r.code]),plan.map(()=>['failed','file-locked']));
   assert.equal(await readFile(doc,'utf8'),'{"k":"synthetic"}');assert.equal(await readFile(env,'utf8'),'B=synthetic-b\n');
   if(process.platform==='darwin')assert.equal(await readFile(flagged,'utf8'),'A=synthetic-a\n');
   assert.deepEqual((await readdir(dir)).filter(n=>n.includes('.oxi-op-')),[],'no rewritten copy is left next to a locked file');
+  assert.deepEqual((await readdir(ro)).sort(),['app.env','key.json']);
  }finally{
   if(process.platform==='darwin')try{execFileSync('chflags',['nouchg',flagged]);}catch{}
   await chmod(ro,0o755).catch(()=>{});await rm(dir,{recursive:true,force:true});
@@ -584,7 +654,7 @@ test('a file changed while 1Password is consulted is neither deleted nor overwri
   const plan=[{file:envFile,title:'A',kind:'env'},{file:keyFile,title:'K',kind:'document'}];
   const imported=await importFiles(v.run,{},'vault-1',plan,undefined,'darwin');
   const racing=async(b,args,e,i)=>{if(args[0]==='item'&&args[1]==='get'){await writeFile(envFile,'K=synthetic-rotated\n');await writeFile(keyFile,'synthetic-rotated-key');}return v.run(b,args,e,i);};
-  const done=await replaceWithReferences(racing,{},'vault-1',plan.map((p,i)=>({...p,itemId:imported.results[i].itemId})));
+  const done=await replaceWithReferences(racing,{},'vault-1',plan.map((p,i)=>({...p,itemId:imported.results[i].itemId})),undefined,join(dir,'archive'));
   assert.equal(done.results[0].code,'changed-during-run');
   assert(['changed-during-run','values-differ'].includes(done.results[1].code),'the key file changed before or during its check');
   assert(done.results.every(r=>r.state==='failed'));
