@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-oxi-projects",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "description": "Manage project tasks, repositories and agent sessions with optional GitHub, Linear and Jira integrations.",
   "type": "module",
