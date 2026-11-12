@@ -111,6 +111,16 @@ export class AccountStore {
     });
   }
 
+  async addDraft(input: {label:string;email:string;priority:number}):Promise<Account> {
+    return this.serialized(async()=>{
+      const accounts=await this.list();
+      if(accounts.some(a=>a.provider==='claude'&&a.email?.toLowerCase()===input.email.toLowerCase()))throw Error('Этот аккаунт Claude уже добавлен.');
+      const account=accountSchema.parse({...input,id:randomUUID(),provider:'claude',kind:'oauth',draft:true,
+        accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:false,createdAt:Date.now()});
+      accounts.push(account);await this.kv.set(ACCOUNTS_KEY,accounts);return account;
+    });
+  }
+
   async remove(id: string): Promise<boolean> {
     return this.serialized(async () => {
       const accounts = await this.list();
@@ -123,7 +133,7 @@ export class AccountStore {
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<Account | null> {
-    return this.update(id, (account) => ({ ...account, enabled }));
+    return this.update(id, account => {if(enabled&&account.draft)throw Error('Сначала выполните вход в аккаунт.');return {...account,enabled};});
   }
 
   async setProjects(id: string, projects: Account["projects"], expected?: Account["projects"] | null): Promise<Account | null> {
@@ -291,21 +301,23 @@ export class AccountStore {
         : account.email !== null && identity.email !== null && account.email.toLowerCase() === identity.email.toLowerCase();
       if (!matches)
         throw new Error("Вы вошли в другой аккаунт. Авторизуйтесь под выбранной подпиской / Signed in to a different account.");
+      const {draft:_draft,...authorizedAccount}=account;
       const updated = accountSchema.parse({
-        ...account,
+        ...authorizedAccount,
         email: identity.email,
         accountUuid: identity.accountUuid,
         subscriptionType: identity.subscriptionType,
         rateLimitTier: identity.rateLimitTier,
       });
-      const previousSecret = await this.readSecret(id);
+      const previousSecret = account.draft ? null : await this.readSecret(id);
       try {
         await this.writeSecret(id, secret);
         accounts[index] = updated;
         await this.kv.set(ACCOUNTS_KEY, accounts);
       } catch (error) {
         try {
-          await this.writeSecret(id, previousSecret);
+          if(previousSecret)await this.writeSecret(id, previousSecret);
+          else await fs.rm(this.accountSecretPath(id),{force:true});
         } catch {
           throw new Error("Не удалось сохранить или восстановить авторизацию. Проверьте хранилище и повторите вход / Authorization persistence and rollback failed; repair storage and sign in again.");
         }

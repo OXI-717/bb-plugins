@@ -1,3 +1,4 @@
+import {AccountDraftForm} from './account-draft-form';
 import {PoolUpdatePanel} from './pool-update-panel';
 import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
@@ -96,6 +97,7 @@ type DialogState =
       accountId: string;
     }
   | { kind: "claude-login" | "codex-login" | "agy-login" }
+  | { kind: "draft-account" }
   | { kind: "api-key"; provider: PoolProvider }
   | null;
 
@@ -346,6 +348,7 @@ function statusPresentation(
   label: string;
   dot: string;
 } {
+  if(account.draft)return {label:"Ожидает входа",dot:"bg-muted-foreground"};
   if (account.drainOnce) threshold = 1;
   if (account.enabled && !account.drainOnce && !scheduleAllows(account.policy, Date.now())) return { label: "Вне расписания", dot: "bg-muted-foreground" };
   if (account.status === "ready" && account.capReached) {
@@ -665,7 +668,7 @@ function AccountRow({
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              disabled={pending}
+              disabled={pending || !!account.draft}
               onSelect={() => onAction("toggle")}
             >
               <Icon name={account.enabled ? "Circle" : "CircleCheck"} />
@@ -727,7 +730,7 @@ function AddAccountMenu({
   onChoose,
 }: {
   provider: PoolProvider;
-  onChoose: (choice: "login" | "import" | "api-key") => void;
+  onChoose: (choice: "login" | "import" | "api-key" | "draft") => void;
 }) {
   return (
     <DropdownMenu>
@@ -738,6 +741,9 @@ function AddAccountMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
+        {provider==='claude'?<DropdownMenuItem onSelect={()=>onChoose('draft')}>
+          <span><span className="block">Добавить без входа…</span><span className="block text-xs text-muted-foreground">Сначала имя, почта и прокси, затем авторизация</span></span>
+        </DropdownMenuItem>:null}
         {(provider === "claude" || provider === "codex" || provider === "agy") ? <DropdownMenuItem
           className="items-start py-2"
           onSelect={() => onChoose("login")}
@@ -1102,6 +1108,8 @@ function AccountPoolSettings() {
   const [loginDone, setLoginDone] = useState<string | null>(null);
   const [reauthorizeAccountId, setReauthorizeAccountId] = useState<string | null>(null);
   const [pastedCode, setPastedCode] = useState("");
+  const [draftEmail,setDraftEmail]=useState("");
+  const [draftLabel,setDraftLabel]=useState("");
   const [apiKey, setApiKey] = useState("");
   const [priority, setPriority] = useState("100");
   const [roleDraft, setRoleDraft] = useState<AccountSummary["role"]>("primary");
@@ -1315,8 +1323,9 @@ function AccountPoolSettings() {
   }
   async function chooseAdd(
     provider: PoolProvider,
-    choice: "login" | "import" | "api-key",
+    choice: "login" | "import" | "api-key" | "draft",
   ): Promise<void> {
+    if(choice==='draft'){setDraftEmail("");setDraftLabel("");setDialog({kind:"draft-account"});return;}
     if (choice === "login") {
       if (provider === "agy") await startAgy();
       else if (provider === "claude") await startClaude();
@@ -2156,6 +2165,12 @@ function AccountPoolSettings() {
             </div>
           </DialogFrame>
         ) : null}
+        {dialog?.kind==='draft-account'?<DialogFrame title="Новый аккаунт Claude" footer={<Button disabled={pending!==null||!draftEmail.trim()} onClick={()=>void run('add-draft',async()=>{
+          const added=await rpc.call('account.add',{provider:'claude',source:{kind:'draft',email:draftEmail.trim()},label:draftLabel.trim()||draftEmail.trim(),priority:100});
+          setDialog({kind:'account',accountId:added.id});
+        })}>Создать и настроить</Button>}>
+          <AccountDraftForm email={draftEmail} label={draftLabel} onEmail={setDraftEmail} onLabel={setDraftLabel}/>
+        </DialogFrame>:null}
         {dialog?.kind === "api-key" ? (
           <DialogFrame
             title={dialog.provider === "claude" ? "Добавить API-ключ Anthropic" : `Добавить ${dialog.provider === "devin" ? "PAT" : "API-ключ"} ${PROVIDERS.find((entry) => entry.id === dialog.provider)?.title ?? dialog.provider}`}
@@ -2257,7 +2272,7 @@ function AccountPoolSettings() {
             countdown={0}
             error={error ?? (browserError?.accountId === reauthorizeAccountId ? browserError.text : null)}
             close={closeDialog}
-            openUrl={navigate.openUrl}
+            openUrl={url=>{if(reauthorizeAccountId!==null){void openBrowser(reauthorizeAccountId,url);return true;}return navigate.openUrl(url);}}
             openAccountUrl={reauthorizeAccountId === null ? undefined : url => void openBrowser(reauthorizeAccountId, url)}
             browserNotice={browserNotice?.accountId === reauthorizeAccountId ? browserNotice.text : null}
             setPastedCode={setPastedCode}
@@ -2396,7 +2411,8 @@ function AccountDialog({
       className="pool-settings sm:max-w-xl"
       footer={
         <>
-          <Button size="sm" variant="outline" disabled={pending} onClick={() => act("refresh")}>
+          {account.draft?<Button size="sm" disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onClick={reauthorize}>Войти в аккаунт</Button>:null}
+          <Button size="sm" variant="outline" disabled={pending || !!account.draft} onClick={() => act("refresh")}>
             Обновить квоты
           </Button>
           <DropdownMenu>
@@ -2406,12 +2422,12 @@ function AccountDialog({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem disabled={pending} onSelect={() => act("toggle")}>
+              <DropdownMenuItem disabled={pending || !!account.draft} onSelect={() => act("toggle")}>
                 {account.enabled ? "Выключить" : "Включить"}
               </DropdownMenuItem>
               {account.provider === "claude" && account.kind === "oauth" && (
                 <DropdownMenuItem disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onSelect={reauthorize}>
-                  Авторизоваться заново
+                  {account.draft?"Войти в аккаунт":"Авторизоваться заново"}
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />

@@ -255,3 +255,32 @@ describe("detached browser supervisor", () => {
     await expect(access(options.socketPath)).rejects.toThrow();
   });
 });
+
+
+describe('account browser upstream proxy',()=>{
+ it('uses authenticated upstream CONNECT, never local destination DNS, and fences route changes',async()=>{
+  const seen:string[]=[];
+  const upstream=createServer(s=>{let raw='';s.on('data',chunk=>{raw+=chunk.toString();if(raw.includes('\r\n\r\n')){seen.push(raw);s.removeAllListeners('data');s.end('HTTP/1.1 200 Connection Established\r\n\r\nfixture-response');}});});
+  await new Promise<void>(resolve=>upstream.listen(0,'127.0.0.1',resolve));
+  cleanup.push(()=>new Promise<void>(resolve=>upstream.close(()=>resolve())));
+  const options=await fixture();options.profileDirectories=['Profile 1'];options.routeKey='revision-one';
+  options.proxyUrl=`http://fixture:synthetic@127.0.0.1:${(upstream.address() as {port:number}).port}/`;
+  await startBrowserTransport(options);
+  const result=await tunnel(await proxyPort(options),'unresolvable.invalid:443');
+  expect(result).toContain('fixture-response');
+  expect(seen[0]).toContain('CONNECT unresolvable.invalid:443');
+  expect(seen[0]).toContain('Proxy-Authorization: Basic '+Buffer.from('fixture:synthetic').toString('base64'));
+  expect(JSON.stringify(await capture(options))).not.toContain('synthetic');
+  await expect(handoffBrowser({...options,routeKey:'revision-two'})).rejects.toThrow('proxy');
+ });
+ it('does not tunnel after upstream rejection or when proxy is unavailable',async()=>{
+  const upstream=createServer(s=>s.once('data',()=>s.end('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n')));
+  await new Promise<void>(resolve=>upstream.listen(0,'127.0.0.1',resolve));
+  const options=await fixture();options.profileDirectories=['Profile 1'];options.routeKey='revision-one';
+  options.proxyUrl=`http://127.0.0.1:${(upstream.address() as {port:number}).port}/`;
+  await startBrowserTransport(options);
+  expect(await tunnel(await proxyPort(options),'unresolvable.invalid:443')).not.toContain('200');
+  await new Promise<void>(resolve=>upstream.close(()=>resolve()));
+  expect(await tunnel(await proxyPort(options),'unresolvable.invalid:443')).not.toContain('200');
+ });
+});

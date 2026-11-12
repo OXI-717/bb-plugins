@@ -8889,6 +8889,32 @@ describe('maintenance races and existing streams',()=>{
 });
 
 describe('account HTTP proxy operator wiring',()=>{
+ it('creates a metadata-only draft through CLI and refuses OAuth through a rejecting assigned proxy',async()=>{
+  const outbound=vi.fn(async()=>Response.json({}));
+  const fixture=await createFixture({upstreamUrl:'https://fixture.example',options:{fetch:outbound,oauthTokenUrl:'https://login.example/token'}});
+  outbound.mockClear();
+  const added=await fixture.host.harness.behavior.runCli(['account','add','--provider','claude','--draft','--email','new@example.test','--label','Prepared account']);
+  expect(added.exitCode).toBe(0);
+  const accounts=await fixture.host.harness.behavior.callRpc('account.list',null) as AccountSummary[];
+  const draft=accounts.find(a=>a.email==='new@example.test')!;
+  expect(draft).toMatchObject({draft:true,enabled:false,label:'Prepared account',eligible:false});
+  const store=new AccountStore(fixture.host.bb.storage.kv,path.join(fixture.dataDir,'plugins',fixture.host.bb.pluginId,'secrets','accounts'));
+  await expect(store.readSecret(draft.id)).rejects.toThrow();
+  expect(outbound).not.toHaveBeenCalled();
+  let connects=0;
+  const proxy=http.createServer();
+  proxy.on('connect',(_req,socket)=>{connects++;socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');});
+  await new Promise<void>(resolve=>proxy.listen(0,'127.0.0.1',resolve));
+  cleanups.push(()=>new Promise<void>((resolve,reject)=>proxy.close(error=>error?reject(error):resolve())));
+  const address=proxy.address();if(!address||typeof address==='string')throw Error('Proxy did not bind');
+  fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}) as never);
+  await fixture.host.harness.behavior.callRpc('egress.proxy',{accountId:draft.id,url:`http://127.0.0.1:${address.port}`});
+  const login=await fixture.host.harness.behavior.callRpc('login.reauthorize',{accountId:draft.id}) as {sessionId:string;authorizeUrl:string};
+  await expect(fixture.host.harness.behavior.callRpc('login.complete',{sessionId:login.sessionId,pasted:`fixture-code#${new URL(login.authorizeUrl).searchParams.get('state')}`})).rejects.toThrow('Assigned account egress unavailable');
+  expect(connects).toBe(1);expect(outbound).not.toHaveBeenCalled();
+  expect(await store.get(draft.id)).toMatchObject({draft:true,enabled:false});
+  await expect(store.readSecret(draft.id)).rejects.toThrow();
+ });
  it('keeps proxy secrets off status and local provider environments on every host and invocation',async()=>{
   const fixture=await createFixture({upstreamUrl:'https://upstream.example'});
   fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}) as never);

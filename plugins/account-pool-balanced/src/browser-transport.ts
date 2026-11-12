@@ -248,6 +248,8 @@ process.stdin.on('end', () => { boot(JSON.parse(input)).catch(close); });
 
 export interface TransportLaunch {
   socketPath: string;
+  proxyUrl?: string;
+  routeKey?: string;
   root: string;
   executable: string;
   profileDirectory: string;
@@ -300,7 +302,7 @@ export async function handoffBrowser(options: TransportLaunch): Promise<boolean>
             finish(new Error("Close this account browser and reopen it after updating Pooler.")); return;
           }
           negotiated = true;
-          socket.write(JSON.stringify({ protocol: options.profileDirectories ? 5 : 2, profileDirectory: options.profileDirectory, timezone: options.timezone, executable: options.executable, url: options.url }) + "\n");
+          socket.write(JSON.stringify({ protocol: options.profileDirectories ? 5 : 2, profileDirectory: options.profileDirectory, routeKey:options.routeKey, timezone: options.timezone, executable: options.executable, url: options.url }) + "\n");
         } else if (result.ok === true) finish();
         else finish(new Error(typeof result.error === "string" ? result.error : "Browser handoff failed."));
       }

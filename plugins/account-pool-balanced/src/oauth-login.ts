@@ -50,6 +50,7 @@ interface LoginSession {
   codeVerifier: string;
   state: string;
   createdAt: number;
+  fetch?: typeof fetch;
 }
 
 export interface ClaudeOAuthAccount {
@@ -65,6 +66,7 @@ export interface ClaudeOAuthAccount {
 
 export interface ClaudeOAuthLoginOptions {
   beforeStart?: () => Promise<void>;
+  accountFetch?: (accountId:string)=>Promise<typeof fetch>;
   fetch?: typeof fetch;
   now?: () => number;
   authorizeUrl?: string;
@@ -138,6 +140,7 @@ export class ClaudeOAuthLogin {
 
   async start(targetAccountId?: string): Promise<OAuthLoginStart> {
     await this.options.beforeStart?.();
+    const accountFetch=targetAccountId&&this.options.accountFetch ? await this.options.accountFetch(targetAccountId) : undefined;
     const codeVerifier = randomBytes(32).toString("base64url");
     const codeChallenge = createHash("sha256")
       .update(codeVerifier)
@@ -147,6 +150,7 @@ export class ClaudeOAuthLogin {
     this.session = {
       ...(targetAccountId===undefined?{}:{targetAccountId}),
       sessionId,
+      fetch: accountFetch,
       codeVerifier,
       state,
       createdAt: this.now(),
@@ -172,8 +176,9 @@ export class ClaudeOAuthLogin {
     if (this.now() - session.createdAt >= LOGIN_SESSION_TTL_MS) {
       throw new Error("Code expired, start again.");
     }
+    const send=session.fetch??this.fetch;
     const parsed = parseManualCode(input.pasted, session.state);
-    const tokenResponse = await this.fetch(this.tokenUrl, {
+    const tokenResponse = await send(this.tokenUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -199,7 +204,7 @@ export class ClaudeOAuthLogin {
       );
     }
     const tokens = parsedTokens.data;
-    const profileResponse = await this.fetch(this.profileUrl, {
+    const profileResponse = await send(this.profileUrl, {
       headers: {
         authorization: `Bearer ${tokens.access_token}`,
         "anthropic-beta": OAUTH_BETA,

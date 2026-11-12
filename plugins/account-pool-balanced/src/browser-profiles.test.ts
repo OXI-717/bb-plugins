@@ -286,6 +286,18 @@ describe("browserExecutableCandidates", () => {
 });
 
 describe("openAccountBrowser", () => {
+  it('allocates only the selected account in a separate root for a bound proxy, without changing shared profiles',async()=>{
+    const box=await sandbox();let launch:any;
+    const options={...baseOptions(box),query:ACCOUNTS[0]!.id,proxyUrl:'http://fixture:synthetic@proxy.example:18444/',fetcher:geoFetcher,transportImpl:async(value:any)=>{launch=value;}};
+    const first=await openAccountBrowser(options);
+    expect(first.profileDir).toContain('Pool Routed Accounts/'+ACCOUNTS[0]!.id);
+    expect(launch.profileDirectories).toHaveLength(1);expect(launch.proxyUrl).toBe(options.proxyUrl);
+    expect(launch.routeKey).toMatch(/^[a-f0-9]{64}$/);
+    const listed=await listBrowserProfiles({...options,routedAccountIds:[ACCOUNTS[0]!.id]});
+    expect(listed[0]?.profileDir).toBe(first.profileDir);expect(listed[0]?.exists).toBe(true);
+    expect(existsSync(path.join(box.dataDir,'plugins/account-pool-balanced/browser-profiles/registry.json'))).toBe(false);
+  });
+
   it.each(["claude", "codex", "kimi", "zai", "opencode-go", "cursor", "devin"] as const)("uses the default destination for %s and reuses its profile", async (provider) => {
     const box = await sandbox();
     const selected = account({ id: ACCOUNTS[0]!.id, provider, label: "Synthetic", email: "person@example.test" });

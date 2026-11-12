@@ -47,3 +47,13 @@ it('keeps first-use close-and-retry guidance without exposing remote errors',asy
  if(!(error instanceof Error))throw Error('Expected browser failure');
  expect(error.message).toContain('close Helium once');expect(error.message).not.toContain('private remote details');
 });
+
+it('binds proxy browser only from server account policy and refuses proxy lookup failure without local fallback',async()=>{
+ const call=vi.fn(async(_m:string,_i:unknown,_h:string)=>({opened:true as const}));const local=vi.fn();
+ const proxy=vi.fn(async()=> 'http://fixture:synthetic@proxy.example:18444/');
+ const router=createBrowserRouter({getHostId:()=> 'mac',listHosts:async()=>[{id:'mac',status:'connected'}],accounts:async()=>[account],proxyForAccount:proxy,callHost:call,localOpen:local,localList:async()=>[]});
+ await router.open(account.id);expect(proxy).toHaveBeenCalledWith(account.id);
+ expect(call.mock.calls[0]).toEqual(['open',{accounts:[account],accountId:account.id,proxyUrl:'http://fixture:synthetic@proxy.example:18444/'},'mac']);
+ proxy.mockRejectedValueOnce(Error('unavailable'));await expect(router.open(account.id)).rejects.toThrow('unavailable');
+ expect(call).toHaveBeenCalledTimes(1);expect(local).not.toHaveBeenCalled();
+});

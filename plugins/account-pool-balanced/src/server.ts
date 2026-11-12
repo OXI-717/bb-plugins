@@ -298,6 +298,13 @@ export function createAccountPoolPlugin(
     },now);
     const login = new ClaudeOAuthLogin({
       beforeStart: () => hub.assertNetworkAllowed("claude"),
+      accountFetch:async id=>{
+        const account=await accounts.get(id);
+        if(!account||account.provider!=='claude')throw Error('Аккаунт Claude не найден.');
+        const route=await egress.acquire(id);
+        const send=hub.outboundFetch('claude',route.fetch(true));
+        return async(input,init)=>{if(!await accounts.get(id))throw Error('Claude OAuth account no longer exists.');return send(input,init);};
+      },
       fetch: hub.outboundFetch("claude"),
       now,
       authorizeUrl: options.oauthAuthorizeUrl,
@@ -326,12 +333,14 @@ export function createAccountPoolPlugin(
     const browserHost=bb.hosts.experimental_client({contract:browserHostContract});
     const browser=createBrowserRouter({
       getHostId:()=>config.get().browserHostId,
+      proxyForAccount:id=>egress.browserProxy(id),
+      routedAccountIds:()=>Object.keys(egress.snapshot().bindings),
       listHosts:()=>bb.sdk.hosts.list(),accounts:()=>operations.list(),
       callHost:(method,input,hostId)=>method==='open'
         ? browserHost.call('open',browserHostContract.open.input.parse(input),{hostId,timeoutMs:60000})
         : browserHost.call('list',browserHostContract.list.input.parse(input),{hostId,timeoutMs:10000}),
-      localOpen:async(query,url)=>openAccountBrowser({accounts:await operations.list(),query,url,dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId,vpnStatusFile:config.get().vpnStatusFile}),
-      localList:async()=>listBrowserProfiles({accounts:await operations.list(),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
+      localOpen:async(query,url)=>openAccountBrowser({accounts:await operations.list(),query,url,proxyUrl:await egress.browserProxy(query),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId,vpnStatusFile:config.get().vpnStatusFile}),
+      localList:async()=>listBrowserProfiles({accounts:await operations.list(),routedAccountIds:Object.keys(egress.snapshot().bindings),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
     });
     maintenanceActivity=()=>hub.maintenanceActivity();
     const maintenanceApi = {

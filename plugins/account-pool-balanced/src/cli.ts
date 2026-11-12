@@ -52,6 +52,7 @@ const HELP = [
   "  bb pool egress unbind <account-id>",
   "  bb pool account add --provider claude --import [--label <text>] [--priority <n>]",
   "  bb pool account add --provider codex --import [--label <text>] [--priority <n>]",
+  "  bb pool account add --provider claude --draft --email <email> [--label <name>]",
   "  bb pool account add --provider claude --login",
   "  bb pool account add --provider codex --login",
   "  bb pool account login-poll --session <id>",
@@ -596,21 +597,22 @@ export function registerPoolCli(
         if (argv[0] === "account" && argv[1] === "add") {
           const flags = parseFlags(
             argv.slice(2),
-            ["import", "api-key-stdin", "login"],
-            ["provider", "api-key", "label", "priority"],
+            ["import", "api-key-stdin", "login", "draft"],
+            ["provider", "api-key", "label", "priority", "email"],
           );
+          const draft=flags.booleans.has("draft");
           const imported = flags.booleans.has("import");
           const apiKeyStdin = flags.booleans.has("api-key-stdin");
           const loginRequested = flags.booleans.has("login");
           const apiKey = flags.values.get("api-key");
           const sourceCount =
-            Number(imported) +
+            Number(draft) + Number(imported) +
             Number(apiKeyStdin) +
             Number(loginRequested) +
             Number(apiKey !== undefined);
           if (sourceCount !== 1)
             throw new Error(
-              "Choose exactly one of --login, --import, --api-key-stdin, or --api-key <key>.",
+              "Choose exactly one of --draft, --login, --import, --api-key-stdin, or --api-key <key>.",
             );
           if (flags.values.get("provider") === "agy") {
             throw new Error("Use Antigravity login in the Pooler UI; local login/import and API keys are not supported.");
@@ -669,7 +671,7 @@ export function registerPoolCli(
           const priorityText = flags.values.get("priority") ?? "100";
           const input = accountAddInputSchema.parse({
             provider: flags.values.get("provider"),
-            source: imported ? { kind: "import" } : { kind: "api-key", apiKey },
+            source: draft ? {kind:"draft",email:flags.values.get("email")} : imported ? { kind: "import" } : { kind: "api-key", apiKey },
             label: flags.values.get("label") ?? null,
             priority: Number(priorityText),
           });

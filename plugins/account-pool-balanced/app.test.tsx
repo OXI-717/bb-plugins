@@ -1410,3 +1410,13 @@ it.each(['kimi','zai','opencode-go','cursor','devin'] as const)('shows the obser
  const ui=renderSlot(app.threadHeaderActions[0]!,{threadId:'thread-one',projectId:'project',isCompactViewport:false},{rpc:{'thread.account':()=>({state:'observed',account:account({provider,kind:'api-key',email:'other@example.com',label:'Subscription'}),lastUsedAt:1800000000000})}});
  expect(await ui.findByRole('button',{name:/Подписка треда: other@example.com/})).toBeTruthy();
 });
+
+it('keeps a saved account awaiting login with a dedicated sign-in action',async()=>{
+ const a=account({draft:true,enabled:false,status:'disabled',label:'Prepared subscription'});
+ const slot=render([a],{'login.reauthorize':()=>({sessionId:'fixture-session',authorizeUrl:'https://login.example/authorize'})});
+ await waitFor(()=>expect(slot.getByText('Ожидает входа')).toBeTruthy());
+ fireEvent.click(await slot.findByRole('button',{name:'Открыть карточку: person@example.com'}));
+ fireEvent.click(await slot.findByRole('button',{name:'Войти в аккаунт'}));
+ await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'login.reauthorize',input:{accountId:a.id}}));
+ expect(slot.rpcCalls.some(c=>c.method==='account.enable')).toBe(false);
+});
