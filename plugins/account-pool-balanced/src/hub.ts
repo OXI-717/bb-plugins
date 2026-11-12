@@ -406,7 +406,7 @@ export class AccountPoolHub {
     const adapter = this.adapter(account.provider);
     const route=await this.acquireRoute(account);
     if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) {
-      if (force) throw new Error("The account has an active request. Refresh quotas after it finishes.");
+      if (force) throw new Error("Аккаунт занят запросом. Повторите обновление квот после его завершения.");
       return;
     }
     const now = this.options.now();
@@ -441,7 +441,7 @@ export class AccountPoolHub {
         if (error instanceof AccountAuthorizationRequiredError) {
           const rejected = this.authorizationFailures.get(error) ?? usageSecret;
           const marked = rejected === undefined ? false : await this.markAuthError(account, rejected, error.accountMessage, this.stopped.signal);
-          if (!marked) throw new TransientOAuthRefreshError("Authorization changed while checking quotas; retry.", 0);
+          if (!marked) throw new TransientOAuthRefreshError("Авторизация изменилась во время проверки квот. Повторите проверку / Authorization changed while checking quotas; retry.", 0);
           this.options.onAccountsChanged();
           throw new Error(error.accountMessage);
         }
@@ -1749,11 +1749,11 @@ export class AccountPoolHub {
     const upstreamHeld = !quotaBlocked && usable.length>0 && usable.every(account => (this.options.quotas.get(account.id).heldUntil??0)>now);
     const reason = providerSpent ? "POOL_QUOTA_EXHAUSTED" : quotaBlocked ? "POOL_QUOTA_THRESHOLD" : upstreamHeld ? "POOL_ACCOUNT_HELD" : "POOL_ACCOUNT_POLICY";
     let message = upstreamHeld
-      ? `${adapter.upstreamName}: accounts are temporarily held by Pooler.`
+      ? `${adapter.upstreamName}: пул временно не использует аккаунты / Accounts temporarily held by Pooler.`
       : providerSpent
-      ? `${adapter.upstreamName}: provider quota exhausted.`
-      : quotaBlocked ? `${adapter.upstreamName}: pool quota threshold reached.`
-      : `${adapter.upstreamName}: no eligible account under pool policy.`;
+      ? `${adapter.upstreamName}: лимит провайдера исчерпан / Provider quota exhausted.`
+      : quotaBlocked ? `${adapter.upstreamName}: достигнут порог квоты в настройках пула / Pool quota threshold reached.`
+      : `${adapter.upstreamName}: нет доступных аккаунтов по настройкам пула / No eligible account under pool policy.`;
     if (quotaBlocked && !providerSpent) {
       const account = usable.find(account => !isQuotaExhausted(this.options.quotas.get(account.id), family, 1, now));
       if (account) {
@@ -1766,10 +1766,10 @@ export class AccountPoolHub {
           ...q.limitWindows.map(w=>({used:w.utilization,reset:w.resetAt,limit:w.windowMinutes===300?limits.fiveHour:w.windowMinutes===10080?limits.weekly:limits.other})),
         ];
         const window = windows.find(w=>w.used!==null&&w.used>=w.limit&&(w.reset===null||w.reset>now));
-        if (window) message += ` Used ${Number((window.used!*100).toFixed(2))}%; threshold ${Number((window.limit*100).toFixed(2))}%.`;
+        if (window) message += ` Использовано / used ${Number((window.used!*100).toFixed(2))}%, порог / threshold ${Number((window.limit*100).toFixed(2))}%.`;
       }
     }
-    if (resetAt!==null) message += upstreamHeld ? ` Retry no earlier than: ${resetAt}.` : ` Reset: ${resetAt}.`;
+    if (resetAt!==null) message += upstreamHeld ? ` Повторная попытка не ранее / Retry no earlier than: ${resetAt}.` : ` Сброс / reset: ${resetAt}.`;
     return this.errorResponse(adapter, request, 403, message, {"x-bb-pool-error":reason});
   }
 

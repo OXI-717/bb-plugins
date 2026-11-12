@@ -8554,7 +8554,7 @@ describe("busy Codex usage collection", () => {
     const response=await fixture.host.harness.behavior.fetchHttp("POST","/v1/messages",{headers:authHeaders(fixture.key),body:"{}"});
     try {
       const before=usageCalls;
-      await expect(fixture.host.harness.behavior.callRpc("account.refreshUsage",{accountId:fixture.account.id})).rejects.toThrow("active request");
+      await expect(fixture.host.harness.behavior.callRpc("account.refreshUsage",{accountId:fixture.account.id})).rejects.toThrow("Аккаунт занят запросом");
       expect(usageCalls).toBe(before);
     } finally {await response.body?.cancel();}
   });
