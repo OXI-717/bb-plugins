@@ -347,11 +347,27 @@ export async function programAvailable(program: string, pathValue = commandPath(
     for (const candidate of candidates.filter(Boolean)) {try {await access(candidate, constants.X_OK); return true;} catch {}}
     return false;
 }
+// `op read` rejects a reference whose item or field name has characters outside its reference
+// syntax (a Cyrillic title, for example), so a key is taken from the item itself: the item by exact
+// title or ID, the field by exact label (or ID). Each item is fetched once per call; values stay here.
+export type FieldValue = {id?: string; label?: string; value?: unknown};
+export function keyReader(run: Runner, binary: string, env: NodeJS.ProcessEnv, vaultId: string, signal?: AbortSignal) {
+    const items = new Map<string, Promise<{fields?: FieldValue[]}>>();
+    return async (key: KeyReference) => {
+        if (!items.has(key.item)) items.set(key.item, run(binary, ['item', 'get', key.item, '--vault', vaultId, '--reveal', '--format=json'], env, undefined, signal).then(out => JSON.parse(out)));
+        const fields = (await items.get(key.item)!).fields ?? [];
+        const byLabel = fields.filter(f => f.label === key.field);
+        const matches = byLabel.length ? byLabel : fields.filter(f => f.id === key.field);
+        if (matches.length !== 1 || typeof matches[0].value !== 'string' || !matches[0].value) throw new CodedError('key-field', 'The key field is missing, empty or ambiguous');
+        return matches[0].value;
+    };
+}
 export async function execWithKeys(run: Runner, command: CommandRunner, env: NodeJS.ProcessEnv, vaultId: string, argv: string[], keys: Record<string, KeyReference>, cwd: string | undefined, timeoutMs: number, signal?: AbortSignal) {
     const values: Record<string, string> = {};
+    const read = keyReader(run, 'op', env, vaultId, signal);
     for (const [variable, key] of Object.entries(keys)) {
         if (variable.startsWith('OP_') || key.item.includes('/') || key.field.includes('/')) throw new Error('Key reference is not allowed');
-        try {values[variable] = await run('op', ['read', '--no-newline', 'op://' + vaultId + '/' + key.item + '/' + key.field], env, undefined, signal);}
+        try {values[variable] = await read(key);}
         catch {throw new Error('Key ' + key.item + ' / ' + key.field + ' could not be read from the automation vault');}
     }
     const childEnv: NodeJS.ProcessEnv = {...process.env};
