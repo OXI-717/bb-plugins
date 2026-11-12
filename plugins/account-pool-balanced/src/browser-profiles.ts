@@ -329,7 +329,7 @@ export async function listRunningHelium(executable = path.join("/Applications", 
     const { stdout } = await execFileAsync("pgrep", ["-f", "--", browserProcessPattern(executable)], {timeout:2000,maxBuffer:65536});
     const pids=stdout.split("\n").map(line=>Number(line.trim())).filter(pid=>Number.isSafeInteger(pid)&&pid>0);
     if(!root||!pids.length)return pids;
-    const processes=await execFileAsync('ps',['-p',pids.join(','),'-o','pid=,command='],{timeout:2000,maxBuffer:65536});
+    const processes=await execFileAsync('ps',['-ww','-p',pids.join(','),'-o','pid=,command='],{timeout:2000,maxBuffer:65536});
     return processes.stdout.split('\n').flatMap(line=>{
       const match=/^\s*(\d+)\s+(.+)$/.exec(line);
       return match&&pids.includes(Number(match[1]))&&browserProcessUsesRoot(match[2]!,root,shared)?[Number(match[1])]:[];
