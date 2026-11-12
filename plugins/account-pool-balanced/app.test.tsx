@@ -106,6 +106,7 @@ function status(
     neuraldeep: null, agy: null,
     cursor: null,
     devin: null,
+    grok: null,
   },
 ): PoolStatus {
   return {
@@ -127,6 +128,7 @@ function status(
     neuraldeep: true, agy: true,
       cursor: true,
       devin: true,
+      grok: true,
     },
   };
 }
@@ -142,6 +144,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
     cursorUpstreamBaseUrl: "https://api2.cursor.sh",
     devinUpstreamBaseUrl: "https://server.codeium.com",
+    grokUpstreamBaseUrl: "https://api.x.ai/v1",
     maxConcurrentRequestsPerAccount: 2,
     claudeRequestStartIntervalMs: 0,
     switchThreshold: 0.98,
@@ -425,7 +428,7 @@ describe("Account Pool settings", () => {
     window.localStorage.setItem(STATUS_CACHE_KEY, '{"accounts":"nope"}');
     const live = deferred<PoolStatus>();
     const slot = render([], { "status.get": () => live.promise });
-    expect(slot.getAllByText("Загрузка…")).toHaveLength(9);
+    expect(slot.getAllByText("Загрузка…")).toHaveLength(10);
     live.resolve(status());
     expect(await slot.findByText("person@example.com")).toBeTruthy();
   });
@@ -700,12 +703,13 @@ describe("Account Pool settings", () => {
     neuraldeep: null, agy: null,
           cursor: null,
           devin: null,
+          grok: null,
         }),
     });
     expect(
       await slot.findByRole("region", { name: "Выбранные аккаунты" }),
     ).toBeTruthy();
-    expect(within(slot.getByRole("region", { name: "Выбранные аккаунты" })).getAllByText("Не выбран")).toHaveLength(8);
+    expect(within(slot.getByRole("region", { name: "Выбранные аккаунты" })).getAllByText("Не выбран")).toHaveLength(9);
     expect(slot.getAllByText("Текущий")).toHaveLength(1);
     expect(slot.getAllByText("Резерв")).toHaveLength(1);
     expect(slot.getByText("потолок сейчас 39% (15%→98%)")).toBeTruthy();
@@ -715,7 +719,7 @@ describe("Account Pool settings", () => {
     const named = account({ label: "Synthetic Display Name", email: "identity@example.com" });
     const slot = render([named], {
       "status.get": () => status([named], { claude: named.id, codex: null, kimi: null, zai: null, "opencode-go": null,
-    neuraldeep: null, agy: null, cursor: null, devin: null }),
+    neuraldeep: null, agy: null, cursor: null, devin: null, grok: null }),
     });
     const overview = await slot.findByRole("region", { name: "Выбранные аккаунты" });
     expect(within(overview).getByText("identity@example.com")).toBeTruthy();

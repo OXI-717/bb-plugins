@@ -39,6 +39,7 @@ import {
 } from "./cursor-adapter.js";
 import { KIMI_MOUNT_PREFIX } from "./kimi-adapter.js";
 import { DEVIN_MOUNT_PREFIX, DEVIN_PROXIED_PATHS } from "./devin-adapter.js";
+import { GROK_MOUNT_PREFIX } from "./grok-adapter.js";
 import {
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
@@ -50,6 +51,7 @@ import { openAccountBrowser, listBrowserProfiles } from "./browser-profiles.js";
 import {createBrowserRouter,browserHostContract} from "./browser-host.js";
 import { ClaudeOAuthLogin } from "./oauth-login.js";
 import { CodexDeviceLogin } from "./codex-device-login.js";
+import { GrokDeviceLogin } from "./grok-device-login.js";
 import {
   ACCOUNT_POOL_ACCOUNTS_CHANGED,
   ACCOUNT_POOL_CONFIG_CHANGED,
@@ -87,6 +89,8 @@ export interface AccountPoolPluginOptions {
   oauthTokenUrl?: string;
   oauthProfileUrl?: string;
   codexAuthBaseUrl?: string;
+  grokLoginCommand?: string;
+  grokLoginArgs?: string[];
 }
 
 interface ProviderEnvScope {
@@ -290,6 +294,7 @@ export function createAccountPoolPlugin(
       'acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai',
       'acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi',
       'acp-opencode-kimi-highspeed':'kimi',
+      'acp-grok':'grok',
     };
     await registerNetworkRetry(bb,async(threadId,providerId)=>{
       const provider=retryProviders[providerId];
@@ -318,9 +323,15 @@ export function createAccountPoolPlugin(
       authBaseUrl: options.codexAuthBaseUrl,
       addAccount: (authenticated) => operations.addCodexOAuth(authenticated),
     });
+    const grokLogin = new GrokDeviceLogin({
+      now,
+      command: options.grokLoginCommand,
+      args: options.grokLoginArgs,
+      addAccount: (credentials) => operations.addGrokOAuth(credentials),
+    });
     if ((await accounts.list()).every((account) => !account.enabled)) {
       bb.status.needsConfiguration(
-        "Add and enable a Claude or Codex account with `bb pool account add`.",
+        "Add and enable a Claude, Codex, or Grok account with `bb pool account add`.",
       );
     }
     const browserHost=bb.hosts.experimental_client({contract:browserHostContract});
@@ -344,7 +355,7 @@ export function createAccountPoolPlugin(
       accountPoolRpcContract,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
         const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
-        const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi'} as Record<string,PoolProvider>)[thread.providerId]??null;
+        const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi','acp-grok':'grok'} as Record<string,PoolProvider>)[thread.providerId]??null;
         const empty = { account: null, lastUsedAt: null };
         if (provider === null) return { state: "unsupported", ...empty };
         if (await routing.isBypassed(threadId) || !(await operations.isRoutingEnabled(provider)))
@@ -372,9 +383,9 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url),egress,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi);
+    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi);
     registerUsageSource(bb, hub);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
@@ -474,6 +485,47 @@ export function createAccountPoolPlugin(
       return executor?null:
         {status:'unavailable' as const,label:'Account Pooler',statusMessage:'No unique enabled native executor for this host and project.'};
     });
+    for (const method of ["GET", "POST"] as const) {
+      for (const suffix of ["chat/completions", "responses", "models", "settings", "feedback/config", "user"]) {
+        bb.http.route(
+          method,
+          `/${GROK_MOUNT_PREFIX}v1/${suffix}`,
+          (context) => hub.handle(context.req.raw, "grok"),
+          { auth: "none" },
+        );
+      }
+    }
+    bb.providers.experimental_contributeEnv("acp-grok", async (context) => {
+      if (
+        !(await operations.isRoutingEnabled("grok")) ||
+        (await isThreadBypassed(context)) ||
+        !(await operations.hasUsableEnabledAccount("grok"))
+      ) return [];
+      const token = await scopedHubToken(context);
+      const grokHome = browserHostContract.grokHome.output.parse(
+        await browserHost.call("grokHome", {}, { hostId: context.hostId, timeoutMs: 10_000 }),
+      ).path;
+      return [
+        {
+          name: "GROK_HOME",
+          value: grokHome,
+          reason: "Isolated Grok CLI config so machine sign-ins cannot override Pool routing",
+        },
+        {
+          name: "GROK_CLI_CHAT_PROXY_BASE_URL",
+          value: { serverPath: `${hubBasePath(bb.pluginId)}/${GROK_MOUNT_PREFIX}v1` },
+          reason: "Grok CLI traffic routed through the Account Pooler hub",
+        },
+        {
+          name: "XAI_API_KEY",
+          value: token,
+          reason: "Scoped Account Pooler token; xAI account credentials stay on the server",
+        },
+      ];
+    });
+    bb.providers.experimental_contributeEnvHealth("acp-grok", context =>
+      proxiedHealth("grok", context),
+    );
     const openAiCompatibleRoutes: ReadonlyArray<{
       provider: PoolProvider;
       mountPrefix: string;
@@ -673,6 +725,7 @@ export function createAccountPoolPlugin(
     bb.onDispose(async () => {
       agyLogin.dispose();
       codexLogin.dispose();
+      grokLogin.dispose();
       let timer: ReturnType<typeof setTimeout> | null = null;
       try {
         const inspection = inspectDisableState(bb, operations);

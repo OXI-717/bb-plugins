@@ -117,6 +117,8 @@ export interface ProviderAdapter {
     request: Request,
     settings: AccountPoolConfig,
     body?: Uint8Array,
+    account?: Account,
+    secret?: AccountSecret,
   ): URL;
   upstreamMethod?(request:Request):string;
   transformResponse?(request:Request,response:Response,signal:AbortSignal):Response;

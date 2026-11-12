@@ -38,6 +38,7 @@ import {
 import type { PoolOperations } from "./operations.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
+import type { GrokDeviceLogin } from "./grok-device-login.js";
 
 export const threadAccountStatusSchema = z.object({
   state: z.enum(["observed", "unobserved", "bypassed", "unsupported"]),
@@ -173,6 +174,18 @@ export const accountPoolRpcContract = defineRpcContract({
     input: codexLoginPollInputSchema,
     output: codexLoginCancelSchema,
   },
+  "grokLogin.start": {
+    input: z.null(),
+    output: codexLoginStartSchema,
+  },
+  "grokLogin.poll": {
+    input: codexLoginPollInputSchema,
+    output: codexLoginPollSchema,
+  },
+  "grokLogin.cancel": {
+    input: codexLoginPollInputSchema,
+    output: codexLoginCancelSchema,
+  },
   "status.get": {
     input: z.null(),
     output: statusSchema,
@@ -202,6 +215,7 @@ export function createRpcHandlers(
   agyLogin?: AgyOAuthLogin,
   openAgyBrowser:(url:string)=>Promise<{opened:true}>=async()=>{throw Error("Sign-in browser unavailable");},
   egress?:AccountEgress,
+  grokLogin?: GrokDeviceLogin,
   nativeAccounts: () => Promise<NativeAccounts> = async () => ({managed: false, accounts: []}),
   nativeSetProjects: (accountId:string,projects:import('./contracts.js').AccountProjects,revision:string)=>Promise<null> = async()=>{throw Error('Native project settings unavailable');},
   nativePrefer:(executorId:string,revision:string)=>Promise<null> = async()=>{throw Error('Native account selection unavailable');},
@@ -279,6 +293,17 @@ export function createRpcHandlers(
     "codexLogin.poll": (input) => codexLogin.poll(input),
     "codexLogin.cancel": (input) => ({
       cancelled: codexLogin.cancel(input),
+    }),
+    "grokLogin.start": () => {
+      if (grokLogin === undefined) throw new Error("Grok sign-in is unavailable.");
+      return grokLogin.start();
+    },
+    "grokLogin.poll": (input) => {
+      if (grokLogin === undefined) throw new Error("Grok sign-in is unavailable.");
+      return grokLogin.poll(input);
+    },
+    "grokLogin.cancel": (input) => ({
+      cancelled: grokLogin === undefined ? false : grokLogin.cancel(input),
     }),
     "status.get": () => operations.status(),
     "status.routedThreads": () => operations.routedThreadsWithoutLocalLogin(),

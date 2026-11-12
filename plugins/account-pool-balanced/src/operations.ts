@@ -20,6 +20,7 @@ import type {
 } from "./store.js";
 import type { ClaudeOAuthAccount } from "./oauth-login.js";
 import type { CodexDeviceAccount } from "./codex-device-login.js";
+import type { GrokSubscriptionCredentials } from "./grok-credentials.js";
 
 interface PoolHost {
   id: string;
@@ -186,6 +187,36 @@ export class PoolOperations {
     return summary;
   }
 
+  async addGrokOAuth(
+    authenticated: GrokSubscriptionCredentials,
+  ): Promise<AccountSummary> {
+    const account = await this.accounts.add(
+      {
+        provider: "grok",
+        kind: "oauth",
+        label: authenticated.label,
+        email: authenticated.email,
+        accountUuid: null,
+        subscriptionType: null,
+        rateLimitTier: null,
+        enabled: true,
+        priority: 100,
+      },
+      {
+        kind: "oauth",
+        accessToken: authenticated.accessToken,
+        refreshToken: authenticated.refreshToken,
+        expiresAt: authenticated.expiresAt,
+        clientId: authenticated.clientId,
+      },
+    );
+    this.onAccountsChanged();
+    await this.onAccountEnabled(account.id);
+    const summary = (await this.list()).find((item) => item.id === account.id);
+    if (summary === undefined) throw new Error("Added Grok account could not be read back.");
+    return summary;
+  }
+
   async addAgyOAuth(authenticated:AgyAuthorization):Promise<Account> {
     const account=await this.accounts.add({provider:'agy',kind:'oauth',label:authenticated.label,
       email:authenticated.email,accountUuid:null,subscriptionType:authenticated.subscriptionType,
@@ -201,9 +232,9 @@ export class PoolOperations {
   async validateClaudeReauthorization(id: string): Promise<void> {
     const account = await this.accounts.get(id);
     if (!account || account.provider !== "claude" || account.kind !== "oauth")
-      throw new Error("Аккаунт Claude OAuth не найден / Claude OAuth account not found.");
+      throw new Error("Claude OAuth account not found.");
     if (!account.accountUuid && !account.email)
-      throw new Error("Личность аккаунта неизвестна; обновите профиль перед входом / Account identity is unknown; refresh profile before reauthorization.");
+      throw new Error("Account identity is unknown; refresh the profile before reauthorizing.");
   }
 
   async remove(id: string): Promise<boolean> {
@@ -326,7 +357,7 @@ export class PoolOperations {
     await this.hubTokens.prune(hosts.map((host) => host.id));
     const status = await this.hub.status();
     const hostNames = new Map(hosts.map((host) => [host.id, host.name]));
-    const [claude, codex, kimi, zai, opencodeGo, neuraldeep, agy, cursor, devin] = await Promise.all([
+    const [claude, codex, kimi, zai, opencodeGo, neuraldeep, agy, cursor, devin, grok] = await Promise.all([
       this.routing.isProviderEnabled("claude"),
       this.routing.isProviderEnabled("codex"),
       this.routing.isProviderEnabled("kimi"),
@@ -336,6 +367,7 @@ export class PoolOperations {
       this.routing.isProviderEnabled("agy"),
       this.routing.isProviderEnabled("cursor"),
       this.routing.isProviderEnabled("devin"),
+      this.routing.isProviderEnabled("grok"),
     ]);
     return {
       ...status,
@@ -360,6 +392,7 @@ export class PoolOperations {
         agy,
         cursor,
         devin,
+        grok,
       },
     };
   }

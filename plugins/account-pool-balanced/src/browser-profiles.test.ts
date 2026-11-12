@@ -254,7 +254,7 @@ describe("profile naming and allocation", () => {
     const localState = JSON.parse(readFileSync(path.join(box.heliumRoot, "Local State"), "utf8"));
     expect(localState.profile.info_cache["Profile 1"].name).toBe("Claude · a@example.test");
     expect(localState.profile.info_cache["Profile 2"].name).toBe("Claude · b@example.test");
-    // повторный вызов идемпотентен
+    // A repeated call is idempotent.
     const again = await ensureProfile(ACCOUNTS[0]!, {
       heliumRoot: box.heliumRoot,
       registryFile,
