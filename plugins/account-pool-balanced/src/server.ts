@@ -1,3 +1,4 @@
+import {ProxySecrets} from './proxy-secrets.js';
 import {PoolMaintenance} from './maintenance.js';
 import {PoolUpdate} from './pool-update.js';
 import {serverGuardRead,runGuardProbe,type GuardServerAccess} from './guard-server.js';
@@ -182,7 +183,7 @@ export function createAccountPoolPlugin(
     const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
     await journal.initialize();
     bb.onDispose(()=>journal.close());
-    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';});
+    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';},new ProxySecrets(path.join(secretDir,'account-proxies')));
     await egress.initialize();
     bb.onDispose(()=>egress.close());
     const transport =

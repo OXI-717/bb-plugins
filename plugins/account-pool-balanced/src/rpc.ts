@@ -1,6 +1,6 @@
 import {maintenanceStatusSchema, type PoolMaintenance} from './maintenance.js';
 import {updateStatusSchema, type PoolUpdate} from './pool-update.js';
-import { egressProfileSchema, egressStateSchema, type AccountEgress } from "./account-egress.js";
+import { accountProxyInputSchema, egressProfileSchema, egressStateSchema, type AccountEgress } from "./account-egress.js";
 import {nativeProjectsSchema, nativeAccountsSchema, type NativeAccounts} from "./native-accounts.js";
 import type {AgyOAuthLogin} from "./agy-oauth-login.js";
 import { defineRpcContract, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
@@ -63,6 +63,7 @@ export const accountPoolRpcContract = defineRpcContract({
   "native.setProjects": {input:z.object({accountId:z.string().min(1).max(80),projects:nativeProjectsSchema,expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
   "native.accounts": {input: z.null(), output: nativeAccountsSchema},
   "native.prefer": {input:z.object({executorId:z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
+  "egress.proxy":{input:accountProxyInputSchema,output:z.null()},
   "egress.status":{input:z.null(),output:egressStateSchema},
   "egress.bind":{input:z.object({accountId:z.string().uuid(),ref:z.object({id:z.string(),version:z.number().int().positive()}).strict().nullable()}).strict(),output:z.null()},
   "egress.configure":{input:egressProfileSchema,output:z.null()},
@@ -214,6 +215,7 @@ export function createRpcHandlers(
     "native.accounts": () => nativeAccounts(),
     "native.prefer": ({executorId,expectedRevision}) => nativePrefer(executorId,expectedRevision),
     "native.setProjects": ({accountId,projects,expectedRevision}) => nativeSetProjects(accountId,projects,expectedRevision),
+    "egress.proxy":async input=>{if(!egress)throw Error("Egress unavailable");await egress.configureProxy(input);return null;},
     "egress.status":()=>{if(!egress)throw Error("Egress unavailable");return egress.snapshot();},
     "egress.configure":async input=>{if(!egress)throw Error("Egress unavailable");await egress.configure(input);return null;},
     "egress.bind":async({accountId,ref})=>{if(!egress)throw Error("Egress unavailable");await egress.bind(accountId,ref);return null;},
