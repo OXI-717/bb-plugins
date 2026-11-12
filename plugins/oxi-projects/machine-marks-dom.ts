@@ -1,12 +1,28 @@
 import {resolveMachineMark,machineMarkStyle,type MachineHost,type MachineMarksConfig} from './machine-marks';
 import {createMachineGlyph} from './machine-glyph';
 
-type ThreadMachine={id:string;host:MachineHost|null};
+type ThreadMachine={id:string;host:MachineHost|null;parentThreadId?:string|null;projectId?:string;isHidden?:boolean};
+/** Roll up known stops in linear time; never read additional thread metadata. */
+function stoppedAncestors(threads:readonly ThreadMachine[],stoppedIds:ReadonlySet<string>){
+ const byId=new Map(threads.filter(t=>!t.isHidden).map(t=>[t.id,t]));const ancestors=new Set<string>();
+ for(const id of stoppedIds){
+  let child=byId.get(id);const seen=new Set<string>([id]);
+  while(child?.parentThreadId){
+   const parent=byId.get(child.parentThreadId);
+   if(!parent||parent.projectId!==child.projectId||seen.has(parent.id))break;
+   seen.add(parent.id);if(ancestors.has(parent.id))break;ancestors.add(parent.id);child=parent;
+  }
+ }
+ return ancestors;
+}
 export function createMachineMarkStore(){
  let snapshot=new Map<string,ReturnType<typeof resolveMachineMark>>();const listeners=new Set<()=>void>();
  let rendered:ReadonlySet<string>=new Set();const renderedListeners=new Set<()=>void>();
  return {
-  set(threads:readonly ThreadMachine[],config:MachineMarksConfig|null,stoppedIds:ReadonlySet<string>=new Set()){snapshot=new Map(threads.map(t=>{const mark=resolveMachineMark(t.host,config);return [t.id,mark&&stoppedIds.has(t.id)?{...mark,stopped:true,label:`${mark.label} · Остановлена`}:mark];}));for(const fn of listeners)fn();},
+  set(threads:readonly ThreadMachine[],config:MachineMarksConfig|null,stoppedIds:ReadonlySet<string>=new Set()){
+   const ancestors=stoppedAncestors(threads,stoppedIds);
+   snapshot=new Map(threads.map(t=>{const mark=resolveMachineMark(t.host,config);const self=stoppedIds.has(t.id),descendant=ancestors.has(t.id);return [t.id,mark&&(self||descendant)?{...mark,stopped:true,label:`${mark.label} · ${self?'Остановлена':'Есть остановленные дочерние сессии'}`}:mark];}));for(const fn of listeners)fn();
+  },
   get(id:string){return snapshot.get(id)??null;},
   subscribe(fn:()=>void){listeners.add(fn);return ()=>{listeners.delete(fn);};},
   renderedIds(){return rendered;},

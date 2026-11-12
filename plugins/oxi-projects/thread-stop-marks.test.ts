@@ -5,6 +5,32 @@ const started=[{type:'turn/started',data:{}}];
 const thread=(id='thr_example',updatedAt=1,status='idle')=>({id,updatedAt,status,runtimeStatus:status});
 const tick=()=>new Promise<void>(resolve=>setTimeout(resolve,0));
 afterEach(()=>vi.useRealTimers());
+it('keeps known child stops when rows collapse without reading unrendered descendants',async()=>{
+ const read=vi.fn(async()=>stopped);const changed=vi.fn();const tracker=createThreadStopMarks(read,changed);
+ const threads=[thread('thr_parent',1,'active'),thread('thr_child'),thread('thr_unseen')];
+ tracker.sync(threads,new Set(['thr_parent','thr_child']));await tick();expect(read).toHaveBeenCalledTimes(1);
+ tracker.sync(threads,new Set(['thr_parent']));tracker.retryUnknown();await tick();
+ expect(read).toHaveBeenCalledTimes(1);expect(changed.mock.lastCall?.[0]).toEqual(new Set(['thr_child']));
+ tracker.sync([{...threads[0]},thread('thr_child',2,'active'),threads[2]],new Set(['thr_parent']));
+ expect(changed.mock.lastCall?.[0]).toEqual(new Set());expect(read).toHaveBeenCalledTimes(1);tracker.dispose();
+});
+it('invalidates changed or removed collapsed children and reads an unknown row only when revealed',async()=>{
+ const read=vi.fn(async()=>stopped);const changed=vi.fn();const tracker=createThreadStopMarks(read,changed);
+ tracker.sync([thread()],new Set(['thr_example']));await tick();
+ tracker.sync([thread('thr_example',2)],new Set());tracker.retryUnknown();await tick();
+ expect(read).toHaveBeenCalledTimes(1);expect(changed.mock.lastCall?.[0]).toEqual(new Set());
+ tracker.sync([thread('thr_example',2)],new Set(['thr_example']));await tick();expect(read).toHaveBeenCalledTimes(2);
+ tracker.sync([],new Set());expect(changed.mock.lastCall?.[0]).toEqual(new Set());tracker.dispose();
+});
+it('aborts pending reads when collapsed and retains the attempt budget across reveal',async()=>{
+ let signal!:AbortSignal;const read=vi.fn((_id:string,s:AbortSignal)=>{signal=s;return new Promise<StopBoundary[]>((_r,reject)=>s.addEventListener('abort',()=>reject(Error('aborted'))));});
+ const tracker=createThreadStopMarks(read,()=>{});
+ for(let n=0;n<5;n++){
+  tracker.sync([thread()],new Set(['thr_example']));await tick();
+  tracker.sync([thread()],new Set());if(n<3)expect(signal.aborted).toBe(true);tracker.retryUnknown();await tick();
+ }
+ expect(read).toHaveBeenCalledTimes(3);tracker.dispose();
+});
 it('marks only an explicit stop boundary, including Guard stops represented by manual-stop',()=>{
  expect(isStoppedBoundary(stopped)).toBe(true);
  for(const events of [[],started,[{type:'system/thread/interrupted',data:{reason:'host-daemon-restarted'}}],[{type:'system/thread/interrupted',data:null}]])expect(isStoppedBoundary(events)).toBe(false);

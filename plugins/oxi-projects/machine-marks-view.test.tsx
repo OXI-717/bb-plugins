@@ -8,6 +8,16 @@ import {MachineMarksSettings,MachineHeaderMark,MachineMarksController} from './m
 import {machineMarkStore} from './machine-marks-dom';
 const view=()=>({config:{enabled:true,hosts:{host_a:{kind:'local'},host_old:{kind:'primary',icon:'chip'}}},revision:'a'.repeat(64),hosts:[{id:'host_a',name:'Example Mac'},{id:'host_b',name:'Example server'}],error:null});
 afterEach(()=>{cleanup();rpc.call.mockReset();sdk.threads.events.list.mockReset();state.threads=[];machineMarkStore.setRenderedIds(new Set());});
+it('highlights ancestors from the existing child read, retains it when collapsed and clears on child restart',async()=>{
+ const host={id:'host_a',name:'Example Mac'};
+ state.threads=[{id:'thr_root',host,status:'active',runtimeStatus:'active',updatedAt:1,parentThreadId:null},{id:'thr_child',host,status:'idle',runtimeStatus:'idle',updatedAt:1,parentThreadId:'thr_root'}];
+ machineMarkStore.setRenderedIds(new Set(['thr_root','thr_child']));sdk.threads.events.list.mockResolvedValue([{type:'system/thread/interrupted',data:{reason:'manual-stop'}}]);
+ const v=render(<MachineMarksController/>);await waitFor(()=>expect(machineMarkStore.get('thr_root')?.stopped).toBe(true));expect(sdk.threads.events.list).toHaveBeenCalledTimes(1);
+ machineMarkStore.setRenderedIds(new Set(['thr_root']));await waitFor(()=>expect(machineMarkStore.get('thr_root')?.label).toContain('дочерние'));
+ expect(sdk.threads.events.list).toHaveBeenCalledTimes(1);
+ state.threads=[state.threads[0],{...state.threads[1],status:'active',runtimeStatus:'active',updatedAt:2}];v.rerender(<MachineMarksController/>);
+ await waitFor(()=>expect(machineMarkStore.get('thr_root')?.stopped).not.toBe(true));expect(sdk.threads.events.list).toHaveBeenCalledTimes(1);
+});
 it('does not fetch stop metadata for rows absent from the rendered sidebar',async()=>{
  state.threads=[{id:'thr_hidden_group',host:{id:'host_a',name:'Example Mac'},status:'idle',runtimeStatus:'idle',updatedAt:1}];
  render(<MachineMarksController/>);await waitFor(()=>expect(machineMarkStore.get('thr_hidden_group')).not.toBeNull());
