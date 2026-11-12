@@ -8887,3 +8887,23 @@ describe('maintenance races and existing streams',()=>{
     expect(outbound).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('account HTTP proxy operator wiring',()=>{
+ it('keeps proxy secrets off status and local provider environments on every host and invocation',async()=>{
+  const fixture=await createFixture({upstreamUrl:'https://upstream.example'});
+  fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}) as never);
+  await fixture.host.harness.behavior.callRpc('egress.proxy',{accountId:fixture.account.id,url:'http://fixture-user:fixture-password@proxy.example:8080'});
+  const state=await fixture.host.harness.behavior.callRpc('egress.status',null);
+  expect(JSON.stringify(state)).not.toContain('fixture-password');
+  expect(JSON.stringify(state)).not.toContain('fixture-user');
+  for(const hostId of ['host-one','host-two'])for(const threadId of ['start-thread','resume-thread','fork-thread',null]){
+   const env=await fixture.host.harness.behavior.resolveProviderEnv('claude-code',{hostId,threadId:threadId as string,projectId:'project-one'});
+   expect(env).toEqual(expect.arrayContaining([
+    expect.objectContaining({name:'ANTHROPIC_BASE_URL',value:{serverPath:'/api/v1/plugins/account-pool/http'}}),
+    expect.objectContaining({name:'ANTHROPIC_AUTH_TOKEN'}),
+   ]));
+   expect(JSON.stringify(env)).not.toContain('fixture-password');
+   expect(JSON.stringify(env)).not.toContain('proxy.example');
+  }
+ });
+});
