@@ -22,6 +22,7 @@ PLUGIN = 'account-pool-balanced'
 REPO = 'https://github.com/OXI-717/bb-plugins.git'
 PREFIX = PLUGIN + '/'
 VERSION = re.compile(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)')
+MANAGEMENT_KEY_FILE = None
 
 
 class UpgradeError(Exception):
@@ -78,7 +79,53 @@ def run(*args, timeout=60):
 
 
 def bb(*args):
+    if args and args[0] == 'pool' and MANAGEMENT_KEY_FILE is not None and MANAGEMENT_KEY_FILE.exists():
+        return managed_pool(args[1:], MANAGEMENT_KEY_FILE)
     return json.loads(run('bb', *args, '--json'))
+
+
+def management_rpc(method, payload):
+    base = os.environ.get('BB_SERVER_URL', 'http://127.0.0.1:38886')
+    parsed = urllib.parse.urlsplit(base)
+    if (parsed.scheme != 'http' or parsed.hostname not in ('localhost', '127.0.0.1', '::1')
+            or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('', '/')):
+        raise UpgradeError('Management requires a local BB server connection')
+    request = urllib.request.Request(base.rstrip('/') + '/api/v1/plugins/' + PLUGIN + '/rpc/' + method,
+                                    data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=30) as response:
+            result = json.load(response)
+        if result.get('ok') is not True:
+            raise UpgradeError('Private management request refused')
+        return result['result']
+    except Exception:
+        raise UpgradeError('Private management request unavailable') from None
+
+
+def managed_pool(args, key_file):
+    descriptor = os.open(key_file, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor) as stream:
+        stat = os.fstat(stream.fileno())
+        if stat.st_mode & 0o077 or stat.st_size > 256:
+            raise UpgradeError('Unsafe private management key file')
+        value = stream.read(257)
+    match = re.fullmatch(r'POOL_MANAGEMENT_KEY=([A-Za-z0-9_-]{43})\n?', value)
+    if not match:
+        raise UpgradeError('Invalid private management key file')
+    grant = management_rpc('management.unlock', {'key': match[1], 'scope': 'manage', 'ttlSeconds': 60})
+    try:
+        result = subprocess.run(('bb', 'pool', 'management', 'execute', '--request-stdin'),
+                                input=json.dumps({'token': grant['token'], 'argv': [*args, '--json']}),
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise UpgradeError('Authorized pool command failed')
+        return json.loads(result.stdout)
+    finally:
+        try:
+            management_rpc('management.lock', {'token': grant['token']})
+        except UpgradeError:
+            pass
 
 
 def installed():
@@ -328,6 +375,8 @@ def main():
         if remote.hostname not in ('localhost', '127.0.0.1', '::1'):
             raise UpgradeError('Run this script on the BB server host with a local BB connection')
         root = Path(bb('status')['dataDir']).resolve()
+        global MANAGEMENT_KEY_FILE
+        MANAGEMENT_KEY_FILE = root / 'plugins' / PLUGIN / 'secrets' / 'accounts' / 'management' / 'operator.env'
         data = root / 'plugins' / PLUGIN
         if not (data / 'data.db').is_file():
             raise UpgradeError('Local plugin database not found; run on the BB server host')

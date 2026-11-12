@@ -8,6 +8,15 @@ import type {
   PoolStatus,
 } from "./src/contracts.js";
 
+vi.mock('./management-ui', async () => {
+  const { useRpc } = await import('@get-bb/plugin-sdk/app');
+  return {
+    ManagementGate: ({ children }: { children: unknown }) => children,
+    usePoolRpc: () => useRpc(),
+    useManagementGrant: () => ({ scope: 'manage', expiresAt: Date.now() + 60_000 }),
+  };
+});
+
 const app = await loadPluginApp(() => import("./app"));
 afterEach(() => {
   cleanup();
@@ -398,18 +407,16 @@ describe("Account Pool settings", () => {
     await waitFor(() => expect((checkbox as HTMLInputElement).checked).toBe(false));
   });
 
-  it("renders cached accounts as refreshing until live status arrives, then caches it", async () => {
+  it("does not load or overwrite a persisted account inventory cache", async () => {
     window.localStorage.setItem(
       STATUS_CACHE_KEY,
       JSON.stringify(status([account({ fiveHourUtilization: 0.21 })])),
     );
     const live = deferred<PoolStatus>();
     const slot = render([], { "status.get": () => live.promise });
-    expect(slot.getByText("person@example.com")).toBeTruthy();
-    expect(slot.getByText("21%")).toBeTruthy();
-    expect(slot.getByText("обновляю квоты…")).toBeTruthy();
-    expect(slot.getByText(/· обновляю…$/)).toBeTruthy();
-    expect(slot.queryByText("Загрузка…")).toBeNull();
+    expect(slot.queryByText("person@example.com")).toBeNull();
+    expect(slot.queryByText("21%")).toBeNull();
+    expect(slot.getAllByText("Загрузка…").length).toBeGreaterThan(0);
     expect(slot.queryByText("В пуле нет аккаунтов")).toBeNull();
     live.resolve(status([account({ fiveHourUtilization: 0.6 })]));
     expect(await slot.findByText("60%")).toBeTruthy();
@@ -418,7 +425,7 @@ describe("Account Pool settings", () => {
     const cached = JSON.parse(
       window.localStorage.getItem(STATUS_CACHE_KEY) ?? "null",
     ) as PoolStatus;
-    expect(cached.accounts[0]?.fiveHourUtilization).toBe(0.6);
+    expect(cached.accounts[0]?.fiveHourUtilization).toBe(0.21);
   });
 
   it("ignores a malformed status cache and shows the loading state", async () => {

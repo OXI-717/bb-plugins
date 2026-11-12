@@ -1,4 +1,5 @@
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
+import { PoolManagementLocked } from './management-access.js';
 import type { AccountSummary, PoolProvider } from "./contracts.js";
 import type { AccountPoolHub } from "./hub.js";
 import {
@@ -75,11 +76,12 @@ function reportsUsage(account: Pick<AccountSummary, "provider">): boolean {
   return account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy";
 }
 
-export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
+export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privateInventory = true) {
   bb.rpc.register(
     usageSourceRpcContract,
     {
       async [usageListMethod]() {
+        if (privateInventory) return { label: 'Provider access', resources: [] };
         const { accounts } = await hub.status();
         return {
           label: "Account Pooler",
@@ -93,6 +95,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
         };
       },
       async [usageFetchMethod]({ resourceId, refresh }) {
+        if (privateInventory) throw new PoolManagementLocked();
         const account = (await hub.status()).accounts.find(account => account.id === resourceId);
         if (!account) throw new Error("Usage resource no longer exists.");
         if (!reportsUsage(account)) throw new Error("Quota reporting is not available for Devin.");

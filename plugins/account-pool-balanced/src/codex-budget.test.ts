@@ -8,7 +8,7 @@ import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
 import { codexQuotaFromUsage, createCodexAdapter } from './codex-adapter.js';
 import { codexBudgetQuota, CODEX_BUDGET_MAX_AGE_MS } from './codex-budget.js';
 import { AccountStore, QuotaStore, QUOTA_MIGRATIONS } from './store.js';
-import { createAccountPoolPlugin } from './server.js';
+import { createAccountPoolPlugin } from './management-test-fixture.js';
 
 const id = '11111111-1111-4111-8111-111111111111';
 const now = 1_900_000_000_000;

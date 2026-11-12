@@ -14,6 +14,63 @@ import upgrade_pool as u
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_transition_to_managed_cli_is_detected_without_open_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            key = Path(temp) / 'operator.env'
+            with patch.object(u, 'MANAGEMENT_KEY_FILE', key), patch.object(u, 'run', return_value='{"legacy":true}') as old, patch.object(u, 'managed_pool', return_value={'managed': True}) as managed:
+                self.assertEqual(u.bb('pool', 'status'), {'legacy': True})
+                managed.assert_not_called()
+                key.write_text('synthetic fixture')
+                self.assertEqual(u.bb('pool', 'status'), {'managed': True})
+                self.assertEqual(old.call_count, 1)
+                managed.assert_called_once_with(('status',), key)
+
+    def test_managed_commands_keep_credentials_in_stdin_and_revoke_afterwards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            key = Path(temp) / 'operator.env'
+            key.write_text('POOL_MANAGEMENT_KEY=' + 'K' * 43 + '\n')
+            key.chmod(0o600)
+            token = 'G' * 43
+            with patch.object(u, 'management_rpc', side_effect=[{'token': token}, None]) as rpc, patch.object(u.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{"inFlight":0}', '')) as process:
+                self.assertEqual(u.managed_pool(('status',), key), {'inFlight': 0})
+                command = process.call_args.args[0]
+                self.assertNotIn(token, ' '.join(command))
+                self.assertNotIn('K' * 43, ' '.join(command))
+                self.assertEqual(json.loads(process.call_args.kwargs['input']), {'token': token, 'argv': ['status', '--json']})
+                self.assertEqual(rpc.call_args_list[-1].args, ('management.lock', {'token': token}))
+
+    def test_managed_command_failure_does_not_retry_or_revert_to_open_cli(self):
+        with tempfile.TemporaryDirectory() as temp:
+            key = Path(temp) / 'operator.env'
+            key.write_text('POOL_MANAGEMENT_KEY=' + 'K' * 43 + '\n')
+            key.chmod(0o600)
+            with patch.object(u, 'management_rpc', side_effect=[{'token': 'G' * 43}, None]) as rpc, patch.object(u.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'sensitive-error')) as process:
+                with self.assertRaises(u.UpgradeError) as error:
+                    u.managed_pool(('maintenance', 'acquire'), key)
+                self.assertNotIn('sensitive-error', str(error.exception))
+                self.assertEqual(process.call_count, 1)
+                self.assertEqual(rpc.call_args_list[-1].args[0], 'management.lock')
+
+    def test_management_key_requires_private_permissions_and_refuses_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            key = Path(temp) / 'operator.env'
+            key.write_text('POOL_MANAGEMENT_KEY=' + 'K' * 43 + '\n')
+            key.chmod(0o644)
+            with patch.object(u, 'management_rpc') as rpc:
+                with self.assertRaises(u.UpgradeError):
+                    u.managed_pool(('status',), key)
+                link = Path(temp) / 'link.env'
+                link.symlink_to(key)
+                with self.assertRaises(OSError):
+                    u.managed_pool(('status',), link)
+                rpc.assert_not_called()
+
+    def test_management_rpc_refuses_remote_urls_before_sending_credentials(self):
+        with patch.dict(os.environ, {'BB_SERVER_URL': 'https://remote.example'}), patch.object(u.urllib.request, 'build_opener') as opener:
+            with self.assertRaises(u.UpgradeError):
+                u.management_rpc('management.unlock', {'key': 'synthetic'})
+            opener.assert_not_called()
+
     def test_wait_only_never_offers_forced_interruption(self):
         with patch.object(u, 'bb', return_value={'inFlight': 1}), patch.object(u, 'report_pool'), patch.object(u, 'confirm_interrupt') as confirm, patch.object(u.time, 'sleep'), patch.object(u.time, 'monotonic', side_effect=[0, 0, 301, 901]):
             with self.assertRaises(u.UpgradeError):

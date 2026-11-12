@@ -1,4 +1,5 @@
 import {AccountDraftForm} from './account-draft-form';
+import {ManagementGate,useManagementGrant,usePoolRpc} from './management-ui';
 import {PoolUpdatePanel} from './pool-update-panel';
 import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
@@ -38,7 +39,6 @@ import {
   definePluginApp,
   useBbNavigate,
   useRealtime,
-  useRpc,
 } from "@get-bb/plugin-sdk/app";
 import { Button } from "./ui/components/ui/button";
 import {
@@ -76,7 +76,7 @@ import type {
   PoolProvider,
   PoolStatus,
 } from "./src/contracts.js";
-import type { ThreadAccountStatus, accountPoolRpcContract } from "./src/rpc.js";
+import type { ThreadAccountStatus } from "./src/rpc.js";
 import type { OAuthLoginStart } from "./src/oauth-login.js";
 import type { CodexDeviceLoginStart } from "./src/codex-device-login.js";
 import {
@@ -284,7 +284,6 @@ function resetLabel(timestamp: number | null): string {
     return `автосброс ${exact} (через ${minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes} мин`})`;
   return `автосброс ${exact}`;
 }
-const STATUS_CACHE_KEY = "account-pool:status";
 
 function savedResetDeadline(timestamp: number | null): string {
   if (timestamp === null) return "срок неизвестен";
@@ -303,25 +302,6 @@ function resetLimitLabel(limit: string): string {
     seven_day_sonnet: "Sonnet · неделя", seven_day_haiku: "Haiku · неделя",
   };
   return labels[limit] ?? limit;
-}
-
-function readCachedStatus(): PoolStatus | null {
-  try {
-    const raw = window.localStorage.getItem(STATUS_CACHE_KEY);
-    if (raw === null) return null;
-    const parsed = statusSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeCachedStatus(status: PoolStatus): void {
-  try {
-    window.localStorage.setItem(STATUS_CACHE_KEY, JSON.stringify(status));
-  } catch {
-    return;
-  }
 }
 
 function weeklyResetAt(account: AccountSummary): number | null {
@@ -1047,9 +1027,13 @@ function ConfigFieldRow({
 }
 
 function AccountPoolSettings() {
-  const rpc = useRpc<typeof accountPoolRpcContract>();
+  return <ManagementGate><UnlockedAccountPoolSettings /></ManagementGate>;
+}
+
+function UnlockedAccountPoolSettings() {
+  const rpc = usePoolRpc();
   const navigate = useBbNavigate();
-  const [status, setStatus] = useState<PoolStatus | null>(readCachedStatus);
+  const [status, setStatus] = useState<PoolStatus | null>(null);
   const [nativeAccounts, setNativeAccounts] = useState<NativeAccounts | null>(null);
   const [nativeSettings, setNativeSettings] = useState<string | null>(null);
   const [nativeError, setNativeError] = useState<string | null>(null);
@@ -1128,7 +1112,6 @@ function AccountPoolSettings() {
   const refresh = useCallback(async () => {
     try {
       const next = await rpc.call("status.get", null);
-      writeCachedStatus(next);
       if (!mounted.current) return;
       setStatus(next);
       setStatusIsCached(false);
@@ -2764,7 +2747,13 @@ function LoginDialog({
 }
 
 export function ThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
-  const rpc = useRpc<typeof accountPoolRpcContract>();
+  const grant = useManagementGrant();
+  if (!grant) return null;
+  return <UnlockedThreadAccountIndicator threadId={threadId} isCompactViewport={isCompactViewport} />;
+}
+
+function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
+  const rpc = usePoolRpc();
   const [status, setStatus] = useState<ThreadAccountStatus | null>(null);
   const [open, setOpen] = useState(false);
   const [error, setError] = useState(false);
