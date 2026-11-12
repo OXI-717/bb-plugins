@@ -61,7 +61,7 @@ not use these account routing rules.
 
 ## Trusted automation purpose
 
-Account settings include **Allow autopilot** (`autopilotAllowed`). The default
+Account settings include **Разрешить автопилоту** (`autopilotAllowed`). The default
 is false, including records saved before this field existed. Reading old records
 does not rewrite storage. Saving uses compare-and-set: a changed permission must
 be refreshed rather than overwritten. Ordinary requests keep their existing rules.

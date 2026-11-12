@@ -32,7 +32,7 @@ export function createGrokAdapter(): ProviderAdapter {
         forAccount: () => body,
       };
     },
-    upstreamUrl(request, settings, _account?: Account, secret?: AccountSecret) {
+    upstreamUrl(request, settings, _body?: Uint8Array, _account?: Account, secret?: AccountSecret) {
       const baseUrl = secret?.kind === "oauth"
         ? GROK_CHAT_PROXY_BASE_URL
         : settings.grokUpstreamBaseUrl;

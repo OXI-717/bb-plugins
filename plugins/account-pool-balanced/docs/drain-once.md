@@ -1,6 +1,6 @@
 # Use an account until exhausted
 
-Open an account card and enable **Use until exhausted**.
+Open an account card and enable **Использовать до исчерпания** (Use until exhausted).
 The account bypasses the pool's progressive weekly cap and early-switch threshold,
 and can serve traffic even when its saved role is reserve. New unbound requests
 prefer enabled accounts with this option; existing conversation bindings remain intact.

@@ -1,4 +1,4 @@
-# BB Projects
+# OXI Projects
 
 Keep a project's tasks, repositories and agent sessions together in BB. Open a
 GitHub, Linear or Jira task beside the current conversation, prepare a new agent
@@ -148,7 +148,9 @@ is not used to bypass an authorization failure.
 
 In plugin settings, open **Значки машин**, enable marks and assign each enrolled machine a role (local computer, primary server or other) and an optional icon from the fixed palette. Roles are bound to BB host IDs; names may change. Unconfigured machines use the other-server mark; threads without a known machine are never classified as local. Settings retain absent host assignments and reject concurrent stale saves. Marks start disabled.
 
-The sidebar decoration is additive: thread names, provider icons, status glyphs and navigation are retained. The header shows the current thread machine; hover, focus or tap a mark for its machine name. A content script targets native `data-sidebar-thread-id` rows and `.bb-thread-title`; unsupported layouts are left untouched. This DOM integration is version-sensitive and must be checked in the running BB after updates. The plugin removes its marks, tooltip, observer and event listeners on unload. No per-row network requests or title updates are issued.
+The sidebar decoration is additive: thread names, provider icons, status glyphs and navigation are retained. The header shows the current thread machine; hover, focus or tap a mark for its machine name. A content script targets native `data-sidebar-thread-id` rows and `.bb-thread-title`; unsupported layouts are left untouched. This DOM integration is version-sensitive and must be checked in the running BB after updates. The plugin removes its marks, tooltip, observer and event listeners on unload. No title updates are issued.
+
+An explicitly stopped thread uses the same machine glyph, tinted red with a stop square inside its existing bounds. No extra row, button or visible text is added. The mark appears only when the latest interruption/turn-start boundary is a `manual-stop` (also used by Guard); ordinary idle state and transport failures do not establish a stop. Starting again clears it immediately. A known child stop also highlights its ancestors in the same project; the tooltip distinguishes their own stop from a descendant stop. This roll-up uses loaded parent links and cached boundaries without additional reads. Collapsing a branch retains unchanged known stops; restart, removal or changed metadata invalidates them. A never-inspected collapsed child remains unknown until its row is shown. Only rendered sidebar rows with enabled machine marks are inspected, with at most four metadata reads in flight; unchanged results are cached and failed reads retry after 20 seconds, at most three attempts per unchanged row. Requests fetch one filtered boundary, never message history. Federation uses its existing routed SDK transport. A failed or unavailable read retains the normal machine glyph unless a descendant stop is already known. The header's machine glyph remains unchanged.
 
 Malformed saved `threadMachineMarks` JSON hides marks and appears as a settings error. Machine-list/read/save failure is distinct from an empty successful list. Repair requires explicitly preparing a reset and saving it; no automatic reset occurs.
 

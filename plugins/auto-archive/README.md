@@ -1,4 +1,4 @@
-# Auto Archive
+# OXI Auto Archive
 
 A tree-aware fork of [bb-plugin-auto-archive](https://github.com/slogsdon/bb-plugin-auto-archive)
 0.1.0 by **Shane Logsdon**, released under MIT. The upstream copyright and

@@ -295,7 +295,7 @@ def bb_collect(server, host):
 
 def main():
     parser = argparse.ArgumentParser(description='Read external automation metadata; never executes tasks or models.')
-    parser.add_argument('kind', choices=['local', 'registry', 'aim', 'bb'])
+    parser.add_argument('kind', choices=['local', 'registry', 'aim', 'bb', 'systemd'])
     parser.add_argument('--source-id', required=True)
     parser.add_argument('--name', required=True)
     parser.add_argument('--host', help='Execution host for local or Scheduler API tasks')
@@ -306,6 +306,7 @@ def main():
     parser.add_argument('--team')
     parser.add_argument('--include-private-metadata', action='store_true', help='Include private registry entries; visible to everyone with access to the destination BB instance. Destination access is not verified.')
     parser.add_argument('--include-results', action='store_true', help='Include authorized Scheduler results in this trusted BB instance')
+    parser.add_argument('--metadata-registry', type=Path, help='Explicit display metadata; does not alter scheduler IDs')
     parser.add_argument('--publish', action='store_true', help='Publish through the currently selected BB server')
     parser.add_argument('--selection', type=Path, help='Required local registry: JSON object mapping task IDs to display names')
     parser.add_argument('--state-dir', type=Path, default=Path.home() / '.local/state/bb-automation-catalog')
@@ -315,8 +316,8 @@ def main():
         parser.error("--bb-server is required for bb and only applies to bb")
     if args.kind == "bb" and not args.host:
         parser.error("--host is required for the BB server execution host")
-    if (args.kind == "local") != (args.selection is not None):
-        parser.error("--selection is required for local and only applies to local")
+    if (args.kind in ("local", "systemd")) != (args.selection is not None):
+        parser.error("--selection is required for local/systemd and only applies to them")
     if args.launch_log is not None and args.kind != 'local':
         parser.error('--launch-log only applies to local')
     if args.include_private_metadata and args.kind != 'registry':
@@ -344,6 +345,11 @@ def main():
                 raise ValueError('Invalid local selection registry')
             snapshot['source']['taskIds'] = list(selection)
             snapshot['tasks'], snapshot['runs'] = local_collect(args.host or socket.gethostname(), args.state_dir, args.launch_log, selection)
+        elif args.kind == 'systemd':
+            from catalog_systemd import collect
+            selection = json.loads(args.selection.read_text())
+            snapshot['source']['taskIds'] = list(selection)
+            snapshot['tasks'], snapshot['runs'] = collect(args.host or socket.gethostname(), selection, command, task_base)
         elif args.kind == 'bb':
             snapshot['tasks'], snapshot['runs'] = bb_collect(args.bb_server, args.host)
         elif args.kind == 'registry':
@@ -355,6 +361,13 @@ def main():
     except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         snapshot['error'] = 'Source unavailable (' + type(error).__name__ + ')'
         snapshot['tasks'], snapshot['runs'] = [], []
+    if args.metadata_registry and snapshot['error'] is None:
+        try:
+            from catalog_registration import overlay
+            overlay(snapshot['tasks'], args.metadata_registry)
+        except (OSError, ValueError, KeyError, TypeError):
+            snapshot['error'] = 'Registry metadata unavailable'
+            snapshot['tasks'], snapshot['runs'] = [], []
     if args.host_prefix:
         for task in snapshot['tasks']:
             task['hostLabel'] = task['host'] if task['host'].startswith(args.host_prefix) else args.host_prefix + task['host']

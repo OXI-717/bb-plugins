@@ -249,3 +249,9 @@ it.each([{available:true,manual:false,disabled:false},{available:false,manual:fa
  expect((resume as HTMLButtonElement).disabled).toBe(disabled);
  if(available)expect((await slot.findAllByText('Прямое подключение')).length).toBeGreaterThan(0);
 });
+
+it('uses the OXI name in navigation and the rendered heading',()=>{
+ expect(app.navPanels[0]!.title).toBe('OXI VPN Guard');
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>guardFixture()}});
+ expect(slot.getByRole('heading',{name:'OXI VPN Guard',level:1})).toBeTruthy();
+});

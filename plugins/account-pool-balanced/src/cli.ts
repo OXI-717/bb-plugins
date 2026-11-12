@@ -1,3 +1,8 @@
+import type {PoolMaintenance} from './maintenance.js';
+import {z} from 'zod';
+import type {CursorStream} from './network-flights.js';
+import {guardProbeSchema,type GuardProbeInput, type runGuardProbe} from './guard-server.js';
+import type { AccountEgress } from "./account-egress.js";
 import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
 import { setTimeout as wait } from "node:timers/promises";
 import {
@@ -40,7 +45,12 @@ interface ParsedFlags {
 }
 
 const HELP = [
+  "  bb pool maintenance <status|acquire|interrupt|release> [--owner <uuid>] --json",
   "Usage:",
+  "  bb pool egress status --json",
+  "  bb pool egress configure <profile-json>",
+  "  bb pool egress bind <account-id> <profile-id> <version>",
+  "  bb pool egress unbind <account-id>",
   "  bb pool account add --provider claude --import [--label <text>] [--priority <n>]",
   "  bb pool account add --provider codex --import [--label <text>] [--priority <n>]",
   "  bb pool account add --provider claude --login",
@@ -66,13 +76,16 @@ const HELP = [
   "  bb pool readiness [--project <id>] [--json]",
   '  bb pool native status --json',
   '  bb pool native configure <executor-json>',
+  '  bb pool native prefer <executor-id>',
   '  bb pool native mode <managed|off>',
   '  bb pool native attest-stopped <lease-id> --confirmed',
+  "  bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]",
   "  bb pool observations [--json]",
+  "  bb pool guard-probe --provider cursor [--delay-stage guard-rpc] [--delay-ms 4100] [--delay-attempts first|all] [--json]",
   "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin|grok> [--off]",
   "  bb pool config",
-  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+"  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
   "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot]",
   "  bb pool client revoke <name>",
@@ -239,6 +252,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `kimiUpstreamBaseUrl: ${config.kimiUpstreamBaseUrl}`,
     `zaiUpstreamBaseUrl: ${config.zaiUpstreamBaseUrl}`,
     `opencodeGoUpstreamBaseUrl: ${config.opencodeGoUpstreamBaseUrl}`,
+    `opencodeFreeUpstreamBaseUrl: ${config.opencodeFreeUpstreamBaseUrl}`,
     `neuraldeepUpstreamBaseUrl: ${config.neuraldeepUpstreamBaseUrl}`,
     `cursorUpstreamBaseUrl: ${config.cursorUpstreamBaseUrl}`,
     `devinUpstreamBaseUrl: ${config.devinUpstreamBaseUrl}`,
@@ -288,6 +302,11 @@ function parseConfigUpdate(
     });
   }
   if (key === "neuraldeepUpstreamBaseUrl") return accountPoolConfigSetInputSchema.parse({ neuraldeepUpstreamBaseUrl: value });
+  if (key === "opencodeFreeUpstreamBaseUrl") {
+    return {
+      opencodeFreeUpstreamBaseUrl: value,
+    };
+  }
   if (key === "opencodeGoUpstreamBaseUrl") {
     return accountPoolConfigSetInputSchema.parse({
       opencodeGoUpstreamBaseUrl: value,
@@ -335,7 +354,7 @@ function parseConfigUpdate(
     });
   }
   throw new Error(
-    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, neuraldeepUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, grokUpstreamBaseUrl, maxConcurrentRequestsPerAccount, claudeRequestStartIntervalMs, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, or vpnGuardEnabled.",
+    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, opencodeFreeUpstreamBaseUrl, neuraldeepUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, grokUpstreamBaseUrl, maxConcurrentRequestsPerAccount, claudeRequestStartIntervalMs, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, or vpnGuardEnabled.",
   );
 }
 
@@ -352,13 +371,18 @@ export function registerPoolCli(
   externalClients?: ExternalClients,
   browser?: ReturnType<typeof createBrowserRouter>,
   nativeSessions?: NativeSessions,
+  egress?: AccountEgress,
   grokLogin?: GrokDeviceLogin,
+  guardProbe?:(input:GuardProbeInput)=>ReturnType<typeof runGuardProbe>,
+  streamProbe?:(threadId:string,requestId?:string)=>{streams:CursorStream[];interrupted?:boolean},
+  maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
 ): void {
   bb.cli.register({
     name: "pool",
     summary:
       "Manage Claude, Codex, and Grok accounts and inspect the Account Pooler hub",
     commands: [
+      {name:"egress",summary:"Manage server-owned account egress profiles",usage:"bb pool egress <status|configure|bind|unbind>"},
       {
         name: "account-add",
         summary:
@@ -418,6 +442,8 @@ export function registerPoolCli(
         usage: "bb pool account refresh <id>",
       },
       { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json]" },
+      {name:"stream-probe",summary:"Inspect one thread or interrupt one exact observed Cursor body",usage:"bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]"},
+      { name:"guard-probe", summary:"Rehearse read-only Guard admission, optionally delaying only this probe", usage:"bb pool guard-probe --provider cursor [--delay-stage server-host|guard-rpc|server-host-recheck] [--delay-ms 0..4500] [--delay-attempts first|all] [--json]" },
       { name:"observations", summary:"Inspect bounded request metadata and retained-event minute counts", usage:"bb pool observations [--json]" },
       { name:"history", summary:"Inspect bounded fourteen-day hourly account and client counters", usage:"bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]" },
       {
@@ -439,7 +465,7 @@ export function registerPoolCli(
         name: "config-set",
         summary: "Update one Account Pooler routing configuration value",
         usage:
-          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
       },
       {
         name: "token-rotate",
@@ -465,11 +491,31 @@ export function registerPoolCli(
     ],
     async run(argv, ctx): Promise<PluginCliResult> {
       try {
+        if(argv[0]==='maintenance'){
+          if(!maintenance)throw Error('Model maintenance unavailable');
+          let result:object;
+          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=maintenance.status();
+          else if(['acquire','release','interrupt'].includes(argv[1]!)&&argv.length===5&&argv[2]==='--owner'&&argv[4]==='--json'){
+            const owner=z.uuid().parse(argv[3]);
+            result=await maintenance[argv[1] as 'acquire'|'release'|'interrupt'](owner);
+          }else throw Error(HELP);
+          return {exitCode:0,stdout:json(result)};
+        }
+        if(argv[0]==='egress'){
+          if(!egress)throw Error('Egress management unavailable.');
+          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')return {exitCode:0,stdout:JSON.stringify(egress.snapshot(),null,2)+'\n'};
+          if(argv[1]==='configure'&&argv.length===3)await egress.configure(JSON.parse(argv[2]!));
+          else if(argv[1]==='bind'&&argv.length===5)await egress.bind(argv[2]!,{id:argv[3]!,version:Number(argv[4])});
+          else if(argv[1]==='unbind'&&argv.length===3)await egress.bind(argv[2]!,null);
+          else throw Error('Invalid egress operation.');
+          return {exitCode:0,stdout:'Account egress configured for new sessions; existing sessions stay pinned.\n'};
+        }
         if(argv[0]==='native'){
           if(!nativeSessions)throw Error('Native executor management unavailable.');
           let result:object;
           if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=await nativeSessions.snapshot();
           else if(argv[1]==='configure'&&argv.length===3)result=await nativeSessions.configure(JSON.parse(argv[2]!));
+          else if(argv[1]==='prefer'&&argv.length===3){await nativeSessions.prefer(argv[2]!, (await nativeSessions.accounts()).selectionRevision);result={executorId:argv[2]!};}
           else if(argv[1]==='mode'&&argv.length===3&&['managed','off'].includes(argv[2]!))result=await nativeSessions.setManaged(argv[2]==='managed');
           else if(argv[1]==='attest-stopped'&&argv.length===4&&argv[3]==='--confirmed')result=await nativeSessions.attestStopped(argv[2]!);
           else throw Error(HELP);
@@ -808,6 +854,24 @@ export function registerPoolCli(
           const projectId = providerReadinessSchema.shape.projectId.parse(flags.values.get("project") ?? null);
           const entries = await operations.readiness(projectId);
           return {exitCode:0, stdout:flags.booleans.has("json") ? json(entries) : entries.map(entry => `${entry.provider}: ${entry.ready ? "ready" : entry.reason}`).join("\n")+"\n"};
+        }
+        if(argv[0]==='stream-probe'){
+          const flags=parseFlags(argv.slice(1),['json','confirm'],['thread','interrupt-request']);
+          const threadId=flags.values.get('thread')??'',requestId=flags.values.get('interrupt-request');
+          if(!/^thr_[a-z0-9]+$/.test(threadId))throw Error('--thread requires a BB thread ID');
+          if(requestId!==undefined&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId))throw Error('--interrupt-request requires an exact request UUID');
+          if((requestId!==undefined)!==flags.booleans.has('confirm'))throw Error('Interrupting one stream requires both --interrupt-request and --confirm');
+          if(!streamProbe)throw Error('Cursor stream probe unavailable');
+          return {exitCode:0,stdout:json(streamProbe(threadId,requestId))};
+        }
+        if(argv[0]==='guard-probe'){
+          const flags=parseFlags(argv.slice(1),['json'],['provider','delay-stage','delay-ms','delay-attempts']);
+          if(!guardProbe)throw Error('Guard probe unavailable');
+          const rawDelay=flags.values.get('delay-ms');
+          if(rawDelay!==undefined&&!/^\d+$/.test(rawDelay))throw Error('--delay-ms requires an integer 0..4500');
+          const input=guardProbeSchema.parse({provider:flags.values.get('provider'),delayStage:flags.values.get('delay-stage'),
+            delayMs:rawDelay===undefined?undefined:Number(rawDelay),delayAttempts:flags.values.get('delay-attempts')});
+          return {exitCode:0,stdout:json(await guardProbe(input))};
         }
         if (argv[0] === "observations") {
           parseFlags(argv.slice(1), ['json'], []);

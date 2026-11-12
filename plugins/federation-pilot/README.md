@@ -1,4 +1,4 @@
-# BB Federation (experimental)
+# OXI Federation (experimental)
 
 Work with independent BB servers in one ordinary BB thread tree. Each configured remote project keeps its original threads, provider and execution environment. The plugin merges lists, routes HTTP to the owning server, and forwards change notifications into BB's native client. It does not modify BB core, copy conversations or enroll the primary machine on a remote server.
 
@@ -119,3 +119,56 @@ See [the bridge contract](CONTRACT.md) and [review and validation](REVIEW.md). T
 The matching Handoff plugin can copy a user-selected saved snapshot and selected
 attachments to a ready remote environment. See [contract and limits](HANDOFF.md).
 This does not enroll remote machines or enable agent consumers.
+
+BB 0.49 short thread links (`/threads/<id>`) are resolved through validated remote reads after the primary server confirms absence. Local threads retain priority; failures are not treated as absence.
+
+### Same-server continuation source
+
+`handoffSource` is a bounded read RPC for the companion Handoff plugin. It requires
+an explicit server/project/thread tuple, configured project membership, enabled
+writes for this user-initiated flow, and no primary identity collision. Membership
+and connection configuration are checked before and after each ordered event page.
+Invalid identity, ordering or page size fails closed. It performs no create,
+archive, deletion, activation or source-agent wake. Remote attachment bytes are
+not exposed. Continuation creation is a separate authorized action; existing
+one-attempt commit and saved-status reconciliation rules remain in force.
+
+### Connection recovery
+
+The configured bridge machine remains the only SSH origin. The plugin never
+moves a bridge to another host, changes authentication or network settings, or
+starts an agent to repair connectivity.
+
+Connection status stays in the existing session indicator; no floating panel
+is added over the conversation or composer (including mobile screens).
+`GET /connections` exposes bridge machine offline, bridge worker unavailable,
+SSH unavailable, or remote BB unavailable, plus last successful probe, outage
+duration, and next check. A successful probe verifies the configured project identity.
+Health probes are single-flight per configured server. Failed probes back off
+from one second to a 60-second cap with jitter; healthy connections are checked
+every 30 seconds. Pending recovery deadlines are not postponed by user traffic.
+
+A safe GET/HEAD can run at most twice, with a successful health probe before its
+one retry. Writes, messages, creates and uploads are never retransmitted after
+an ambiguous result. Realtime subscriptions reconnect independently with capped
+jitter and catch up via reads; outbound user messages are not queued for replay.
+
+Tunnel reuse checks the SSH child and loopback listener. Broken resources are
+replaced at most once per acquisition; concurrent callers share establishment.
+The SSH child owns a worker retention lease. Idle cleanup preserves active
+WebSockets; idle expiry after socket closure, configuration reconciliation and plugin disposal
+release resources. Configuration is inspected every five seconds; reconciliation
+only runs when the destination set changes, with at most five attempts after
+failure. Socket cleanup and child exits address the exact tunnel generation,
+so late cleanup cannot close its replacement. Configuration is revalidated
+after waiting for a probe, immediately before any request or upload.
+
+After two minutes of continuous outage, the plugin attempts one standard BB
+push notification. Successful delivery suppresses further notices until recovery;
+failed delivery can be retried on a later health check. Notification settings
+and availability remain owned by the installed push-notifications plugin.
+Diagnostics expose categories, never raw SSH stderr.
+
+Synthetic tests cover outage/recovery, single-flight backoff, safe-read retry
+bounds, once-only mutation attempts, notification deduplication, pinned tunnels,
+and timer disposal. Live bridge failure injection is deliberately excluded.

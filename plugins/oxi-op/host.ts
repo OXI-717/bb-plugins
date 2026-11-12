@@ -1,0 +1,210 @@
+import {runTaskProcess} from './task-process.js';
+import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
+import { randomUUID } from 'node:crypto';
+import { contract, type Route } from './contract.js';
+import { CodedError } from './errors.js';
+import { runProcess, runOwnedProcess, brokerRunner, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, keyReader, runCommand, overviewVaults, execResolved, runTidy, programAvailable, importFiles, replaceWithReferences } from './core.js';
+const pending = new Set<string>();
+// Owner-approved (desktop) op calls go through the OXI Op broker service when the route names
+// one, so macOS and 1Password authorise one long-lived service instead of each call.
+const runOp = (route: Route): typeof runProcess => (binary, args, env, input, signal) =>
+    route.authentication === 'desktop' && route.opBroker ? brokerRunner(route.opBroker)(binary, args, env, input, signal) : runProcess(binary, args, env, input, signal);
+async function environment(route: Route, signal: AbortSignal, serviceAccountToken?: string) {
+    if (signal.aborted)
+        throw new Error('Operation cancelled');
+    if (route.authentication === 'desktop') {
+        const env: NodeJS.ProcessEnv = { ...process.env, OP_BIOMETRIC_UNLOCK_ENABLED: 'true' };
+        for (const key of Object.keys(env))
+            if (key === 'OP_SERVICE_ACCOUNT_TOKEN' || key.startsWith('OP_SESSION') || key.startsWith('OP_CONNECT') || key === 'OP_RUN_NO_MASKING')
+                delete env[key];
+        return env;
+    }
+    return serviceEnvironment(route.tokenSetting ? serviceAccountToken ?? '' : process.env[route.tokenEnvironment!] ?? '');
+}
+export default experimental_defineHostEntry({ contract, handlers: {
+        resolve: async ({route, operation}, ctx) => {
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            return {bindings: await readOperationBindings(runner, await environment(route, ctx.signal), route, operation, ctx.signal)};
+        },
+        execute: async ({route, operation, bindings}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval || !route.credentialHostId) throw new Error('Remote execution requires approved desktop access');
+            await executeOperationBindings(runProcess, process.env, route, operation, bindings, ctx.signal);
+            return {completed: true as const};
+        },
+        provisionVault: async ({route, projectId, name, existingVaultId}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Project setup requires owner desktop approval');
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            return provisionProjectVault(runner, await environment(route, ctx.signal), projectId, name, ctx.signal, existingVaultId);
+        },
+        issueServiceAccounts: async ({route, ...request}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Service account issuance requires owner desktop approval');
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            return issueServiceAccounts(runner, await environment(route, ctx.signal), request, ctx.signal);
+        },
+        listKeys: async ({route, serviceAccountToken}, ctx) => {
+            if (route.authentication !== 'service-account') throw new Error('Key listing requires a service account');
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, args, env, input, signal);
+            return listVaultKeys(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, ctx.signal);
+        },
+        exec: async ({route, serviceAccountToken, argv, keys, cwd, timeoutSeconds}, ctx) => {
+            if (route.authentication !== 'service-account' || route.requireApproval || !route.allowAgentCommands) throw new Error('Agent commands are not enabled for this access profile');
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, args, env, input, signal);
+            return execWithKeys(runner, runCommand, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, argv, keys, cwd, timeoutSeconds * 1000, ctx.signal);
+        },
+        describeScope: async ({opBinary, serviceAccountToken}, ctx) => {
+            if (ctx.signal.aborted) throw new Error('Operation cancelled');
+            const vaults = JSON.parse(await runProcess(opBinary, ['vault', 'list', '--format=json'], serviceEnvironment(serviceAccountToken), undefined, ctx.signal));
+            if (!Array.isArray(vaults) || vaults.length > 20) throw new CodedError('scope-differs', 'Service account scope differs from the automation vault');
+            return {vaults: vaults.map((v: {id: unknown; name: unknown}) => ({id: String(v.id), name: String(v.name)}))};
+        },
+        deleteSelftest: async ({route, serviceAccountToken, title}, ctx) => {
+            if (route.authentication !== 'service-account') throw new Error('Self-test cleanup requires a service account');
+            const env = await environment(route, ctx.signal, serviceAccountToken);
+            const op = async (args: string[]) => runOp(route)(route.opBinary, args, env, undefined, ctx.signal);
+            const items = JSON.parse(await op(['item', 'list', '--vault', route.vaultId, '--format=json'])).filter((x: {title: string}) => x.title === title);
+            for (const item of items) await op(['item', 'delete', item.id, '--vault', route.vaultId]);
+            if (JSON.parse(await op(['item', 'list', '--vault', route.vaultId, '--format=json'])).some((x: {title: string}) => x.title === title)) throw new Error('Self-test cleanup could not be confirmed');
+            return {deleted: items.length};
+        },
+        probeScope: async ({route, serviceAccountToken}, ctx) => {
+            if (route.authentication !== 'service-account') throw new Error('Scope probes require a service account');
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, args, env, input, signal);
+            return probeServiceScope(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, ctx.signal);
+        },
+        importFiles: async ({route, mode, entries, archiveDir}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Migration requires owner desktop approval');
+            const runner: typeof runProcess = (binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            const env = await environment(route, ctx.signal);
+            // The card names the vault; it must really be that vault.
+            const vault = JSON.parse(await runner('op', ['vault', 'get', route.vaultId, '--format=json'], env, undefined, ctx.signal));
+            if (vault.id !== route.vaultId || vault.name !== route.vaultLabel) throw new CodedError('vault-identity', 'The target vault name differs from the one shown on the card');
+            if (mode === 'import') return importFiles(runner, env, route.vaultId, entries, ctx.signal);
+            const items = JSON.parse((await runner('op', ['item', 'list', '--vault', route.vaultId, '--format=json'], env, undefined, ctx.signal)).trim() || '[]') as {id: string; title: string}[];
+            const resolved = entries.map(e => ({...e, itemId: items.filter(x => x.title === e.title).length === 1 ? items.find(x => x.title === e.title)!.id : ''}));
+            const missing = resolved.filter(e => !e.itemId).map(e => ({file: e.file, state: 'failed', code: 'item-not-found'}));
+            const done = await replaceWithReferences(runner, env, route.vaultId, resolved.filter(e => e.itemId), ctx.signal, archiveDir);
+            return {results: [...missing, ...done.results]};
+        },
+        programAvailable: async ({program, cwd}) => ({available: await programAvailable(program.startsWith('./') || (program.includes('/') && !program.startsWith('/')) ? (cwd ? cwd + '/' + program : program) : program)}),
+        resolveKeys: async ({route, keys}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Critical keys require approved desktop access');
+            const env = await environment(route, ctx.signal);
+            const bindings: Record<string, string> = {};
+            const op = runOp(route);
+            const read = keyReader((binary, args, ...rest) => op(binary, ['--account', route.accountId!, ...args], ...rest), route.opBinary, env, route.vaultId, ctx.signal);
+            for (const [variable, key] of Object.entries(keys)) {
+                try {bindings[variable] = await read(key);}
+                catch {throw new CodedError('key-unreadable', 'A requested key could not be read');}
+            }
+            return {bindings};
+        },
+        execResolved: async ({argv, bindings, cwd, timeoutSeconds}, ctx) => execResolved(runCommand, argv, bindings, cwd, timeoutSeconds * 1000, ctx.signal),
+        tidy: async ({route, steps}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Clean-up requires owner desktop approval');
+            const runner: typeof runProcess = (_binary, args, env, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], env, input, signal);
+            return runTidy(runner, await environment(route, ctx.signal), steps, ctx.signal);
+        },
+        overview: async ({route, serviceVaultIds, registryTitle}, ctx) => {
+            if (route.authentication !== 'desktop' || !route.requireApproval) throw new Error('Vault overview requires owner desktop approval');
+            const env = await environment(route, ctx.signal);
+            const runner: typeof runProcess = (_binary, args, values, input, signal) => runOp(route)(route.opBinary, ['--account', route.accountId!, ...args], values, input, signal);
+            const ids = new Set(serviceVaultIds);
+            // A missing or unreadable registry narrows the map; it is reported instead of failing it.
+            let registryRead = !registryTitle;
+            if (registryTitle) {
+                try {
+                    const registry = JSON.parse(await runner('op', ['item', 'get', registryTitle, '--vault', route.vaultId, '--format=json', '--reveal'], env, undefined, ctx.signal));
+                    const notes = String(registry.notesPlain ?? '') + '\n' + (registry.fields ?? []).filter((x: {id: string}) => x.id === 'notesPlain').map((x: {value: string}) => x.value).join('\n');
+                    for (const id of notes.match(/\b[a-z2-7]{26}\b/g) ?? []) ids.add(id);
+                    registryRead = true;
+                } catch {}
+            }
+            return {...await overviewVaults(runner, env, ids, ctx.signal), registryRead};
+        },
+        inventory: async ({route, registryTitle}, ctx) => {
+            if (route.authentication !== 'desktop') throw new Error('Registry inventory requires explicit owner desktop access');
+            const env = await environment(route, ctx.signal);
+            const args = ['--account', route.accountId!];
+            const registry = JSON.parse(await runOp(route)(route.opBinary, [...args, 'item', 'get', registryTitle, '--vault', route.vaultId, '--format=json', '--reveal'], env, undefined, ctx.signal));
+            const notes = String(registry.notesPlain ?? '') + '\n' + (registry.fields ?? []).filter((x: {id: string}) => x.id === 'notesPlain').map((x: {value: string}) => x.value).join('\n');
+            const ids = new Set(notes.match(/\b[a-z2-7]{26}\b/g) ?? []);
+            const vaults = JSON.parse(await runOp(route)(route.opBinary, [...args, 'vault', 'list', '--format=json'], env, undefined, ctx.signal));
+            return {vaults: vaults.filter((x: {id: string}) => ids.has(x.id)).map((x: {id: string; name: string}) => ({id: x.id, name: x.name}))};
+        },
+        verify: async ({route, serviceAccountToken}, ctx) => {
+            const env = await environment(route, ctx.signal, serviceAccountToken);
+            const title = 'OXI OP verification ' + randomUUID();
+            const username = 'synthetic-verification';
+            const password = randomUUID();
+            const runner: typeof runProcess = (binary, args, values, input, signal) => runOp(route)(route.opBinary, route.authentication === 'desktop' ? ['--account', route.accountId!, ...args] : args, values, input, signal);
+            let itemId: string | undefined;
+            let failure: unknown;
+            try {
+                const result = await storeCredential(runner, env, route.vaultId, title, username, password, ctx.signal);
+                itemId = result.itemId;
+            } catch (error) {
+                failure = error;
+                throw error;
+            } finally {
+                // Recover an uncertain create, but remove only our exact synthetic item.
+                const items = JSON.parse(await runner('op', ['item', 'list', '--vault', route.vaultId, '--format=json'], env));
+                const matches = items.filter((item: {title: string}) => item.title === title);
+                if (matches.length === 0 && !itemId) throw failure ?? new CodedError('verify-not-created', 'Verification did not create an item; no cleanup needed');
+                if (matches.length !== 1) throw new CodedError('verify-cleanup-review', 'Verification cleanup needs owner review: ' + title);
+                const candidate = matches[0].id;
+                const stored = JSON.parse(await runner('op', ['item', 'get', candidate, '--vault', route.vaultId, '--format=json', '--reveal'], env));
+                const fields = new Map(stored.fields.map((field: {label: string; value: string}) => [field.label, field.value]));
+                if (stored.title !== title || fields.get('username') !== username || fields.get('password') !== password || (itemId && itemId !== candidate)) throw new CodedError('verify-differs', 'Verification item differs; cleanup declined: ' + title);
+                await runner('op', ['item', 'delete', candidate, '--vault', route.vaultId], env);
+                const remaining = JSON.parse(await runner('op', ['item', 'list', '--vault', route.vaultId, '--format=json'], env));
+                if (remaining.some((item: {id: string}) => item.id === candidate)) throw new CodedError('verify-cleanup-unconfirmed', 'Verification cleanup could not be confirmed');
+            }
+            return {verified: true as const, cleaned: true as const};
+        },
+        check: async ({ route, serviceAccountToken }, ctx) => {
+            const env = await environment(route, ctx.signal, serviceAccountToken);
+            const result = await runOp(route)(route.opBinary, [...(route.authentication === 'desktop' ? ['--account', route.accountId!] : []), 'vault', 'get', route.vaultId, '--format=json'], env, undefined, ctx.signal);
+            try {
+                if (JSON.parse(result).id !== route.vaultId)
+                    throw new Error();
+            }
+            catch {
+                throw new Error('The configured vault could not be verified');
+            }
+            return { authorized: true as const };
+        },
+        store: async ({ route, title, username, password, serviceAccountToken }, ctx) => {
+            const key = route.vaultId + '\0' + title;
+            if (pending.has(key))
+                throw new Error('This item is already being stored');
+            pending.add(key);
+            const runner: typeof runProcess = (binary, args, env, input, signal) => runOp(route)(route.opBinary, route.authentication === 'desktop' ? ['--account', route.accountId!, ...args] : args, env, input, signal);
+            try {
+                return await storeCredential(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, title, username, password, ctx.signal);
+            }
+            finally {
+                pending.delete(key);
+            }
+        },
+        runPrepared: async ({route,assignment,serviceAccountToken},ctx) => {
+            if(route.authentication!=='service-account'||route.requireApproval||route.tokenSetting!=='projectServiceAccounts'||
+               route.hostId!==assignment.binding.hostId||route.projectId!==assignment.binding.caller.projectId||route.profile!==assignment.profile)
+                throw new Error('Prepared operation route changed');
+            await runTaskProcess(route,assignment,serviceAccountToken,ctx.signal);
+            return {completed:true as const};
+        },
+        run: async ({ route, operation, serviceAccountToken }, ctx) => {
+            const matches = route.operations.filter(x => x.name === operation);
+            if (matches.length !== 1)
+                throw new Error('Operation is not configured');
+            const op = matches[0];
+            const env = await environment(route, ctx.signal, serviceAccountToken);
+            for (const [key, ref] of Object.entries(op.references)) {
+                if (key.startsWith('OP_') || !ref.startsWith('op://' + route.vaultId + '/'))
+                    throw new Error('Reference is outside the configured vault');
+                env[key] = ref;
+            }
+            await runOwnedProcess(route.opBinary, [...(route.authentication === 'desktop' ? ['--account', route.accountId!] : []), 'run', '--', ...op.argv], env, undefined, ctx.signal);
+            return { completed: true as const };
+        }
+    } });

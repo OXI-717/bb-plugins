@@ -24,9 +24,34 @@ bb pool native configure '{"id":"native-mac","accountId":"subscription-one","hos
 bb pool native status --json
 ```
 
+Open the Google subscription card in Accounts to use the existing Projects form.
+Choose **All projects** to include future projects, or **Only selected** to limit
+execution to the listed projects. As with other accounts, an empty list permits
+all projects. Saving applies atomically to every executor sharing the subscription;
+active/queued/uncertain leases, ambiguous executor selection and stale forms refuse changes. Native lists are limited to 32 project IDs. Native executors do
+not implement project-specific primary/reserve roles, so those controls are hidden.
+
+Legacy registrations retain their `projectIds` allowlist until explicitly changed.
+The optional `projects` field uses the existing account projects contract and takes
+precedence over that legacy list. Caller/host, catalog-only and automation permissions,
+network checks, prepared runtime bindings and host workspace limits still apply.
+
 Use the SAME subscription identifier for executors sharing one real Google
-account; do not infer identity from a path or copy a native profile. Only one
-enabled executor may match a host/project for BB auto-selection. Additional
+account; do not infer identity from a path or copy a native profile. Multiple
+accounts on one host require an explicit preferred executor. Choose **Use** on
+the account card or run `bb pool native prefer <executor-id>`. The choice is
+stored separately from admitted process bindings, so existing sessions keep
+their account and queued work is not rebound. A stale UI revision refuses;
+unknown/disabled executors cannot be selected. With no explicit preference,
+ambiguous matches still refuse. Optional executor `label` identifies the account
+in the UI without exposing private profile paths or caller credentials.
+
+The host launcher must separately contain an explicit private profile reference
+for each selected executor. Pooler cannot turn an unprepared host profile into
+another account. Selection still filters project, caller, catalog and automation
+permissions before considering the preference; it does not grant any access.
+This is operator selection for future sessions, without quota-driven rotation.
+Additional
 standalone callers require existing server-issued project/purpose-bound clients;
 project IDs and caller-provided host headers do not create authority. Every
 executor host must be enrolled. Machine login contexts remain host-local.
@@ -97,3 +122,18 @@ and continuation checks, and one ordinary headless acceptance in its intended
 isolated user/workspace. No copying native credentials to containers, no disabling
 container isolation and no automatic Google consent. Synthetic tests and CLI help
 checks do not establish those live results.
+
+## Accounts settings
+
+The Antigravity section displays registered official-client subscriptions directly
+from the native registry. Executors with the same `accountId` share one card;
+no proxy OAuth account or duplicate Google login is created. The card lists
+executor enablement, automation permissions, and active, queued or uncertain
+leases. It refreshes every 15 seconds and reports registry read failures.
+
+Registration is configuration evidence only. The card does not claim that a
+client is signed in or that a numeric quota is available. In managed mode,
+legacy OAuth controls are hidden; routing and VPN controls remain available
+for native execution. Official clients retain
+ownership of authentication. With managed mode off, registered cards remain
+visible with that state, and legacy controls remain available.

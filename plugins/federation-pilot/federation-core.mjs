@@ -279,6 +279,33 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     return json(isBootstrap?{...a,projects:[...(a.projects??[]),...extra]}:[...(Array.isArray(a)?a:[]),...extra]);
   }
 
+  // Short thread URLs in BB 0.49 omit the project. Resolve only the current
+  // navigation target, using a primary 404 and server-validated bridge reads.
+  const resolvingThreads = new Map();
+  async function resolveShortThread(threadId) {
+    if(primaryIds.has(threadId)||owners.has(threadId)||conflicts.has(threadId))return;
+    if(resolvingThreads.has(threadId))return resolvingThreads.get(threadId);
+    const task=(async()=>{
+      const path=`/api/v1/threads/${threadId}`;
+      const local=await nativeFetch.call(win,path);
+      if(local.ok){learnPrimary(path,await local.json());return;}
+      if(local.status!==404)throw new FederationError('federation_owner_unavailable',503,'Cannot establish thread ownership on the primary server.');
+      for(const peer of peers){
+        const response=await viaBridge(peer,'GET',path,null);
+        if(response.ok){
+          const thread=await response.clone().json();
+          if(thread.id!==threadId||thread.projectId!==peer.projectId)throw new FederationError('federation_owner_invalid',409,'Invalid remote thread identity.');
+          // The bridge checks collisions across all configured servers.
+          return;
+        }
+        if(primaryIds.has(threadId))return;
+      }
+      throw new FederationError('federation_owner_unavailable',503,'Thread ownership could not be established on the configured servers.');
+    })();
+    resolvingThreads.set(threadId,task);
+    try{await task;}finally{resolvingThreads.delete(threadId);}
+  }
+
   async function route(input, init, ctx) {
     const req = input instanceof win.Request ? input : null;
     let url;
@@ -293,6 +320,8 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     const currentRoute=/^\/projects\/(proj_[a-z0-9]+)\/threads\/(thr_[a-z0-9]+)/u.exec(new URL(win.location.href).pathname);
     const currentPeer=peers.find(p=>p.projectId===currentRoute?.[1]);
     if(currentPeer && !primaryIds.has(currentRoute[2]))addRemote(currentRoute[2],currentPeer);
+    const shortRoute=/^\/threads\/(thr_[a-z0-9]+)(?:\/|$)/u.exec(new URL(win.location.href).pathname);
+    if(shortRoute && url.pathname.startsWith(`/api/v1/threads/${shortRoute[1]}`))await resolveShortThread(shortRoute[1]);
     const pathIds = url.pathname.split("/").filter((s) => ID_RE.test(s));
     const queryIds = [];
     for (const [k, v] of url.searchParams) if (SCOPE_PARAMS.includes(k) || ID_RE.test(v)) queryIds.push(v);
@@ -443,7 +472,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
         if(acceptRemote(m,c.peer)){state.counters.wsAccepted++;this._emit(new win.MessageEvent("message",{data:String(e.data)}));}
         else {state.counters.wsDropped++;log("ws-remote-dropped",{serverId:c.peer.serverId,type:m?.type,entity:m?.entity});}
       });
-      r.addEventListener("close",()=>{if(c.ws!==r)return;c.ws=null;c.ready=false;if(this._closed)return;setRemoteState(c.peer,"offline");state.needsCatchUp=true;const delay=Math.min(RETRY_MAX_MS,RETRY_MIN_MS*2**c.attempt++);c.timer=win.setTimeout(()=>{c.timer=null;this._openRemote(c);},delay);});
+      r.addEventListener("close",()=>{if(c.ws!==r)return;c.ws=null;c.ready=false;if(this._closed)return;setRemoteState(c.peer,"offline");state.needsCatchUp=true;const delay=Math.round(Math.min(RETRY_MAX_MS,RETRY_MIN_MS*2**Math.min(c.attempt++,6))*(0.8+0.2*Math.random()));c.timer=win.setTimeout(()=>{c.timer=null;this._openRemote(c);},delay);});
     }
     _catchUp(peer){for(const id of peer.ids)if(isRemote(id)){if(id.startsWith("thr_"))this._refreshThread(id);if(id.startsWith("host_"))this._refreshHost(id);}this._emitJson({type:"changed",entity:"project",id:peer.projectId,changes:["threads-changed","project-updated"]});}
     _refreshHost(id){this._emitJson({type:'changed',entity:'host',id,changes:['host-connected']});}

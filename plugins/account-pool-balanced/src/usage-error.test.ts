@@ -141,14 +141,14 @@ describe("usage refresh", () => {
       account, accounts, quotas, now: () => 1_800_000_002_000,
       freshSecret: async () => secret,
       fetch: async () => { requests++; return new Response(null, { status: 401 }); },
-    })).rejects.toThrow("Sign in to ChatGPT again");
+    })).rejects.toThrow("повторный вход");
     expect(requests).toBe(2);
     expect(quotas.get(account.id)).toEqual(goodQuota);
     await expect(adapter.refreshUsage({
       account, accounts, quotas, now: () => 1_800_000_003_000,
       freshSecret: async () => secret,
       fetch: async () => Response.json({ unexpected: true }),
-    })).rejects.toThrow("invalid quota data");
+    })).rejects.toThrow("некорректные");
     expect(quotas.get(account.id)).toEqual(goodQuota);
   });
 });

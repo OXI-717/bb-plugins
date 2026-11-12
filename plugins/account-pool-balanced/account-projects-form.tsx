@@ -2,8 +2,9 @@ import { Button } from './ui/components/ui/button';
 import { useEffect, useRef, useState } from 'react';
 import { accountProjectsSchema, type AccountProjects, type AccountSummary } from './src/contracts.js';
 
-export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChange }: {
-  account: AccountSummary;
+export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChange, showRoles = true }: {
+  account: Pick<AccountSummary, "projects" | "role">;
+  showRoles?: boolean;
   loadProjects: () => Promise<Array<{ id: string; name: string }>>;
   save: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
   onUnsavedChange?: (value: boolean) => void;
@@ -27,7 +28,7 @@ export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChan
     const persisted: AccountProjects | null = JSON.parse(incoming);
     if (dirty.current && incoming !== JSON.stringify(submitted.current)) {
       conflicted.current = true; setConflict(true); setSaved(false);
-      setError('Settings changed in another session. Reload the latest settings.');
+      setError('Настройки изменились в другой сессии. Загрузите актуальные настройки.');
     } else {
       baseline.current = persisted;
       if (!dirty.current) { setDraft(persisted ?? { onlySelected: false, rules: [] }); setSaved(false); }
@@ -43,7 +44,7 @@ export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChan
       await save(accountProjectsSchema.parse(next), baseline.current);
       if (!conflicted.current) { baseline.current = next; dirty.current = false; setSaved(true); onUnsavedChange?.(false); }
     }
-    catch { setError('Could not save project rules. Try again.'); }
+    catch { setError('Не удалось сохранить проекты. Повторите попытку.'); }
     finally { submitted.current = null; setPending(false); }
   };
   const reload = () => {
@@ -51,30 +52,30 @@ export function AccountProjectsForm({ account, loadProjects, save, onUnsavedChan
     setDraft(account.projects ?? { onlySelected: false, rules: [] }); setConflict(false); setError(''); setSaved(false); onUnsavedChange?.(false);
   };
   const names = new Map(catalog.map(project => [project.id, project.name]));
-  return <section className="pool-settings-section" aria-label="Subscription projects">
-    <h3 className="pool-settings-heading">Projects</h3>
-    <p className="pool-settings-help">Default role: {account.role === 'primary' ? 'primary' : 'reserve'}. Project rules override this role. Quotas and schedules are shared across the subscription.</p>
+  return <section className="pool-settings-section" aria-label="Проекты подписки">
+    <h3 className="pool-settings-heading">Проекты</h3>
+    {showRoles && <p className="pool-settings-help">Роль по умолчанию: {account.role === 'primary' ? 'основной' : 'резерв'}. Настройки проекта переопределяют эту роль. Квоты и расписание общие для подписки.</p>}
     <fieldset disabled={pending || conflict} className="pool-settings-fields">
-      <label className="pool-settings-field pool-settings-inline">Use in <select aria-label="Use in" className="pool-settings-control" value={draft.onlySelected ? 'selected' : 'all'} onChange={e => void change({ ...draft, onlySelected: e.target.value === 'selected' })}>
-        <option value="all">All projects</option><option value="selected">Selected projects only</option>
+      <label className="pool-settings-field pool-settings-inline">Где использовать <select aria-label="Где использовать" className="pool-settings-control" value={draft.onlySelected ? 'selected' : 'all'} onChange={e => void change({ ...draft, onlySelected: e.target.value === 'selected' })}>
+        <option value="all">Во всех проектах</option><option value="selected">Только в выбранных</option>
       </select></label>
-      {draft.rules.length === 0 && <p className="pool-settings-help">The list is empty; this account can be used in any project.</p>}
+      {draft.rules.length === 0 && <p className="pool-settings-help">Список пуст — используется в любом проекте.</p>}
       {draft.rules.map(rule => <div key={rule.projectId} className="pool-settings-project">
-        <span className="pool-settings-project-name">{names.get(rule.projectId) ?? `Unavailable project (${rule.projectId})`}</span>
-        <select aria-label={`Role in ${names.get(rule.projectId) ?? rule.projectId}`} className="pool-settings-control" value={rule.role} onChange={e => void change({ ...draft, rules: draft.rules.map(value => value.projectId === rule.projectId ? { ...value, role: e.target.value as typeof rule.role } : value) })}>
-          <option value="inherit">Default</option><option value="primary">Primary</option><option value="reserve">Reserve</option>
-        </select>
-        <Button className="pool-settings-remove" size="sm" variant="ghost" type="button" aria-label={`Remove ${names.get(rule.projectId) ?? rule.projectId}`} onClick={() => void change({ ...draft, rules: draft.rules.filter(value => value.projectId !== rule.projectId) })}><span aria-hidden="true">×</span></Button>
+        <span className="pool-settings-project-name">{names.get(rule.projectId) ?? `Недоступный проект (${rule.projectId})`}</span>
+        {showRoles && <select aria-label={`Роль в ${names.get(rule.projectId) ?? rule.projectId}`} className="pool-settings-control" value={rule.role} onChange={e => void change({ ...draft, rules: draft.rules.map(value => value.projectId === rule.projectId ? { ...value, role: e.target.value as typeof rule.role } : value) })}>
+          <option value="inherit">По умолчанию</option><option value="primary">Основной</option><option value="reserve">Резерв</option>
+        </select>}
+        <Button className="pool-settings-remove" size="sm" variant="ghost" type="button" aria-label={`Убрать ${names.get(rule.projectId) ?? rule.projectId}`} onClick={() => void change({ ...draft, rules: draft.rules.filter(value => value.projectId !== rule.projectId) })}><span aria-hidden="true">×</span></Button>
       </div>)}
-      <label className="pool-settings-field pool-settings-inline pool-settings-project-add">Add project <select aria-label="Add project" className="pool-settings-control" value="" onChange={e => { if (e.target.value) void change({ ...draft, rules: [...draft.rules, { projectId: e.target.value, role: 'inherit' }] }); }}>
-        <option value="">Choose a project</option>{catalog.filter(project => !draft.rules.some(rule => rule.projectId === project.id)).map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+      <label className="pool-settings-field pool-settings-inline pool-settings-project-add">Добавить проект <select aria-label="Добавить проект" className="pool-settings-control" value="" onChange={e => { if (e.target.value) void change({ ...draft, rules: [...draft.rules, { projectId: e.target.value, role: 'inherit' }] }); }}>
+        <option value="">Выберите проект</option>{catalog.filter(project => !draft.rules.some(rule => rule.projectId === project.id)).map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
       </select></label>
     </fieldset>
-    <p className="pool-settings-help">Order: project primary → project reserve → global primary → global reserve. “Until exhausted” temporarily allows use in every project.</p>
-    {catalogError && <p role="alert" className="text-sm">Could not load the project list. Saved rules remain in effect.</p>}
-    <p role="status" className="pool-settings-status">{pending ? "Saving…" : saved ? "Saved" : ""}</p>
+    {showRoles && <p className="pool-settings-help">Порядок: основной проекта → резерв проекта → общий основной → общий резерв. «До исчерпания» временно разрешает использование везде.</p>}
+    {catalogError && <p role="alert" className="text-sm">Не удалось загрузить список проектов. Сохранённые привязки остаются в силе.</p>}
+    <p role="status" className="pool-settings-status">{pending ? "Сохраняем…" : saved ? "Сохранено" : ""}</p>
     {error && <div role="alert" className="pool-settings-error">{error} {conflict
-      ? <Button size="sm" variant="ghost" type="button" disabled={pending} onClick={reload}>Reload latest settings</Button>
-      : <Button size="sm" variant="ghost" type="button" disabled={pending} onClick={() => void change(draft)}>Retry</Button>}</div>}
+      ? <Button size="sm" variant="ghost" type="button" disabled={pending} onClick={reload}>Загрузить актуальные настройки</Button>
+      : <Button size="sm" variant="ghost" type="button" disabled={pending} onClick={() => void change(draft)}>Повторить</Button>}</div>}
   </section>;
 }

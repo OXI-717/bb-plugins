@@ -13,7 +13,7 @@ it('waits for a fresh permission within the Guard host-check budget',async()=>{
   } finally {vi.useRealTimers();}
 });
 
-it('cancels a stalled RPC at the shared deadline and ignores a late allow',async()=>{
+it('bounds two stalled reads to eight seconds and ignores a late allow',async()=>{
   vi.useFakeTimers();
   try {
     let signal:AbortSignal|undefined;
@@ -23,7 +23,7 @@ it('cancels a stalled RPC at the shared deadline and ignores a late allow',async
       return new Promise(resolve=>{finish=resolve;});
     });
     const result=createGuardNetworkCheck(read)('codex').catch(error=>error);
-    await vi.advanceTimersByTimeAsync(3999);
+    await vi.advanceTimersByTimeAsync(7999);
     expect(signal?.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(signal?.aborted).toBe(true);
@@ -79,4 +79,121 @@ it('gates OpenCode Go as well as Devin, leaving only Kimi and Z.ai exempt',async
  await check('kimi');await check('zai');expect(read).toHaveBeenCalledTimes(5);
  const config=accountPoolConfigSchema.parse({vpnGuardEnabled:true,vpnOnlyProviders:[]});
  await expect(createVpnPolicy(()=>config,Date.now,undefined,check).assert('opencode-go')).rejects.toThrow('VPN_GUARD_BLOCKED');
+});
+
+
+it('recovers one timeout with fresh permission and a fresh abort signal',async()=>{
+ vi.useFakeTimers();
+ try {
+  const signals:AbortSignal[]=[];
+  const read=vi.fn((_provider,signal:AbortSignal)=>{
+   signals.push(signal);
+   if(signals.length===1)return new Promise(()=>{});
+   return Promise.resolve({schema:'bb-vpn-guard/network-decision/2',hostId:'server',allowed:true,reason:'direct'});
+  });
+  const result=createGuardNetworkCheck(read)('cursor').catch(e=>e);
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(await result).toBe('direct');
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(signals[0].aborted).toBe(true);
+  expect(signals[1].aborted).toBe(false);
+  expect(vi.getTimerCount()).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+
+it('honors a new manual block after timeout without retrying the denial',async()=>{
+ vi.useFakeTimers();
+ try {
+  const read=vi.fn().mockImplementationOnce(()=>new Promise(()=>{})).mockResolvedValue({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'});
+  const result=createGuardNetworkCheck(read)('cursor').catch(e=>e);
+  await vi.advanceTimersByTimeAsync(4000);
+  expect(await result).toMatchObject({code:'VPN_GUARD_BLOCKED'});
+  expect(read).toHaveBeenCalledTimes(2);
+ }finally{vi.useRealTimers();}
+});
+
+
+it('ignores a late first permission while the fresh check denies traffic',async()=>{
+ vi.useFakeTimers();
+ try {
+  let finish:(value:unknown)=>void=()=>{};
+  const read=vi.fn().mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;})).mockImplementationOnce(()=>new Promise(resolve=>setTimeout(()=>resolve({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}),100)));
+  const result=createGuardNetworkCheck(read)('cursor').catch(e=>e);
+  await vi.advanceTimersByTimeAsync(4000);
+  finish({schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'connected'});
+  await vi.advanceTimersByTimeAsync(100);
+  expect(await result).toMatchObject({code:'VPN_GUARD_BLOCKED'});
+  expect(read).toHaveBeenCalledTimes(2);
+ }finally{vi.useRealTimers();}
+});
+
+
+it('shares only a pending read per provider and reads fresh after settlement',async()=>{
+ let finish:(value:unknown)=>void=()=>{};
+ const read=vi.fn(()=>new Promise(resolve=>{finish=resolve;}));
+ const check=createGuardNetworkCheck(read);
+ const batch=Array.from({length:12},()=>check('cursor'));
+ await Promise.resolve();
+ expect(read).toHaveBeenCalledTimes(1);
+ finish({schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'observe'});
+ await Promise.all(batch);
+ const fresh=check('cursor');await Promise.resolve();
+ expect(read).toHaveBeenCalledTimes(2);
+ finish({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'});
+ await expect(fresh).rejects.toMatchObject({code:'VPN_GUARD_BLOCKED'});
+});
+
+it('shares the two-attempt deadline without extending it for later waiters',async()=>{
+ vi.useFakeTimers();
+ try {
+  const read=vi.fn(()=>new Promise(()=>{}));const check=createGuardNetworkCheck(read);
+  const first=check('cursor').catch(e=>e);
+  await vi.advanceTimersByTimeAsync(7000);
+  const later=Array.from({length:12},()=>check('cursor').catch(e=>e));
+  await vi.advanceTimersByTimeAsync(1000);
+  for(const error of await Promise.all([first,...later]))expect(error).toMatchObject({failureReason:'timeout'});
+  expect(read).toHaveBeenCalledTimes(2);expect(vi.getTimerCount()).toBe(0);
+  const fresh=check('cursor').catch(e=>e);await vi.advanceTimersByTimeAsync(8000);await fresh;
+  expect(read).toHaveBeenCalledTimes(4);
+ }finally{vi.useRealTimers();}
+});
+
+it('isolates pending permissions by provider and checker instance',async()=>{
+ let finish:(value:unknown)=>void=()=>{};
+ const read=vi.fn((provider:string)=>provider==='cursor'?new Promise(resolve=>{finish=resolve;}):Promise.resolve({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}));
+ const check=createGuardNetworkCheck(read);const cursor=check('cursor');await Promise.resolve();
+ await expect(check('claude')).rejects.toMatchObject({code:'VPN_GUARD_BLOCKED'});
+ await expect(createGuardNetworkCheck(async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}))('cursor')).rejects.toMatchObject({code:'VPN_GUARD_BLOCKED'});
+ await check('kimi');await check('zai');expect(read).toHaveBeenCalledTimes(2);
+ finish({schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'observe'});await cursor;
+});
+
+it.each([
+ [{schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'},'VPN_GUARD_BLOCKED'],
+ [{allowed:true},'VPN_GUARD_UNAVAILABLE'],
+])('shares a denial without retry or a retained result',async(value,code)=>{
+ const read=vi.fn(async()=>value);const check=createGuardNetworkCheck(read);
+ const batch=Array.from({length:12},()=>check('cursor').catch(e=>e));
+ for(const error of await Promise.all(batch))expect(error.code).toBe(code);
+ expect(read).toHaveBeenCalledTimes(1);
+ await expect(check('cursor')).rejects.toMatchObject({code});expect(read).toHaveBeenCalledTimes(2);
+});
+
+it('keeps concurrent host/RPC/host reads within a serialized SDK budget',async()=>{
+ vi.useFakeTimers();
+ try {
+  let tail=Promise.resolve();
+  const rpc=(signal:AbortSignal)=>{
+   const result=tail.then(async()=>{signal.throwIfAborted();await new Promise(resolve=>setTimeout(resolve,20));signal.throwIfAborted();});
+   tail=result.catch(()=>{});return result;
+  };
+  const read=vi.fn(async(_provider,signal:AbortSignal)=>{
+   await rpc(signal);await rpc(signal);await rpc(signal);
+   return {schema:'bb-vpn-guard/network-decision/1',allowed:true,reason:'observe'};
+  });
+  const check=createGuardNetworkCheck(read,100);
+  const results=Promise.all(Array.from({length:12},()=>check('cursor').then(()=>true,()=>false)));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(await results).toEqual(Array(12).fill(true));expect(read).toHaveBeenCalledTimes(1);
+ }finally{vi.useRealTimers();}
 });

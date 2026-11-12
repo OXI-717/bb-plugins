@@ -1,5 +1,5 @@
 Enable Account Pool Balanced and keep the builtin Account Pooler disabled.
-Add Claude, Codex, or Grok credentials, then inspect proxy routes and account quota:
+Add Claude or Codex credentials, then inspect proxy routes and account quota:
 
 ```sh
 bb plugin enable account-pool-balanced
@@ -7,25 +7,24 @@ bb pool account add --provider claude --login
 printf '%s\n' "$CLAUDE_AUTH_CODE" | bb pool account login-complete --session <id> --code-stdin
 bb pool account add --provider codex --login
 bb pool account login-poll --session <id>
-bb pool account add --provider grok --login
-bb pool account login-poll --session <id> --provider grok
 bb pool account add --provider claude --import
 bb pool account add --provider codex --import
+bb pool account add --provider grok --login
+bb pool account login-poll --session <id> --provider grok
 printf '%s\n' "$ANTHROPIC_API_KEY" | bb pool account add --provider claude --api-key-stdin [--label <text>] [--priority <n>]
 bb pool account add --provider claude --api-key <key> [--label <text>] [--priority <n>]
-bb pool account add --provider <kimi|zai|opencode-go|cursor|devin|grok> --api-key-stdin [--label <text>] [--priority <n>]
 bb pool account list [--json]
 bb pool account remove <id>
 bb pool account enable <id>
 bb pool account disable <id>
 bb pool account priority <id> <n>
-bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor|devin|grok> <id>...
+bb pool account reorder <claude|codex|grok> <id>...
 bb pool account role <id> <primary|reserve>
 bb pool account cap <id> <early> <late>
 bb pool account cap <id> off
 bb pool account refresh <id>
 bb pool status [--json]
-bb pool routing <claude|codex|kimi|zai|opencode-go|cursor|devin|grok> [--off]
+bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin|grok> [--off]
 bb pool config
 bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|grokUpstreamBaseUrl|switchThreshold|parentMode|routingStrategy|reserveDrainHours|restDays> <value>
 bb pool token rotate --machine <id-or-name>
@@ -34,19 +33,16 @@ bb pool bypass <thread-id> [--off]
 
 Claude `--login` starts a PKCE session, prints a browser URL and session ID,
 then exits. Pipe the manual callback code to `account login-complete` with that
-session ID within ten minutes. Codex `--login` prints a device verification
+session ID within ten minutes. Grok `--login` requires the official Grok CLI with
+`grok login --device-auth` support: it prints a device URL, code and session ID,
+and `account login-poll --provider grok` waits for the server-side account. Codex `--login` prints a device verification
 URL, one-time code, session ID, and an `account login-poll` command that waits
-for authorization. Grok `--login` requires the official Grok CLI with
-`grok login --device-auth` support; it prints a device URL, code and session ID,
-then `account login-poll --provider grok` waits for the server-side account to
-be saved. This flow uses a temporary isolated `GROK_HOME`; it does not import a
-login from the machine. An xAI API key can be added separately for API billing. The Claude code stays out of process arguments, and either
+for authorization. The Claude code stays out of process arguments, and either
 browser may be on a different machine from the bb server. Newly added or
 enabled accounts are available without a plugin reload. With an
 enabled account whose secret file remains readable and valid, matching Claude
-Code, Codex, and Grok sessions receive the pool route and a distinct secret
-token for their machine. Grok ACP sessions also receive an isolated Grok config
-directory so a machine login cannot override the Pool route.
+Code, Codex or Grok sessions receive the pool route and a distinct secret token for
+their machine.
 Codex receives `CODEX_OPENAI_BASE_URL` and the secret
 `CODEX_POOL_AUTH_TOKEN`; bb applies them as in-memory app-server config.
 Codex image generation and editing use the same authenticated pool route.
@@ -87,7 +83,7 @@ and the pool retains the 4,096 most recently used pins.
 
 Drag an account’s handle in Account Pooler settings (or focus the handle and use
 Space, arrow keys, and Space again), or
-`bb pool account reorder <claude|codex|kimi|zai|opencode-go|cursor|devin|grok> <id>...`, to set the complete order for
+`bb pool account reorder <claude|codex|grok> <id>...`, to set the complete order for
 one provider. Include disabled accounts too. Reordering changes the next failover
 sequence without moving the current account. `bb pool account priority <id> <n>`
 sets an individual priority; the same operations are available through the

@@ -58,7 +58,6 @@ Standalone model paths:
 | OpenCode Go | `POST /opencode-go/v1/chat/completions` |
 | Antigravity | `GET /agy/v1beta/models`; `POST /agy/v1beta/models/{catalog-model}:generateContent` or `:streamGenerateContent` |
 | NeuralDeep | `POST /neuraldeep/v1/chat/completions`; `GET /neuraldeep/v1/models` |
-| Grok | `POST /grok/v1/chat/completions` |
 | Devin Local CLI | `POST /exa.*` Connect/protobuf RPCs (via the launcher below) |
 | Cursor CLI | `GET/POST /cursor/rpc` through `cursor-route`, or direct `/cursor/aiserver.vN.*` and `/cursor/agent.vN.*` RPC paths |
 

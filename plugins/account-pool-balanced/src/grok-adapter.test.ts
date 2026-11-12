@@ -37,7 +37,7 @@ describe("Grok adapter", () => {
   it("routes OAuth accounts through the CLI proxy and keeps OAuth upstream-only", () => {
     const adapter = createGrokAdapter();
     const config = accountPoolConfigSchema.parse({});
-    const url = adapter.upstreamUrl(request(), config, account, oauth);
+    const url = adapter.upstreamUrl(request(), config, undefined, account, oauth);
     const headers = adapter.requestHeaders(request().headers, account, oauth);
     expect(url.toString()).toBe("https://cli-chat-proxy.grok.com/v1/responses");
     expect(headers.get("authorization")).toBe("Bearer synthetic-access-token");
@@ -50,7 +50,7 @@ describe("Grok adapter", () => {
     const adapter = createGrokAdapter();
     const config = accountPoolConfigSchema.parse({ grokUpstreamBaseUrl: "https://api.example/v1" });
     const apiKey: AccountSecret = { kind: "api-key", apiKey: "synthetic-xai-key" };
-    expect(adapter.upstreamUrl(request(), config, account, apiKey).toString()).toBe(
+    expect(adapter.upstreamUrl(request(), config, undefined, account, apiKey).toString()).toBe(
       "https://api.example/v1/responses",
     );
     const headers = adapter.requestHeaders(request().headers, account, apiKey);

@@ -30,6 +30,7 @@ export const requestSchema = z.object({
   body: z.string().max(3 * 1024 * 1024).nullable().default(null),
 }).strict();
 export const hostContract = defineRpcContract({
+  reconcile:{input:z.object({keys:z.array(z.string()).max(100)}),output:z.object({ok:z.boolean()})},
   handoffUpload: {
     input: handoffUploadSchema.extend(destination),
     output: z.object({status:z.number().int(), contentType:z.string(), bodyBase64:z.string()}),

@@ -286,7 +286,7 @@ test("federated socket: routing, readiness, policy, row status, backoff, catch-u
     r.serverOpen(); // bridge reachable, upstream still down
     r.close(4001);
   }
-  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+  for(const [i,cap]of [1000,2000,4000,8000,16000,30000,30000].entries())assert.ok(delays[i]>=0.8*cap&&delays[i]<=cap);
   for (let i = 0; i < 3; i++) t.env.runTimers(); // exhaust bounded nudges; next retry fires
   const back = t.env.FakeWS.all.at(-1);
   back.serverOpen();
@@ -384,4 +384,35 @@ test('only explicit remote handoff RPCs reach primary; legacy machine operations
   const r=await t.fetch(`/api/v1/plugins/handoff/rpc/${method}`,{method:'POST',body});assert.equal(r.status,409);
  }
  assert.equal(t.env.calls.length,count);
+});
+
+
+test('short thread route resolves cold remote ownership before timeline requests',async()=>{
+ const t=setup({primary:{'GET /api/v1/threads/thr_cold01':R({},404)},remote:{'GET /api/v1/threads/thr_cold01':{id:'thr_cold01',projectId:'proj_remote01'},'GET /api/v1/threads/thr_cold01/timeline':{items:[]}}});
+ t.env.win.location.href='http://primary.invalid/threads/thr_cold01';
+ const response=await t.fetch('/api/v1/threads/thr_cold01/timeline');
+ assert.equal(response.status,200);assert.equal(t.fed.isRemote('thr_cold01'),true);
+ assert.equal(t.env.primaryCalls().some(c=>c.path.endsWith('/timeline')),false);
+ t.fed.dispose();
+});
+test('short route preserves a primary thread and refuses primary failures',async()=>{
+ for(const status of [200,503]){
+ const t=setup({primary:{'GET /api/v1/threads/thr_cold01':R({id:'thr_cold01',projectId:'proj_local01'},status)}});
+ t.env.win.location.href='http://primary.invalid/threads/thr_cold01';
+ await t.fetch('/api/v1/threads/thr_cold01');
+ assert.equal(t.fed.isRemote('thr_cold01'),false);
+ assert.equal(t.env.calls.some(c=>c.to==='bridge'),false);
+ t.fed.dispose();
+ }
+});
+
+test('unavailable remote discovery never forwards reads or mutations to primary',async()=>{
+ for(const method of ['GET','POST']){
+ const t=setup({primary:{'GET /api/v1/threads/thr_cold01':R({},404)},remote:{'GET /api/v1/threads/thr_cold01':R({},503)}});
+ t.env.win.location.href='http://primary.invalid/threads/thr_cold01';
+ const response=await t.fetch('/api/v1/threads/thr_cold01/messages',{method});
+ assert.equal(response.status,503);
+ assert.equal(t.env.primaryCalls().some(c=>c.path.endsWith('/messages')),false);
+ t.fed.dispose();
+ }
 });

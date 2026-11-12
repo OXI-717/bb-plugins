@@ -38,7 +38,14 @@ export const handoffResultSchema=z.object({
  serverId:z.string(),projectId:z.string(),hostId:z.string(),environmentId:z.string(),
  threadId:z.string().regex(/^thr_[a-z0-9]+$/).nullable(),uploaded:z.number().int(),
 }).strict();
+export const handoffSourceSchema=z.object({
+ serverId:handoffTargetSchema.shape.serverId,projectId:handoffTargetSchema.shape.projectId,
+ threadId:z.string().regex(/^thr_[a-z0-9]+$/),
+ afterSeq:z.number().int().nonnegative().optional(),
+ order:z.enum(['asc','desc']).default('asc'),limit:z.number().int().min(1).max(100).default(100),
+}).strict();
 export const handoffRpc=defineRpcContract({
+ handoffSource:{input:handoffSourceSchema,output:z.object({thread:z.any(),events:z.array(z.any())})},
  handoffTargets:{input:z.null(),output:z.array(z.object({
   serverId:z.string(),label:z.string(),projectId:z.string(),available:z.boolean(),
   targets:z.array(z.object({hostId:z.string(),hostName:z.string(),environmentId:z.string(),path:z.string().nullable()})),

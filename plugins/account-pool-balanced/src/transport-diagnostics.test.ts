@@ -3,6 +3,7 @@ import { describeTransportError, observeUpstreamFetch } from "./transport-diagno
 import { NetworkFlights } from "./network-flights.js";
 
 it.each([
+  ["VPN_GUARD_UNAVAILABLE", "policy"], ["VPN_GUARD_BLOCKED", "policy"], ["VPN_REQUIRED", "policy"],
   ["ENOTFOUND", "dns"], ["EAI_AGAIN", "dns"],
   ["UND_ERR_CONNECT_TIMEOUT", "connect"], ["ECONNREFUSED", "connect"],
   ["ECONNRESET", "socket"], ["UND_ERR_SOCKET", "socket"],

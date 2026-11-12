@@ -431,7 +431,7 @@ export function createCodexAdapter(options: {
     async refreshUsage(context) {
       let secret = await context.freshSecret();
       if (secret.kind !== "oauth" || context.account.codexAccountId === undefined)
-        throw new Error("OAuth and a ChatGPT account ID are required to refresh quotas.");
+        throw new Error("Для обновления квот нужны OAuth и ChatGPT account ID.");
       const requestUsage = (accessToken: string) => context.fetch(options.usageUrl, {
         headers: {
           authorization: `Bearer ${accessToken}`,
@@ -445,12 +445,12 @@ export function createCodexAdapter(options: {
       if (response.status === 401) {
         await response.body?.cancel();
         secret = await context.freshSecret(secret.accessToken);
-        if (secret.kind !== "oauth") throw new Error("Sign in to ChatGPT again.");
+        if (secret.kind !== "oauth") throw new Error("Требуется повторный вход в ChatGPT.");
         response = await requestUsage(secret.accessToken);
       }
       if (!response.ok) {
         await response.body?.cancel();
-        throw new Error(`Could not refresh quotas: HTTP ${response.status}.${response.status === 401 ? " Sign in to ChatGPT again." : ""}`);
+        throw new Error(`Не удалось обновить квоты: HTTP ${response.status}.${response.status === 401 ? " Требуется повторный вход в ChatGPT." : ""}`);
       }
       const payload: unknown = await response.json().catch(() => null);
       const quota = codexQuotaFromUsage(
@@ -459,7 +459,7 @@ export function createCodexAdapter(options: {
         context.quotas.get(context.account.id),
         context.now(),
       );
-      if (quota === null) throw new Error("The server returned invalid quota data.");
+      if (quota === null) throw new Error("Сервер вернул некорректные данные квот.");
       context.quotas.put({ ...quota, error: null });
       const resetCount = resetCountSchema.safeParse(payload);
       const availableCount = resetCount.success ? resetCount.data.rate_limit_reset_credits?.available_count : undefined;

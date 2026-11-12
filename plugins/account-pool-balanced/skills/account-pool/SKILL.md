@@ -43,3 +43,33 @@ to the existing client issuance command. Only explicitly opted-in accounts are
 selectable; project policies and quota guards still apply. Existing credentials
 remain legacy. A client name or request header cannot supply the trusted purpose.
 Do not choose or enable accounts without the operator's policy instruction.
+
+
+## Concurrent Guard reads and interrupted Cursor streams
+
+Pending Guard permission checks share one in-flight read per provider. The
+completed decision is never cached: the next call starts a fresh read, with the
+same host binding/recheck and two-attempt timeout budget. Explicit denial and
+RPC/validation failures remain final. Probe invocations have independent checks
+and cannot delay or change production permission checks.
+
+A failed background permission check still aborts active streams for that
+provider. Body failures log a safe `response_body` stage, request UUID, bytes read,
+fixed error category and optional Guard failure reason. No body bytes, URLs or
+raw error messages are logged. Match that UUID to request observations before
+attributing an `incomplete envelope` to Guard. A nearby Guard timeout alone is
+not proof. Success and ordinary caller cancellations produce no body warning.
+
+
+Cursor's local RPC gateway limits connection/header waits to 120 seconds. An
+accepted response body follows the client's lifetime, so long model/tool waits
+do not truncate it. Disconnecting the local client shuts down its upstream
+socket. A silent upstream can remain open while the client is still waiting;
+the gateway does not invent a Connect end frame or replay inference.
+
+
+For an explicitly authorized synthetic recovery test, inspect one thread with
+`bb pool stream-probe --thread <thread-id> --json`. Interrupt only an exact observed
+model response using `--interrupt-request <request-uuid> --confirm`; both identities
+must match. It does not change Guard, replay requests, or interrupt neighbours.
+See [controlled stream recovery](../../docs/cursor-paths.md#controlled-stream-recovery-check).
