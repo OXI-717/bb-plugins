@@ -28,7 +28,7 @@ export function claudeResetCredits(payload: unknown, now: number): ResetCredits 
       (grant.starts_at == null || Date.parse(grant.starts_at) <= now) &&
       (grant.ends_at == null || Date.parse(grant.ends_at) > now))
     .map((grant) => ({
-      title: grant.label || "Сброс лимитов Claude",
+      title: grant.label || "Claude usage limit reset",
       expiresAt: grant.ends_at == null ? null : Date.parse(grant.ends_at),
       remaining: grant.resets_left,
       limitTypes: grant.clears ?? [],
