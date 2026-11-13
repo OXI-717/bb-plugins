@@ -1,3 +1,4 @@
+import { inClientScope, clientRouteAllowed, type ClientAccountScope } from "./client-scope.js";
 import {PoolMaintenanceError, type PoolMaintenance} from './maintenance.js';
 import {GuardRequiredError} from './network-errors.js';
 import {CURSOR_RPC_PATH_HEADER} from './cursor-rpc.js';
@@ -127,7 +128,7 @@ interface HubOptions {
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
   maxAffinityBindings: number;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext" | "validatesAccountScope">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;
@@ -179,7 +180,7 @@ interface RefreshBackoff {
 type SecretUse = { kind: "normal" } | { kind: "rejected"; accessToken: string };
 
 type SecretFlight =
-  | { kind: "refresh"; use: SecretUse; result: Promise<AccountSecret> }
+  | { kind: "refresh"; use: SecretUse; routeKey?: string; result: Promise<AccountSecret> }
   | { kind: "rejection-check"; result: Promise<void> };
 
 interface FailureSummary {
@@ -332,7 +333,7 @@ export class AccountPoolHub {
     const body = new Uint8Array(await request.arrayBuffer());
     const refusal = adapter.guardRequest?.(request, body);
     if (refusal !== null && refusal !== undefined) return refusal;
-    return this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null, "purpose" in context ? context.purpose : undefined, maintenanceSignal);
+    return this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null, "purpose" in context ? context.purpose : undefined, maintenanceSignal, "accountScope" in context ? context.accountScope : undefined, token);
   }
 
   threadObservation(provider:PoolProvider,hostId:string,threadId:string,projectId:string|null):AccountBinding|null {
@@ -613,6 +614,8 @@ export class AccountPoolHub {
     threadId: string | null = null,
     purpose?: "autopilot",
     maintenanceSignal?: AbortSignal,
+    accountScope?:ClientAccountScope,
+    credential?:string|null,
   ): Promise<Response> {
     const requestLifetime = AbortSignal.any([request.signal,...(maintenanceSignal?[maintenanceSignal]:[])]);
     const signal = AbortSignal.any([requestLifetime, this.stopped.signal]);
@@ -626,11 +629,12 @@ export class AccountPoolHub {
     let lastDispatchedAccount: string | null = null;
     let failure: FailureSummary | null = null;
     const accounts = (await this.options.accounts.list()).filter(
-      (account) => account.provider === adapter.provider,
+      (account) => account.provider === adapter.provider && inClientScope(account.id,accountScope),
     );
     const candidateIds = new Set(accounts.map((account) => account.id));
     const legacyAffinityHost = projectId === null ? hostId : JSON.stringify([hostId, projectId]);
-    const affinityHost = purpose ? JSON.stringify([legacyAffinityHost, "purpose", purpose]) : legacyAffinityHost;
+    const purposeHost = purpose ? JSON.stringify([legacyAffinityHost, "purpose", purpose]) : legacyAffinityHost;
+    const affinityHost = accountScope ? JSON.stringify([purposeHost,"account-scope",accountScope]) : purposeHost;
     const parsed = adapter.parseRequest(body, request.headers, request);
     const family = parsed.family;
     const freeTier = adapter.provider === "opencode-go" && isOpenCodeGoFreeModelBody(body);
@@ -653,7 +657,7 @@ export class AccountPoolHub {
       affinityKey === null || parsed.parentAffinityId === null
         ? null
         : JSON.stringify([adapter.provider, affinityHost, parsed.parentAffinityId]);
-    const routeSessionKey=threadId===null?affinityKey:JSON.stringify([hostId,projectId,threadId,adapter.provider]);
+    const routeSessionKey=threadId===null?affinityKey:JSON.stringify([accountScope?affinityHost:hostId,projectId,threadId,adapter.provider]);
     try {
       const pinnedRouteAccountId=routeSessionKey===null?null:this.options.pinnedRouteAccount?.(routeSessionKey)??null;
       if(pinnedRouteAccountId!==null && !candidateIds.has(pinnedRouteAccountId))throw new EgressUnavailable();
@@ -674,9 +678,20 @@ export class AccountPoolHub {
           purpose,
           freeTier,
           pinnedRouteAccountId,
+          accountScope ? affinityHost : undefined,
         );
         if (selected === null) break;
-        const route=await this.acquireRoute(selected.account,routeSessionKey);
+        const acquired=await this.acquireRoute(selected.account,routeSessionKey);
+        const assertScope=()=>{
+          if(!clientRouteAllowed(acquired,accountScope,selected.account.id,this.options.now()))throw new EgressUnavailable();
+        };
+        if(accountScope)await acquired.prepareScope?.();
+        assertScope();
+        // Recheck at refresh/dispatch transport start as well as the metadata fence.
+        const route:AccountRoute=accountScope?{...acquired,assertScope,fetch:ipv4=>{
+          const send=acquired.fetch(ipv4,assertScope);
+          return send===undefined?undefined:async(...args)=>{await acquired.prepareScope?.();assertScope();return send(...args);};
+        }}:acquired;
         lastAccount=selected.account.id;
         let pacing: PacingFlight | null = null;
         previousAccountId = selected.account.id;
@@ -734,7 +749,7 @@ export class AccountPoolHub {
               secret,
               adapter,
               trace, attempt, route,
-              {purpose,projectId,family,freeTier,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
+              {purpose,projectId,family,freeTier,accountScope,credential,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
                 switched = lastDispatchedAccount !== null && lastDispatchedAccount !== selected.account.id;
                 if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'dispatched'});
                 lastDispatchedAccount = selected.account.id;
@@ -1081,8 +1096,8 @@ export class AccountPoolHub {
     let networkAllowed = true;
     try { await this.assertNetworkAllowed('codex'); } catch { networkAllowed = false; }
     const threadBypassed = context.threadId ? await bypassed(context.threadId) : false;
-    const routeReady = this.modelAdmissionOpen() && routingEnabled && networkAllowed && !threadBypassed;
-    const accounts = (await this.options.accounts.list()).filter(a => a.provider === 'codex' && projectTier(a, context.projectId) !== null);
+    const routeReady = !context.accountScope && this.modelAdmissionOpen() && routingEnabled && networkAllowed && !threadBypassed;
+    const accounts = (await this.options.accounts.list()).filter(a => a.provider === 'codex' && inClientScope(a.id,context.accountScope) && projectTier(a, context.projectId) !== null);
     const eligible = new Set(this.eligibleEntries('codex', context.projectId, accounts, 'other', now, context.purpose).eligible.map(({ account }) => account.id));
     return reply({
       schema: 'bb-account-pool/codex-budget/1', observedAt: now, maxAgeMs: CODEX_BUDGET_MAX_AGE_MS,
@@ -1110,8 +1125,8 @@ export class AccountPoolHub {
     let networkAllowed=true;
     try {await this.assertNetworkAllowed('zai');} catch {networkAllowed=false;}
     const threadBypassed=context.threadId?await bypassed(context.threadId):false;
-    const routeReady=this.modelAdmissionOpen() && routingEnabled && networkAllowed && !threadBypassed;
-    const accounts=(await this.options.accounts.list()).filter(a=>a.provider==='zai' && projectTier(a,context.projectId)!==null);
+    const routeReady=!context.accountScope && this.modelAdmissionOpen() && routingEnabled && networkAllowed && !threadBypassed;
+    const accounts=(await this.options.accounts.list()).filter(a=>a.provider==='zai' && inClientScope(a.id,context.accountScope) && projectTier(a,context.projectId)!==null);
     const eligible=new Set(this.eligibleEntries('zai',context.projectId,accounts,'other',now,context.purpose).eligible.map(({account})=>account.id));
     return reply({schema:'bb-account-pool/zai-budget/1',observedAt:now,maxAgeMs:ZAI_BUDGET_MAX_AGE_MS,projectId:context.projectId,
       ...(context.purpose?{purpose:context.purpose}:{}),
@@ -1137,8 +1152,8 @@ export class AccountPoolHub {
       const now=this.options.now();
       let networkAllowed=true;try{await this.assertNetworkAllowed(provider);}catch{networkAllowed=false;}
       const threadBypassed=context.threadId?await bypassed(context.threadId):false;
-      const ready=this.modelAdmissionOpen()&&routingEnabled&&networkAllowed&&!threadBypassed;
-      const accounts=(await this.options.accounts.list()).filter(a=>a.provider===provider&&projectTier(a,context.projectId)!==null);
+      const ready=!context.accountScope&&this.modelAdmissionOpen()&&routingEnabled&&networkAllowed&&!threadBypassed;
+      const accounts=(await this.options.accounts.list()).filter(a=>a.provider===provider&&inClientScope(a.id,context.accountScope)&&projectTier(a,context.projectId)!==null);
       // Available applies shared project/purpose/policy gates before any family filter.
       // A blocked 'other' family must not hide an account selectable by Sonnet.
       const eligible=new Set(this.eligibleEntries(provider,context.projectId,accounts,'other',now,context.purpose).available.map(e=>e.account.id));
@@ -1164,8 +1179,9 @@ export class AccountPoolHub {
     purpose?: "autopilot",
     freeTier?: boolean,
     pinnedRouteAccountId: string | null = null,
+    scopeNamespace?: string,
   ): Promise<SelectedAccount | null> {
-    const accounts = (await this.routingAccounts()).sort(
+    const accounts = (await this.routingAccounts()).filter(account=>scopeNamespace === undefined || candidateIds.has(account.id)).sort(
       (left, right) => left.priority - right.priority,
     );
     signal.throwIfAborted();
@@ -1212,7 +1228,8 @@ export class AccountPoolHub {
       }
     }
     const legacyActiveKey = projectId === null ? provider : `${provider}:${projectId}`;
-    const activeKey = purpose ? JSON.stringify([legacyActiveKey, "purpose", purpose]) : legacyActiveKey;
+    const purposeKey = purpose ? JSON.stringify([legacyActiveKey, "purpose", purpose]) : legacyActiveKey;
+    const activeKey = scopeNamespace === undefined ? purposeKey : JSON.stringify([purposeKey, "client", scopeNamespace]);
     let active = this.activeAccounts.get(activeKey);
     const activeAccount = eligible.find(
       ({ account }) => account.id === active?.accountId,
@@ -1318,7 +1335,7 @@ export class AccountPoolHub {
           this.affinityBindings.set(affinityKey, accepted);
         }
         if (advance && this.activeAccounts.get(activeKey) === active) {
-          if (purpose === undefined) {
+          if (purpose === undefined && scopeNamespace === undefined) {
             if (projectId === null) this.options.affinity.putActiveAccount(provider, selected.account.id);
             else this.options.affinity.putProjectActiveAccount(provider, projectId, selected.account.id);
           }
@@ -1336,12 +1353,17 @@ export class AccountPoolHub {
   ): Promise<AccountSecret> {
     route ??= await this.acquireRoute(account);
     while (true) {
+      if(route.assertScope)await route.prepareScope?.();
+      route.assertScope?.();
       const existing = this.refreshes.get(account.id);
       if (existing !== undefined) {
         if (existing.kind === "rejection-check") {
           await existing.result;
           continue;
         }
+        // Never join credential refresh started through another egress (or an
+        // operator authorization replacement). Refuse until that flight ends.
+        if (route.assigned && existing.routeKey !== JSON.stringify(route.profile)) throw new EgressUnavailable();
         let secret: AccountSecret;
         try {
           secret = await existing.result;
@@ -1373,6 +1395,7 @@ export class AccountPoolHub {
       const flight: Extract<SecretFlight, { kind: "refresh" }> = {
         kind: "refresh",
         use,
+        routeKey: JSON.stringify(route.profile),
         result: this.options.accounts
           .readSecret(account.id)
           .then(async (secret) => {
@@ -1503,7 +1526,7 @@ export class AccountPoolHub {
     secret: AccountSecret,
     adapter: ProviderAdapter,
     trace: Trace, attempt: number, route:AccountRoute,
-    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;deadline:number;onDispatch?:()=>void},
+    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;accountScope?:ClientAccountScope;credential?:string|null;deadline:number;onDispatch?:()=>void},
     signal: AbortSignal, requestLifetime: AbortSignal,
   ): Promise<UpstreamResult> {
     const admissionSignal = signal;
@@ -1577,8 +1600,12 @@ export class AccountPoolHub {
             const waited = await this.admission.waitCooldown(AbortSignal.any([controller.signal, this.stopped.signal]), cooldown, deadline);
             if (waited) {const previous=phase;phase='cooldown';try{await check();}finally{phase=previous;}}
             const started = await this.options.accounts.withSnapshot(accounts => {
+              if (admission.accountScope) {
+                if (!this.options.hubTokens.validatesAccountScope?.(admission.credential ?? null, admission.accountScope)) throw new ClientPolicyDenied();
+                if (!clientRouteAllowed(route, admission.accountScope,account.id,this.options.now())) throw new EgressUnavailable();
+              }
               const current = this.eligibleEntries(adapter.provider, admission.projectId,
-                accounts, admission.family, this.options.now(), admission.purpose, admission.freeTier).eligible;
+                accounts.filter(a=>inClientScope(a.id,admission.accountScope)), admission.family, this.options.now(), admission.purpose, admission.freeTier).eligible;
               if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
               // Metadata serialization can outlast admission: never start new work after its deadline.
               if (this.options.now() >= deadline) throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
@@ -1819,7 +1846,7 @@ export function createHub(options: {
   accounts: AccountStore;
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext" | "validatesAccountScope">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;

@@ -1,3 +1,5 @@
+import {nativeProbeInputSchema} from './native-probe-wire.js';
+import { clientAccountScopeSchema } from "./client-scope.js";
 import type {PoolMaintenance} from './maintenance.js';
 import {z} from 'zod';
 import type {CursorStream} from './network-flights.js';
@@ -44,7 +46,7 @@ interface ParsedFlags {
 }
 
 const HELP = [
-  "  bb pool maintenance <status|acquire|interrupt|release> [--owner <uuid>] --json",
+  "  bb pool maintenance <status|acquire-graceful|acquire|interrupt|release> [--owner <uuid>] --json",
   "Usage:",
   "  bb pool egress status --json",
   "  bb pool egress configure <profile-json>",
@@ -74,6 +76,7 @@ const HELP = [
   "  bb pool status [--json]",
   "  bb pool readiness [--project <id>] [--json]",
   '  bb pool native status --json',
+  '  bb pool native preflight <target-json>',
   '  bb pool native configure <executor-json>',
   '  bb pool native prefer <executor-id>',
   '  bb pool native mode <managed|off>',
@@ -86,7 +89,7 @@ const HELP = [
   "  bb pool config",
   "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
-  "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot]",
+  "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot] [--account-scope-json <json>]",
   "  bb pool client revoke <name>",
   "  bb pool bypass <thread-id> [--off]",
   "  bb pool browser open <id|email|label> [--url <url>]",
@@ -369,7 +372,8 @@ export function registerPoolCli(
   egress?: AccountEgress,
   guardProbe?:(input:GuardProbeInput)=>ReturnType<typeof runGuardProbe>,
   streamProbe?:(threadId:string,requestId?:string)=>{streams:CursorStream[];interrupted?:boolean},
-  maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
+  maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & Partial<Pick<PoolMaintenance,'acquireGraceful'>> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
+  nativePreflight?:(input:import('./native-probe-wire.js').NativeProbeInput)=>Promise<object>,
 ): void {
   bb.cli.register({
     name: "pool",
@@ -489,6 +493,10 @@ export function registerPoolCli(
           if(!maintenance)throw Error('Model maintenance unavailable');
           let result:object;
           if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=maintenance.status();
+          else if(argv[1]==='acquire-graceful'&&argv.length===5&&argv[2]==='--owner'&&argv[4]==='--json'){
+            if(!maintenance.acquireGraceful)throw Error('Graceful model admission unavailable');
+            result=await maintenance.acquireGraceful(z.uuid().parse(argv[3]));
+          }
           else if(['acquire','release','interrupt'].includes(argv[1]!)&&argv.length===5&&argv[2]==='--owner'&&argv[4]==='--json'){
             const owner=z.uuid().parse(argv[3]);
             result=await maintenance[argv[1] as 'acquire'|'release'|'interrupt'](owner);
@@ -507,7 +515,8 @@ export function registerPoolCli(
         if(argv[0]==='native'){
           if(!nativeSessions)throw Error('Native executor management unavailable.');
           let result:object;
-          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=await nativeSessions.snapshot();
+          if(argv[1]==='preflight'&&argv.length===3&&nativePreflight){result=await nativePreflight(nativeProbeInputSchema.parse(JSON.parse(argv[2]!)));return {exitCode:(result as {status:string}).status==='ready'?0:2,stdout:json(result)};}
+          else if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=await nativeSessions.snapshot();
           else if(argv[1]==='configure'&&argv.length===3)result=await nativeSessions.configure(JSON.parse(argv[2]!));
           else if(argv[1]==='prefer'&&argv.length===3){await nativeSessions.prefer(argv[2]!, (await nativeSessions.accounts()).selectionRevision);result={executorId:argv[2]!};}
           else if(argv[1]==='mode'&&argv.length===3&&['managed','off'].includes(argv[2]!))result=await nativeSessions.setManaged(argv[2]==='managed');
@@ -912,13 +921,15 @@ export function registerPoolCli(
         }
         if (argv[0] === "client" && externalClients) {
           if (argv[1] === "add" && argv[2]) {
-            const flags = parseFlags(argv.slice(3), [], ["output", "project", "purpose"]);
+            const flags = parseFlags(argv.slice(3), [], ["output", "project", "purpose", "account-scope-json"]);
             const output = flags.values.get("output");
             if (!output) throw new Error("--output is required (path on the BB server).");
             const projectId = flags.values.get("project") ?? null;
             const purpose = flags.values.get("purpose");
             if (purpose !== undefined && purpose !== "autopilot") throw Error("Unsupported client purpose.");
-            await externalClients.add(argv[2], output, projectId, purpose);
+            const scopeInput=flags.values.get("account-scope-json");
+            const scope=scopeInput===undefined?undefined:clientAccountScopeSchema.parse(JSON.parse(scopeInput));
+            await externalClients.add(argv[2], output, projectId, purpose, scope);
             return { exitCode: 0, stdout: "External client token saved to private file on the BB server.\n" };
           }
           if (argv[1] === "revoke" && argv.length === 3) {

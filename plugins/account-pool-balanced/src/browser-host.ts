@@ -1,3 +1,4 @@
+import {nativeProbeLaunchSchema,nativeProbeResultSchema} from './native-probe-wire.js';
 import {defineRpcContract} from '@get-bb/plugin-sdk';
 import {z} from 'zod';
 import {access} from 'node:fs/promises';
@@ -15,6 +16,8 @@ const openInput=z.object({accounts:accountsSchema,routedAccountIds:z.array(z.str
 const listInput=z.object({accounts:accountsSchema,routedAccountIds:z.array(z.string().uuid()).max(256).optional()}).strict();
 const rowSchema=z.object({accountId:z.string(),provider:z.string(),label:z.string(),email:z.string().nullable(),profileName:z.string(),profileDirectory:z.string(),profileDir:z.string(),exists:z.boolean(),updatedAt:z.number().nullable()}).strict();
 export const browserHostContract=defineRpcContract({
+ nativeProbeCapabilities:{input:z.object({executorId:z.string().regex(/^[A-Za-z0-9_-]{1,80}$/)}).strict(),output:z.object({protocol:z.union([z.literal(0),z.literal(1)])}).strict()},
+ nativeProbe:{input:nativeProbeLaunchSchema,output:nativeProbeResultSchema},
  open:{input:openInput,output:z.object({opened:z.literal(true)}).strict()},
  list:{input:listInput,output:z.array(rowSchema).max(256)},
 });

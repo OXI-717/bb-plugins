@@ -73,13 +73,14 @@ export class PoolUpdate {
       await fs.copyFile(path.join(path.dirname(script),name),target,constants.COPYFILE_EXCL);
       await fs.chmod(target,0o600);
     }
+    const operatorKeyFile=path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'secrets','accounts','management','operator.env');
     const frozenScript=path.join(operationRoot,'upgrade-pool.sh');
     await bb.storage.kv.set(KEY, value);
     try {
       const terminal = await bb.sdk.terminals.create({cols:100,rows:28,
         title:`Pool update ${value.operationId}`,
         scope:{kind:'host_path',hostId,cwd:operationRoot},
-        start:{mode:'command',command:`env BB_SERVER_URL=${quote(loopback.origin)} bash ${quote(frozenScript)} --pause-sessions`}});
+        start:{mode:'command',command:`env BB_SERVER_URL=${quote(loopback.origin)} bash ${quote(frozenScript)} --drain-sessions --operator-key-file ${quote(operatorKeyFile)}`}});
       const next: UpdateState = {...value,terminalId:terminal.id,state:'running'};
       await bb.storage.kv.set(KEY,next);
       return next;

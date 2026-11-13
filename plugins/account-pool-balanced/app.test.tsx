@@ -206,24 +206,48 @@ describe("Account Pool settings", () => {
 
   it('opens the native card and saves the existing all-projects control',async()=>{
     const projects={onlySelected:true,rules:[{projectId:'project-one',role:'inherit' as const}]};
-    const slot=render([],{"native.accounts":()=>({managed:true,accounts:[{accountId:'subscription-one',projects,projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.setProjects":()=>null});
+    const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[{accountId:'subscription-one',projects,projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.updateAccount":()=>null});
     fireEvent.click(await slot.findByRole('button',{name:'Google · Antigravity'}));
     const control=await slot.findByLabelText('Где использовать');
     expect(control.closest('.pool-settings')).not.toBeNull();
     expect((control as HTMLSelectElement).value).toBe('selected');
-    expect(slot.queryByLabelText('Роль в project-one')).toBeNull();
+    expect(await slot.findByLabelText('Роль в project-one')).toBeTruthy();
     fireEvent.change(control,{target:{value:'all'}});
-    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.setProjects',input:{accountId:'subscription-one',projects:{...projects,onlySelected:false},expectedRevision:'a'.repeat(64)}}));
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-one',projects:{...projects,onlySelected:false},expectedRevision:'b'.repeat(64)}}));
   });
 
-  it('shows a named second Google account and selects only through the revision-bound action',async()=>{
+  it('opens explicit settings and saves priority through the revision-bound action',async()=>{
     const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[{
       accountId:'subscription-two',label:'Second Google',projects:{onlySelected:false,rules:[]},projectsRevision:'a'.repeat(64),mixedProjects:false,
       executors:[{id:'second-host',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0,
-    }]}),"native.prefer":()=>null});
+    }]}),"native.updateAccount":()=>null});
     expect(await slot.findByRole('button',{name:'Google · Second Google'})).toBeTruthy();
-    fireEvent.click(await slot.findByRole('button',{name:'Выбрать second-host'}));
-    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.prefer',input:{executorId:'second-host',expectedRevision:'b'.repeat(64)}}));
+    expect(slot.queryByRole('button',{name:'Использовать'})).toBeNull();
+    fireEvent.click(await slot.findByRole('button',{name:'Настройки Google · Second Google'}));
+    const priority=await slot.findByLabelText('Приоритет аккаунта');
+    fireEvent.change(priority,{target:{value:'2'}});fireEvent.blur(priority);
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',priority:2,expectedRevision:'b'.repeat(64)}}));
+  });
+
+  it('saves native role, project role and automation switches in the same account settings without legacy preference calls',async()=>{
+    const item={accountId:'subscription-two',label:'Second Google',role:'primary',priority:1,projects:{onlySelected:false,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[{id:'second-host',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0};
+    const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[item]}),"native.updateAccount":()=>null});
+    fireEvent.click(await slot.findByRole('button',{name:'Настройки Google · Second Google'}));
+    fireEvent.change(await slot.findByLabelText('Роль по умолчанию'),{target:{value:'reserve'}});
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',expectedRevision:'b'.repeat(64),role:'reserve'}}));
+    await waitFor(()=>expect(slot.getByLabelText('Разрешить автопилоту second-host').closest('fieldset')?.disabled).toBe(false));
+    fireEvent.click(slot.getByLabelText('Разрешить автопилоту second-host'));
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',expectedRevision:'b'.repeat(64),executor:{id:'second-host',autopilotAllowed:true}}}));
+    await waitFor(()=>expect(slot.getByLabelText('Роль в project-one').closest('fieldset')?.disabled).toBe(false));
+    fireEvent.change(slot.getByLabelText('Роль в project-one'),{target:{value:'primary'}});
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',expectedRevision:'b'.repeat(64),projects:{onlySelected:false,rules:[{projectId:'project-one',role:'primary'}]}}}));
+    expect(slot.rpcCalls.some(call=>call.method==='native.prefer')).toBe(false);
+  });
+  it('shows a useful error when native settings conflict instead of claiming a saved priority',async()=>{
+    const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[{accountId:'subscription-two',label:'Second Google',role:'primary',priority:1,projects:{onlySelected:false,rules:[]},projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.updateAccount":()=>{throw Error('native-selection-changed');}});
+    fireEvent.click(await slot.findByRole('button',{name:'Настройки Google · Second Google'}));
+    fireEvent.change(slot.getByLabelText('Роль по умолчанию'),{target:{value:'reserve'}});
+    await slot.findByText('Настройки изменились в другой сессии. Обновите данные и повторите.');
   });
 
   it("shows one official Google subscription across executors without an OAuth sign-in", async () => {
@@ -232,7 +256,7 @@ describe("Account Pool settings", () => {
       {id: "official-worker", enabled: true, autopilotAllowed: true},
     ], active: 1, queued: 2, uncertain: 0}]})});
     expect(await slot.findAllByText("Google · Antigravity")).toHaveLength(1);
-    await slot.findByText("official-worker · включён · автопилот разрешён");
+    await slot.findByText("Автопилот: разрешён.");
     expect(slot.queryByText("В пуле нет аккаунтов")).toBeNull();
     expect(slot.getByRole("switch", {name: "Направлять треды Antigravity"})).toBeTruthy();
     expect(slot.queryByRole("button", {name: "Добавить аккаунт Antigravity"})).toBeNull();
@@ -262,7 +286,7 @@ describe("Account Pool settings", () => {
     const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
       {id: "official-desktop", enabled: true, autopilotAllowed: false},
     ], active: 0, queued: 0, uncertain: 1}]})});
-    await slot.findByText("Требуется проверка остановки");
+    await slot.findByText(/Требуется проверка остановки/);
   });
 
   it("saves the explicit account permission with compare-and-set and reports conflicts", async () => {

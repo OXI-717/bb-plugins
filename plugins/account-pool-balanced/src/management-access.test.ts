@@ -81,7 +81,7 @@ function handlerFixture(overrides: Partial<PluginRpcHandlers<typeof accountPoolR
   } as PluginRpcHandlers<typeof accountPoolRpcContract>;
 }
 
-it('protects every legacy RPC before dispatch and permits only the exact trusted plugin reads', async () => {
+it('permits owner UI RPCs while refusing untrusted plugin dispatch', async () => {
   const { access } = await setup();
   const registrations: Array<{ contract: unknown; handlers: Record<string, (input: unknown, context?: unknown) => unknown> }> = [];
   const bb = { rpc: { register: (contract: unknown, handlers: Record<string, (input: unknown, context?: unknown) => unknown>) => registrations.push({ contract, handlers }) } } as unknown as Pick<BbPluginApi, 'rpc'>;
@@ -89,9 +89,15 @@ it('protects every legacy RPC before dispatch and permits only the exact trusted
   registerManagementRpc(bb, access, handlers);
   const legacy = registrations[0]!.handlers;
   for (const [method, handler] of Object.entries(legacy)) {
-    for (const caller of [undefined, { kind: 'client', pluginId: 'model-connections' }, { kind: 'plugin', pluginId: 'untrusted' }]) {
-      expect(() => handler({ threadId: 'owner-thread', projectId: 'owner-project' }, { experimental_caller: caller })).toThrow(PoolManagementLocked);
+    if(['egress.scopeAccept','egress.scopeRevoke'].includes(method)){
+      expect(()=>handler(null)).toThrow(PoolManagementLocked);
+      continue;
     }
+    for (const caller of [undefined, { kind: 'client', pluginId: 'model-connections' }])
+      await handler({ threadId: 'owner-thread', projectId: 'owner-project' }, { experimental_caller: caller });
+    expect(handlers[method as keyof typeof handlers]).toHaveBeenCalledTimes(2);
+    vi.mocked(handlers[method as keyof typeof handlers]).mockClear();
+    expect(() => handler(null,{experimental_caller:{kind:'plugin',pluginId:'untrusted'}})).toThrow(PoolManagementLocked);
     if (!['status.get', 'thread.account'].includes(method)) expect(() => handler(null, { experimental_caller: { kind: 'plugin', pluginId: 'model-connections' } })).toThrow(PoolManagementLocked);
   }
   for (const handler of Object.values(handlers)) expect(handler).not.toHaveBeenCalled();

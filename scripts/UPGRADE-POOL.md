@@ -154,3 +154,40 @@ Bootstrapping from an older pool without the model-admission API requires its
 previously accepted updater and a coordinated idle window once. The new updater
 refuses the missing API before stopping sessions; it never claims that old external
 clients were paused. Subsequent CLI and interface updates use both barriers.
+
+## Natural completion without interruption
+
+Use `--drain-sessions --grant-file "$GRANT_FILE"` in an independent machine
+terminal. The grant is operator-issued JSON, mode 0600; it is read privately and
+sent through stdin. The updater no longer discovers a management root key.
+The coordinator revokes the grant when the operation finishes. Short-lived grants
+do not survive plugin reload: use `--operator-key-file "$OPERATOR_KEY_FILE"` for
+a durable update. This explicit private file is never discovered automatically;
+the existing management client issues and revokes a fresh 60-second grant for
+each command, including post-reload validation and hold release. The interface
+passes only a fixed server-owned file path, never its contents; the browser
+cannot choose a path or command. The two credential flags are mutually exclusive.
+The dispatch queue is held for at most 30 minutes; natural completion waits up
+to 600 seconds (`--drain-timeout`). No thread stop, continuation, model interrupt
+or concurrency change occurs. Three complete empty inventories are required.
+The owned all-client barrier uses `acquire-graceful`, which blocks admission
+without aborting existing transport. The usual backup, idle checks and source,
+account, routing and integrity validation still run. Release and recovery retain
+ownership checks; the private receipt has no stopped sessions to restart.
+
+Bootstrap: installations without `acquire-graceful` cannot use that API. There is
+no fallback to cancelling `acquire`. Coordinate a separately proven idle window
+with external admission controlled before first installation. Active external
+requests are a blocker, even when BB sessions have finished.
+
+## Candidate preflight before publication or installation
+
+`--candidate-preflight "$MANIFEST" --receipt-output "$RECEIPT"` performs no
+installation or production writes. The JSON manifest contains `artifacts` (map
+of repository-relative paths to SHA256), explicit `tests` (existing relative
+`src/*.test.ts` or `.tsx` paths), and optional credential-free HTTPS `network`
+endpoints. It runs typecheck, those suites and the plugin build. Private receipt
+and command log record UTC timestamps. DNS/TCP/TLS is separate from provider
+inference. Missing host bundle, policy preservation, protocol, eligibility and
+live provider receipts remain `unknown`; exit 2 means the aggregate is not ready.
+A successful fixture suite never establishes live subscription or billing state.
