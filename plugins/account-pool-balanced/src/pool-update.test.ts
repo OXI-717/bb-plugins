@@ -34,7 +34,8 @@ it('starts exactly one BB-owned machine terminal and follows it across plugin re
   const f=await fixture();
   const [first,second]=await Promise.all([f.controller.start(),f.controller.start()]);
   expect(first).toEqual(second);expect(f.create).toHaveBeenCalledTimes(1);
-  expect(f.create.mock.calls[0]?.[0]).toMatchObject({scope:{kind:'host_path',hostId:'host-one',cwd:path.join(f.dataDir,'plugins','account-pool','updates',first!.operationId)},start:{mode:'command',command:expect.stringContaining('--drain-sessions --operator-key-file')}});
+  expect(f.create.mock.calls[0]?.[0]).toMatchObject({scope:{kind:'host_path',hostId:'host-one',cwd:path.join(f.dataDir,'plugins','account-pool','updates',first!.operationId)},start:{mode:'command',command:expect.stringContaining('--pause-sessions --operator-key-file')}});
+  expect((f.create.mock.calls[0]?.[0] as {start:{command:string}}).start.command).not.toContain('--drain-sessions');
   const reloaded=new PoolUpdate(f.host.bb);
   expect(await reloaded.start()).toEqual(first);expect(f.create).toHaveBeenCalledTimes(1);
   f.exit(0);expect(await reloaded.status()).toMatchObject({state:'succeeded',terminalId:'terminal-one'});
@@ -56,7 +57,7 @@ it('retains executable inputs and a usable cwd after BB removes the old source c
   const cwd=path.join(f.dataDir,'plugins','account-pool','updates',operation!.operationId);
   const input=f.create.mock.calls[0]![0] as {scope:{cwd:string};start:{command:string}};
   await rm(f.checkout,{recursive:true,force:true});
-  const result=await promisify(execFile)('/bin/bash',[path.join(input.scope.cwd,'upgrade-pool.sh'),'--drain-sessions'],{cwd:input.scope.cwd,timeout:5000});
+  const result=await promisify(execFile)('/bin/bash',[path.join(input.scope.cwd,'upgrade-pool.sh'),'--pause-sessions'],{cwd:input.scope.cwd,timeout:5000});
   expect(result.stdout.trim()).toBe('MODULES_OK');
   expect(input.scope.cwd).toBe(cwd);expect(input.start.command).toContain(path.join(cwd,'upgrade-pool.sh'));
   expect(input.start.command).not.toContain(f.checkout);
@@ -66,13 +67,13 @@ it('retains executable inputs and a usable cwd after BB removes the old source c
   }
 });
 
-it('runs the UI-emitted durable command with a fixed private operator file and no credential bytes in argv',async()=>{
+it('runs the UI-emitted fast pause command with a fixed private operator file and no credential bytes in argv',async()=>{
   const f=await fixture();
   const keyFile=path.join(f.dataDir,'plugins','account-pool','secrets','accounts','management','operator.env');
   await mkdir(path.dirname(keyFile),{recursive:true});
   const fixtureValue='synthetic-private-value';
   await writeFile(keyFile,fixtureValue,{mode:0o600});
-  await writeFile(path.join(f.checkout,'scripts','upgrade_pool.py'),`import argparse\nfrom pathlib import Path\np=argparse.ArgumentParser()\np.add_argument('--drain-sessions',action='store_true')\np.add_argument('--operator-key-file',required=True)\na=p.parse_args()\nassert a.drain_sessions\nassert Path(a.operator_key_file).read_text()=='synthetic-private-value'\nprint('MANAGED_UPDATE_OK')\n`);
+  await writeFile(path.join(f.checkout,'scripts','upgrade_pool.py'),`import argparse\nfrom pathlib import Path\np=argparse.ArgumentParser()\np.add_argument('--pause-sessions',action='store_true')\np.add_argument('--operator-key-file',required=True)\na=p.parse_args()\nassert a.pause_sessions\nassert Path(a.operator_key_file).read_text()=='synthetic-private-value'\nprint('MANAGED_UPDATE_OK')\n`);
   let stdout='';
   f.create.mockImplementationOnce(async(raw)=>{
     const input=raw as {scope:{cwd:string};start:{command:string}};
