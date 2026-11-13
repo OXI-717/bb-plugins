@@ -79,7 +79,7 @@ export class PoolUpdate {
       const terminal = await bb.sdk.terminals.create({cols:100,rows:28,
         title:`Pool update ${value.operationId}`,
         scope:{kind:'host_path',hostId,cwd:operationRoot},
-        start:{mode:'command',command:`env BB_SERVER_URL=${quote(loopback.origin)} bash ${quote(frozenScript)} --pause-sessions`}});
+        start:{mode:'command',command:`env BB_SERVER_URL=${quote(loopback.origin)} bash ${quote(frozenScript)} --drain-sessions`}});
       const next: UpdateState = {...value,terminalId:terminal.id,state:'running'};
       await bb.storage.kv.set(KEY,next);
       return next;

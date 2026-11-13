@@ -1,3 +1,4 @@
+import {createManagedConnectSource} from './managed-connect-source.js';
 import {ProxySecrets} from './proxy-secrets.js';
 import {ManagementAccess} from './management-access.js';
 import {managementCli,registerManagementRpc} from './management-boundary.js';
@@ -6,6 +7,7 @@ import {PoolUpdate} from './pool-update.js';
 import {serverGuardRead,runGuardProbe,type GuardServerAccess} from './guard-server.js';
 import {registerNativeUnlockRpc} from "./native-unlock-rpc.js";
 import { AccountEgress } from "./account-egress.js";
+import type { HttpScopeEnforcementSource } from './http-scope-acceptance.js';
 import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
 import {NativeSessions,NativeSessionError,nativeHttp} from './native-sessions.js';
 import {AgyOAuthLogin,readNativeAgyConfig,type AgyAppConfig} from "./agy-oauth-login.js";
@@ -66,6 +68,9 @@ import {
 } from "./store.js";
 
 export interface AccountPoolPluginOptions {
+  // Internal override; production uses the root-owned Fleet observer by default.
+  // Never substitute Guard readiness, a receipt file or caller-supplied metadata.
+  httpScopeEnforcement?:HttpScopeEnforcementSource;
   agyAppConfig?:()=>Promise<AgyAppConfig>;
   fetch?: typeof fetch;
   fetchIpv4?:typeof fetch;
@@ -188,7 +193,7 @@ export function createAccountPoolPlugin(
     const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
     await journal.initialize();
     bb.onDispose(()=>journal.close());
-    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';},new ProxySecrets(path.join(secretDir,'account-proxies')));
+    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';},new ProxySecrets(path.join(secretDir,'account-proxies')),now,options.httpScopeEnforcement??createManagedConnectSource(now));
     await egress.initialize();
     bb.onDispose(()=>egress.close());
     const transport =
@@ -351,6 +356,7 @@ export function createAccountPoolPlugin(
     const maintenanceApi = {
       status:()=>maintenance.status(),
       acquire:(owner:string)=>maintenance.acquire(owner),
+      acquireGraceful:(owner:string)=>maintenance.acquireGraceful(owner),
       release:(owner:string)=>maintenance.release(owner),
       interrupt:async(owner:string)=>{hub.interruptForMaintenance(owner);return maintenance.status();},
     };
@@ -385,9 +391,9 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url),egress,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update,input=>nativeSessions.updateAccount(input),input=>nativeSessions.probe(input,async()=>{try{return (await browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})).protocol===1;}catch{return false;}},request=>browserHost.call('nativeProbe',request,{hostId:input.hostId,timeoutMs:125000}))),
     );
-    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi);
+    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})));
     registerUsageSource(bb, hub, false);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
@@ -462,7 +468,7 @@ export function createAccountPoolPlugin(
     );
     bb.http.route('GET','/agy/v1beta/models',context=>hub.handle(context.req.raw,'agy'),{auth:'none'});
     bb.http.route('POST','/native/agy',context=>nativeHttp(context.req.raw,nativeSessions,
-      token=>combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token)),{auth:'none'});
+      async token=>{const caller=await combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token);return caller?.accountScope?null:caller;}),{auth:'none'});
     bb.providers.experimental_contributeEnv('acp-agy',async context=>{
       if(nativeSessions.managed()){
         const catalog=context.threadId===null;

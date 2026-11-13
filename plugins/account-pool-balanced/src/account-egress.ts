@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ProxySecrets, parseProxyUrl } from './proxy-secrets.js';
+import { HttpScopeAcceptances, httpScopeAcceptInputSchema, profileFingerprint, type HttpScopeEnforcementSource } from './http-scope-acceptance.js';
 import { z } from 'zod';
 import { ProxyAgent, buildConnector } from 'undici';
 import type { PoolKvStorage } from './core-storage.js';
@@ -52,7 +53,10 @@ export class EgressUnavailable extends Error {
 export interface AccountRoute {
   assigned:boolean;
   profile:Readonly<EgressProfile>|null;
-  fetch(ipv4:boolean):typeof fetch|undefined;
+  fetch(ipv4:boolean,beforeSend?:()=>void):typeof fetch|undefined;
+  scopeAccepted?(accountId:string,now:number):boolean;
+  assertScope?():void;
+  prepareScope?():Promise<void>;
 }
 
 /** Server-owned selection, never read from client headers or model names. */
@@ -61,13 +65,27 @@ export class AccountEgress {
   private readonly agents = new Map<string,ProxyAgent>();
   private readonly sessions = new Map<string,{accountId:string;route:AccountRoute}>();
   private mutation:Promise<unknown> = Promise.resolve();
+  private readonly scopeAcceptances:HttpScopeAcceptances;
   constructor(private readonly kv:PoolKvStorage,private readonly hostId:()=>Promise<string>,
-    private readonly accountExists:(id:string)=>Promise<boolean>,private readonly proxySecrets?:ProxySecrets){}
+    private readonly accountExists:(id:string)=>Promise<boolean>,private readonly proxySecrets?:ProxySecrets,
+    now:()=>number=Date.now,enforcement?:HttpScopeEnforcementSource){
+      this.scopeAcceptances=new HttpScopeAcceptances(kv,now,enforcement);
+    }
   async initialize(){
     const stored=await this.kv.get('account-egress-v1');if(stored!==undefined)this.state=egressStateSchema.parse(stored);
+    await this.scopeAcceptances.initialize();
     if(decisionCount(this.state)>=4096 || registryBytes(this.state)>=MAX_REGISTRY_BYTES)this.state.assignmentBlocked=true;
   }
   snapshot(){return structuredClone(this.state);}
+  async acceptScope(value:unknown){
+    const input=httpScopeAcceptInputSchema.parse(value);
+    const profile=this.state.profiles.find(p=>p.id===input.profile.id&&p.version===input.profile.version);
+    if(!profile||profile.transport!=='http-connect'||profileFingerprint(profile)!==input.profileFingerprint||
+      !profile.hostIds.includes(input.hostId)||await this.hostId()!==input.hostId||!await this.accountExists(input.accountId))
+      throw new EgressUnavailable();
+    return this.scopeAcceptances.accept(input);
+  }
+  revokeScope(value:unknown){return this.scopeAcceptances.revoke(value);}
   /** Only assigned pins constrain account selection; ordinary affinity may fail over. */
   pinnedAccount(sessionKey:string):string|null{return this.state.pins[sessionKey]?.accountId??null;}
   validateNativeProfile(ref:{id:string;version:number},hostId:string):void{
@@ -125,7 +143,8 @@ export class AccountEgress {
     let route:AccountRoute={assigned:false,profile:null,fetch:()=>undefined};
     if(ref){
       const value=this.state.profiles.find(p=>p.id===ref.id&&p.version===ref.version);
-      if(!value || !value.hostIds.includes(await this.hostId()))throw new EgressUnavailable();
+      const routeHost=await this.hostId();
+      if(!value || !value.hostIds.includes(routeHost))throw new EgressUnavailable();
       const profile=Object.freeze(structuredClone(value));
       const key=JSON.stringify(profile);
       let agent=this.agents.get(key);
@@ -145,13 +164,20 @@ export class AccountEgress {
         this.agents.set(key,agent);
       }
       const dispatcher=agent;
-      const send:typeof fetch=async(input,init)=>{
+      const send=(beforeSend?:()=>void):typeof fetch=>async(input,init)=>{
         const url=new URL(input instanceof Request?input.url:String(input));
-        if(!profile.hostIds.includes(await this.hostId()) || url.protocol!=='https:' || url.hostname.includes(':'))throw new EgressUnavailable();
+        const currentHost=await this.hostId();
+        if(!profile.hostIds.includes(currentHost) || beforeSend&&currentHost!==routeHost || url.protocol!=='https:' || url.hostname.includes(':'))throw new EgressUnavailable();
+        beforeSend?.();
         try{return await fetch(input,{...init,redirect:'error',dispatcher} as RequestInit);}
         catch{throw new EgressUnavailable();}
       };
-      route={assigned:true,profile,fetch:()=>send};
+      route={assigned:true,profile,fetch:(_ipv4,beforeSend)=>send(beforeSend),
+        prepareScope:()=>this.scopeAcceptances.prepare({accountId,hostId:routeHost,
+          profile:{id:profile.id,version:profile.version},profileFingerprint:profileFingerprint(profile)}),
+        scopeAccepted:(id,now)=>id===accountId&&profile.transport==='http-connect'&&this.scopeAcceptances.allowed({
+          accountId,hostId:routeHost,profile:{id:profile.id,version:profile.version},profileFingerprint:profileFingerprint(profile),
+        },now)};
     }
     // Pins survive settings edits. Bounded refusal does not evict warm sessions.
     // Providers outside central egress retain their policy even at capacity.

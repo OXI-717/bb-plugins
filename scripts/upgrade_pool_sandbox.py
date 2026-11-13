@@ -21,6 +21,8 @@ def sandbox(upgrader):
             db.execute('CREATE TABLE fixture (value TEXT)')
             db.execute("INSERT INTO fixture VALUES ('synthetic state')")
             db.commit()
+        (data / 'secrets').mkdir(mode=0o700)
+        (data / 'secrets' / 'fixture.json').write_text(json.dumps({'reference': 'synthetic-reference'}))
         state = {
             'accepting': True, 'inFlight': 0, 'enabledAccountCount': 1,
             'routing': {'codex': True},
@@ -96,8 +98,28 @@ def sandbox(upgrader):
             with contextlib.closing(sqlite3.connect(output/'backup'/'data.db')) as db:
                 if db.execute('SELECT value FROM fixture').fetchone()[0] != 'synthetic state':
                     raise AssertionError('Backup contents differ')
+            # Exercise data migration and restoration only on synthetic copies.
+            migrated = root / 'migrated.db'
+            restored = root / 'restored.db'
+            with contextlib.closing(sqlite3.connect(data / 'data.db')) as src:
+                with contextlib.closing(sqlite3.connect(migrated)) as dst:
+                    src.backup(dst)
+                    dst.execute('ALTER TABLE fixture ADD COLUMN revision INTEGER DEFAULT 2')
+                    dst.execute("UPDATE fixture SET value='migrated synthetic state'")
+                    dst.commit()
+            with contextlib.closing(sqlite3.connect(output/'backup'/'data.db')) as src:
+                with contextlib.closing(sqlite3.connect(restored)) as dst:
+                    src.backup(dst)
+                    if dst.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                        raise AssertionError('Synthetic restore integrity failed')
+                    if dst.execute('SELECT value FROM fixture').fetchone()[0] != 'synthetic state':
+                        raise AssertionError('Synthetic data rollback failed')
+                    if len(dst.execute('PRAGMA table_info(fixture)').fetchall()) != 1:
+                        raise AssertionError('Synthetic schema rollback failed')
+            if (output/'backup'/'secrets'/'fixture.json').read_bytes() != (data/'secrets'/'fixture.json').read_bytes():
+                raise AssertionError('Synthetic secret reference changed')
         except Exception as error:
             print(f'SANDBOX FAILED: {type(error).__name__}: {error}', flush=True)
             return 1
-        print('SANDBOX PASS: actual workflow, reporter, backup and verification completed; no live update.', flush=True)
+        print('SANDBOX PASS: actual workflow, reporter, backup, synthetic migration/restore and verification completed; no live update.', flush=True)
         return 0

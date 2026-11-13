@@ -34,7 +34,7 @@ it('starts exactly one BB-owned machine terminal and follows it across plugin re
   const f=await fixture();
   const [first,second]=await Promise.all([f.controller.start(),f.controller.start()]);
   expect(first).toEqual(second);expect(f.create).toHaveBeenCalledTimes(1);
-  expect(f.create.mock.calls[0]?.[0]).toMatchObject({scope:{kind:'host_path',hostId:'host-one',cwd:path.join(f.dataDir,'plugins','account-pool','updates',first!.operationId)},start:{mode:'command',command:expect.stringContaining('--pause-sessions')}});
+  expect(f.create.mock.calls[0]?.[0]).toMatchObject({scope:{kind:'host_path',hostId:'host-one',cwd:path.join(f.dataDir,'plugins','account-pool','updates',first!.operationId)},start:{mode:'command',command:expect.stringContaining('--drain-sessions')}});
   const reloaded=new PoolUpdate(f.host.bb);
   expect(await reloaded.start()).toEqual(first);expect(f.create).toHaveBeenCalledTimes(1);
   f.exit(0);expect(await reloaded.status()).toMatchObject({state:'succeeded',terminalId:'terminal-one'});
@@ -56,7 +56,7 @@ it('retains executable inputs and a usable cwd after BB removes the old source c
   const cwd=path.join(f.dataDir,'plugins','account-pool','updates',operation!.operationId);
   const input=f.create.mock.calls[0]![0] as {scope:{cwd:string};start:{command:string}};
   await rm(f.checkout,{recursive:true,force:true});
-  const result=await promisify(execFile)('/bin/bash',[path.join(input.scope.cwd,'upgrade-pool.sh'),'--pause-sessions'],{cwd:input.scope.cwd,timeout:5000});
+  const result=await promisify(execFile)('/bin/bash',[path.join(input.scope.cwd,'upgrade-pool.sh'),'--drain-sessions'],{cwd:input.scope.cwd,timeout:5000});
   expect(result.stdout.trim()).toBe('MODULES_OK');
   expect(input.scope.cwd).toBe(cwd);expect(input.start.command).toContain(path.join(cwd,'upgrade-pool.sh'));
   expect(input.start.command).not.toContain(f.checkout);

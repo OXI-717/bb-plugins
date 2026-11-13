@@ -1,4 +1,5 @@
 import {AccountDraftForm} from './account-draft-form';
+import {NativeAccountCard,NativeAccountSettings} from './native-account-settings';
 import {PoolUpdatePanel} from './pool-update-panel';
 import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
@@ -1587,16 +1588,7 @@ function UnlockedAccountPoolSettings() {
           >
             {provider.id === "agy" && nativeError !== null ? <p role="alert" className="py-2.5 text-sm text-destructive-text">Не удалось загрузить исполнителей: {nativeError}</p> : null}
             {provider.id === "agy" ? nativeAccounts?.accounts.map(account => (
-              <div key={account.accountId} className="space-y-2 border-b border-border py-3 last:border-b-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <button type="button" className="text-sm font-medium text-foreground hover:underline" onClick={() => setNativeSettings(account.accountId)}>Google · {account.label ?? "Antigravity"}</button>
-                  <SettingsBadge>{!nativeAccounts.managed ? "Управляемый режим выключен" : account.uncertain > 0 ? "Требуется проверка остановки" : account.executors.some(executor => executor.enabled) ? "Настроен" : "Исполнители выключены"}</SettingsBadge>
-                </div>
-                <p className="break-all text-xs text-muted-foreground">Подписка: {account.accountId}</p>
-                <ul className="space-y-1 text-xs text-muted-foreground">{account.executors.map(executor => <li key={executor.id} className="flex flex-wrap items-center gap-2 break-words"><span>{executor.id} · {executor.enabled ? "включён" : "выключен"} · автопилот {executor.autopilotAllowed ? "разрешён" : "выключен"}</span>{executor.preferred ? <SettingsBadge>Выбран для новых сессий</SettingsBadge> : executor.enabled && nativeAccounts.selectionRevision ? <Button size="sm" disabled={pending !== null} aria-label={`Выбрать ${executor.id}`} onClick={() => void run('native-prefer',async()=>{await rpc.call('native.prefer',{executorId:executor.id,expectedRevision:nativeAccounts.selectionRevision!});await refreshNative();})}>Использовать</Button> : null}</li>)}</ul>
-                <p className="text-xs text-muted-foreground">В работе: {account.active}; в очереди: {account.queued}; остановка не подтверждена: {account.uncertain}.</p>
-                <p className="text-xs text-muted-foreground">Лимит здесь не измеряется. Состояние входа проверяет официальный клиент на машине исполнителя.</p>
-              </div>
+              <NativeAccountCard key={account.accountId} managed={nativeAccounts.managed} account={account} open={()=>setNativeSettings(account.accountId)} loadProjects={()=>rpc.call('projects.list',null)}/>
             )) : null}
             {status === null ? (
               <p className="py-2.5 text-sm text-muted-foreground">Загрузка…</p>
@@ -2294,12 +2286,11 @@ function UnlockedAccountPoolSettings() {
       <AccountSettingsStyle />
       <Dialog open={nativeSettings !== null} onOpenChange={open => {if(!open)setNativeSettings(null);}}>
         <DialogContent className="pool-settings max-h-[85vh] overflow-y-auto">
-          <DialogHeader><DialogTitle>Google · Antigravity</DialogTitle></DialogHeader>
-          {nativeAccounts?.accounts.filter(a=>a.accountId===nativeSettings).map(account=><div key={account.accountId}>
-            {account.mixedProjects && <p className="text-sm text-muted-foreground">У исполнителей разные настройки проектов. Сохранение применит выбранные настройки ко всей подписке.</p>}
-            <AccountProjectsForm account={{role:'primary',projects:account.projects}} showRoles={false}
+          <DialogHeader><DialogTitle>Настройки · {nativeAccounts?.accounts.find(a=>a.accountId===nativeSettings)?.label??'Google Antigravity'}</DialogTitle></DialogHeader>
+          {nativeAccounts?.selectionRevision&&nativeAccounts.accounts.filter(a=>a.accountId===nativeSettings).map(account=><NativeAccountSettings
+            key={account.accountId} account={account} revision={nativeAccounts.selectionRevision!}
             loadProjects={()=>rpc.call('projects.list',null)}
-            save={async projects=>{await rpc.call('native.setProjects',{accountId:account.accountId,projects,expectedRevision:account.projectsRevision});await refreshNative();}} /></div>)}
+            save={async input=>{await rpc.call('native.updateAccount',input);await refreshNative();}} probe={input=>rpc.call('native.probe',input)}/>)}
         </DialogContent>
       </Dialog>
     </div>
