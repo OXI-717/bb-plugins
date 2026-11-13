@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-oxi-projects",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "description": "Manage project tasks, repositories and agent sessions with optional GitHub, Linear and Jira integrations.",
   "type": "module",
@@ -85,6 +85,6 @@
     "test:changed": "vitest run",
     "test:registration": "vitest run app-registration.test.ts",
     "test:github": "vitest run github",
-    "test:machine-marks": "vitest run machine-marks.test.ts machine-marks-dom.test.ts machine-marks-server.test.ts machine-marks-view.test.tsx"
+    "test:machine-marks": "vitest run machine-marks.test.ts machine-marks-dom.test.ts machine-marks-server.test.ts machine-marks-view.test.tsx thread-stop-marks.test.ts"
   }
 }

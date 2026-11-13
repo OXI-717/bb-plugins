@@ -90,13 +90,14 @@ import {
   ACCOUNT_POOL_ACCOUNTS_CHANGED,
   ACCOUNT_POOL_CONFIG_CHANGED,
 } from "./src/realtime.js";
+import type { GrokDeviceLoginStart } from "./src/grok-device-login.js";
 
 type DialogState =
   | {
       kind: "account" | "priority" | "role" | "cap" | "remove";
       accountId: string;
     }
-  | { kind: "claude-login" | "codex-login" | "agy-login" }
+  | { kind: "claude-login" | "codex-login" | "agy-login" | "grok-login" }
   | { kind: "draft-account" }
   | { kind: "api-key"; provider: PoolProvider }
   | null;
@@ -160,6 +161,11 @@ const PROVIDERS: Array<{
     title: "Devin",
     description: "Devin CLI использует PAT аккаунтов через пул; на клиенте остаётся только токен хаба.",
   },
+  {
+    id: "grok",
+    title: "Grok",
+    description: "Подписки Grok Code хранятся на сервере пула; ACP-сессии получают только ограниченный токен пула.",
+  },
 ];
 const FAMILY_LABELS: Record<ModelFamily, string> = {
   fable: "Fable, неделя",
@@ -195,6 +201,7 @@ function configDrafts(config: AccountPoolConfig): Record<ConfigField, string> {
     neuraldeepUpstreamBaseUrl: config.neuraldeepUpstreamBaseUrl,
     cursorUpstreamBaseUrl: config.cursorUpstreamBaseUrl,
     devinUpstreamBaseUrl: config.devinUpstreamBaseUrl,
+    grokUpstreamBaseUrl: config.grokUpstreamBaseUrl,
     maxConcurrentRequestsPerAccount: String(config.maxConcurrentRequestsPerAccount),
     switchThreshold: String(config.switchThreshold),
   };
@@ -744,19 +751,20 @@ function AddAccountMenu({
         {provider==='claude'?<DropdownMenuItem onSelect={()=>onChoose('draft')}>
           <span><span className="block">Добавить без входа…</span><span className="block text-xs text-muted-foreground">Сначала имя, почта и прокси, затем авторизация</span></span>
         </DropdownMenuItem>:null}
-        {(provider === "claude" || provider === "codex" || provider === "agy") ? <DropdownMenuItem
+        {(provider === "claude" || provider === "codex" || provider === "agy" || provider === "grok") ? <DropdownMenuItem
           className="items-start py-2"
           onSelect={() => onChoose("login")}
         >
           <Icon name="UserRound" className="mt-0.5" />
           <span>
             <span className="block">
-              Вход в {provider === "claude" ? "Claude" : provider === "agy" ? "Antigravity" : "Codex"}
+              Вход в {provider === "claude" ? "Claude" : provider === "agy" ? "Antigravity" : provider === "grok" ? "Grok" : "Codex"}
             </span>
             <span className="block text-xs text-muted-foreground">
               {provider === "claude"
                 ? "Откроет claude.ai, код вставите обратно"
-                : provider === "agy" ? "Вход в Google, код вставите обратно" : "Откроет ChatGPT с кодом устройства"}
+                : provider === "agy" ? "Вход в Google, код вставите обратно"
+                : provider === "grok" ? "Откроет xAI с кодом устройства" : "Откроет ChatGPT с кодом устройства"}
             </span>
           </span>
         </DropdownMenuItem> : null}
@@ -784,7 +792,7 @@ function AddAccountMenu({
               <span>
                 <span className="block">{provider === "devin" ? "Добавить PAT…" : "Добавить API-ключ…"}</span>
                 <span className="block text-xs text-muted-foreground">
-                  {provider === "claude" ? "Платный запасной вариант, выбирается последним" : "Ключ хранится на сервере пула"}
+                  {provider === "claude" ? "Платный запасной вариант, выбирается последним" : provider === "grok" ? "Для биллинга xAI API; ключ хранится на сервере пула" : "Ключ хранится на сервере пула"}
                 </span>
               </span>
             </DropdownMenuItem>
@@ -1065,6 +1073,7 @@ function AccountPoolSettings() {
     neuraldeepUpstreamBaseUrl: "",
     cursorUpstreamBaseUrl: "",
     devinUpstreamBaseUrl: "",
+    grokUpstreamBaseUrl: "",
     maxConcurrentRequestsPerAccount: "",
     switchThreshold: "",
   });
@@ -1080,6 +1089,7 @@ function AccountPoolSettings() {
     neuraldeepUpstreamBaseUrl: null,
     cursorUpstreamBaseUrl: null,
     devinUpstreamBaseUrl: null,
+    grokUpstreamBaseUrl: null,
     maxConcurrentRequestsPerAccount: null,
     switchThreshold: null,
   });
@@ -1105,6 +1115,7 @@ function AccountPoolSettings() {
     null,
   );
   const [agyStep,setAgyStep]=useState<{sessionId:string;authorizeUrl:string;expiresAt:number}|null>(null);
+  const [grokStep, setGrokStep] = useState<GrokDeviceLoginStart | null>(null);
   const [loginDone, setLoginDone] = useState<string | null>(null);
   const [reauthorizeAccountId, setReauthorizeAccountId] = useState<string | null>(null);
   const [pastedCode, setPastedCode] = useState("");
@@ -1214,6 +1225,40 @@ function AccountPoolSettings() {
       if (timer !== null) clearTimeout(timer);
     };
   }, [codexStep, loginDone, refresh, rpc]);
+  useEffect(() => {
+    if (grokStep === null || loginDone !== null) return;
+    const update = () =>
+      setCountdown(Math.max(0, Math.ceil((grokStep.expiresAt - Date.now()) / 1_000)));
+    update();
+    const interval = window.setInterval(update, 1_000);
+    return () => window.clearInterval(interval);
+  }, [grokStep, loginDone]);
+  useEffect(() => {
+    if (grokStep === null || loginDone !== null) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      try {
+        const result = await rpc.call("grokLogin.poll", { sessionId: grokStep.sessionId });
+        if (cancelled) return;
+        if (result.status === "complete") {
+          setLoginDone(result.account.label);
+          setGrokStep(null);
+          await refresh();
+        } else if (result.status === "error") {
+          setGrokStep(null);
+          setError(result.message);
+        } else timer = setTimeout(poll, grokStep.intervalMs);
+      } catch (pollError) {
+        if (!cancelled) setError(errorText(pollError));
+      }
+    };
+    timer = setTimeout(poll, grokStep.intervalMs);
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [grokStep, loginDone, refresh, rpc]);
   const accounts = status?.accounts ?? [];
   const selectedAccount =
     dialog?.kind === "account" ||
@@ -1321,6 +1366,15 @@ function AccountPoolSettings() {
     setAgyStep(null);setPastedCode('');setLoginDone(null);setDialog({kind:'agy-login'});
     await run('agy-login',async()=>setAgyStep(await rpc.call('agyLogin.start',null)));
   }
+  async function startGrok(): Promise<void> {
+    if (grokStep !== null) void rpc.call("grokLogin.cancel", { sessionId: grokStep.sessionId }).catch(() => undefined);
+    setGrokStep(null);
+    setLoginDone(null);
+    setDialog({ kind: "grok-login" });
+    await run("grok-login", async () => {
+      setGrokStep(await rpc.call("grokLogin.start", null));
+    });
+  }
   async function chooseAdd(
     provider: PoolProvider,
     choice: "login" | "import" | "api-key" | "draft",
@@ -1328,6 +1382,7 @@ function AccountPoolSettings() {
     if(choice==='draft'){setDraftEmail("");setDraftLabel("");setDialog({kind:"draft-account"});return;}
     if (choice === "login") {
       if (provider === "agy") await startAgy();
+      else if (provider === "grok") await startGrok();
       else if (provider === "claude") await startClaude();
       else await startCodex();
       return;
@@ -1448,6 +1503,8 @@ function AccountPoolSettings() {
     if (dialog?.kind === "codex-login" && codexStep !== null)
       void rpc.call("codexLogin.cancel", { sessionId: codexStep.sessionId });
     if(dialog?.kind==="agy-login"&&agyStep)void rpc.call("agyLogin.cancel",{sessionId:agyStep.sessionId}).catch(()=>undefined);
+    if (dialog?.kind === "grok-login" && grokStep !== null)
+      void rpc.call("grokLogin.cancel", { sessionId: grokStep.sessionId }).catch(() => undefined);
     setAgyStep(null);setPastedCode("");
     if (dialog?.kind === "api-key") setApiKey("");
     setDialog(null);
@@ -2263,6 +2320,7 @@ function AccountPoolSettings() {
         {dialog?.kind === "claude-login" ? (
           <LoginDialog
             provider="claude"
+            grokStep={null}
             reauthorizing={reauthorizeAccountId === null ? null : status?.accounts.find(account => account.id === reauthorizeAccountId)?.email ?? "этого аккаунта"}
             loginStep={loginStep}
             codexStep={null}
@@ -2295,6 +2353,7 @@ function AccountPoolSettings() {
             provider="codex"
             loginStep={null}
             codexStep={codexStep}
+            grokStep={null}
             loginDone={loginDone}
             pending={pending !== null}
             pastedCode=""
@@ -2305,6 +2364,24 @@ function AccountPoolSettings() {
             setPastedCode={() => {}}
             complete={() => {}}
             restart={() => void startCodex()}
+          />
+        ) : null}
+        {dialog?.kind === "grok-login" ? (
+          <LoginDialog
+            provider="grok"
+            loginStep={null}
+            codexStep={null}
+            grokStep={grokStep}
+            loginDone={loginDone}
+            pending={pending !== null}
+            pastedCode=""
+            countdown={countdown}
+            error={error}
+            close={closeDialog}
+            openUrl={navigate.openUrl}
+            setPastedCode={() => {}}
+            complete={() => {}}
+            restart={() => void startGrok()}
           />
         ) : null}
       </Dialog>
@@ -2643,6 +2720,7 @@ function LoginDialog({
   reauthorizing = null,
   loginStep,
   codexStep,
+  grokStep,
   loginDone,
   pending,
   pastedCode,
@@ -2660,6 +2738,7 @@ function LoginDialog({
   reauthorizing?: string | null;
   loginStep: OAuthLoginStart | null;
   codexStep: CodexDeviceLoginStart | null;
+  grokStep: GrokDeviceLoginStart | null;
   loginDone: string | null;
   pending: boolean;
   pastedCode: string;
@@ -2673,11 +2752,14 @@ function LoginDialog({
   complete: () => void;
   restart: () => void;
 }) {
-  const name = provider === "claude" ? "Claude" : "Codex";
+  const name = provider === "claude" ? "Claude" : provider === "grok" ? "Grok" : "Codex";
   const url =
     provider === "claude"
       ? loginStep?.authorizeUrl
-      : codexStep?.verificationUri;
+      : provider === "grok"
+        ? grokStep?.verificationUri
+        : codexStep?.verificationUri;
+  const deviceStep = provider === "grok" ? grokStep : codexStep;
   return (
     <DialogFrame
       title={reauthorizing === null ? `Вход в ${name}` : "Повторная авторизация Claude"}
@@ -2732,11 +2814,13 @@ function LoginDialog({
           <p className="text-sm text-muted-foreground">
             {provider === "claude"
               ? "Войдите на claude.ai и вставьте код с последней страницы."
-              : "Откройте страницу проверки, войдите в ChatGPT и введите этот код."}
+              : provider === "grok"
+                ? "Откройте страницу проверки, войдите в xAI и введите этот код."
+                : "Откройте страницу проверки, войдите в ChatGPT и введите этот код."}
           </p>
           {reauthorizing === null ? null : <p className="text-sm text-muted-foreground">Войдите именно в {reauthorizing}. Вход в другой аккаунт не заменит эту подписку.</p>}
-          {codexStep === null ? null : (
-            <UserCodeBlock userCode={codexStep.userCode} />
+          {deviceStep === null ? null : (
+            <UserCodeBlock userCode={deviceStep.userCode} />
           )}
           <AuthorizationUrlRow name={name} url={url} openUrl={openUrl} />
           {openAccountUrl === undefined ? null : <div className="space-y-1">

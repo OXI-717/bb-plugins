@@ -15,6 +15,7 @@ const openInput=z.object({accounts:accountsSchema,routedAccountIds:z.array(z.str
 const listInput=z.object({accounts:accountsSchema,routedAccountIds:z.array(z.string().uuid()).max(256).optional()}).strict();
 const rowSchema=z.object({accountId:z.string(),provider:z.string(),label:z.string(),email:z.string().nullable(),profileName:z.string(),profileDirectory:z.string(),profileDir:z.string(),exists:z.boolean(),updatedAt:z.number().nullable()}).strict();
 export const browserHostContract=defineRpcContract({
+ grokHome:{input:z.object({}).strict(),output:z.object({path:z.string().min(1).max(4096)}).strict()},
  open:{input:openInput,output:z.object({opened:z.literal(true)}).strict()},
  list:{input:listInput,output:z.array(rowSchema).max(256)},
 });

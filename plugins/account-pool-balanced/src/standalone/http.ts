@@ -17,6 +17,7 @@ const routes = new Map<string, PoolProvider>([
   ["/v1/models", "codex"], ["/v1/images/generations", "codex"], ["/v1/images/edits", "codex"], ["/v1/alpha/search", "codex"],
   ["/kimi/v1/messages", "kimi"], ["/kimi/v1/messages/count_tokens", "kimi"],
   ["/zai/v1/chat/completions", "zai"], ["/opencode-go/v1/chat/completions", "opencode-go"],
+  ["/grok/v1/chat/completions", "grok"],
 ]);
 for (const rpcPath of DEVIN_PROXIED_PATHS) {
   routes.set(`/devin/${rpcPath}`, "devin");

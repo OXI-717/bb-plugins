@@ -12,6 +12,18 @@ test('remote host model settings allowed',()=>assert.equal(classifyRequest('GET'
 test('project plus wrong host refused',()=>assert.equal(classifyRequest('GET','/api/v1/system/environment-providers?projectId=proj_remote&hostId=host_primary',null,i,true).ok,false));
 test('path traversal refused',()=>assert.equal(classifyRequest('GET','/api/v1/projects/proj_remote/../../system/config',null,i,true).ok,false));
 test('encoded separators refused',()=>assert.equal(classifyRequest('GET','/api/v1/threads/thr_remote%2f..%2fconfig',null,i,true).ok,false));
+const stopQuery='?limit=1&order=desc&types=turn%2Fstarted%2Csystem%2Fthread%2Finterrupted';
+test('bounded SDK stop metadata is readable without write permission',()=>{
+ for(const method of ['GET','HEAD'])assert.equal(classifyRequest(method,'/api/v1/threads/thr_remote/events'+stopQuery,null,i,false).ok,true);
+});
+test('stop filter never exempts a foreign identity or unsafe route',()=>{
+ for(const path of ['/api/v1/threads/thr_primary/events'+stopQuery,'/api/v1/threads/thr_remote%2Fconfig/events'+stopQuery,'/api/v1/threads/thr_remote/../events'+stopQuery,'/api/v1/threads/thr_remote/events'+stopQuery+'&projectId=proj_primary','/api/v1/threads/thr_remote/events'+stopQuery+'&path=%2E%2E%2Fconfig'])assert.equal(classifyRequest('GET',path,null,i,true).ok,false,path);
+});
+test('encoded type exemption is limited to one latest-boundary read',()=>{
+ const base='/api/v1/threads/thr_remote/events';
+ for(const query of [stopQuery.replace('limit=1','limit=10'),stopQuery.replace('order=desc','order=asc'),stopQuery+'&types=turn%2Fstarted',stopQuery.replace('turn%2Fstarted%2Csystem%2Fthread%2Finterrupted','client%2Fturn%2Frequested')])assert.equal(classifyRequest('GET',base+query,null,i,true).ok,false,query);
+ assert.equal(classifyRequest('POST',base+stopQuery,null,i,true).ok,false);
+});
 test('plugin RPC refused',()=>assert.equal(classifyRequest('POST','/api/v1/plugins/anything/rpc/run',{threadId:'thr_remote'},i,true).ok,false));
 test('routing does not inspect prompt text',()=>assert.deepEqual(routingIds('/api/v1/threads',{projectId:'proj_remote',input:[{type:'text',text:'host_primary'}]}),['proj_remote']));
 
