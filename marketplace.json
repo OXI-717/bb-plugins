@@ -224,6 +224,30 @@
           "tagPrefix": "oxi-op/"
         }
       }
+    },
+    {
+      "id": "oxi-thread-list",
+      "displayName": "OXI Session Tree",
+      "description": "Group sessions by project and then by machine, with per-project controls and preserved parent-child trees.",
+      "author": {
+        "name": "OXI",
+        "github": "OXI-717"
+      },
+      "tags": [
+        "sessions",
+        "sidebar"
+      ],
+      "icon": {
+        "url": "./icons/oxi-thread-list.svg"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/oxi-thread-list",
+          "range": "^0.1.0",
+          "tagPrefix": "oxi-thread-list/"
+        }
+      }
     }
   ]
 }
