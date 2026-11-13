@@ -12,6 +12,9 @@ host, native, launcher, dependency and unknown backend changes also require macO
 Other changed plugins retain their existing platforms. Shared code, workflow edits
 and unknown repository paths conservatively select the complete matrix. Renames
 include both old and new paths.
+Changes to the six Pooler modules loaded by OP's native-task fixture also select
+the existing OP integration suite on Linux and macOS. A regression reads that
+fixture's dependency list so adding a dependency cannot silently omit its checks.
 A release metadata exception is allowed only for the changed Pooler plugin, when the
 package version, lock root and root-package versions, and that plugin's root
 marketplace `source.git.range` change coherently. Structural JSON comparison at
@@ -40,6 +43,8 @@ Known safety failures still require investigation; background does not mean igno
 | Pooler UI + coherent package/lock/root marketplace version-only release | 21 | 6 | 0 |
 | Release metadata with dependency/inventory/schema/extra changes | 21 | 23 | 9 |
 | Pooler browser-host.ts / unknown safety test | 21 | 8 | 2 |
+| Pooler native-sessions.ts (including OP integration) | 21 | 10 | 3 |
+| Pooler project-policy.ts (including OP integration) | 21 | 8 | 1 |
 | shared VPN evidence / workflow change | 21 | 23 | 9 |
 
 Counts include the two new planning/aggregation jobs. No test count reduction is

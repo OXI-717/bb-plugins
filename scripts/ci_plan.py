@@ -9,6 +9,9 @@ PLUGINS = ['account-pool-balanced', 'automation-catalog', 'vpn-guard', 'oxi-proj
            'model-connections', 'federation-pilot', 'pool-maintenance']
 PORTABLE = {'balancer', 'account-policy', 'project-policy', 'purpose-affinity',
             'provider-budget', 'codex-budget', 'zai-budget', 'usage-error'}
+# OP's native task integration fixture loads these Pooler modules directly.
+OP_POOL_MODULES = {'native-sessions', 'native-probe-wire', 'native-accounts',
+                   'native-unlock-rpc', 'contracts', 'project-policy'}
 
 
 def mac_required(path):
@@ -46,6 +49,8 @@ def plan(paths, full=False, version_plugin=None, version_paths=()):
             if plugin == 'account-pool-balanced':
                 upgrade = True
                 upgrade_mac |= mac_required(path)
+                op |= path in {'plugins/account-pool-balanced/src/' + name + '.ts'
+                               for name in OP_POOL_MODULES}
         elif path.startswith('plugins/oxi-op/'):
             op = True
         elif path.startswith('plugins/auto-archive/'):

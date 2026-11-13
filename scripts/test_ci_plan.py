@@ -1,5 +1,5 @@
 import unittest
-from ci_plan import PLUGINS, plan
+from ci_plan import OP_POOL_MODULES, PLUGINS, plan
 
 
 class PlanTests(unittest.TestCase):
@@ -21,6 +21,24 @@ class PlanTests(unittest.TestCase):
         for name in ['balancer.ts', 'balancer.test.ts']:
             p = plan(['plugins/account-pool-balanced/src/' + name])
             self.assertEqual(len(p['matrix']['include']), 1)
+
+    def test_op_pool_dependencies_require_cross_plugin_integration(self):
+        import ast
+        from pathlib import Path
+        import re
+        root = Path(__file__).resolve().parent.parent
+        fixture = (root / 'plugins/oxi-op/test/native-task-host.mjs').read_text()
+        match = re.search(r'for\(const name of (\[[^\]]+\])\)', fixture)
+        self.assertIsNotNone(match, 'Keep the OP fixture dependency contract explicit')
+        modules = ast.literal_eval(match.group(1))
+        self.assertEqual(set(modules), OP_POOL_MODULES)
+        for module in modules:
+            with self.subTest(module=module):
+                p = plan(['plugins/account-pool-balanced/src/' + module + '.ts'])
+                self.assertTrue(p['op'], 'Pooler dependency must run OP integration tests')
+                self.assertEqual(len(p['matrix']['include']), 1 if module == 'project-policy' else 2)
+                self.assertEqual(p['upgrade_mac'], module != 'project-policy')
+        self.assertFalse(plan(['plugins/account-pool-balanced/src/balancer.ts'])['op'])
 
     def test_unknown_shared_and_workflow_changes_fail_closed(self):
         for path in ['new-file', 'shared/vpn-evidence.ts', '.github/workflows/ci.yml',
