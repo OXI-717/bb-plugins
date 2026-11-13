@@ -37,3 +37,8 @@
 
 .vg-stop-history>li>button {text-align:left}.vg-stop-history code {font-size:12px;overflow-wrap:anywhere}
 .vg-stop-history>li>button {white-space:normal;overflow-wrap:anywhere}
+
+.vg-host-control {display:grid;gap:6px;text-align:right}.vg-host-control button{justify-self:end;width:auto;white-space:normal}.vg-host-control>span{overflow-wrap:anywhere}
+@container(max-width:440px){.vg-host-control{text-align:left;grid-template-columns:minmax(0,1fr) auto;align-items:center}}
+
+.vg-actions button{white-space:normal;overflow-wrap:anywhere}

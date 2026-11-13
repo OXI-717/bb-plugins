@@ -28,7 +28,7 @@ const LIMITATIONS = [
   'VPN Guard is BB admission control, not a packet firewall.',
 ];
 type Configuration = z.infer<typeof configurationSchema>;
-const initialConfiguration: Configuration = {mode:'observe',manualBlock:false,directHostIds:[],hostIds:[],suspendNativePluginsGlobally:false,coordinateAutomations:false,automationControllerPath:null,automationHostId:null};
+const initialConfiguration: Configuration = {mode:'observe',manualBlock:false,manualBlockHostIds:[],directHostIds:[],hostIds:[],suspendNativePluginsGlobally:false,coordinateAutomations:false,automationControllerPath:null,automationHostId:null};
 
 export default async function plugin(bb: BbPluginApi) {
   const storedInstance=await bb.storage.kv.get<string>('protection-instance-v1');
@@ -103,8 +103,13 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const host = bb.hosts.experimental_client({contract:hostContract});
-  const loaded=configurationSchema.safeParse(await bb.storage.kv.get<unknown>(CONFIG));
+  const rawConfig=await bb.storage.kv.get<unknown>(CONFIG);
+  const loaded=configurationSchema.safeParse(rawConfig);
+  if(!loaded.success&&rawConfig&&typeof rawConfig==='object'&&Object.hasOwn(rawConfig,'manualBlockHostIds'))
+    throw Error('Invalid saved machine block configuration; manual review required.');
   let config:Configuration=loaded.success ? loaded.data : initialConfiguration;
+  if(config.manualBlockHostIds.some(id=>!config.hostIds.includes(id)))
+    throw Error('Saved machine block is outside protected scope; manual review required.');
   if ((config.mode==='enforce' || config.manualBlock) && config.hostIds.length===0) config={...config,mode:'observe',manualBlock:false};
   if(config.suspendNativePluginsGlobally || config.directHostIds.some(id=>!config.hostIds.includes(id)))config={...config,directHostIds:[]};
   if(loaded.success)await bb.storage.kv.set(CONFIG,config);
@@ -134,6 +139,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function vpn(hostId:string):Promise<VpnState> {
     const result=await readHost(hostId);return result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state;
   }
+  const manuallyBlocked = (hostId:string) => config.manualBlock || config.manualBlockHostIds.includes(hostId);
   const directHost = (hostId:string) => config.hostIds.includes(hostId) && config.directHostIds.includes(hostId);
   async function networkState(hostId:string):Promise<VpnState> {
     if(!directHost(hostId)) return vpn(hostId);
@@ -160,7 +166,7 @@ export default async function plugin(bb: BbPluginApi) {
     for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,networkMode:directHost(id)?'direct' as const:'vpn-required' as const,vpn:'unknown',evidence:null,rpc:null});
     let pool:{linked:boolean|null,vpnPolicyVersion:2|null,error:string|null}={linked:null,vpnPolicyVersion:null,error:null};
     try {const raw=await poolPolicy();pool={linked:raw.vpnGuardEnabled,vpnPolicyVersion:raw.vpnPolicyVersion,error:null};}catch{pool.error='Pooler linkage unavailable';}
-    return {mode:config.mode,manualBlock:config.manualBlock,serverHostId,hostIds:config.hostIds,directHostIds:config.directHostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,automationHostId:config.automationHostId,
+    return {mode:config.mode,manualBlock:config.manualBlock,manualBlockHostIds:config.manualBlockHostIds,serverHostId,hostIds:config.hostIds,directHostIds:config.directHostIds,suspendNativePluginsGlobally:config.suspendNativePluginsGlobally,coordinateAutomations:config.coordinateAutomations,automationControllerPath:config.automationControllerPath,automationHostId:config.automationHostId,
       hosts,protectedProviders:PROTECTED_PROVIDERS,ownedDisabledPlugins:[...owned],ambiguousPluginChanges:[...pending],stoppedThreadIds:[...stopped],stopHistory:[...stopHistory],events:journal.snapshot(),limitations:LIMITATIONS,pool,automations:{status:automationStatus,error:automationError,held:automationBinding!==null||bindingCorrupt,needsReconcile:automationDesired===null,busy:automationBusy||automationTask!==null,lastAttemptAt:lastAutomationAttempt,lastSuccessAt:lastAutomationSuccess,retryAt:automationRetryAt}};
   }
   async function saveConfig(next:Configuration) {
@@ -169,6 +175,10 @@ export default async function plugin(bb: BbPluginApi) {
     policyVersion++;
     recheckDirty=true;
     if(previous.manualBlock!==next.manualBlock)event({kind:next.manualBlock?'manual_block_on':'manual_block_off',reason:'manual_block'});
+    for(const hostId of new Set([...previous.manualBlockHostIds,...next.manualBlockHostIds])) {
+      if(previous.manualBlockHostIds.includes(hostId)!==next.manualBlockHostIds.includes(hostId))
+        event({kind:next.manualBlockHostIds.includes(hostId)?'manual_block_on':'manual_block_off',hostId,reason:'manual_block'});
+    }
   }
   async function saveOwned() {await bb.storage.kv.set(JOURNAL,[...owned]);}
   async function savePending() {await bb.storage.kv.set(PENDING,[...pending]);}
@@ -249,7 +259,7 @@ export default async function plugin(bb: BbPluginApi) {
     try {runningThreads=await bb.sdk.threads.listRunning();}
     catch(error) {return [new Error(`threads.listRunning: ${String(error)}`)];}
     for(const running of runningThreads) {
-      if(!running.hostId || !config.hostIds.includes(running.hostId) || (!config.manualBlock && states.get(running.hostId)==='connected')) continue;
+      if(!running.hostId || !config.hostIds.includes(running.hostId) || (!manuallyBlocked(running.hostId) && (config.mode!=='enforce'||states.get(running.hostId)==='connected'))) continue;
       try {
         const thread=await bb.sdk.threads.get({threadId:running.id});
         if(!protectedProvider(thread.providerId)) continue;
@@ -271,7 +281,7 @@ export default async function plugin(bb: BbPluginApi) {
         if(stopped.size>100) stopped=new Set([...stopped].slice(-100));
         await bb.storage.kv.set(STOPPED,[...stopped]);
         const observation=snapshot.hosts.find(h=>h.id===running.hostId);
-        const reason=config.manualBlock?'manual_block':!observation?.available?'host_catalog_unavailable':!observation.evidence?'host_rpc_failed':observation.evidence.reason;
+        const reason=manuallyBlocked(running.hostId)?'manual_block':!observation?.available?'host_catalog_unavailable':!observation.evidence?'host_rpc_failed':observation.evidence.reason;
         const parsedReason=stopReasonSchema.safeParse(reason);
         const stopRecord=stopObservationSchema.safeParse({threadId:running.id,hostId:running.hostId,at:stoppedAt,reason:parsedReason.success?parsedReason.data:'invalid_evidence'});
         if(stopRecord.success){stopHistory=[...stopHistory,stopRecord.data].slice(-100);await bb.storage.kv.set(STOP_HISTORY,stopHistory);await autoRecovery.remember(running.id,stopRecord.data.at,running.hostId);}else bb.log.warn('VPN Guard stop observation rejected');
@@ -294,7 +304,7 @@ export default async function plugin(bb: BbPluginApi) {
     const report=await controller('status',binding);
     if(automatic&&(report.holds.length>0||report.legacyBlocked||!report.recoveryPending))return;
     if(!report.restoreRevision)throw Error('Automation recovery snapshot unavailable; retry required');
-    if(await networkState(binding.hostId)!=='connected')throw Error('Release protection blocks and verify VPN before resuming');
+    if(manuallyBlocked(binding.hostId)||await networkState(binding.hostId)!=='connected')throw Error('Release protection blocks and verify VPN before resuming');
     const restored=await controller('resume',binding,true,report.restoreRevision,automatic);
     if(restored.errors.length||restored.blocked||restored.recoveryPending)throw Error('Automation recovery is incomplete; inspect controller status');
     event({kind:'automation_restored',hostId:binding.hostId});
@@ -304,7 +314,7 @@ export default async function plugin(bb: BbPluginApi) {
     if(bindingCorrupt)throw Error('Automation ownership journal is malformed; manual review required');
     const controllerHostId=snapshot.automationHostId??snapshot.serverHostId;
     const server=snapshot.hosts.find(h=>h.id===controllerHostId);
-    const wants=config.coordinateAutomations&&!!server?.selected&&(config.manualBlock||(config.mode==='enforce'&&!(server.networkMode==='direct'?server.available:server.vpn==='connected')));
+    const wants=config.coordinateAutomations&&!!server?.selected&&(manuallyBlocked(server.id)||(config.mode==='enforce'&&!(server.networkMode==='direct'?server.available:server.vpn==='connected')));
     try {
       if(wants) {
         if(!controllerHostId||!config.automationControllerPath)throw Error('Automation controller host and executable must be configured');
@@ -328,7 +338,7 @@ export default async function plugin(bb: BbPluginApi) {
       } else if(config.coordinateAutomations&&controllerHostId&&config.automationControllerPath) {
         await controller('status',{hostId:controllerHostId,executable:config.automationControllerPath});
       }
-      if(!wants&&!automationBinding&&config.coordinateAutomations&&!config.manualBlock&&server?.selected&&(server.networkMode==='direct'?server.available:server.vpn==='connected')&&config.automationControllerPath&&automationStatus?.recoveryPending) {
+      if(!wants&&!automationBinding&&config.coordinateAutomations&&server?.selected&&!manuallyBlocked(server.id)&&(server.networkMode==='direct'?server.available:server.vpn==='connected')&&config.automationControllerPath&&automationStatus?.recoveryPending) {
         await resumeAutomations({hostId:server.id,executable:config.automationControllerPath},true);
       }
       assertAutomationCurrent();automationDesired=wants;lastCoordinatedVersion=automationPolicyVersion;
@@ -355,9 +365,10 @@ export default async function plugin(bb: BbPluginApi) {
       try {failures.push(...await suspendNativePlugins(true));}
       catch(error) {failures.push(new Error(`native suspension: ${String(error)}`));}
     }
-    if(config.manualBlock || (config.mode==='enforce' && [...states.values()].some(state=>state!=='connected'))) {
+    if(config.manualBlock || config.manualBlockHostIds.length>0 || (config.mode==='enforce' && [...states.values()].some(state=>state!=='connected'))) {
       failures.push(...await stopProtected(states,snapshot));
-    } else if(!config.manualBlock&&states.size>0&&[...states.values()].every(state=>state==='connected')&&owned.size>0) {
+    }
+    if(!config.manualBlock&&states.size>0&&[...states.values()].every(state=>state==='connected')&&owned.size>0) {
       try {await restoreOwned(true);}
       catch(error) {if(nativeProblem!=='restore'){nativeProblem='restore';event({kind:'native_restore_failed',reason:String(error).includes('connected')?'vpn_unavailable':'operation_failed'});}failures.push(new Error(`native recovery: ${String(error)}`));}
     }
@@ -373,6 +384,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function update(next:Configuration) {
     if(next.directHostIds.length&&next.suspendNativePluginsGlobally)throw Error('Direct hosts require host-scoped protection; global native suspension would block unrelated machines.');
+    if(next.manualBlockHostIds.some(id=>!next.hostIds.includes(id)))throw Error('Release the machine manual block before removing its protection.');
     if(next.directHostIds.some(id=>!next.hostIds.includes(id)))throw Error('Direct host must be selected.');
     if((next.mode==='enforce' || next.manualBlock) && next.hostIds.length===0) throw new Error('Select at least one machine before enforcement.');
     await saveConfig(next);
@@ -387,6 +399,12 @@ export default async function plugin(bb: BbPluginApi) {
       if(unique.some(id=>!available.has(id) && !config.hostIds.includes(id))) throw new Error('A newly selected machine is not enrolled.');
     }
     return update({...config,hostIds:unique,directHostIds:config.directHostIds.filter(id=>unique.includes(id))});
+  }
+  async function setHostManualBlock(hostId:string,blocked:boolean) {
+    if(blocked&&!config.hostIds.includes(hostId))throw Error('Select the machine before blocking it.');
+    const ids=new Set(config.manualBlockHostIds);
+    if(blocked)ids.add(hostId);else ids.delete(hostId);
+    return update({...config,manualBlockHostIds:[...ids]});
   }
   async function setAutomationHost(hostId:string|null) {
     if(hostId===config.automationHostId)return status();
@@ -426,7 +444,7 @@ export default async function plugin(bb: BbPluginApi) {
       const version=policyVersion;
       if(owned.has(nativePluginFor(id)) || pending.has(nativePluginFor(id))) return {action:'wait',reason:'VPN Guard: native plugin change awaits review or restore'};
       if(!hostId || !config.hostIds.includes(hostId)) return {action:'proceed'};
-      if(config.manualBlock) return {action:'wait',reason:'VPN Guard: manual block on selected host'};
+      if(manuallyBlocked(hostId)) return {action:'wait',reason:'VPN Guard: manual block on selected host'};
       if(config.mode!=='enforce') return {action:'proceed'};
       let available=false;
       try {available=(await bb.sdk.hosts.list()).some(h=>h.id===hostId);}
@@ -442,7 +460,7 @@ export default async function plugin(bb: BbPluginApi) {
       const decision=(allowed:boolean,reason:'manual_block'|'vpn_unavailable'|'outside_scope'|'observe'|'connected'|'restore_required'|'direct')=>versioned?({schema:'bb-vpn-guard/network-decision/2' as const,hostId,allowed,reason}):({schema:'bb-vpn-guard/network-decision/1' as const,allowed:reason==='direct'?false:allowed,reason:reason==='direct'?'vpn_unavailable' as const:reason});
       if(owned.has(nativePluginFor(provider)) || pending.has(nativePluginFor(provider))) return decision(false,'restore_required');
       if(!config.hostIds.includes(hostId)) return decision(true,'outside_scope');
-      if(config.manualBlock) return decision(false,'manual_block');
+      if(manuallyBlocked(hostId)) return decision(false,'manual_block');
       if(directHost(hostId)) {
         const ready=await networkState(hostId);
         if(version!==policyVersion)continue;
@@ -495,7 +513,7 @@ export default async function plugin(bb: BbPluginApi) {
     claimed:(threadId,at)=>resumeClaims===null||resumeClaims.some(value=>value.threadId===threadId&&value.stoppedAt===at),
     allowed:async(hostId,threadId,at)=>{
       const proof=stopProofs.find(value=>value.threadId===threadId&&value.at===at);
-      return !!proof&&!disposed&&!config.manualBlock&&config.hostIds.includes(hostId)&&
+      return !!proof&&!disposed&&!manuallyBlocked(hostId)&&config.hostIds.includes(hostId)&&
         !owned.has(nativePluginFor(proof.providerId))&&!pending.has(nativePluginFor(proof.providerId))&&await networkState(hostId)==='connected';
     },
     resume:async(threadId,at)=>{await resumeThread(threadId,at,true);},
@@ -519,7 +537,7 @@ export default async function plugin(bb: BbPluginApi) {
       const retained=autoRecovery.snapshot().slice().reverse().find(stop=>stop.threadId===threadId);
       if(proof&&stopProofs.find(value=>value.threadId===threadId)?.at!==stoppedAt)throw Error('This Guard stop was superseded.');
       const record=proof?retained:stopHistory.slice().reverse().find(stop=>stop.threadId===threadId);
-      if(!record||record.at!==stoppedAt||!config.hostIds.includes(record.hostId))throw Error('This Guard stop is no longer current. Open the thread to continue.');
+      if(!record||record.at!==stoppedAt||manuallyBlocked(record.hostId)||!config.hostIds.includes(record.hostId))throw Error('This Guard stop is no longer current. Open the thread to continue.');
       return record;
     };
     const assertThread=(thread:Awaited<ReturnType<typeof bb.sdk.threads.get>>)=>{
@@ -583,7 +601,7 @@ export default async function plugin(bb: BbPluginApi) {
       const snapshot=await status();assertAutomationCurrent();
       const controllerHostId=snapshot.automationHostId??snapshot.serverHostId;
       if(!config.coordinateAutomations||!controllerHostId||!config.automationControllerPath)throw Error('Automation controller is not configured');
-      if(action==='resume'&&(config.manualBlock||automationBinding||snapshot.hosts.some(h=>h.selected&&(h.networkMode==='direct'?!h.available:h.vpn!=='connected'))))throw Error('Release protection blocks and verify VPN before resuming');
+      if(action==='resume'&&(!controllerHostId||manuallyBlocked(controllerHostId)||automationBinding||snapshot.hosts.some(h=>h.id===controllerHostId&&h.selected&&(h.networkMode==='direct'?!h.available:h.vpn!=='connected'))))throw Error('Release protection blocks and verify VPN before resuming');
       const binding={hostId:controllerHostId,executable:config.automationControllerPath};
       if(action==='resume')await resumeAutomations(binding,false);
       else {
@@ -596,6 +614,7 @@ export default async function plugin(bb: BbPluginApi) {
     networkDecisionV2:async({hostId,provider})=>{const d=await networkDecision(hostId,provider,true);if(d.schema!=='bb-vpn-guard/network-decision/2')throw Error('Invalid decision version');return d;},
     setDirectHosts:({hostIds})=>serial(()=>setDirectHosts(hostIds)),
     status:()=>status(),
+    setHostManualBlock:({hostId,blocked})=>serial(()=>setHostManualBlock(hostId,blocked)),
     setManualBlock:({blocked})=>serial(()=>update({...config,manualBlock:blocked})),
     setMode:({mode})=>serial(()=>update({...config,mode})),
     setHosts:({hostIds})=>serial(()=>setHosts(hostIds)),
@@ -609,8 +628,8 @@ export default async function plugin(bb: BbPluginApi) {
   bb.cli.register({
     name:'vpn-guard',summary:'Observe and guard selected BB machines',
     commands:[
-      {name:'block',summary:'Block selected machines regardless of VPN',usage:'bb vpn-guard block'},
-      {name:'unblock',summary:'Release manual block and retain current mode',usage:'bb vpn-guard unblock'},
+      {name:'block',summary:'Block one machine or all selected machines',usage:'bb vpn-guard block [--host <host-id>]'},
+      {name:'unblock',summary:'Release manual block and retain current mode',usage:'bb vpn-guard unblock [--host <host-id>]'},
       {name:'status',summary:'Show scope, VPN decisions and actions',usage:'bb vpn-guard status [--json]'},
       {name:'hosts',summary:'Select protected machines',usage:'bb vpn-guard hosts <host-id>... | none'},
       {name:'automation-host',summary:'Pin the automation controller to a selected enrolled host',usage:'bb vpn-guard automation-host <host-id> | server'},
@@ -626,6 +645,7 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         let result;
         if(command==='status' && args.length===0) result=await status();
+        else if((command==='block'||command==='unblock') && args.length===2 && args[0]==='--host') result=await serial(()=>setHostManualBlock(args[1]!,command==='block'));
         else if((command==='block'||command==='unblock') && args.length===0) result=await serial(()=>update({...config,manualBlock:command==='block'}));
         else if(command==='enforce' && args.length===0) result=await serial(()=>update({...config,mode:'enforce'}));
         else if(command==='observe' && args.length===0) result=await serial(()=>update({...config,mode:'observe'}));

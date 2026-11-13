@@ -106,3 +106,9 @@ The server reads VPN evidence from the selected machine through the host RPC. Ea
 The response is checked again on arrival: the status file must remain at most 90 seconds old and its verified probe at most 390 seconds old, with no future timestamps. These limits also apply when the server and protected machine are different hosts.
 
 `bb vpn-guard status --json` includes `hosts[].rpc` for selected VPN hosts: a safe category (`ok`, `timeout`, `host_unavailable`, `cancelled`, `rpc_error`) and elapsed milliseconds. The category describes the RPC, not VPN health. Failure logs contain the category and elapsed time, never the exception payload. Direct hosts do not need VPN evidence.
+
+## Independent machine blocks
+
+Each selected machine has its own Block / Unblock control. A machine block holds protected dispatch on that execution host and stops its protected running turns; other selected hosts continue according to their existing VPN policies. No machine name is hardcoded. Existing exact Kimi and Z.ai exemptions remain. VPN reconnect and Observe mode do not release manual machine blocks. State survives reload; all-selected and per-machine blocks compose with OR.
+
+The separate global block button is labelled explicitly. Machine blocks never request global native plugin suspension. Automation holds follow only the configured controller host. Pooler checks its own egress host, so a laptop block does not disable server-side work. This does not provide a packet firewall, stop standalone model clients, or close the documented Send-now bypass. Unblock a machine before deselecting it.

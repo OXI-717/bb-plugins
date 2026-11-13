@@ -3,6 +3,10 @@ import {guardFixture} from '../ui-fixture.js';
 const params=new URLSearchParams(location.search);
 const status=guardFixture();
 const scenario=params.get('scenario');
+if(scenario==='host-block'){
+ status.hostIds.push('demo-laptop');status.manualBlockHostIds=['demo-laptop'];
+ status.hosts.push({...status.hosts[0]!,id:'demo-laptop',name:'Demo laptop'});
+}
 if(scenario==='unknown'){
   status.hosts[0]!.vpn='unknown';status.hosts[0]!.available=false;
   status.hosts[0]!.evidence={state:'unknown',assurance:'invalid',reason:'probe_stale',updatedAt:null,probeAt:null};
@@ -27,6 +31,7 @@ const rpc={async call(method:string,input?:any){
     case 'resumeThread':return {accepted:true};
     case 'status':break;
     case 'setMode':status.mode=input.mode;break;
+    case 'setHostManualBlock':status.manualBlockHostIds=input.blocked?[...status.manualBlockHostIds,input.hostId]:status.manualBlockHostIds.filter(id=>id!==input.hostId);break;
     case 'setManualBlock':status.manualBlock=input.blocked;break;
     case 'setGlobalSuspension':status.suspendNativePluginsGlobally=input.enabled;break;
     case 'restoreOwned':if(status.manualBlock||status.hosts.some(host=>host.selected&&host.vpn!=='connected'))throw new Error('Selected machines must be connected before restoring native plugins.');status.ownedDisabledPlugins=[];break;
