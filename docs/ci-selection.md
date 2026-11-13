@@ -20,8 +20,9 @@ must always succeed. This source change does not alter GitHub protection rules;
 old required matrix contexts may still block merging until separately authorized
 configuration adopts the stable gate. No bypass is implied.
 
-The unchanged full cross-platform suite lives in `Extended compatibility`, on main
-and the release branch, weekly and on manual request. It is outside the PR release
+The unchanged full cross-platform suite lives in `Extended compatibility`, on the release
+branch, weekly and on manual request. Main already runs the full required CI,
+so it does not also trigger the extended workflow. It is outside the PR release
 DAG, keeping broad compatibility visible without repeating it on every PR fix.
 Known safety failures still require investigation; background does not mean ignored.
 

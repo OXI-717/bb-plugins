@@ -126,6 +126,14 @@ class CliTests(unittest.TestCase):
             fields = dict(line.split('=', 1) for line in output.read_text().splitlines())
             self.assertEqual(len(json.loads(fields['matrix'])['include']), 2)
 
+            output.write_text('')
+            subprocess.run(['python3', str(script)], cwd=root, check=True, timeout=10,
+                           env={**os.environ, 'EVENT_NAME': 'push',
+                                'GIT_REF': 'refs/heads/main', 'DIFF_HEAD': 'HEAD',
+                                'GITHUB_OUTPUT': str(output)})
+            fields = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            self.assertEqual(len(json.loads(fields['matrix'])['include']), 14)
+
 
 class CoverageTests(unittest.TestCase):
     def test_existing_and_new_test_paths_are_required(self):
@@ -141,6 +149,23 @@ class CoverageTests(unittest.TestCase):
         self.assertGreater(len(tests), 75)
         self.assertNotIn('testNamePattern', config)
         self.assertNotIn('exclude:', config)
+
+
+class TriggerOverlapTests(unittest.TestCase):
+    def test_main_full_ci_does_not_also_trigger_extended(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        critical = (root / '.github/workflows/ci.yml').read_text()
+        extended = (root / '.github/workflows/ci-extended.yml').read_text()
+        self.assertIn('branches: [main]', critical)
+        self.assertIn('branches: [release/account-pool-0.4.x]', extended)
+        self.assertNotIn('branches: [main', extended)
+        # Normal non-PR builds retain all required platform/plugin checks.
+        full = plan([], full=True)
+        self.assertEqual(len(full['matrix']['include']), 14)
+        self.assertTrue(full['upgrade_mac'])
+        self.assertTrue(full['op'])
+        self.assertTrue(full['archive'])
 
 
 if __name__ == '__main__':
