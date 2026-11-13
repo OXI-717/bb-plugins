@@ -15,6 +15,7 @@ export const stopObservationSchema=z.object({threadId:z.string().max(160),hostId
 export const configurationSchema = z.object({
   mode: modeSchema,
   manualBlock: z.boolean().default(false),
+  manualBlockHostIds: z.array(z.string().min(1).max(160)).max(256).default([]),
   hostIds: z.array(z.string().min(1)).max(256),
   directHostIds: z.array(z.string().min(1)).max(256).default([]),
   suspendNativePluginsGlobally: z.boolean(),
@@ -25,6 +26,7 @@ export const configurationSchema = z.object({
 export const statusSchema = z.object({
   mode: modeSchema,
   manualBlock: z.boolean(),
+  manualBlockHostIds: z.array(z.string()).default([]),
   serverHostId:z.string().nullable(),
   hostIds: z.array(z.string()),
   directHostIds: z.array(z.string()).default([]),
@@ -56,6 +58,7 @@ export const rpcContract = defineRpcContract({
   networkDecisionV2: {input:z.object({hostId:z.string().min(1),provider:z.enum(['codex','claude','cursor','devin','opencode-go','neuraldeep','agy'])}).strict(),output:z.object({schema:z.literal('bb-vpn-guard/network-decision/2'),hostId:z.string().min(1),allowed:z.boolean(),reason:z.enum(['manual_block','vpn_unavailable','outside_scope','observe','connected','restore_required','direct'])}).strict()},
   resumeThread: {input:z.object({threadId:z.string().min(1).max(160),stoppedAt:z.number().int().nonnegative()}).strict(),output:z.object({accepted:z.literal(true)})},
   status: {input:z.null(),output:statusSchema},
+  setHostManualBlock: {input:z.object({hostId:z.string().min(1).max(160),blocked:z.boolean()}).strict(),output:statusSchema},
   setManualBlock: {input:z.object({blocked:z.boolean()}),output:statusSchema},
   setMode: {input:z.object({mode:modeSchema}),output:statusSchema},
   setHosts: {input:z.object({hostIds:z.array(z.string().min(1)).max(256)}),output:statusSchema},

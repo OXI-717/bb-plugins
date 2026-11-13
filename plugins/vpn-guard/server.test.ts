@@ -673,3 +673,108 @@ it.each(['neuraldeep','agy'])('admits %s through the existing scoped policy with
  expect(await decision(providerUnderTest)).toMatchObject({allowed:false,reason:'vpn_unavailable'});
  await fake.harness.lifecycle.dispose();
 });
+
+describe('independent machine manual blocks',()=>{
+  it('holds a connected laptop while server dispatch/network and exempt routes continue',async()=>{
+    const {fake,states,dispatch,stopped,mutations}=await setup();
+    states.set('host-a','connected');
+    try {
+      await select(fake,['host-a','host-b']);
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+      expect(await dispatch('codex','host-a')).toMatchObject({action:'wait'});
+      expect(await dispatch('acp-agy','host-a')).toMatchObject({action:'wait'});
+      expect(await dispatch('codex','host-b')).toEqual({action:'proceed'});
+      expect(await dispatch('kimi','host-a')).toEqual({action:'proceed'});
+      expect(await dispatch('acp-opencode-zai','host-a')).toEqual({action:'proceed'});
+      for(const method of ['networkDecision','networkDecisionV2']) {
+        expect(await fake.harness.behavior.callRpc(method,{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:false,reason:'manual_block'});
+        expect(await fake.harness.behavior.callRpc(method,{hostId:'host-b',provider:'codex'})).toMatchObject({allowed:true});
+      }
+      expect(stopped).toEqual(['protected']);
+      expect(mutations).toEqual([]);
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('does not stop an unrelated disconnected host in observe mode',async()=>{
+    const {fake,states,stopped}=await setup();states.set('host-b','disconnected');
+    try {
+      await select(fake,['host-a','host-b']);
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+      expect(stopped).toEqual(['protected']);
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('persists per-machine intent across reload and VPN reconnect; global unblock cannot clear it',async()=>{
+    const {fake,states}=await setup();
+    await select(fake,['host-a','host-b']);
+    await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+    states.set('host-a','connected');
+    const reloaded=await fake.harness.lifecycle.reload(plugin);
+    try {
+      await reloaded.harness.behavior.callRpc('setManualBlock',{blocked:false});
+      expect(await reloaded.harness.behavior.callRpc('status',null)).toMatchObject({manualBlock:false,manualBlockHostIds:['host-a']});
+      expect(await reloaded.harness.behavior.callRpc('networkDecisionV2',{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:false,reason:'manual_block'});
+      expect(await reloaded.harness.behavior.callRpc('networkDecisionV2',{hostId:'host-b',provider:'codex'})).toMatchObject({allowed:true});
+    } finally {await reloaded.harness.lifecycle.dispose();}
+  });
+  it('only releases the requested machine; global block and other machine blocks remain',async()=>{
+    const {fake,dispatch}=await setup();
+    try {
+      await select(fake,['host-a','host-b']);
+      for(const hostId of ['host-a','host-b'])await fake.harness.behavior.callRpc('setHostManualBlock',{hostId,blocked:true});
+      await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:false});
+      expect(await dispatch('codex','host-a')).toMatchObject({action:'wait'});
+      await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
+      expect(await dispatch('codex','host-a')).toEqual({action:'proceed'});
+      expect(await dispatch('codex','host-b')).toMatchObject({action:'wait'});
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('unblock rechecks admission while preserving unavailable VPN denial',async()=>{
+    const {fake,dispatch}=await setup();
+    try {
+      await select(fake,['host-a','host-b']);await mode(fake,'enforce');
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+      const before=fake.harness.recheckCount;
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:false});
+      expect(fake.harness.recheckCount).toBeGreaterThan(before);
+      expect(await dispatch('codex','host-a')).toMatchObject({action:'wait'});
+      expect(await dispatch('codex','host-b')).toEqual({action:'proceed'});
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('rejects unselected IDs and removing a blocked machine instead of silently losing intent',async()=>{
+    const {fake}=await setup();
+    try {
+      await select(fake,['host-a','host-b']);
+      await expect(fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'unknown',blocked:true})).rejects.toThrow('Select');
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+      await expect(select(fake,['host-b'])).rejects.toThrow('manual block');
+      expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({manualBlockHostIds:['host-a'],hostIds:['host-a','host-b']});
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('supports explicit host CLI while leaving legacy global block separate',async()=>{
+    const {fake}=await setup();
+    try {
+      await select(fake,['host-a','host-b']);
+      const result=await fake.harness.behavior.runCli(['block','--host','host-a','--json']);
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout!)).toMatchObject({manualBlock:false,manualBlockHostIds:['host-a']});
+      expect((await fake.harness.behavior.runCli(['unblock','--host','host-a'])).exitCode).toBe(0);
+      expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({manualBlockHostIds:[]});
+      expect((await fake.harness.behavior.runCli(['block','--host'])).exitCode).toBe(1);
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+});
+
+
+it('does not replace malformed saved machine blocks with an unprotected default',async()=>{
+ const fake=createFakePluginHost({pluginId:'vpn-guard'});
+ await fake.bb.storage.kv.set('configuration-v2',{mode:'enforce',manualBlock:false,manualBlockHostIds:null,hostIds:['host-a'],suspendNativePluginsGlobally:false});
+ try {await expect(plugin(fake.bb)).rejects.toThrow('Invalid saved machine block');}
+ finally {await fake.harness.lifecycle.dispose();}
+});
+
+it('rejects saved blocks outside the selected scope',async()=>{
+ const fake=createFakePluginHost({pluginId:'vpn-guard'});
+ await fake.bb.storage.kv.set('configuration-v2',{mode:'enforce',manualBlock:false,manualBlockHostIds:['host-b'],hostIds:['host-a'],suspendNativePluginsGlobally:false});
+ try {await expect(plugin(fake.bb)).rejects.toThrow('outside protected scope');}
+ finally {await fake.harness.lifecycle.dispose();}
+});
