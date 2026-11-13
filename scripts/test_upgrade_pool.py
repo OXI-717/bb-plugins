@@ -281,3 +281,32 @@ class UpgradeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class DurableManagementTests(unittest.TestCase):
+    def test_explicit_operator_key_reissues_after_reload_invalidates_grants(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);data=root/'plugins'/u.PLUGIN
+            data.mkdir(parents=True);(data/'data.db').touch()
+            key=root/'operator.env';key.write_text('POOL_MANAGEMENT_KEY='+'K'*43+'\n');key.chmod(0o600)
+            generation=[0]; issued=[]; revoked=[]
+            def rpc(method,payload):
+                if method=='management.unlock':
+                    token='generation-'+str(generation[0]);issued.append(token);return {'token':token}
+                revoked.append(payload['token']);return None
+            def process(argv,**kwargs):
+                request=json.loads(kwargs['input'])
+                self.assertEqual(request['token'],'generation-'+str(generation[0]))
+                self.assertNotIn(request['token'],' '.join(argv))
+                return subprocess.CompletedProcess(argv,0,json.dumps({'generation':generation[0]}),'')
+            def bb_run(*argv,**kwargs):
+                self.assertEqual(argv,('bb','status','--json'))
+                return json.dumps({'dataDir':temp})
+            def perform(*args):
+                self.assertEqual(u.bb('pool','status')['generation'],0)
+                generation[0]=1 # ManagementAccess.close/initialize invalidates old grants.
+                self.assertEqual(u.bb('pool','status')['generation'],1)
+                return 'PASS'
+            with patch.object(u.sys,'argv',['upgrade','--operator-key-file',str(key)]),patch.object(u,'run',side_effect=bb_run),patch.object(u,'management_rpc',side_effect=rpc),patch.object(u.subprocess,'run',side_effect=process),patch.object(u,'perform',side_effect=perform),patch.dict(u.os.environ,{'BB_SERVER_URL':'http://127.0.0.1'}),contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(u.main(),0)
+            self.assertEqual(issued,['generation-0','generation-1'])
+            self.assertEqual(revoked,issued)

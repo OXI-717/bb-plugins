@@ -160,7 +160,13 @@ clients were paused. Subsequent CLI and interface updates use both barriers.
 Use `--drain-sessions --grant-file "$GRANT_FILE"` in an independent machine
 terminal. The grant is operator-issued JSON, mode 0600; it is read privately and
 sent through stdin. The updater no longer discovers a management root key.
-The coordinator revokes the grant when the operation finishes.
+The coordinator revokes the grant when the operation finishes. Short-lived grants
+do not survive plugin reload: use `--operator-key-file "$OPERATOR_KEY_FILE"` for
+a durable update. This explicit private file is never discovered automatically;
+the existing management client issues and revokes a fresh 60-second grant for
+each command, including post-reload validation and hold release. The interface
+passes only a fixed server-owned file path, never its contents; the browser
+cannot choose a path or command. The two credential flags are mutually exclusive.
 The dispatch queue is held for at most 30 minutes; natural completion waits up
 to 600 seconds (`--drain-timeout`). No thread stop, continuation, model interrupt
 or concurrency change occurs. Three complete empty inventories are required.

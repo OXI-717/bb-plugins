@@ -372,11 +372,14 @@ def main():
     parser.add_argument('--interrupt-now', action='store_true', help='Offer the interactive interruption prompt immediately')
     parser.add_argument('--drain-sessions', action='store_true', help='Hold dispatch and await natural session completion; never cancel active work')
     parser.add_argument('--drain-timeout', type=int, default=600, help='Natural drain deadline in seconds (1..600)')
+    parser.add_argument('--operator-key-file', help='Explicit private operator key for durable per-command grants across reload; no autodiscovery')
     parser.add_argument('--grant-file', help='Explicit private operator-issued management grant JSON; no automatic root-key access')
     parser.add_argument('--pause-sessions', action='store_true', help='Stop active sessions on ALL hosts, update, then continue the same sessions; history retained, current turns interrupted')
     parser.add_argument('--resume-sessions', help='Recover session continuation from a previous private operation receipt; never updates the pool')
     parser.add_argument('--sandbox', action='store_true', help='Exercise the full workflow on temporary synthetic state; no live BB or network')
     args = parser.parse_args()
+    if args.operator_key_file and args.grant_file:
+        parser.error('Choose operator key or one short-lived grant')
     if args.candidate_preflight:
         if not args.receipt_output or any((args.check,args.wait_idle,args.version,args.pause_sessions,args.drain_sessions,args.resume_sessions,args.sandbox,args.interrupt_now)):
             parser.error('Candidate preflight requires receipt output and no live-operation flags')
@@ -410,7 +413,7 @@ def main():
             raise UpgradeError('Run this script on the BB server host with a local BB connection')
         root = Path(bb('status')['dataDir']).resolve()
         global MANAGEMENT_KEY_FILE
-        MANAGEMENT_KEY_FILE = None
+        MANAGEMENT_KEY_FILE = Path(args.operator_key_file).resolve() if args.operator_key_file else None
         global MANAGEMENT_GRANT_FILE
         MANAGEMENT_GRANT_FILE = Path(args.grant_file).resolve() if args.grant_file else None
         data = root / 'plugins' / PLUGIN
