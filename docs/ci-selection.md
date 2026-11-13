@@ -11,7 +11,15 @@ For Pooler, UI/CSS and the small explicit portable-module list need Linux. Brows
 host, native, launcher, dependency and unknown backend changes also require macOS.
 Other changed plugins retain their existing platforms. Shared code, workflow edits
 and unknown repository paths conservatively select the complete matrix. Renames
-include both old and new paths. Tags compare with the previous reachable version
+include both old and new paths.
+A release metadata exception is allowed only for the changed Pooler plugin, when the
+package version, lock root and root-package versions, and that plugin's root
+marketplace `source.git.range` change coherently. Structural JSON comparison at
+the actual merge-base requires every other field and plugin identity/inventory
+to remain identical. Duplicate keys, missing/deleted/malformed/oversized JSON,
+dependencies, lock entries, schemas and extra fields fall back to the full plan.
+Other plugins retain the full fallback for release metadata; no platform is dropped.
+The alternate Claude marketplace layout remains unknown/full. Tags compare with the previous reachable version
 of the same plugin; an absent baseline falls back to the full matrix.
 
 The stable `release-gate` requires success from every selected check. A selected
@@ -29,9 +37,11 @@ Known safety failures still require investigation; background does not mean igno
 | Example diff | Previous jobs | Selected jobs | Selected Mac jobs |
 |---|---:|---:|---:|
 | Pooler app.tsx / balancer.ts | 21 | 6 | 0 |
+| Pooler UI + coherent package/lock/root marketplace version-only release | 21 | 6 | 0 |
+| Release metadata with dependency/inventory/schema/extra changes | 21 | 23 | 9 |
 | Pooler browser-host.ts / unknown safety test | 21 | 8 | 2 |
 | shared VPN evidence / workflow change | 21 | 23 | 9 |
 
 Counts include the two new planning/aggregation jobs. No test count reduction is
 claimed. Hosted elapsed time depends on runner availability; only job plans are
-measured locally. Validate with `python3 -m unittest discover -s scripts -p test_ci_plan.py -v`.
+measured locally. Validate with `python3 -m unittest discover -s scripts -p 'test_ci_*.py' -v`.

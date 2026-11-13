@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from ci_versions import git, version_only
 
 PLUGINS = ['account-pool-balanced', 'automation-catalog', 'vpn-guard', 'oxi-projects',
            'model-connections', 'federation-pilot', 'pool-maintenance']
@@ -23,13 +24,17 @@ def mac_required(path):
     return True
 
 
-def plan(paths, full=False):
+def plan(paths, full=False, version_plugin=None, version_paths=()):
     selected = set()
     mac = set()
     upgrade = False
     upgrade_mac = False
     op = archive = False
     for path in paths:
+        if path in version_paths:
+            selected.add(version_plugin)
+            upgrade |= version_plugin == 'account-pool-balanced'
+            continue
         parts = path.split('/')
         if path.endswith('.md') and not path.startswith('.github/'):
             continue
@@ -72,14 +77,18 @@ if __name__ == '__main__':
         if previous:
             base, full = previous[0], False
     paths = []
+    version_plugin, version_paths = None, set()
     if not full:
         if not base:
             raise SystemExit('Missing pull request base')
+        base = git('merge-base', base, head)
         out = subprocess.run(['git', 'diff', '--no-renames', '--name-only', '-z',
                               base + '...' + head], check=True, capture_output=True,
                              text=True, timeout=30)
         paths = [p for p in out.stdout.split('\0') if p]
-    result = plan(paths, full)
+        version_plugin, version_paths, metadata_full = version_only(paths, base, head, PLUGINS)
+        full |= metadata_full
+    result = plan(paths, full, version_plugin, version_paths)
     with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
         for key, value in result.items():
             output.write(f'{key}={json.dumps(value, separators=(",", ":"))}\n')
