@@ -68,18 +68,19 @@ async function fixture(provider:PoolProvider='claude',ids?:string[]) {
   const authority=scope(ids??[allowed.id]);const token=await tokens.forIssuedClient('external_fixture','project',undefined,authority);
   const legacy=await tokens.forIssuedClient('external_fixture_legacy','project');
   let status=200;const seen:string[]=[];const direct=vi.fn<typeof fetch>(async(_url,init)=>{if(String(_url).includes('exchange_user_api_key'))return Response.json({accessToken:'fixture-minted'});seen.push(new Headers(init?.headers).get('x-api-key')??new Headers(init?.headers).get('authorization')!);return Response.json({id:'fixture-response'},{status});});
-  let route:AccountRoute={assigned:true,profile,fetch:()=>direct};
+  let route:AccountRoute={assigned:true,profile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>direct(...args)):direct(...args)};
   const fallback=vi.fn<typeof fetch>(async()=>{throw Error('Unexpected personal transport');});
   let guardAction=async()=>{};
   const settings=accountPoolConfigSchema.parse({vpnOnlyProviders:[],vpnPolicyVersion:2,vpnGuardEnabled:true});
+  let now=1900000000000;
   const hub=createHub({route:'/pool',accounts,quotas,affinity,hubTokens:tokens,getSettings:()=>settings,
-    accountRoute:async()=>route,guardCheck:async()=>{await guardAction();return 'direct';},fetch:fallback,fetchIpv4:fallback,now:()=>1900000000000});
+    accountRoute:async()=>route,guardCheck:async()=>{await guardAction();return 'direct';},fetch:fallback,fetchIpv4:fallback,now:()=>now});
   vi.spyOn(hub,'refreshUsage').mockResolvedValue();
   const controller=new AbortController();const done=hub.start(controller.signal);cleanups.push(async()=>{controller.abort();await done;});await new Promise(r=>setImmediate(r));
-  const request=async(key=token,parent?:string,method='POST')=>{
-    const r=await hub.handle(new Request('http://localhost/pool/v1/'+(method==='GET'?'models':'messages'),{method,headers:{authorization:`Bearer ${key}`,'content-type':'application/json','x-account-id':personal.id,'x-bb-project-id':'other',...(provider==='cursor'?{'x-cursor-rpc-path':'aiserver.v1.AiService/AvailableModels'}:{})},...(method==='GET'?{}:{body:JSON.stringify({accountId:personal.id,accountScope:scope([personal.id]),metadata:{user_id:JSON.stringify({session_id:parent?'child':'same',...(parent?{parent_session_id:parent}:{})})}})})}),provider);
+  const request=async(key=token,parent?:string,method='POST',signal?:AbortSignal)=>{
+    const r=await hub.handle(new Request('http://localhost/pool/v1/'+(method==='GET'?'models':'messages'),{method,signal,headers:{authorization:`Bearer ${key}`,'content-type':'application/json','x-account-id':personal.id,'x-bb-project-id':'other',...(provider==='cursor'?{'x-cursor-rpc-path':'aiserver.v1.AiService/AvailableModels'}:{})},...(method==='GET'?{}:{body:JSON.stringify({accountId:personal.id,accountScope:scope([personal.id]),metadata:{user_id:JSON.stringify({session_id:parent?'child':'same',...(parent?{parent_session_id:parent}:{})})}})})}),provider);
     const text=await r.text();return {status:r.status,text};};
-  return {hub,request,allowed,personal,accounts,affinity,tokens,token,legacy,seen,quotas,fallback,authority,transport:direct,
+  return {hub,request,settings,advance:(ms:number)=>{now+=ms;hub.admissionLimitsChanged();},allowed,personal,accounts,affinity,tokens,token,legacy,seen,quotas,fallback,authority,transport:direct,
     status:(s:number)=>status=s,route:(r:AccountRoute)=>route=r,onGuard:(fn:()=>Promise<void>)=>guardAction=fn};
 }
 
@@ -188,9 +189,9 @@ it('refuses to join credential refresh started through a different egress',async
   const f=await fixture('cursor');await f.accounts.setEnabled(f.personal.id,false);let enter!:()=>void,unblock!:()=>void;
   const reached=new Promise<void>(r=>enter=r),gate=new Promise<void>(r=>unblock=r);
   f.transport.mockImplementationOnce(async()=>{enter();await gate;return Response.json({accessToken:'fixture-minted'});});
-  f.route({assigned:true,profile:{...profile,id:'other-exit'},fetch:()=>f.transport});
+  f.route({assigned:true,profile:{...profile,id:'other-exit'},fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args)});
   const pending=f.request(f.legacy);await reached;
-  f.route({assigned:true,profile,fetch:()=>f.transport});
+  f.route({assigned:true,profile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args)});
   try {expect((await f.request()).status).toBe(503);expect(f.seen).toEqual([]);}
   finally {unblock();await pending;}
 });
@@ -198,15 +199,15 @@ it('refuses to join credential refresh started through a different egress',async
 const httpProfile={id:profile.id,version:1,label:'Fixture HTTP',hostIds:['fixture-host'],transport:'http-connect' as const,
   endpoint:'http://proxy.example:18444/',secretRef:syntheticId,failure:'closed' as const};
 it('denies ordinary HTTP before provider secret access and preserves legacy behavior',async()=>{
-  const f=await fixture();f.route({assigned:true,profile:httpProfile,fetch:()=>f.transport});
+  const f=await fixture();f.route({assigned:true,profile:httpProfile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args)});
   const read=vi.spyOn(f.accounts,'readSecret');
   expect((await f.request()).status).toBe(503);expect(read).not.toHaveBeenCalled();
   expect(f.transport).not.toHaveBeenCalled();expect(f.fallback).not.toHaveBeenCalled();
-  expect(clientRouteAllowed({assigned:true,profile:httpProfile,fetch:()=>f.transport})).toBe(true);
+  expect(clientRouteAllowed({assigned:true,profile:httpProfile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args)})).toBe(true);
 });
 it('refuses lost HTTP acceptance at the metadata fence without replay',async()=>{
   const f=await fixture();let accepted=true;
-  f.route({assigned:true,profile:httpProfile,fetch:()=>f.transport,scopeAccepted:(id)=>id===f.allowed.id&&accepted});
+  f.route({assigned:true,profile:httpProfile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args),scopeAccepted:(id)=>id===f.allowed.id&&accepted});
   const snapshot=f.accounts.withSnapshot.bind(f.accounts);
   vi.spyOn(f.accounts,'withSnapshot').mockImplementationOnce(async action=>{accepted=false;return snapshot(action);});
   expect((await f.request()).status).toBe(503);
@@ -214,7 +215,7 @@ it('refuses lost HTTP acceptance at the metadata fence without replay',async()=>
 });
 it('rechecks after recordUsed before reading the provider secret',async()=>{
   const f=await fixture();let accepted=true;
-  f.route({assigned:true,profile:httpProfile,fetch:()=>f.transport,scopeAccepted:id=>id===f.allowed.id&&accepted});
+  f.route({assigned:true,profile:httpProfile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args),scopeAccepted:id=>id===f.allowed.id&&accepted});
   const record=f.accounts.recordUsed.bind(f.accounts),read=vi.spyOn(f.accounts,'readSecret');
   vi.spyOn(f.accounts,'recordUsed').mockImplementationOnce(async(...args)=>{const result=await record(...args);accepted=false;return result;});
   expect((await f.request()).status).toBe(503);expect(read).not.toHaveBeenCalled();
@@ -223,20 +224,95 @@ it('rechecks after recordUsed before reading the provider secret',async()=>{
 it('permits only an accepted HTTP account and rechecks at transport start after the snapshot',async()=>{
   const f=await fixture();let accepted=true;
   f.route({assigned:true,profile:httpProfile,scopeAccepted:id=>id===f.allowed.id&&accepted,
-    fetch:(_ipv4,beforeSend)=>async(...args)=>{accepted=false;beforeSend?.();return f.transport(...args);}});
+    fetch:(_ipv4,beforeSend)=>async(...args)=>{accepted=false;return beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args);}});
   expect((await f.request()).status).toBe(503);
   expect(f.transport).not.toHaveBeenCalled();expect(f.fallback).not.toHaveBeenCalled();
 });
 it('uses the existing assigned HTTP transport when its synthetic source remains accepted',async()=>{
   const f=await fixture();
-  f.route({assigned:true,profile:httpProfile,fetch:()=>f.transport,scopeAccepted:id=>id===f.allowed.id});
+  f.route({assigned:true,profile:httpProfile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args),scopeAccepted:id=>id===f.allowed.id});
   expect((await f.request()).status).toBe(200);expect(f.seen).toEqual(['fixture-permitted']);
   expect(f.fallback).not.toHaveBeenCalled();
 });
 it('refuses lost acceptance at credential-refresh transport start without replay',async()=>{
   const f=await fixture('cursor');let accepted=true;
   f.route({assigned:true,profile:httpProfile,scopeAccepted:id=>id===f.allowed.id&&accepted,
-    fetch:(_ipv4,beforeSend)=>async(...args)=>{accepted=false;beforeSend?.();return f.transport(...args);}});
+    fetch:(_ipv4,beforeSend)=>async(...args)=>{accepted=false;return beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args);}});
   expect((await f.request()).status).toBe(503);
   expect(f.transport).not.toHaveBeenCalled();expect(f.fallback).not.toHaveBeenCalled();
+});
+
+// Suspend actual request flow, mutate authority, then resume each await boundary.
+for(const boundary of ['root-readback','host-read'] as const){
+  for(const provider of ['claude','cursor'] as const){
+    it.each(['credential','disabled','project','quota','scope'] as const)(`fences %s during ${boundary} before ${provider} transport`,async mutation=>{
+      const f=await fixture(provider);let armed=false,accepted=true,enter!:()=>void,resume!:()=>void;
+      const reached=new Promise<void>(r=>enter=r),gate=new Promise<void>(r=>resume=r);
+      const read=f.accounts.readSecret.bind(f.accounts);
+      vi.spyOn(f.accounts,'readSecret').mockImplementation(async(...args)=>{const value=await read(...args);armed=true;return value;});
+      const pause=async()=>{if(armed){armed=false;enter();await gate;}};
+      f.route({assigned:true,profile:httpProfile,scopeAccepted:id=>id===f.allowed.id&&accepted,
+        prepareScope:async()=>{if(boundary==='root-readback')await pause();},
+        fetch:(_ipv4,beforeSend)=>async(...args)=>{
+          if(boundary==='host-read')await pause();
+          const started=beforeSend?.(()=>f.transport(...args));
+          return started??f.transport(...args);
+        }});
+      const pending=f.request();
+      try {
+        await reached;
+        if(mutation==='credential')await f.tokens.remove('external_fixture');
+        if(mutation==='disabled')await f.accounts.setEnabled(f.allowed.id,false);
+        if(mutation==='project')await f.accounts.setProjects(f.allowed.id,{onlySelected:true,rules:[{projectId:'other',role:'inherit'}]});
+        if(mutation==='quota')f.quotas.put({...f.quotas.get(f.allowed.id),error:'fixture unavailable'});
+        if(mutation==='scope')accepted=false;
+      }finally{resume();}
+      expect((await pending).status).toBe(mutation==='scope'?503:403);
+      expect(f.transport).not.toHaveBeenCalled();expect(f.fallback).not.toHaveBeenCalled();
+    });
+  }
+}
+
+for(const boundary of ['root-readback','host-read'] as const){
+  it.each(['release','deadline'] as const)(`respects a new model hold during ${boundary}: %s`,async outcome=>{
+    const f=await fixture('codex');let armed=false,enter!:()=>void;
+    const reached=new Promise<void>(r=>enter=r);
+    const read=f.accounts.readSecret.bind(f.accounts);
+    vi.spyOn(f.accounts,'readSecret').mockImplementation(async(...args)=>{const value=await read(...args);armed=true;return value;});
+    const hold=async()=>{if(armed){armed=false;await Promise.resolve();f.quotas.put({...f.quotas.get(f.allowed.id),heldUntil:1900000000000+60000});enter();}};
+    f.route({assigned:true,profile:httpProfile,scopeAccepted:id=>id===f.allowed.id,
+      prepareScope:async()=>{if(boundary==='root-readback')await hold();},
+      fetch:(_ipv4,beforeSend)=>async(...args)=>{if(boundary==='host-read')await hold();return beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args);}});
+    const pending=f.request();await reached;await new Promise(r=>setImmediate(r));
+    expect(f.transport).not.toHaveBeenCalled();
+    // Metadata changes must remain possible while cooldown waits.
+    await f.accounts.setEnabled(f.allowed.id,true);
+    if(outcome==='release')f.advance(60001);else f.advance(15*60000+1);
+    expect((await pending).status).toBe(outcome==='release'?200:503);
+    expect(f.transport).toHaveBeenCalledTimes(outcome==='release'?1:0);
+    expect(f.fallback).not.toHaveBeenCalled();
+  });
+}
+
+it('cancels scoped cooldown before any transport start',async()=>{
+  const f=await fixture('codex'),controller=new AbortController();let enter!:()=>void;
+  const reached=new Promise<void>(r=>enter=r);
+  f.route({assigned:true,profile:httpProfile,scopeAccepted:id=>id===f.allowed.id,
+    fetch:(_ipv4,beforeSend)=>async(...args)=>{
+      await Promise.resolve();f.quotas.put({...f.quotas.get(f.allowed.id),heldUntil:1900000060000});enter();
+      return beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args);
+    }});
+  const pending=f.request(f.token,undefined,'POST',controller.signal);await reached;await new Promise(r=>setImmediate(r));
+  expect(f.transport).not.toHaveBeenCalled();controller.abort();
+  expect((await pending).status).toBe(499);expect(f.transport).not.toHaveBeenCalled();
+});
+it('records Claude spacing at actual dispatch after delayed host validation',async()=>{
+  const f=await fixture();f.settings.claudeRequestStartIntervalMs=1000;
+  f.route({assigned:true,profile:httpProfile,scopeAccepted:id=>id===f.allowed.id,
+    fetch:(_ipv4,beforeSend)=>async(...args)=>{await Promise.resolve();f.advance(2000);return beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args);}});
+  expect((await f.request()).status).toBe(200);
+  const second=f.request();await new Promise(r=>setImmediate(r));
+  expect(f.transport).toHaveBeenCalledTimes(1);
+  f.advance(1001);expect((await second).status).toBe(200);
+  expect(f.transport).toHaveBeenCalledTimes(2);
 });

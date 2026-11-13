@@ -32,14 +32,14 @@ it('binds the actual dispatcher to acceptance and rechecks after asynchronous ho
       profileFingerprint:profileFingerprint(profile),receiptDigest:'a'.repeat(64),configDigest:'b'.repeat(64),
       authGeneration:'auth-one',expectedExit:['192.0.2.1'],checkedAt:1000,expiresAt:60000};
     const accepted=await egress.acceptScope(input);expect(accepted.active).toBe(true);
-    expect((await route.fetch(true,assertAllowed)!('https://origin.example/')).status).toBe(200);
+    expect((await route.fetch(true,send=>{assertAllowed();return send();})!('https://origin.example/')).status).toBe(200);
     expect(send).toHaveBeenCalledTimes(1);expect(send.mock.calls[0][1]).toMatchObject({redirect:'error'});
     expect((send.mock.calls[0][1] as any).dispatcher).toBeDefined();send.mockClear();
     invalidateDuringHostRead=true;
-    await expect(route.fetch(true,assertAllowed)!('https://origin.example/')).rejects.toBeInstanceOf(EgressUnavailable);
+    await expect(route.fetch(true,send=>{assertAllowed();return send();})!('https://origin.example/')).rejects.toBeInstanceOf(EgressUnavailable);
     expect(send).not.toHaveBeenCalled();invalidateDuringHostRead=false;enforced=true;
     currentHost='host-two'; // Even a second allowed host is not the accepted pool host.
-    await expect(route.fetch(true,assertAllowed)!('https://origin.example/')).rejects.toBeInstanceOf(EgressUnavailable);
+    await expect(route.fetch(true,send=>{assertAllowed();return send();})!('https://origin.example/')).rejects.toBeInstanceOf(EgressUnavailable);
     expect(send).not.toHaveBeenCalled();currentHost='host-one';
     const {accountId:a,hostId,profile:ref,profileFingerprint:fingerprint}=input;
     await egress.revokeScope({accountId:a,hostId,profile:ref,profileFingerprint:fingerprint,acceptanceId:accepted.acceptanceId});
