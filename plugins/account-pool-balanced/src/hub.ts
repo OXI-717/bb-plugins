@@ -687,10 +687,29 @@ export class AccountPoolHub {
         };
         if(accountScope)await acquired.prepareScope?.();
         assertScope();
-        // Recheck at refresh/dispatch transport start as well as the metadata fence.
-        const route:AccountRoute=accountScope?{...acquired,assertScope,fetch:ipv4=>{
-          const send=acquired.fetch(ipv4,assertScope);
-          return send===undefined?undefined:async(...args)=>{await acquired.prepareScope?.();assertScope();return send(...args);};
+        // Root observation and host validation can both yield. Reacquire current
+        // metadata after each boundary; the final callback starts transport without
+        // yielding after credential, scope, account and project admission.
+        const admitScoped=async(send:()=>Promise<Response>)=>{
+          const started=await this.options.accounts.withSnapshot(accounts=>{
+            signal.throwIfAborted();
+            this.options.maintenance?.assertAllowed();
+            if(!accountScope || !this.options.hubTokens.validatesAccountScope?.(credential??null,accountScope))throw new ClientPolicyDenied();
+            assertScope();
+            const current=this.eligibleEntries(adapter.provider,projectId,
+              accounts.filter(a=>inClientScope(a.id,accountScope)),family,this.options.now(),purpose,freeTier).eligible;
+            if(!current.some(entry=>entry.account.id===selected.account.id))throw new ClientPolicyDenied();
+            if(this.options.now()>=startedAt+ACCOUNT_QUEUE_MAX_WAIT_MS)throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
+            return {response:send()};
+          });
+          return started.value.response;
+        };
+        const route:AccountRoute=accountScope?{...acquired,assertScope,fetch:(ipv4,beforeSend)=>{
+          const send=acquired.fetch(ipv4,beforeSend??admitScoped);
+          return send===undefined?undefined:async(...args)=>{
+            await acquired.prepareScope?.();
+            return send(...args);
+          };
         }}:acquired;
         lastAccount=selected.account.id;
         let pacing: PacingFlight | null = null;
@@ -710,7 +729,7 @@ export class AccountPoolHub {
             signal,
           );
         } catch (error) {
-          if (error instanceof EgressUnavailable || error instanceof VpnRequiredError) throw error;
+          if (error instanceof EgressUnavailable || error instanceof VpnRequiredError || error instanceof ClientPolicyDenied || error instanceof AdmissionUnavailable) throw error;
           if(route.assigned)throw new EgressUnavailable();
           if (pacing !== null) {
             this.releasePacing(selected.account.id, pacing);
@@ -885,7 +904,7 @@ export class AccountPoolHub {
                   signal,
                 );
               } catch (error) {
-                if (error instanceof VpnRequiredError) throw error;
+                if (error instanceof VpnRequiredError || error instanceof EgressUnavailable || error instanceof ClientPolicyDenied || error instanceof AdmissionUnavailable) throw error;
                 signal.throwIfAborted();
                 if (error instanceof TransientOAuthRefreshError) {
                   failure = {
@@ -941,6 +960,7 @@ export class AccountPoolHub {
       if (maintenanceSignal?.aborted) return result(this.errorResponse(adapter,request,503,"Account Pooler is paused for maintenance.",{"x-bb-pool-error":"POOL_MAINTENANCE","retry-after":"30"}));
       if (error instanceof PoolMaintenanceError) return result(this.errorResponse(adapter,request,503,error.message,{"x-bb-pool-error":error.code,"retry-after":"30"}));
       if (error instanceof EgressUnavailable)return result(this.errorResponse(adapter,request,503,error.message,{"x-bb-pool-error":error.code}));
+      if (error instanceof ClientPolicyDenied)return result(this.errorResponse(adapter,request,403,"No enabled account is allowed for this client purpose.",{"x-bb-pool-error":"POOL_ACCOUNT_POLICY"}));
       if (error instanceof AdmissionUnavailable) {
         this.observe(trace,{event:'queue-wait',attempt,accountId:lastAccount,status:503,errorClass:error.code==='POOL_QUEUE_FULL'?'queue-full':'queue-timeout',durationMs:Math.max(0,this.options.now()-startedAt)});
         return result(this.errorResponse(adapter, request, 503, error.message, {"x-bb-pool-error":error.code,"retry-after":"1"}));
@@ -1588,14 +1608,9 @@ export class AccountPoolHub {
       const method=adapter.upstreamMethod?.(request)??request.method;
       let phase:'before-dispatch'|'after-headers'|'cooldown'='before-dispatch';
       const check=()=>this.assertNetworkAllowed(account.provider,result=>this.observe(trace,{event:'guard-check',attempt,accountId:account.id,durationMs:result.durationMs,guardOutcome:result.outcome,guardPhase:phase}));
-      const response = await this.networkFlights.fetch(account.provider,url, {
-          method,
-          headers,
-          ...(method === "GET" || method === "HEAD"
-            ? {}
-            : { body: upstreamBody }),
-          signal: controller.signal,
-        },true, async send => {
+      // For scoped routes this continuation runs after root/host preparation,
+      // so cooldown and Claude pacing describe the actual transport start.
+      const admit= async (send:()=>Promise<Response>) => {
           while (true) {
             const waited = await this.admission.waitCooldown(AbortSignal.any([controller.signal, this.stopped.signal]), cooldown, deadline);
             if (waited) {const previous=phase;phase='cooldown';try{await check();}finally{phase=previous;}}
@@ -1620,7 +1635,15 @@ export class AccountPoolHub {
             });
             if (started.value !== null) return started.value.response;
           }
-        },check,route.fetch(this.requiresIpv4(account.provider)),(error,bytesRead)=>{
+        };
+      const response = await this.networkFlights.fetch(account.provider,url, {
+          method,
+          headers,
+          ...(method === "GET" || method === "HEAD"
+            ? {}
+            : { body: upstreamBody }),
+          signal: controller.signal,
+        },true, admission.accountScope?undefined:admit,check,route.fetch(this.requiresIpv4(account.provider),admission.accountScope?admit:undefined),(error,bytesRead)=>{
           this.options.onUpstreamError(account.provider,error,{
             elapsedMs:Math.max(0,this.options.now()-openedAt),transport:this.requiresIpv4(account.provider)?"ipv4":"default",
             stage:"response_body",operation:"model",requestId:trace.requestId,bytesRead,

@@ -53,7 +53,8 @@ export class EgressUnavailable extends Error {
 export interface AccountRoute {
   assigned:boolean;
   profile:Readonly<EgressProfile>|null;
-  fetch(ipv4:boolean,beforeSend?:()=>void):typeof fetch|undefined;
+  /** Implementations must invoke beforeSend with the actual transport start after all awaits. */
+  fetch(ipv4:boolean,beforeSend?:(send:()=>Promise<Response>)=>Promise<Response>):typeof fetch|undefined;
   scopeAccepted?(accountId:string,now:number):boolean;
   assertScope?():void;
   prepareScope?():Promise<void>;
@@ -164,13 +165,16 @@ export class AccountEgress {
         this.agents.set(key,agent);
       }
       const dispatcher=agent;
-      const send=(beforeSend?:()=>void):typeof fetch=>async(input,init)=>{
+      const send=(beforeSend?:(send:()=>Promise<Response>)=>Promise<Response>):typeof fetch=>async(input,init)=>{
         const url=new URL(input instanceof Request?input.url:String(input));
         const currentHost=await this.hostId();
         if(!profile.hostIds.includes(currentHost) || beforeSend&&currentHost!==routeHost || url.protocol!=='https:' || url.hostname.includes(':'))throw new EgressUnavailable();
-        beforeSend?.();
-        try{return await fetch(input,{...init,redirect:'error',dispatcher} as RequestInit);}
-        catch{throw new EgressUnavailable();}
+        const start=async()=>{
+          try{return await fetch(input,{...init,redirect:'error',dispatcher} as RequestInit);}
+          catch{throw new EgressUnavailable();}
+        };
+        // Admission owns the synchronous fence and starts transport in the same turn.
+        return beforeSend ? beforeSend(start) : start();
       };
       route={assigned:true,profile,fetch:(_ipv4,beforeSend)=>send(beforeSend),
         prepareScope:()=>this.scopeAcceptances.prepare({accountId,hostId:routeHost,
