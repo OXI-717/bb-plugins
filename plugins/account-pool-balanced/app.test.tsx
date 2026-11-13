@@ -1140,9 +1140,18 @@ describe("Account Pool settings", () => {
     const codeCopyButton = await slot.findByRole("button", {
       name: "Скопировать код входа Codex",
     });
-    // Busy CI workers can spend longer than the 1.5-second success indicator
-    // inside React act. Control its clock after the async dialog is ready.
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // Control only the success indicator. Switching the entire mounted Radix
+    // dialog to fake timers can race its existing real timers on busy workers.
+    const schedule = globalThis.setTimeout;
+    let expire: (() => void) | undefined;
+    let expirationTimer: ReturnType<typeof setTimeout> | undefined;
+    const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((...[callback, delay, ...args]: Parameters<typeof setTimeout>) => {
+      if (delay !== 1500 || typeof callback !== "function") return schedule(callback, delay, ...args);
+      expect(expire).toBeUndefined();
+      expire = () => callback(...args);
+      expirationTimer = schedule(() => {}, 60_000);
+      return expirationTimer;
+    }) as typeof setTimeout);
     try {
       await act(async () => {
         fireEvent.click(codeCopyButton);
@@ -1151,9 +1160,12 @@ describe("Account Pool settings", () => {
       expect(writeText).toHaveBeenCalledWith("ABCD-1234");
       expect(slot.getByText("Код входа скопирован")).toBeTruthy();
       expect(codeCopyButton.querySelector('[data-icon="Check"]')).not.toBeNull();
-      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(expire).toBeTypeOf("function");
+      clearTimeout(expirationTimer);
+      act(() => expire!());
       expect(slot.queryByText("Код входа скопирован")).toBeNull();
       expect(codeCopyButton.querySelector('[data-icon="Check"]')).toBeNull();
+      timerSpy.mockRestore();
 
       await act(async () => {
         fireEvent.click(slot.getByRole("button", { name: "Скопировать ссылку авторизации Codex" }));
@@ -1161,7 +1173,8 @@ describe("Account Pool settings", () => {
       });
       expect(writeText).toHaveBeenCalledWith("https://auth.openai.com/codex/device");
     } finally {
-      vi.useRealTimers();
+      clearTimeout(expirationTimer);
+      timerSpy.mockRestore();
     }
   });
 
@@ -1413,4 +1426,14 @@ it('enables fail-closed VPN Guard linkage through the existing autosave config R
 it.each(['kimi','zai','opencode-go','cursor','devin'] as const)('shows the observed %s email in the thread header',async provider=>{
  const ui=renderSlot(app.threadHeaderActions[0]!,{threadId:'thread-one',projectId:'project',isCompactViewport:false},{rpc:{'thread.account':()=>({state:'observed',account:account({provider,kind:'api-key',email:'other@example.com',label:'Subscription'}),lastUsedAt:1800000000000})}});
  expect(await ui.findByRole('button',{name:/Подписка треда: other@example.com/})).toBeTruthy();
+});
+
+it('keeps a saved account awaiting login with a dedicated sign-in action',async()=>{
+ const a=account({draft:true,enabled:false,status:'disabled',label:'Prepared subscription'});
+ const slot=render([a],{'login.reauthorize':()=>({sessionId:'fixture-session',authorizeUrl:'https://login.example/authorize'})});
+ await waitFor(()=>expect(slot.getByText('Ожидает входа')).toBeTruthy());
+ fireEvent.click(await slot.findByRole('button',{name:'Открыть карточку: person@example.com'}));
+ fireEvent.click(await slot.findByRole('button',{name:'Войти в аккаунт'}));
+ await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'login.reauthorize',input:{accountId:a.id}}));
+ expect(slot.rpcCalls.some(c=>c.method==='account.enable')).toBe(false);
 });

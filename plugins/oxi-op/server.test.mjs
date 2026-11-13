@@ -841,14 +841,14 @@ test('migration shows every file on one card, grouped by vault, and calls each v
  const H=['','Users','someone'].join('/');
  const calls=[];
  const h=fleet(t,{offline:['mac-air'],routes:[{...route,...owner,hostId:'mac-max'}],callHost:({method,input,hostId})=>{calls.push({method,hostId,input});return {results:input.entries.map(e=>({file:e.file,title:e.title,kind:e.kind,state:'imported',keys:['A']}))};}});
- const plan=[{file:H+'/cc/proj/app.env',title:'App env',kind:'env',vaultId:vid('one'),vaultLabel:'Project One'},{file:H+'/cc/proj/id.key',title:'Key',kind:'document',vaultId:vid('one'),vaultLabel:'Project One'},{file:H+'/cc/two/b.env',title:'B',kind:'env',vaultId:vid('two'),vaultLabel:'Project Two'}];
+ const plan=[{file:H+'/workspace/proj/app.env',title:'App env',kind:'env',vaultId:vid('one'),vaultLabel:'Project One'},{file:H+'/workspace/proj/id.key',title:'Key',kind:'document',vaultId:vid('one'),vaultLabel:'Project One'},{file:H+'/workspace/two/b.env',title:'B',kind:'env',vaultId:vid('two'),vaultLabel:'Project Two'}];
  assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','import','--plan',JSON.stringify([{...plan[0],vaultId:'bad'}])],context)).exitCode,1);
  assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','import','--plan',JSON.stringify([plan[0],{...plan[1],title:'App env'}])],context)).exitCode,1,'duplicate titles in one vault are refused');
  assert.equal(h.inspection.pendingInteractions.length,0);
  const work=h.behavior.runCli(['migrate','--profile','default','--mode','import','--plan',JSON.stringify(plan)],context);await setImmediate();await setImmediate();
  const form=h.inspection.pendingInteractions[0];
  assert.equal(form.timeoutMs,600_000);assert.equal(calls.length,0);
- assert(form.payload.purpose.includes('Сейф «Project One»:\n  ~/cc/proj/app.env\n  ~/cc/proj/id.key (файл целиком)')&&form.payload.purpose.includes('Сейф «Project Two»:\n  ~/cc/two/b.env'));
+ assert(form.payload.purpose.includes('Сейф «Project One»:\n  ~/workspace/proj/app.env\n  ~/workspace/proj/id.key (файл целиком)')&&form.payload.purpose.includes('Сейф «Project Two»:\n  ~/workspace/two/b.env'));
  assert(!form.payload.purpose.includes(H));
  h.behavior.submitInteraction(form.id,{approved:true});
  const out=JSON.parse((await work).stdout);
@@ -857,14 +857,14 @@ test('migration shows every file on one card, grouped by vault, and calls each v
  const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
  assert.equal(row.kind,'migrate');assert(!JSON.stringify(row).includes(H),'the journal keeps states, not paths');
  // Reference mode: key files go to the named archive folder; without one the card says they stay.
- assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','import','--archive-dir',H+'/cc/moved','--plan',JSON.stringify(plan)],context)).exitCode,1,'an archive folder belongs to reference mode');
+ assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','import','--archive-dir',H+'/workspace/moved','--plan',JSON.stringify(plan)],context)).exitCode,1,'an archive folder belongs to reference mode');
  assert.equal((await h.behavior.runCli(['migrate','--profile','default','--mode','reference','--archive-dir','relative/dir','--plan',JSON.stringify(plan)],context)).exitCode,1);
  calls.length=0;
- const ref=h.behavior.runCli(['migrate','--profile','default','--mode','reference','--archive-dir',H+'/cc/moved','--plan',JSON.stringify(plan)],context);await setImmediate();await setImmediate();
+ const ref=h.behavior.runCli(['migrate','--profile','default','--mode','reference','--archive-dir',H+'/workspace/moved','--plan',JSON.stringify(plan)],context);await setImmediate();await setImmediate();
  const card=h.inspection.pendingInteractions.at(-1);
- assert(card.payload.purpose.includes('переместить файлы-ключи в папку ~/cc/moved')&&card.payload.purpose.includes('Ничего не удаляется'));
+ assert(card.payload.purpose.includes('переместить файлы-ключи в папку ~/workspace/moved')&&card.payload.purpose.includes('Ничего не удаляется'));
  h.behavior.submitInteraction(card.id,{approved:true});await ref;
- assert(calls.length===2&&calls.every(c=>c.input.mode==='reference'&&c.input.archiveDir===H+'/cc/moved'));
+ assert(calls.length===2&&calls.every(c=>c.input.mode==='reference'&&c.input.archiveDir===H+'/workspace/moved'));
  calls.length=0;
  const bare=h.behavior.runCli(['migrate','--profile','default','--mode','reference','--plan',JSON.stringify(plan)],context);await setImmediate();await setImmediate();
  const bareCard=h.inspection.pendingInteractions.at(-1);

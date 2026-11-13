@@ -190,7 +190,7 @@ test('keys are read from the item itself, so titles op read rejects (Cyrillic) s
  const item={fields:[{id:'username',label:'username',value:'root'},{id:'password',label:'password',value:'synthetic-root'},{id:'x1',label:'Пароль',value:'synthetic-ru'},{id:'d1',label:'dup',value:'a'},{id:'d2',label:'dup',value:'b'},{id:'e1',label:'empty',value:''}]};
  const run=async(binary,args)=>{calls.push([binary,...args]);return JSON.stringify(item);};
  const read=keyReader(run,'/bin/op',{},'vault-1');
- const title='Пароль root сервера Пример 10.0.0.1';
+ const title='Пароль root сервера Пример 192.0.2.1';
  assert.equal(await read({item:title,field:'password'}),'synthetic-root');
  assert.equal(await read({item:title,field:'Пароль'}),'synthetic-ru');
  assert.equal(await read({item:title,field:'x1'}),'synthetic-ru','a field ID works too');
