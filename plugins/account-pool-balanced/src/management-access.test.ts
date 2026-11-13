@@ -191,3 +191,21 @@ it('a read grant inspects the single-argument config command without mutations',
   expect((await execute(['config', 'set', 'vpnGuardEnabled', 'false'])).exitCode).toBe(1);
   expect(executed).toHaveBeenCalledTimes(1);
 });
+
+it("vpn-guard's policy read returns only the enforcement subset without a grant", async () => {
+  const { access } = await setup();
+  const registrations: Array<{ contract: unknown; handlers: Record<string, (input: unknown, context?: unknown) => unknown> }> = [];
+  const bb = { rpc: { register: (contract: unknown, handlers: Record<string, (input: unknown, context?: unknown) => unknown>) => registrations.push({ contract, handlers }) } } as unknown as Pick<BbPluginApi, 'rpc'>;
+  const policy = { vpnGuardEnabled: true, vpnPolicyVersion: 2, vpnOnlyProviders: ['codex'], upstreamBaseUrl: 'https://secret.example' };
+  const handlers = handlerFixture({ 'config.get': vi.fn(() => policy) as unknown as PluginRpcHandlers<typeof accountPoolRpcContract>['config.get'] });
+  registerManagementRpc(bb, access, handlers);
+  const legacy = registrations[0]!.handlers;
+  const guard = { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } };
+  expect(await (registrations[1]!.handlers as Record<string, (input: unknown, context?: unknown) => unknown>)['vpnPolicy.get']!(null, { experimental_caller: guard })).toEqual({
+    vpnGuardEnabled: true, vpnPolicyVersion: 2, vpnOnlyProviders: ['codex'],
+  });
+  expect(handlers['config.get']).toHaveBeenCalledOnce();
+  // Ordinary tokenless administrative callers stay locked, including vpn-guard on other methods.
+  expect(() => legacy['account.list']!(null, { experimental_caller: guard })).toThrow(PoolManagementLocked);
+  expect(() => legacy['config.get']!(null, { experimental_caller: guard })).toThrow(PoolManagementLocked);
+});

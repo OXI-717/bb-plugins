@@ -53,6 +53,14 @@ export function registerManagementRpc(bb: Pick<BbPluginApi, 'rpc'>, access: Mana
     },
     'management.lock': ({ token }) => { access.revoke(token); return null; },
     'public.status': () => ({ management: 'locked' as const }),
+    'vpnPolicy.get': () => {
+      const full = (handlers['config.get'] as unknown as () => Record<string, unknown>)();
+      return {
+        vpnGuardEnabled: typeof full.vpnGuardEnabled === 'boolean' ? full.vpnGuardEnabled : false,
+        vpnPolicyVersion: typeof full.vpnPolicyVersion === 'number' ? full.vpnPolicyVersion : 2,
+        vpnOnlyProviders: Array.isArray(full.vpnOnlyProviders) ? full.vpnOnlyProviders.map(String) : [],
+      };
+    },
   });
 }
 

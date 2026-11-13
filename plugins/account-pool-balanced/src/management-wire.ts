@@ -28,4 +28,12 @@ export const managementRpcContract = defineRpcContract({
   },
   'management.lock': { input: z.object({ token: z.string().max(256) }).strict(), output: z.null() },
   'public.status': { input: z.null(), output: publicPoolStatusSchema },
+  'vpnPolicy.get': {
+    input: z.null(),
+    output: z.object({
+      vpnGuardEnabled: z.boolean(),
+      vpnPolicyVersion: z.number().int(),
+      vpnOnlyProviders: z.array(z.string()),
+    }).strict(),
+  },
 });
