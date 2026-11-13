@@ -1181,7 +1181,7 @@ export class AccountPoolHub {
     pinnedRouteAccountId: string | null = null,
     scopeNamespace?: string,
   ): Promise<SelectedAccount | null> {
-    const accounts = (await this.routingAccounts()).filter(account=>candidateIds.has(account.id)).sort(
+    const accounts = (await this.routingAccounts()).filter(account=>scopeNamespace === undefined || candidateIds.has(account.id)).sort(
       (left, right) => left.priority - right.priority,
     );
     signal.throwIfAborted();

@@ -47,10 +47,10 @@ it('persists immutable authority through restart/rotation/grace, isolates return
   expect(await tokens.authenticateContext(rotated)).toBeNull();
 });
 
-it('rejects malformed persisted scopes instead of restoring unscoped authority',async()=>{
+it.each([null,false,{}, {accountIds:['invalid']}, {...scope(),accountIds:['invalid']}, {...scope(),extra:true}])('rejects malformed persisted scope %j instead of restoring unscoped authority',async invalid=>{
   const dir=await directory();const tokens=new HubTokenStore(dir);await tokens.forIssuedClient('external_fixture','project',undefined,scope());
   const file=path.join(dir,(await fs.readdir(dir)).find(n=>n.endsWith('.json'))!);
-  const record=JSON.parse(await fs.readFile(file,'utf8'));record.accountScope.accountIds=['invalid'];await fs.writeFile(file,JSON.stringify(record));
+  const record=JSON.parse(await fs.readFile(file,'utf8'));record.accountScope=invalid;await fs.writeFile(file,JSON.stringify(record));
   await expect(new HubTokenStore(dir).initialize()).rejects.toThrow();
 });
 

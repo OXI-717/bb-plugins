@@ -783,14 +783,14 @@ describe("Account Pool plugin", () => {
       priority: 100,
     }));
     const inventory = await fixture.host.harness.behavior.callRpc("provider-usage.v1.listResources", {});
-    expect(inventory).toEqual({ label: "Provider access", resources: [] });
+    expect(inventory).toMatchObject({label:"Account Pooler",resources:[{id:supported.id}]});
     const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
     expect(accounts.some(account => account.id === fixture.account.id && account.enabled)).toBe(true);
     outbound.mockClear(); // Ignore the supported account's initial quota collection.
     for (const refresh of [false, true]) {
       await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
         resourceId: fixture.account.id, refresh,
-      })).rejects.toThrow("Pool management is locked");
+      })).rejects.toThrow("Quota reporting is not available for Devin");
     }
     expect(outbound).not.toHaveBeenCalled();
   });
@@ -2038,8 +2038,8 @@ describe("Account Pool plugin", () => {
         hostId: "host-one",
       }),
     ).resolves.toEqual({
-      label: "Ready",
-      statusMessage: "Provider access is ready.",
+      label: "Proxied",
+      statusMessage: "Credentials are provided by the Account Pooler hub.",
     });
     const httpResponse = await host.harness.behavior.fetchHttp(
       "POST",
@@ -2951,8 +2951,8 @@ describe("Account Pool plugin", () => {
         hostId: "host-one",
       }),
     ).resolves.toEqual({
-      label: "Ready",
-      statusMessage: "Provider access is ready.",
+      label: "Proxied",
+      statusMessage: "Credentials are provided by the Account Pooler hub.",
     });
     const secondToken = await resolveToken(
       fixture.host,
@@ -7767,7 +7767,7 @@ describe("VPN-only outbound protection", () => {
     expect(outbound).not.toHaveBeenCalled();
     await expect(fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id })).rejects.toThrow("VPN_REQUIRED");
     await expect(fixture.host.harness.behavior.callRpc("codexLogin.start", null)).rejects.toThrow("VPN_REQUIRED");
-    await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", { resourceId: fixture.account.id, refresh: true })).rejects.toThrow("Pool management is locked");
+    await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", { resourceId: fixture.account.id, refresh: true })).rejects.toThrow("VPN_REQUIRED");
     await expect(fixture.host.harness.behavior.callRpc("login.start", null)).rejects.toThrow("VPN_REQUIRED");
     expect(outbound).not.toHaveBeenCalled();
     connected = true;
@@ -7934,7 +7934,7 @@ it('blocks Guard-linked OAuth quotas and login without corrupting account eligib
  await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});outbound.mockClear();
  for(const method of ['account.refreshUsage','provider-usage.v1.getResource'] as const) {
    const input=method==='account.refreshUsage'?{accountId:fixture.account.id}:{resourceId:fixture.account.id,refresh:true};
-   await expect(fixture.host.harness.behavior.callRpc(method,input)).rejects.toThrow(method==='account.refreshUsage'?'VPN_GUARD_BLOCKED':'Pool management is locked');
+   await expect(fixture.host.harness.behavior.callRpc(method,input)).rejects.toThrow('VPN_GUARD_BLOCKED');
  }
  await expect(fixture.host.harness.behavior.callRpc('codexLogin.start',null)).rejects.toThrow('VPN_GUARD_BLOCKED');
  expect(outbound).not.toHaveBeenCalled();
