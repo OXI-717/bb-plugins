@@ -5,7 +5,7 @@ import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {it,expect,vi} from 'vitest';
 import {nativeAccountsSchema} from './native-accounts.js';
-import {createAccountPoolPlugin} from './server.js';
+import {createAccountPoolPlugin} from './management-test-fixture.js';
 
 it('authenticates prepared runtime grants against the server profile registry before a native task',async()=>{
   const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});

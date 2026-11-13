@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { createAccountPoolPlugin } from "./server.js";
+import { createAccountPoolPlugin } from "./management-test-fixture.js";
 
 it("BB CLI provisions an external client that shares the pool and can be revoked", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "bb-external-"));

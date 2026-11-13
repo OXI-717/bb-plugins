@@ -3,7 +3,7 @@ import {afterEach,expect,it,vi} from 'vitest';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {createAccountPoolPlugin} from './server.js';
+import {createAccountPoolPlugin} from './management-test-fixture.js';
 import {vpnProof} from './vpn-test-fixture.js';
 import type {PoolProvider,Account} from './contracts.js';
 const cleanup:Array<()=>Promise<void>>=[];afterEach(async()=>{while(cleanup.length)await cleanup.pop()!();});

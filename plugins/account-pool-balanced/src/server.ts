@@ -1,4 +1,6 @@
 import {ProxySecrets} from './proxy-secrets.js';
+import {ManagementAccess} from './management-access.js';
+import {managementCli,registerManagementRpc} from './management-boundary.js';
 import {PoolMaintenance} from './maintenance.js';
 import {PoolUpdate} from './pool-update.js';
 import {serverGuardRead,runGuardProbe,type GuardServerAccess} from './guard-server.js';
@@ -146,6 +148,9 @@ export function createAccountPoolPlugin(
     const accounts = new AccountStore(bb.storage.kv, secretDir);
     await accounts.initialize();
     const now = options.now ?? Date.now;
+    const management = new ManagementAccess(path.join(secretDir, 'management'), now);
+    await management.initialize().catch(() => bb.log.warn('Management access is unavailable; account administration remains locked.'));
+    bb.onDispose(() => management.close());
     let maintenanceActivity=()=>0;
     const maintenance = new PoolMaintenance(value=>bb.storage.kv.set('model-maintenance-v1',value),now,()=>maintenanceActivity());
     await maintenance.initialize(await bb.storage.kv.get('model-maintenance-v1'));
@@ -360,8 +365,7 @@ export function createAccountPoolPlugin(
       release:(owner:string)=>maintenance.release(owner),
       interrupt:async(owner:string)=>{hub.interruptForMaintenance(owner);return maintenance.status();},
     };
-    bb.rpc.register(
-      accountPoolRpcContract,
+    registerManagementRpc(bb, management,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
         const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
         const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi','acp-grok':'grok'} as Record<string,PoolProvider>)[thread.providerId]??null;
@@ -394,14 +398,14 @@ export function createAccountPoolPlugin(
         return { opened: true };
       }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi);
-    registerUsageSource(bb, hub);
+    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi);
+    registerUsageSource(bb, hub, true);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
       if (readiness.reason === "routing-disabled") return null;
-      if (readiness.ready) return {label: "Proxied", statusMessage: "Credentials are provided by the Account Pooler hub."};
+      if (readiness.ready) return {label: "Ready", statusMessage: "Provider access is ready."};
       if (!("projectId" in context)) return null;
-      return {status: "unavailable" as const, label: "Account Pooler", statusMessage: `Account Pooler is not ready: ${readiness.reason}.`};
+      return {status: "unavailable" as const, label: "Unavailable", statusMessage: "Provider access is unavailable."};
     };
     if (transport !== null) bb.providers.experimental_contributeEnvHealth("acp-oxi-devin-pool", context => proxiedHealth("devin", context));
     bb.providers.experimental_contributeEnv("claude-code", async (context) => {

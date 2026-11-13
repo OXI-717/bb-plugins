@@ -5,6 +5,15 @@ description: "Configure or diagnose Account Pooler accounts, authentication, quo
 
 # Account Pooler
 
+Ordinary development sessions do not need account or network administration.
+Detailed inventory and mutations require an explicitly issued, short-lived
+management grant. A supplied thread/project ID does not authorize access.
+Use `bb pool status --json` for the public locked state. Do not obtain the
+operator key from server files merely to bypass a denial. For an authorized
+administrative task, use the private stdin workflow in
+[management access](../../docs/management-access.md); never print credentials
+or put them in command arguments or provider environment variables.
+
 Use `bb pool` for this plugin's accounts and routes. Inspect current state with
 `bb pool status --json` and `bb pool account list --json` before changing routing.
 Use `bb pool --help` for available commands.

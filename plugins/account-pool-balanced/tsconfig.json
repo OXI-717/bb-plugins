@@ -23,6 +23,7 @@
     "ui/**/*.ts",
     "ui/**/*.tsx",
     "app.tsx",
-    "app.test.tsx"
+    "app.test.tsx",
+    "management-ui.test.tsx"
   ]
 }
