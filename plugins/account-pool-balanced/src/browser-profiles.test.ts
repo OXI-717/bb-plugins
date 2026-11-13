@@ -13,6 +13,8 @@ import type { AccountSummary } from "./contracts.js";
 import {
   browserExecutableCandidates,
   browserProcessPattern,
+  browserProcessUsesRoot,
+  listRunningHelium,
   ensureProfile,
   fetchExitGeo,
   heliumDataRoot,
@@ -264,6 +266,34 @@ describe("profile naming and allocation", () => {
 });
 
 describe("browserExecutableCandidates", () => {
+  it('ignores only managed routed roots while protecting shared and unmanaged browsers',()=>{
+    const root='/fixture/Helium User Data';
+    const routed=root+'/Pool Routed Accounts/11111111-1111-4111-8111-111111111111';
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+routed+' --profile-directory=Profile 1',root,true)).toBe(false);
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+routed,routed)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+root+' --profile-directory=Profile 1',root,true)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --profile-directory=Profile 1',root,true)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --user-data-dir=/unknown/custom-root',root,true)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+routed+'-suffix',root,true)).toBe(true);
+    expect(browserProcessUsesRoot('Helium --user-data-dir='+routed+'-suffix',routed)).toBe(false);
+  });
+  it('permits a shared launch while a real routed browser process is alive, retaining unmanaged protection',async()=>{
+    const executable=path.join(tmpdir(),'pool-browser-process-'+Date.now());
+    const root='/fixture/Helium User Data',routed=root+'/Pool Routed Accounts/11111111-1111-4111-8111-111111111111';
+    const children:ReturnType<typeof spawnProcess>[]=[];
+    const launch=async(args:string[])=>{
+      const child=spawnProcess(process.execPath,['-e','setInterval(()=>{},1000)','--',...args],{argv0:executable,stdio:'ignore'});children.push(child);
+      await new Promise<void>((resolve,reject)=>{child.once('spawn',resolve);child.once('error',reject);});return child;
+    };
+    try{
+      const selected=await launch(['--user-data-dir='+routed]);
+      expect(await listRunningHelium(executable)).toContain(selected.pid);
+      expect(await listRunningHelium(executable,root,true)).not.toContain(selected.pid);
+      expect(await listRunningHelium(executable,routed)).toContain(selected.pid);
+      const unmanaged=await launch([]);
+      expect(await listRunningHelium(executable,root,true)).toContain(unmanaged.pid);
+    }finally{await Promise.all(children.map(child=>new Promise<void>(resolve=>{if(child.exitCode!==null)return resolve();child.once('exit',()=>resolve());child.kill();})));}
+  });
   it("matches the browser main process with arguments and escapes the executable", () => {
     const executable = "/fixture/Helium.app/Contents/MacOS/Helium";
     const pattern = new RegExp(browserProcessPattern(executable).replace("[[:space:]]", "\\s"));
@@ -286,6 +316,38 @@ describe("browserExecutableCandidates", () => {
 });
 
 describe("openAccountBrowser", () => {
+  it('excludes assigned accounts from shared registration and retained native picker without deleting their data',async()=>{
+    const box=await sandbox();const launches:any[]=[];
+    const options={...baseOptions(box),query:ACCOUNTS[0]!.id,fetcher:geoFetcher,transportImpl:async(value:any)=>{launches.push(value);}};
+    const retained=await openAccountBrowser(options);
+    writeFileSync(path.join(retained.profileDir,'retained-session'),'synthetic-session');
+    const other=ACCOUNTS[1]!;
+    await openAccountBrowser({...options,query:other.id,routedAccountIds:[ACCOUNTS[0]!.id]});
+    expect(launches[1].profileDirectories).not.toContain(launches[0].profileDirectory);
+    expect(launches[1].routeKey).not.toBe(launches[0].routeKey);
+    const state=JSON.parse(readFileSync(path.join(box.heliumRoot,'Local State'),'utf8'));
+    expect(state.profile.info_cache[launches[0].profileDirectory]).toBeUndefined();
+    expect(readFileSync(path.join(retained.profileDir,'retained-session'),'utf8')).toBe('synthetic-session');
+    const registry=JSON.parse(readFileSync(path.join(box.dataDir,'plugins/account-pool-balanced/browser-profiles/registry.json'),'utf8'));
+    expect(registry[ACCOUNTS[0]!.id]).toBeTruthy();
+    await expect(openAccountBrowser({...options,routedAccountIds:[ACCOUNTS[0]!.id]})).rejects.toThrow('proxy is required');
+    const fresh=await sandbox();let freshLaunch:any;
+    await openAccountBrowser({...baseOptions(fresh),query:other.id,routedAccountIds:[ACCOUNTS[0]!.id],fetcher:geoFetcher,transportImpl:async(value:any)=>{freshLaunch=value;}});
+    expect(freshLaunch.profileDirectories).toHaveLength(ACCOUNTS.length-1);
+  });
+
+  it('allocates only the selected account in a separate root for a bound proxy, without changing shared profiles',async()=>{
+    const box=await sandbox();let launch:any;
+    const options={...baseOptions(box),query:ACCOUNTS[0]!.id,proxyUrl:'http://fixture:synthetic@proxy.example:18444/',fetcher:geoFetcher,transportImpl:async(value:any)=>{launch=value;}};
+    const first=await openAccountBrowser(options);
+    expect(first.profileDir).toContain('Pool Routed Accounts/'+ACCOUNTS[0]!.id);
+    expect(launch.profileDirectories).toHaveLength(1);expect(launch.proxyUrl).toBe(options.proxyUrl);
+    expect(launch.routeKey).toMatch(/^[a-f0-9]{64}$/);
+    const listed=await listBrowserProfiles({...options,routedAccountIds:[ACCOUNTS[0]!.id]});
+    expect(listed[0]?.profileDir).toBe(first.profileDir);expect(listed[0]?.exists).toBe(true);
+    expect(existsSync(path.join(box.dataDir,'plugins/account-pool-balanced/browser-profiles/registry.json'))).toBe(false);
+  });
+
   it.each(["claude", "codex", "kimi", "zai", "opencode-go", "cursor", "devin"] as const)("uses the default destination for %s and reuses its profile", async (provider) => {
     const box = await sandbox();
     const selected = account({ id: ACCOUNTS[0]!.id, provider, label: "Synthetic", email: "person@example.test" });

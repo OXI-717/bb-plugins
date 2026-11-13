@@ -285,6 +285,7 @@ export const accountSchema = z
     subscriptionType: z.string().nullable(),
     rateLimitTier: z.string().nullable(),
     enabled: z.boolean(),
+    draft: z.literal(true).optional(),
     autopilotAllowed: z.boolean().default(false),
     priority: z.number().int(),
     createdAt: z.number().int().nonnegative(),
@@ -486,6 +487,7 @@ export const accountAddInputSchema = z
     provider: providerSchema,
     source: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("import") }).strict(),
+      z.object({ kind: z.literal("draft"), email: z.string().trim().email().max(254) }).strict(),
       z
         .object({ kind: z.literal("api-key"), apiKey: z.string().min(1) })
         .strict(),

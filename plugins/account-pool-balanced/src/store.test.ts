@@ -31,6 +31,25 @@ function delayedAccountReads(kv: PluginKvStorage): PluginKvStorage {
 }
 
 describe("AccountStore", () => {
+  it('creates metadata-only disabled drafts, preserves settings and checks identity on authorization',async()=>{
+    const dir=await mkdtemp(path.join(tmpdir(),'pool-draft-'));
+    const host=createFakePluginHost({pluginId:'account-pool',dataDir:dir});
+    cleanups.push(async()=>{await host.harness.lifecycle.dispose();await fs.rm(dir,{recursive:true,force:true});});
+    const store=new AccountStore(host.bb.storage.kv,path.join(dir,'secrets'));
+    const a=await store.addDraft({label:'Team subscription',email:'fixture@example.com',priority:8});
+    expect(a).toMatchObject({enabled:false,draft:true,provider:'claude',kind:'oauth'});
+    await expect(fs.stat(path.join(dir,'secrets'))).rejects.toThrow();
+    await expect(store.setEnabled(a.id,true)).rejects.toThrow('вход');
+    await expect(store.addDraft({label:'duplicate',email:'FIXTURE@example.com',priority:9})).rejects.toThrow('уже');
+    const identity={email:'wrong@example.com',accountUuid:'00000000-0000-4000-8000-000000000001',subscriptionType:null,rateLimitTier:null};
+    const secret={kind:'oauth' as const,accessToken:'synthetic-access',refreshToken:'synthetic-refresh',expiresAt:null};
+    await expect(store.replaceClaudeAuthorization(a.id,identity,secret)).rejects.toThrow('другой');
+    const result=await store.replaceClaudeAuthorization(a.id,{...identity,email:a.email},secret);
+    expect(result).toMatchObject({id:a.id,label:a.label,priority:8,enabled:false});
+    expect(result.draft).toBeUndefined();expect(await store.readSecret(a.id)).toEqual(secret);
+    expect((await store.setEnabled(a.id,true))?.enabled).toBe(true);
+  });
+
   it("restores previous authorization when reauthorization metadata cannot be persisted", async () => {
     const dataDir=await mkdtemp(path.join(tmpdir(),'bb-account-store-'));
     const host=createFakePluginHost({pluginId:'account-pool',dataDir});

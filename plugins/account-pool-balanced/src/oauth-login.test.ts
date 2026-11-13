@@ -262,3 +262,17 @@ describe("parseManualCode", () => {
     );
   });
 });
+
+it('uses the selected account transport for token and profile, with no default fallback on failure',async()=>{
+ const seen:string[]=[];let fail=false;
+ const login=new ClaudeOAuthLogin({accountFetch:async()=>async(input)=>{
+  seen.push(String(input));if(fail)throw Error('proxy unavailable');
+  return Response.json(String(input).includes('/token')?{access_token:'synthetic-access',refresh_token:'synthetic-refresh',expires_in:3600}:{account:{email:'fixture@example.com'}});
+ },fetch:async()=>{throw Error('Unexpected direct transport');},tokenUrl:'https://example.test/token',profileUrl:'https://example.test/profile',addAccount:async a=>savedAccount(a)});
+ const first=await login.start('11111111-1111-4111-8111-111111111111');
+ await login.complete({sessionId:first.sessionId,pasted:'synthetic-code'});
+ expect(seen).toEqual(['https://example.test/token','https://example.test/profile']);
+ const next=await login.start('11111111-1111-4111-111111111111');fail=true;
+ await expect(login.complete({sessionId:next.sessionId,pasted:'synthetic-code'})).rejects.toThrow('proxy unavailable');
+ expect(seen).toHaveLength(3);
+});

@@ -179,5 +179,17 @@ export class AccountEgress {
     }
     return route;
   }
+  async browserProxy(accountId:string):Promise<string|undefined>{
+    const route=await this.acquire(accountId);
+    if(!route.assigned)return undefined;
+    const profile=route.profile;
+    if(!profile||profile.transport!=='http-connect'||!this.proxySecrets)throw new EgressUnavailable();
+    try{
+      const u=parseProxyUrl(await this.proxySecrets.read(profile.secretRef));
+      const clean=new URL(u);clean.username='';clean.password='';
+      if(clean.href!==profile.endpoint)throw new EgressUnavailable();
+      return u.href;
+    }catch{throw new EgressUnavailable();}
+  }
   async close(){await Promise.all([...this.agents.values()].map(a=>a.destroy()));}
 }

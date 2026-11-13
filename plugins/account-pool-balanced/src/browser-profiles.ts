@@ -17,7 +17,8 @@ import { mkdir, readdir, rename, stat, writeFile, open, rm, cp, copyFile, realpa
 import { homedir, platform as currentPlatform, tmpdir } from "node:os";
 import path from "node:path";
 import { promisify, isDeepStrictEqual } from "node:util";
-import { Agent, request as httpRequest } from "undici";
+import { Agent, ProxyAgent, request as httpRequest } from "undici";
+import {parseProxyUrl} from "./proxy-secrets.js";
 import type { BrowserAccount } from "./browser-host.js";
 import { readVpnEvidence } from "./vpn-policy.js";
 import type { VpnEvidence } from "./vpn-evidence.js";
@@ -62,10 +63,10 @@ export type VpnReader = (file: string) => Promise<VpnEvidence>;
 
 const defaultVpnReader: VpnReader = (file) => readVpnEvidence(file, Date.now());
 
-const defaultGeoFetcher: GeoFetcher = async (url) => {
+const geoFetcher = async (url:string, proxyUrl?:string):Promise<unknown> => {
   const target = new URL(url);
   if (target.hostname.startsWith("[") || target.username || target.password || !["http:", "https:"].includes(target.protocol)) return null;
-  const dispatcher = new Agent({ connect: { family: 4, timeout: 4000 } });
+  const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : new Agent({ connect: { family: 4, timeout: 4000 } });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 4000);
   try {
@@ -86,6 +87,8 @@ const defaultGeoFetcher: GeoFetcher = async (url) => {
     await dispatcher.destroy();
   }
 };
+
+const defaultGeoFetcher:GeoFetcher=url=>geoFetcher(url);
 
 const storeTails = new Map<string, Promise<void>>();
 async function withProfileStore<T>(root: string, action: () => Promise<T>): Promise<T> {
@@ -310,16 +313,28 @@ export function browserProcessPattern(executable: string): string {
   return executable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([[:space:]]|$)";
 }
 
-export async function listRunningHelium(executable = path.join("/Applications", HELIUM_APP_BINARY)): Promise<number[]> {
+/** Exclude only a positively identified managed routed root. Unknown/unmanaged
+ * processes remain blockers for the shared root, including default launches. */
+export function browserProcessUsesRoot(command:string,root:string,shared=false):boolean{
+  const escape=(value:string)=>value.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+  const argument="(?:^|[ \t])--user-data-dir(?:=|[ \t]+)";
+  const boundary="(?:[ \t]|$)";
+  if(new RegExp(argument+escape(root)+boundary).test(command))return true;
+  if(!shared)return false;
+  const routed=new RegExp(argument+escape(path.join(root,'Pool Routed Accounts'))+"/[a-f0-9-]{36}"+boundary,'i');
+  return !routed.test(command);
+}
+
+export async function listRunningHelium(executable = path.join("/Applications", HELIUM_APP_BINARY), root?:string, shared=false): Promise<number[]> {
   try {
-    const { stdout } = await execFileAsync("pgrep", ["-f", "--", browserProcessPattern(executable)], {
-      timeout: 2000,
-      maxBuffer: 65536,
+    const { stdout } = await execFileAsync("pgrep", ["-f", "--", browserProcessPattern(executable)], {timeout:2000,maxBuffer:65536});
+    const pids=stdout.split("\n").map(line=>Number(line.trim())).filter(pid=>Number.isSafeInteger(pid)&&pid>0);
+    if(!root||!pids.length)return pids;
+    const processes=await execFileAsync('ps',['-ww','-p',pids.join(','),'-o','pid=,command='],{timeout:2000,maxBuffer:65536});
+    return processes.stdout.split('\n').flatMap(line=>{
+      const match=/^\s*(\d+)\s+(.+)$/.exec(line);
+      return match&&pids.includes(Number(match[1]))&&browserProcessUsesRoot(match[2]!,root,shared)?[Number(match[1])]:[];
     });
-    return stdout
-      .split("\n")
-      .map((line) => Number(line.trim()))
-      .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === 1) return [];
     throw new Error("Cannot inspect running browser processes; refusing an unverified timezone handoff.");
@@ -517,6 +532,8 @@ async function migrateToNative(options: EnsureProfileOptions, assertClosed: () =
 export interface OpenAccountBrowserOptions {
   accounts: readonly BrowserAccount[];
   query: string;
+  routedAccountIds?:readonly string[]|undefined;
+  proxyUrl?: string | undefined;
   url?: string | undefined;
   dataDir: string;
   pluginId: string;
@@ -548,7 +565,16 @@ export interface OpenAccountBrowserResult {
 export async function openAccountBrowser(
   options: OpenAccountBrowserOptions,
 ): Promise<OpenAccountBrowserResult> {
-  const root = options.heliumRoot ?? heliumDataRoot(options.platformName ?? currentPlatform());
+  let root = options.heliumRoot ?? heliumDataRoot(options.platformName ?? currentPlatform());
+  const selected=resolveAccount(options.accounts,options.query);
+  if(!options.proxyUrl&&options.routedAccountIds?.includes(selected.id))throw Error('Assigned account browser proxy is required.');
+  if(!options.proxyUrl)options={...options,accounts:options.accounts.filter(a=>!options.routedAccountIds?.includes(a.id))};
+  if(options.proxyUrl){
+    const account=selected;
+    const proxyUrl=parseProxyUrl(options.proxyUrl).href;
+    root=path.join(root,'Pool Routed Accounts',account.id);
+    options={...options,proxyUrl,accounts:[account],dataDir:path.join(options.dataDir,'account-browser-routes',account.id)};
+  }
   return withProfileStore(root, async () => openAccountBrowserLocked({ ...options, heliumRoot: await realpath(root) }));
 }
 
@@ -570,7 +596,7 @@ async function openAccountBrowserLocked(
       );
     }
   }
-  const geo = await fetchExitGeo(options.fetcher ?? defaultGeoFetcher);
+  const geo = await fetchExitGeo(options.fetcher ?? (options.proxyUrl ? url=>geoFetcher(url,options.proxyUrl) : defaultGeoFetcher));
   if (geo === null && guarded) {
     throw new Error(
       "Cannot determine the exit IP timezone; refusing to open a guarded account with a mismatched browser timezone.",
@@ -597,9 +623,11 @@ async function openAccountBrowserLocked(
   const socketPath = path.join(tmpdir(), `bb-pool-${createHash("sha256").update(root).digest("hex").slice(0, 24)}.sock`);
   let registry = await readRegistry(registryFile);
   let entry = registry[account.id];
+  const selectable=()=>Object.entries(registry).filter(([id,e])=>!e.isolated&&(!!options.proxyUrl||!options.routedAccountIds?.includes(id))).map(([,e])=>e);
   const launchFor = (selected: RegistryEntry): TransportLaunch => ({
-    root, socketPath, executable, profileDirectory: selected.profileDirectory,
-    profileDirectories: Object.values(registry).filter(e => !e.isolated).map(e => e.profileDirectory),
+    root, socketPath, executable, ...(options.proxyUrl?{proxyUrl:options.proxyUrl}:{}),
+    routeKey:createHash("sha256").update(JSON.stringify([options.proxyUrl??null,selectable().map(e=>e.profileDirectory).sort()])).digest("hex"),profileDirectory: selected.profileDirectory,
+    profileDirectories: selectable().map(e => e.profileDirectory),
     timezone, url, settleMs: options.settleMs ?? 800, env: options.env ?? process.env,
   });
   if (entry && !entry.isolated && !options.transportImpl && !options.spawnImpl) {
@@ -613,7 +641,7 @@ async function openAccountBrowserLocked(
   // A native or older isolated process may be writing either side of migration.
   // Never join it without the current shared supervisor capability.
   const assertClosed = async () => {
-    const running = await (options.listRunning ?? (() => listRunningHelium(executable)))();
+    const running = await (options.listRunning ?? (() => listRunningHelium(executable,root,!options.proxyUrl)))();
     if (running.length) throw new Error("Helium is running without a live transport supervisor for this profile. Close Helium once before updating the shared profile list.");
   };
   await assertClosed();
@@ -628,7 +656,17 @@ async function openAccountBrowserLocked(
   registry = await readRegistry(registryFile);
   entry = registry[account.id]!;
   await assertClosed();
-  await syncLocalStateProfiles(root, Object.values(registry));
+  await syncLocalStateProfiles(root, selectable());
+  if(!options.proxyUrl&&options.routedAccountIds?.length){
+    const blocked=new Set(options.routedAccountIds.flatMap(id=>registry[id]?[registry[id]!.profileDirectory]:[]));
+    const file=path.join(root,'Local State'),state=await readObject(file),cache=nativeProfileCache(state);
+    for(const directory of blocked)delete cache[directory];
+    const profile=state.profile as Record<string,unknown>;
+    profile.info_cache=cache;
+    if(typeof profile.last_used==='string'&&blocked.has(profile.last_used))profile.last_used=entry.profileDirectory;
+    if(Array.isArray(profile.last_active_profiles))profile.last_active_profiles=profile.last_active_profiles.filter(p=>!blocked.has(p));
+    await writeJsonAtomic(file,state);
+  }
   const launch = launchFor(entry);
   await removeStaleBrowserSocket(socketPath);
   if (options.transportImpl) await options.transportImpl(launch);
@@ -682,6 +720,7 @@ export interface BrowserProfileInfo {
 /** Registry view: every pool account and the state of its Helium profile. */
 export async function listBrowserProfiles(options: {
   accounts: readonly BrowserAccount[];
+  routedAccountIds?:readonly string[]|undefined;
   dataDir: string;
   pluginId: string;
   heliumRoot?: string | undefined;
@@ -692,9 +731,12 @@ export async function listBrowserProfiles(options: {
   );
   const rows: BrowserProfileInfo[] = [];
   for (const account of options.accounts) {
-    const entry = registry[account.id];
+    const routed=options.routedAccountIds?.includes(account.id);
+    const accountRoot=routed?path.join(heliumRoot,'Pool Routed Accounts',account.id):heliumRoot;
+    const accountRegistry=routed?await readRegistry(path.join(options.dataDir,'account-browser-routes',account.id,'plugins',options.pluginId,'browser-profiles','registry.json')):registry;
+    const entry = accountRegistry[account.id];
     const profileDirectory = entry?.profileDirectory ?? "";
-    const profileDir = entry === undefined ? "" : path.join(entry.isolated ? isolatedRoot(heliumRoot, profileDirectory) : heliumRoot, profileDirectory);
+    const profileDir = entry === undefined ? "" : path.join(entry.isolated ? isolatedRoot(accountRoot, profileDirectory) : accountRoot, profileDirectory);
     let updatedAt: number | null = null;
     if (entry !== undefined) {
       try {

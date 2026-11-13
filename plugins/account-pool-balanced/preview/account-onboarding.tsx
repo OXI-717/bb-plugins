@@ -1,0 +1,6 @@
+import React from 'react';
+import {renderToStaticMarkup} from 'react-dom/server';
+import {AccountDraftForm} from '../account-draft-form';
+import {accountSettingsCss} from '../account-settings-style';
+const content=<main className="pool-settings"><h1>Новый аккаунт Claude</h1><AccountDraftForm email="person@example.test" label="Рабочая подписка" onEmail={()=>{}} onLabel={()=>{}}/><button>Создать и настроить</button><hr/><h2>Следующий шаг</h2><p>Ожидает входа</p><p>Прокси аккаунта: Рабочий прокси</p><button>Войти в аккаунт</button></main>;
+process.stdout.write('<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>'+accountSettingsCss+'body{font-family:system-ui;background:#fafafa;margin:0;padding:24px;color:#171717}main{max-width:520px;background:white;padding:24px;margin:auto;border:1px solid #ddd;border-radius:12px}h1{font-size:22px}h2{font-size:18px}label{display:block;margin:12px 0}input{display:block;box-sizing:border-box;width:100%;padding:10px;border:1px solid #aaa;border-radius:6px;margin-top:6px}button{padding:10px 14px;border-radius:6px;background:#252525;color:white;border:0}p{font-size:14px;line-height:1.5}hr{border:0;border-top:1px solid #ddd;margin:24px 0}</style>'+renderToStaticMarkup(content)+'</html>');

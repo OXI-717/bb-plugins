@@ -57,6 +57,11 @@ export class PoolOperations {
     if (input.provider === "agy") {
       throw new Error("Use Antigravity login in the Pooler UI; local credentials are not imported.");
     }
+    if(input.source.kind==='draft'){
+      if(input.provider!=='claude')throw Error('Предварительное добавление пока доступно для Claude.');
+      const account=await this.accounts.addDraft({email:input.source.email,label:input.label??input.source.email,priority:input.priority});
+      this.onAccountsChanged();return account;
+    }
     if (input.source.kind === "api-key") {
       if (input.provider === "codex") {
         throw new Error("This provider requires its supported OAuth login.");
