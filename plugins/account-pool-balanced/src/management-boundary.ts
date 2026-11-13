@@ -14,7 +14,7 @@ const rpcScope = (method: string): ManagementScope => readMethods.has(method) ? 
 const readCli = (argv: string[]) =>
   (['status', 'readiness'].includes(argv[0] ?? '')) ||
   (argv[0] === 'account' && argv[1] === 'list') ||
-  (argv[0] === 'config' && argv[1] === 'get') ||
+  (argv[0] === 'config' && (argv.length === 1 || argv[1] === 'get')) ||
   (argv[0] === 'browser' && argv[1] === 'list') ||
   (['egress', 'native', 'maintenance'].includes(argv[0] ?? '') && argv[1] === 'status');
 

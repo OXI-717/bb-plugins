@@ -174,3 +174,20 @@ it('issues CLI grants only into new private server files and never into command 
   expect((await run(argv, {})).exitCode).toBe(1);
   expect(await fs.readFile(output, 'utf8')).toBe(text);
 });
+
+it('a read grant inspects the single-argument config command without mutations', async () => {
+  const { access, directory, key } = await setup();
+  let run!: (argv: string[], context: object) => Promise<{ exitCode: number; stdout?: string; stderr?: string }>;
+  const executed = vi.fn(async () => ({ exitCode: 0, stdout: 'config-output' }));
+  const bb = { pluginId: 'test', server: {}, cli: { register: (registration: { run: typeof run }) => { run = registration.run; } } } as unknown as Pick<BbPluginApi, 'cli' | 'server' | 'pluginId'>;
+  managementCli(bb, access).cli.register({ name: 'pool', summary: 'test', commands: [], run: executed });
+  const output = path.join(directory, 'read-config-grant.json');
+  const unlock = ['management', 'unlock', '--request', JSON.stringify({ key, scope: 'read', ttlSeconds: 60, output })];
+  expect((await run(unlock, {})).exitCode).toBe(0);
+  const grant = JSON.parse(await fs.readFile(output, 'utf8')) as { token: string };
+  const execute = (argv: string[]) => run(['management', 'execute', '--request', JSON.stringify({ token: grant.token, argv })], {});
+  expect((await execute(['config'])).stdout).toBe('config-output');
+  expect((executed.mock.calls[0] as unknown[][])[0]).toEqual(['config']);
+  expect((await execute(['config', 'set', 'vpnGuardEnabled', 'false'])).exitCode).toBe(1);
+  expect(executed).toHaveBeenCalledTimes(1);
+});
