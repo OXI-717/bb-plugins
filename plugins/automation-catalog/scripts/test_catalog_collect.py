@@ -35,6 +35,37 @@ class CollectorTests(unittest.TestCase):
                 tasks, _ = c.bb_collect('http://source:1234', 'worker')
             self.assertEqual(tasks[0]['host'], 'Хост не определён')
 
+    def test_bb_history_is_bounded_parallel_and_keeps_source_order(self):
+        import threading
+        barrier = threading.Barrier(4, timeout=2)
+        active = peak = 0
+        lock = threading.Lock()
+        entries = [dict(project=dict(id='p', name='Example'), automation=dict(id=str(i), name=str(i), execution=dict(mode='script'))) for i in range(8)]
+        def command(args, env=None):
+            nonlocal active, peak
+            if args[1] == 'plugin': return json.dumps(dict(automations=entries))
+            if args[1] == 'host': return '[]'
+            self.assertEqual(args[1:3], ['automation', 'runs'])
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                barrier.wait()
+                return json.dumps(dict(runs=[dict(id='run-' + args[3], status='succeeded')]))
+            finally:
+                with lock: active -= 1
+        with patch.object(c, 'command', side_effect=command):
+            tasks, runs = c.bb_collect('https://example.invalid', 'worker')
+        self.assertEqual([t['id'] for t in tasks], [str(i) for i in range(8)])
+        self.assertEqual([r['taskId'] for r in runs], [str(i) for i in range(8)])
+        self.assertEqual(peak, 4)
+
+    def test_bb_history_failure_still_fails_collection(self):
+        entry = dict(project=dict(id='p', name='Example'), automation=dict(id='a', name='A', execution=dict(mode='script')))
+        with patch.object(c, 'command', side_effect=[json.dumps(dict(automations=[entry])), '[]', RuntimeError('Unavailable')]):
+            with self.assertRaises(RuntimeError):
+                c.bb_collect('https://example.invalid', 'worker')
+
     def test_launchd_disabled_overrides_do_not_become_unknown_or_active(self):
         cases = [
             ('disabled', False, False, 'paused'),

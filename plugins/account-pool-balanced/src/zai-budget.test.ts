@@ -9,7 +9,7 @@ import { zaiEvidenceFromUsages, zaiBudgetQuota, ZAI_BUDGET_MAX_AGE_MS } from './
 import { zaiQuotaFromUsages } from './openai-compatible-usage.js';
 import { createOpenAiCompatibleAdapter } from './openai-compatible-adapter.js';
 import { quotaFromHeaders } from './quota.js';
-import { createAccountPoolPlugin } from './server.js';
+import { createAccountPoolPlugin } from './management-test-fixture.js';
 import { AccountPoolHub } from './hub.js';
 
 const id='11111111-1111-4111-8111-111111111111',now=1900000000000;

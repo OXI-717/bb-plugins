@@ -10,7 +10,7 @@ import {quotaFromUsage} from './usage.js';
 import {kimiQuotaFromUsages} from './kimi-usage.js';
 import {opencodeGoQuotaFromUsages} from './openai-compatible-usage.js';
 import {quotaFromHeaders} from './quota.js';
-import {createAccountPoolPlugin} from './server.js';
+import {createAccountPoolPlugin} from './management-test-fixture.js';
 import {createKimiAdapter} from './kimi-adapter.js';
 import {createAgyAdapter} from './agy-adapter.js';
 import type {PoolProvider,AccountQuota} from './contracts.js';

@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import getpass
 import hashlib
@@ -258,8 +259,8 @@ def bb_collect(server, host):
         hosts = {h['id']: h['name'] for h in inventory}
     except (RuntimeError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         pass  # Host metadata is optional; continue collecting tasks and history.
-    tasks, runs = [], []
-    for entry in overview['automations']:
+    def collect_entry(entry):
+        runs = []
         item, project = entry['automation'], entry['project']
         execution = item.get('execution', {})
         host_id = (execution.get('environment') or {}).get('hostId')
@@ -283,13 +284,21 @@ def bb_collect(server, host):
         task['agent'] = dict(targetThreadId=execution.get('targetThreadId'), provider=execution.get('providerId'), model=execution.get('model'),
                              reasoning=execution.get('reasoningLevel'), serviceTier=execution.get('serviceTier'),
                              modelSource='existing-thread' if execution.get('targetThreadId') else 'automation') if execution.get('mode') == 'agent' else None
-        tasks.append(task)
         history = read(['automation', 'runs', item['id'], '--project', project['id'], '--limit', '100'])
         for run in history['runs']:
             runs.append(dict(taskId=item['id'], host=task['host'], id=run['id'],
                              status=run['status'], startedAt=run.get('startedAt'), finishedAt=run.get('finishedAt'),
                              exitCode=run.get('exitCode'), summary=('Skipped: ' + run['skipReason']) if run.get('skipReason') else None,
                              hasOutput=bool(run.get('output'))))
+        return task, runs
+
+    tasks, runs = [], []
+    # Bound CLI/network pressure while avoiding one process round-trip per row
+    # on the critical path. map preserves the original inventory order.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for task, history in pool.map(collect_entry, overview['automations']):
+            tasks.append(task)
+            runs.extend(history)
     return tasks, runs
 
 

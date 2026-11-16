@@ -142,7 +142,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const poolPolicySchema=z.object({vpnGuardEnabled:z.boolean(),vpnPolicyVersion:z.literal(2),vpnOnlyProviders:z.array(z.string())});
   async function poolPolicy() {
-    return poolPolicySchema.parse(await bb.sdk.plugins.callRpc({pluginId:'account-pool-balanced',method:'config.get',input:null,outputSchema:poolPolicySchema,signal:AbortSignal.timeout(1000)}));
+    return poolPolicySchema.parse(await bb.sdk.plugins.callRpc({pluginId:'account-pool-balanced',method:'vpnPolicy.get',input:null,outputSchema:poolPolicySchema,signal:AbortSignal.timeout(1000)}));
   }
   async function status() {
     let serverHostId:string|null=null;
