@@ -38,6 +38,7 @@ import {
   getProjectThreadItemDescendants,
   type ProjectThreadNode,
 } from "../model/project-thread-groups.js";
+import { groupProjectRootsByMachine, projectMachineGroupingEnabled } from "../model/project-machine-groups.js";
 import { getCollapsedChildActivity } from "../model/thread-activity.js";
 import { useSectionThreadDnd } from "../dnd/useSectionThreadDnd.js";
 import { useNestDropPreview } from "../dnd/useNestDropPreview.js";
@@ -92,6 +93,8 @@ import {
   type PinnedThreadTreeProps,
 } from "./PinnedThreadTree.js";
 import {
+  projectMachineGroupingAtom,
+  projectMachineOverridesAtom,
   collapsedEnvironmentIdsAtom,
   collapsedProjectIdsAtom,
   collapsedSidebarSectionIdsAtom,
@@ -541,6 +544,8 @@ function ProjectModeSections({
   threads,
   threadsSection,
 }: ProjectModeSectionsProps) {
+  const machineGrouping = useAtomValue(projectMachineGroupingAtom);
+  const machineOverrides = useAtomValue(projectMachineOverridesAtom);
   const groupThreadsByEnvironment = useAtomValue(
     sidebarGroupThreadsByEnvironmentAtom,
   );
@@ -629,8 +634,8 @@ function ProjectModeSections({
   );
   const projectGroups = useMemo(
     () =>
-      projectRows.map((row) =>
-        buildGroupSectionItem(
+      projectRows.map((row) => {
+        const section = buildGroupSectionItem(
           row.project.id,
           buildSidebarEntitySectionId("project", row.project.id),
           row.project.name,
@@ -639,9 +644,15 @@ function ProjectModeSections({
             : EMPTY_THREAD_LIST,
           compareThreads,
           groupThreadsByEnvironment,
-        ),
-      ),
-    [compareThreads, groupThreadsByEnvironment, projectRows],
+        );
+        if (projectMachineGroupingEnabled(row.project.id, machineGrouping, machineOverrides)) {
+          // Rendering and drag lookup must share the same worktree partitions.
+          section.group.items = groupProjectRootsByMachine(row.project.id, section.group.items)
+            .flatMap((group) => group.items);
+        }
+        return section;
+      }),
+    [compareThreads, groupThreadsByEnvironment, projectRows, machineGrouping, machineOverrides],
   );
   const projectItemsByProjectId = useMemo(
     () =>

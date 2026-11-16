@@ -2,10 +2,18 @@
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import { makePluginProject, makeSidebarThread } from "./app/model/fixtures.js";
+import { makePluginProject, makeSidebarThread, makeSidebarEnvironment } from "./app/model/fixtures.js";
 import { defaultPreferences, type PreferenceValues } from "./shared/preferences.js";
 import { flushPreferenceWritesForTest, resetPreferencesSyncForTest, setPreferencesMirrorStorageForTest } from "./app/preferences/preferences-sync.js";
 import { projectMachineKey } from "./app/model/project-machine-groups.js";
+
+import { collectSectionThreadDndLookup, resolveSectionThreadDropDecision, useSectionThreadDnd } from "./app/dnd/useSectionThreadDnd.js";
+import type { SidebarThread } from "./app/model/sidebar-thread.js";
+
+vi.mock("./app/dnd/useSectionThreadDnd.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./app/dnd/useSectionThreadDnd.js")>();
+  return { ...actual, useSectionThreadDnd: vi.fn(actual.useSectionThreadDnd) };
+});
 
 const app = await loadPluginApp(() => import("./app.js"));
 const laptop = { id: "host_laptop", name: "Laptop" };
@@ -16,19 +24,19 @@ const threads = [
   makeSidebarThread({ id: "thr_other", projectId: "proj_alpha", title: "Other", host: server }),
   makeSidebarThread({ id: "thr_beta", projectId: "proj_beta", title: "Beta task", host: server }),
 ];
-function render(preferences: Partial<PreferenceValues> = {}, compact = false, routedThreadId: string | null = null) {
+function render(preferences: Partial<PreferenceValues> = {}, compact = false, routedThreadId: string | null = null, inputThreads: SidebarThread[] = threads) {
   setPreferencesMirrorStorageForTest(null);
   return renderSlot(app.threadLists[0]!, {
     activeThreadId: null, activeProjectId: null, isCompactViewport: compact, onNavigate: vi.fn(), searchQuery: "",
   }, {
     pluginId: "oxi-thread-list",
     context: { projectId: routedThreadId ? "proj_alpha" : null, threadId: routedThreadId },
-    sidebarThreads: { threads, projects: [makePluginProject({ id: "proj_alpha", name: "Alpha" }), makePluginProject({ id: "proj_beta", name: "Beta" })] },
+    sidebarThreads: { threads: inputThreads, projects: [makePluginProject({ id: "proj_alpha", name: "Alpha" }), makePluginProject({ id: "proj_beta", name: "Beta" })] },
     rpc: { listPreferences: () => ({ preferences: { ...defaultPreferences(), organizationMode: "project", ...preferences } }), setPreference: (input: unknown) => input },
   });
 }
 const groups = () => Array.from(document.querySelectorAll("[data-project-machine-group]"));
-afterEach(() => { cleanup(); resetPreferencesSyncForTest(); setPreferencesMirrorStorageForTest(undefined); });
+afterEach(() => { vi.clearAllMocks(); cleanup(); resetPreferencesSyncForTest(); setPreferencesMirrorStorageForTest(undefined); });
 
 describe("project-machine list controls", () => {
   it("renders each row once, keeps a cross-machine child under its parent, and remembers collapse", async () => {
@@ -62,6 +70,34 @@ describe("project-machine list controls", () => {
     expect(screen.getByRole("button", { name: "Свернуть машину Laptop" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Развернуть машину Server" })).toBeTruthy();
     expect(screen.queryByText("Other")).toBeNull();
+  });
+  it("reveals a cross-project child's ancestor machine without opening the child's own machine", async () => {
+    render({ collapsedThreads: ["thr_parent"], collapsedProjectMachines: [
+      projectMachineKey("proj_alpha", laptop.id), projectMachineKey("proj_alpha", server.id),
+    ] }, false, "thr_child", threads.map((thread) => thread.id === "thr_child"
+      ? { ...thread, projectId: "proj_beta" } : thread));
+    await screen.findByText("Child");
+    expect(screen.getByRole("button", { name: "Свернуть машину Laptop" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Развернуть машину Server" })).toBeTruthy();
+    expect(screen.queryByText("Other")).toBeNull();
+  });
+  it.each([true, false])("uses the rendered worktree partitions for drag-to-pin with grouping=%s", async (grouping) => {
+    const environment = makeSidebarEnvironment({ id: "env_shared", isWorktree: true });
+    const mixed = [
+      ...["a1", "a2"].map((id) => makeSidebarThread({ id, title: id, projectId: "proj_alpha", host: laptop, environment })),
+      ...["b1", "b2"].map((id) => makeSidebarThread({ id, title: id, projectId: "proj_alpha", host: server, environment })),
+      makeSidebarThread({ id: "remote-child", title: "Remote child", projectId: "proj_beta", host: server, environment, parentThreadId: "a1" }),
+    ];
+    render({ projectMachineGrouping: grouping }, false, null, mixed);
+    await waitFor(() => expect(vi.mocked(useSectionThreadDnd).mock.lastCall?.[0].rootItems.length).toBeGreaterThan(0));
+    const args = vi.mocked(useSectionThreadDnd).mock.lastCall![0];
+    const lookup = collectSectionThreadDndLookup(args.rootItems, "threads", [], [], { groups: true });
+    const decisions = [...lookup.itemKindById].filter(([, kind]) => kind === "environment")
+      .map(([id]) => resolveSectionThreadDropDecision(lookup, id, "pinned"));
+    expect(decisions.every((decision) => decision?.kind === "pin")).toBe(true);
+    expect(decisions.map((decision) => decision && "pinThreadIds" in decision ? [...decision.pinThreadIds].sort() : [])
+      .sort((a, b) => a.join().localeCompare(b.join()))).toEqual(grouping ? [["a1", "a2"], ["b1", "b2"]] : [["a1", "a2", "b1", "b2"]]);
+    expect(lookup.nestParentIdByItemId.get("remote-child")).toBe("a1");
   });
   it("changes one project's override through its real menu and restores inheritance", async () => {
     render();

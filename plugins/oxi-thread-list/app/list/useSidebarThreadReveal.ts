@@ -6,6 +6,7 @@ import { buildPinnedSidebarState } from "../model/pinned-sidebar-threads.js";
 import {
   CHRONOLOGICAL_CONTAINER_ID,
   resolveSidebarProjectId,
+  createSidebarProjectIdResolver,
   buildProjectThreadGroups,
   getProjectThreadItemDescendants,
 } from "../model/project-thread-groups.js";
@@ -298,8 +299,9 @@ function useSidebarThreadRevealCore({
       }
       if (expansion.projectId) {
         const projectId = expansion.projectId;
+        const sidebarProjectId = createSidebarProjectIdResolver(threadById);
         const groups = groupProjectRootsByMachine(projectId, buildProjectThreadGroups(
-          threads.filter((candidate) => candidate.projectId === projectId && !effectivePinnedThreadIds.has(candidate.id)),
+          threads.filter((candidate) => sidebarProjectId(candidate) === projectId && !effectivePinnedThreadIds.has(candidate.id)),
         ));
         const machine = groups.find((group) => getProjectThreadItemDescendants(group.items)
           .some((candidate) => candidate.id === threadId));
