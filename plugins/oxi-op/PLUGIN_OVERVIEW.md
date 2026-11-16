@@ -5,6 +5,6 @@ Save credentials through a native BB form and use them in owner-configured opera
 - Writes go through `op` JSON stdin and are verified by a separate read.
 - Routine API access can run unattended with a scoped service account.
 - Administrative access can require a BB confirmation and 1Password desktop authorization.
-- Commands and vault references are configured by the owner; agents cannot supply arbitrary commands.
+- Configured operations use owner-defined commands. With `oxi_op_exec`, agents supply a command using routine keys; critical credentials additionally require an approval card naming the command and requested entries.
 
 Install 1Password CLI on the enrolled host and configure project routes in BB settings. Service tokens use a native secret setting or a host environment variable. No direct Keychain access is used. See [setup and security boundaries](README.md).
