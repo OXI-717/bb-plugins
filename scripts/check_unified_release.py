@@ -13,7 +13,7 @@ import subprocess
 
 def read(path, tree=None):
     if tree:
-        result = subprocess.run(['git', 'show', f'{tree}:{path}'], capture_output=True, text=True)
+        result = subprocess.run(['git', 'show', f'{tree}:{path}'], capture_output=True, text=True, timeout=15)
         return result.stdout if result.returncode == 0 else ''
     p = Path(path)
     return p.read_text() if p.exists() else ''
@@ -47,7 +47,7 @@ def main():
         if plugin == 'account-pool-balanced':
             floors.append('0.4.92')
         if plugin == 'vpn-guard':
-            floors.append('0.1.24')
+            floors.append('0.1.25')
         if any(version(current) < version(floor) for floor in floors):
             failures.append(f'{plugin}: package below required floor')
         if version(entry['source']['git']['range']) < version(current):
