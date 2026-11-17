@@ -6,12 +6,12 @@ import { CodedError, errorCode } from './errors.js';
 import { contract, routeSchema, resolveRoute, keyReferenceSchema, tidyStepSchema, storeFailureCode, type Route } from './contract.js';
 import {createJournal, completionText, cancelledOutcome, OperationFailure, type Progress} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal; notifyCompletion?: boolean};
-const approvalTimeoutMs = 60_000;
+const approvalTimeoutMs = 600_000;
 // Intake needs time for copying a credential; no credential is used before submission.
 const intakeTimeoutMs = 600_000;
 // Setup cards change structure, never reveal or use a password: they wait ten minutes.
 const setupTimeoutMs = 600_000;
-export const deliveryContract = defineRpcContract({formReceipt: {input: z.object({threadId:z.string().min(1).max(100),interactionId:z.string().min(1).max(100),visible:z.boolean(),formRequestId:z.string().uuid().optional()}).strict(),output:z.object({recorded:z.literal(true)})}});
+export const deliveryContract = defineRpcContract({formReceipt: {input: z.object({threadId:z.string().min(1).max(100),interactionId:z.string().min(1).max(100),visible:z.boolean(),phase:z.enum(['submit-started','submit-failed']).optional(),formRequestId:z.string().uuid().optional()}).strict(),output:z.object({recorded:z.literal(true)})}});
 export default function plugin(bb: BbPluginApi) {
     const settings = bb.settings.define({ routes: { type: 'string', label: 'Project vault routes (JSON)', default: '[]', experimental_multiline: true }, serviceAccountToken: { type: 'string', label: 'Legacy scoped service account token', secret: true, default: '' }, projectServiceAccounts: {type: 'string', label: 'Project and profile service accounts (encrypted JSON)', secret: true, default: '{}'} });
     const rawHost = bb.hosts.experimental_client({ contract });
@@ -43,7 +43,7 @@ export default function plugin(bb: BbPluginApi) {
     type Receipt = {interactionId:string;mountedAt:string;lastSeenAt:string;visibleEver:boolean};
     const receiptPrefix = (projectId:string,threadId:string) => 'display:'+encodeURIComponent(projectId)+':'+encodeURIComponent(threadId)+':';
     const activeForms=new Map<string,{threadId:string;projectId:string;progress:Progress;visible:boolean}>();
-    bb.rpc.register(deliveryContract,{async formReceipt({threadId,interactionId,visible,formRequestId}) {
+    bb.rpc.register(deliveryContract,{async formReceipt({threadId,interactionId,visible,phase,formRequestId}) {
         const requests = await bb.sdk.threads.interactions.list({threadId});
         const interaction=requests.find(r => r.id===interactionId && r.origin?.kind==='plugin' && r.origin.pluginId===bb.pluginId);
         if (!interaction) throw new Error('This form is not pending for this plugin');
@@ -58,7 +58,7 @@ export default function plugin(bb: BbPluginApi) {
         const previous=await bb.storage.kv.get<Receipt>(key);
         const now=new Date().toISOString();
         await bb.storage.kv.set(key,{interactionId,mountedAt:previous?.mountedAt??now,lastSeenAt:now,visibleEver:visible||previous?.visibleEver===true});
-        if(tracked && activeForms.get(formRequestId!)===tracked) {tracked.visible ||= visible;await tracked.progress(undefined,false,tracked.visible?'visible':'mounted');}
+        if(tracked && activeForms.get(formRequestId!)===tracked) {tracked.visible ||= visible;await tracked.progress(undefined,false,tracked.visible?'visible':'mounted',phase==='submit-started'?'started':phase==='submit-failed'?'failed':undefined);}
         return {recorded:true as const};
     }});
     // A one-minute card is easy to miss when the owner looks at another session. Every approval
@@ -67,13 +67,19 @@ export default function plugin(bb: BbPluginApi) {
     // blocks or repeats the request. The notice carries no item, vault or project names, since it
     // can reach lock screens and external push providers. A card the owner is already looking at
     // still gets a notice: a duplicate is cheaper than a missed approval.
-    const requestApproval: typeof bb.ui.requestInput = (request, options) => {
-        const card = bb.ui.requestInput(request, options);
+    const requestApproval = async (request: Parameters<typeof bb.ui.requestInput>[0], options: Parameters<typeof bb.ui.requestInput>[1], progress: Progress) => {
+        if(!request.payload || typeof request.payload!=='object' || Array.isArray(request.payload) || typeof request.payload.projectId!=='string') throw new Error('Approval context is missing');
+        const formRequestId=randomUUID();
+        await progress(undefined,false,'not-observed');
+        activeForms.set(formRequestId,{threadId:request.threadId,projectId:request.payload.projectId,progress,visible:false});
+        let card;
+        try {card = bb.ui.requestInput({...request,payload:{...request.payload,formRequestId}}, options);}
+        catch(error) {activeForms.delete(formRequestId);throw error;}
         setImmediate(() => {
             const seconds = Math.round((request.timeoutMs ?? approvalTimeoutMs) / 1000);
             void Promise.resolve().then(() => bb.sdk.plugins.callRpc({pluginId: 'push-notifications', method: 'notifications.send', input: {title: 'Oxi Op: нужно подтверждение', body: 'Откройте сессию: карточка подтверждения действует ' + seconds + ' секунд.', threadId: request.threadId}, outputSchema: z.object({ok: z.literal(true), channels: z.array(z.string())}).passthrough(), signal: AbortSignal.timeout(10_000)})).catch(() => {});
         });
-        return card;
+        try {return await card;} finally {activeForms.delete(formRequestId);}
     };
     // BB resumes an idle agent for a fulfilled tool result, including a reported failure.
     const toolOutcome = async (work: () => Promise<string>) => {
@@ -168,12 +174,8 @@ export default function plugin(bb: BbPluginApi) {
         const access = {...configured, route};
         await requireCredentialHost(route,ctx);
         const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
-        await progress('awaiting-approval',false,'not-observed');
-        const formRequestId=randomUUID();
-        activeForms.set(formRequestId,{threadId:ctx.threadId,projectId:ctx.projectId,progress,visible:false});
-        let result;
-        try {result = await requestApproval({ threadId: ctx.threadId, rendererId: 'credential', timeoutMs: intakeTimeoutMs, title: 'Сохранить пароль: ' + title, payload: { mode: 'store', formRequestId, title, username, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Создать запись и проверить сохранённый пароль', secrets: [{field: 'password', item: title}] }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal });}
-        finally {activeForms.delete(formRequestId);}
+        await progress('awaiting-approval');
+        const result = await requestApproval({ threadId: ctx.threadId, rendererId: 'credential', timeoutMs: intakeTimeoutMs, title: 'Сохранить пароль: ' + title, payload: { mode: 'store', title, username, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Создать запись и проверить сохранённый пароль', secrets: [{field: 'password', item: title}] }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal }, progress);
         if (result.outcome !== 'submitted')
             return cancelledOutcome(result);
         await progress('awaiting-approval',true);
@@ -204,7 +206,7 @@ export default function plugin(bb: BbPluginApi) {
             const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
             return await journal.run('connect', profile, ctx, async progress => {
                 await progress('awaiting-approval');
-                const decision = await requestApproval({threadId:ctx.threadId,rendererId:'credential',timeoutMs:setupTimeoutMs,title:'Подключить хранилище: '+project.name,payload:{mode:'approve',title:'Подключить проект '+project.name,profile,projectId:ctx.projectId,threadId:ctx.threadId,label:project.name+' — защищённое хранилище',hostId:credentialHost(route),...display,vaultId:'new-project-vault',vaultLabel:project.name,purpose:'Создать отдельный сейф «'+project.name+'» и сохранить привязку проекта в Oxi Op. Существующий одноимённый сейф используется только при точном совпадении метки этого BB-проекта. Пароли не читаются, автоматический доступ не выдаётся.',secrets:[]},describeSubmission:()=>({title:'Project vault setup approved (no credential values)'})},{signal:ctx.signal});
+                const decision = await requestApproval({threadId:ctx.threadId,rendererId:'credential',timeoutMs:setupTimeoutMs,title:'Подключить хранилище: '+project.name,payload:{mode:'approve',title:'Подключить проект '+project.name,profile,projectId:ctx.projectId,threadId:ctx.threadId,label:project.name+' — защищённое хранилище',hostId:credentialHost(route),...display,vaultId:'new-project-vault',vaultLabel:project.name,purpose:'Создать отдельный сейф «'+project.name+'» и сохранить привязку проекта в Oxi Op. Существующий одноимённый сейф используется только при точном совпадении метки этого BB-проекта. Пароли не читаются, автоматический доступ не выдаётся.',secrets:[]},describeSubmission:()=>({title:'Project vault setup approved (no credential values)'})},{signal:ctx.signal}, progress);
                 if (decision.outcome !== 'submitted' || !z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
                 await progress('running', true);
                 const vault = await host.call('provisionVault',{route,projectId,name:project.name},{hostId:credentialHost(route),signal:ctx.signal});
@@ -239,7 +241,7 @@ export default function plugin(bb: BbPluginApi) {
             const display=await displayContext({...route,hostId:credentialHost(route)},ctx);
             return await journal.run('connect-many',profile,ctx,async progress=>{
                 await progress('awaiting-approval');
-                const decision=await requestApproval({threadId:ctx.threadId,rendererId:'credential',timeoutMs:setupTimeoutMs,title:'Подключить хранилища проектов',payload:{mode:'approve',title:'Подключить '+pending.length+' проектов',profile,projectId:ctx.projectId,threadId:ctx.threadId,label:pending.map(p=>p.name).join(', '),hostId:credentialHost(route),...display,vaultId:'project-vaults',vaultLabel:'Отдельный сейф каждого проекта',purpose:pending.map(p=>p.name+': '+(p.existingVaultId?'подключить существующий сейф по точному ID':'сейф «'+p.vault+'»'+(pending.filter(x=>x.vault===p.vault).length>1?' (общий)':'')+', создать или восстановить с меткой проекта')).join('\n')+'\nСохранить привязки по умолчанию. Пароли не читаются; автоматический доступ не выдаётся. Уже настроенные проекты пропускаются.',secrets:[]},describeSubmission:()=>({title:'Project vault connections approved (no credential values)'})},{signal:ctx.signal});
+                const decision=await requestApproval({threadId:ctx.threadId,rendererId:'credential',timeoutMs:setupTimeoutMs,title:'Подключить хранилища проектов',payload:{mode:'approve',title:'Подключить '+pending.length+' проектов',profile,projectId:ctx.projectId,threadId:ctx.threadId,label:pending.map(p=>p.name).join(', '),hostId:credentialHost(route),...display,vaultId:'project-vaults',vaultLabel:'Отдельный сейф каждого проекта',purpose:pending.map(p=>p.name+': '+(p.existingVaultId?'подключить существующий сейф по точному ID':'сейф «'+p.vault+'»'+(pending.filter(x=>x.vault===p.vault).length>1?' (общий)':'')+', создать или восстановить с меткой проекта')).join('\n')+'\nСохранить привязки по умолчанию. Пароли не читаются; автоматический доступ не выдаётся. Уже настроенные проекты пропускаются.',secrets:[]},describeSubmission:()=>({title:'Project vault connections approved (no credential values)'})},{signal:ctx.signal}, progress);
                 if(decision.outcome!=='submitted'||!z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success)return cancelledOutcome(decision);
                 await progress('running',true);
                 // Projects listed with the same vault name in one batch share one vault, created for
@@ -377,7 +379,7 @@ export default function plugin(bb: BbPluginApi) {
                 await requireCredentialHost(route, ctx);
                 const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
                 await progress('awaiting-approval');
-                const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: (reissue ? 'Перевыпуск доступа агентов: ' : 'Автоматический доступ агентов: ') + title, payload: {mode: 'approve', title: (reissue ? 'Перевыпустить доступ агентов: ' : 'Выпустить автоматический доступ агентов: ') + title, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: fresh.map(x => x.name).join(', '), hostId: credentialHost(route), ...display, vaultId: 'automation-vaults', vaultLabel: 'Отдельный сейф «<Проект> — Automation» у каждого проекта', purpose: [(reissue ? 'Перевыпустить для каждого проекта два доступа к сейфу ключей агентов, ' : 'Для каждого проекта: сейф только для ключей агентов и два доступа к нему, ') + (expiresIn ? 'срок ' + expiresIn + '.' : 'без срока действия.'), 'Чтение (read_items) — агенты используют ключи без подтверждений на машинах: ' + machineNames.join(', ') + '.', 'Чтение и запись (read_items, write_items) — приём новых ключей через закрытую форму.', 'Без других сейфов, share_items и создания сейфов. Критические пароли в основном сейфе проекта по-прежнему требуют вашего подтверждения.', 'Токены — только в зашифрованных настройках Oxi Op и резервной записи в основном сейфе проекта.', 'Права проверяются с ' + execution.hostLabel + ' до включения.', ...(reissue ? ['Прежние доступы работают до замены и после неё остаются в 1Password: удалите их там вручную.'] : [])].join('\n'), secrets: []}, describeSubmission: () => ({title: 'Automatic agent access approved (no credential values)'})}, {signal: ctx.signal});
+                const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: (reissue ? 'Перевыпуск доступа агентов: ' : 'Автоматический доступ агентов: ') + title, payload: {mode: 'approve', title: (reissue ? 'Перевыпустить доступ агентов: ' : 'Выпустить автоматический доступ агентов: ') + title, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: fresh.map(x => x.name).join(', '), hostId: credentialHost(route), ...display, vaultId: 'automation-vaults', vaultLabel: 'Отдельный сейф «<Проект> — Automation» у каждого проекта', purpose: [(reissue ? 'Перевыпустить для каждого проекта два доступа к сейфу ключей агентов, ' : 'Для каждого проекта: сейф только для ключей агентов и два доступа к нему, ') + (expiresIn ? 'срок ' + expiresIn + '.' : 'без срока действия.'), 'Чтение (read_items) — агенты используют ключи без подтверждений на машинах: ' + machineNames.join(', ') + '.', 'Чтение и запись (read_items, write_items) — приём новых ключей через закрытую форму.', 'Без других сейфов, share_items и создания сейфов. Критические пароли в основном сейфе проекта по-прежнему требуют вашего подтверждения.', 'Токены — только в зашифрованных настройках Oxi Op и резервной записи в основном сейфе проекта.', 'Права проверяются с ' + execution.hostLabel + ' до включения.', ...(reissue ? ['Прежние доступы работают до замены и после неё остаются в 1Password: удалите их там вручную.'] : [])].join('\n'), secrets: []}, describeSubmission: () => ({title: 'Automatic agent access approved (no credential values)'})}, {signal: ctx.signal}, progress);
                 if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
                 await progress('awaiting-approval', true);
                 const approvedAt = new Date().toISOString();
@@ -418,7 +420,7 @@ export default function plugin(bb: BbPluginApi) {
             await requireCredentialHost(route, ctx);
             const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
             await progress('awaiting-approval');
-            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: 'Обзор сейфов 1Password', payload: {mode: 'approve', title: 'Обзор служебных сейфов', purpose: 'Составить карту сейфов: какие маршруты их используют, названия и даты записей, пустые сейфы и повторы. Значения не читаются. Записи читаются только в служебных сейфах (из маршрутов, служебного реестра и с меткой Oxi Op); остальные сейфы — только название.', profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: 'Обзор сейфов', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Служебный сейф', secrets: registryTitle ? [{item: registryTitle, field: 'Служебная заметка'}] : []}, describeSubmission: () => ({title: 'Vault overview approved (no credential values)'})}, {signal: ctx.signal});
+            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: 'Обзор сейфов 1Password', payload: {mode: 'approve', title: 'Обзор служебных сейфов', purpose: 'Составить карту сейфов: какие маршруты их используют, названия и даты записей, пустые сейфы и повторы. Значения не читаются. Записи читаются только в служебных сейфах (из маршрутов, служебного реестра и с меткой Oxi Op); остальные сейфы — только название.', profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: 'Обзор сейфов', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Служебный сейф', secrets: registryTitle ? [{item: registryTitle, field: 'Служебная заметка'}] : []}, describeSubmission: () => ({title: 'Vault overview approved (no credential values)'})}, {signal: ctx.signal}, progress);
             if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
             await progress('awaiting-approval', true);
             await requireCredentialHost(route, ctx);
@@ -457,7 +459,7 @@ export default function plugin(bb: BbPluginApi) {
             await requireCredentialHost(route, ctx);
             const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
             await progress('awaiting-approval');
-            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: 'Порядок в сейфах: ' + steps.length + ' шагов', payload: {mode: 'approve', title: 'Навести порядок в сейфах', purpose: steps.map((step, i) => (i + 1) + '. ' + describe(step)).join('\n') + '\nШаги идут по порядку и останавливаются на первой ошибке.', profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: 'Порядок в сейфах', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Служебный сейф', secrets: []}, describeSubmission: () => ({title: 'Vault clean-up approved (no credential values)'})}, {signal: ctx.signal});
+            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: 'Порядок в сейфах: ' + steps.length + ' шагов', payload: {mode: 'approve', title: 'Навести порядок в сейфах', purpose: steps.map((step, i) => (i + 1) + '. ' + describe(step)).join('\n') + '\nШаги идут по порядку и останавливаются на первой ошибке.', profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: 'Порядок в сейфах', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Служебный сейф', secrets: []}, describeSubmission: () => ({title: 'Vault clean-up approved (no credential values)'})}, {signal: ctx.signal}, progress);
             if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
             await progress('awaiting-approval', true);
             // Routes may have changed while the card waited; check again right before acting.
@@ -523,7 +525,7 @@ export default function plugin(bb: BbPluginApi) {
                 ? 'Перенести ' + entries.length + ' файлов в 1Password. Каждое значение после записи сверяется; файлы на диске не меняются.\n' + list
                 : 'Только для уже перенесённых и совпадающих значений: заменить их в файлах ссылками op:// и ' + (archiveDir ? 'переместить файлы-ключи в папку ' + home(archiveDir) + ' (с прежними путями, доступ только владельцу). ' : 'не трогать файлы-ключи: папка для них не указана. ') + 'Ничего не удаляется; файл не трогается, если что-то не совпало.\n' + list;
             await progress('awaiting-approval');
-            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: (mode === 'import' ? 'Перенос в 1Password: ' : 'Очистка после переноса: ') + entries.length + ' файлов', payload: {mode: 'approve', title: mode === 'import' ? 'Перенести ключи в 1Password' : 'Заменить ключи ссылками', purpose, profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: 'Перенос ключей', hostId: credentialHost(route), ...display, vaultId: vaults[0][0], vaultLabel: vaults.map(v => v[1]).join(', '), secrets: []}, describeSubmission: () => ({title: 'Secret migration approved (no values)'})}, {signal: ctx.signal});
+            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: setupTimeoutMs, title: (mode === 'import' ? 'Перенос в 1Password: ' : 'Очистка после переноса: ') + entries.length + ' файлов', payload: {mode: 'approve', title: mode === 'import' ? 'Перенести ключи в 1Password' : 'Заменить ключи ссылками', purpose, profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: 'Перенос ключей', hostId: credentialHost(route), ...display, vaultId: vaults[0][0], vaultLabel: vaults.map(v => v[1]).join(', '), secrets: []}, describeSubmission: () => ({title: 'Secret migration approved (no values)'})}, {signal: ctx.signal}, progress);
             if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
             await progress('awaiting-approval', true);
             await requireCredentialHost(route, ctx);
@@ -557,7 +559,7 @@ export default function plugin(bb: BbPluginApi) {
             if (route.requireApproval) {
                 const display = await displayContext(route, ctx);
                 await progress('awaiting-approval');
-                const result = await requestApproval({ threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Использовать секрет: ' + (configured.label ?? configured.purpose ?? operation), payload: { mode: 'approve', title: configured.label ?? configured.purpose ?? operation, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose, secrets: Object.entries(configured.references).map(([variable, reference]) => ({variable, reference, item: configured.referenceLabels?.[variable]?.item ?? 'Название записи не настроено', field: configured.referenceLabels?.[variable]?.field ?? reference.split('/').at(-1) ?? 'Поле не указано'})) }, describeSubmission: () => ({ title: 'Credential use approved' }) }, { signal: ctx.signal });
+                const result = await requestApproval({ threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Использовать секрет: ' + (configured.label ?? configured.purpose ?? operation), payload: { mode: 'approve', title: configured.label ?? configured.purpose ?? operation, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: route.hostId, ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose, secrets: Object.entries(configured.references).map(([variable, reference]) => ({variable, reference, item: configured.referenceLabels?.[variable]?.item ?? 'Название записи не настроено', field: configured.referenceLabels?.[variable]?.field ?? reference.split('/').at(-1) ?? 'Поле не указано'})) }, describeSubmission: () => ({ title: 'Credential use approved' }) }, { signal: ctx.signal }, progress);
                 if (result.outcome !== 'submitted' || z.object({ approved: z.literal(true) }).strict().safeParse(result.value).success === false)
                     return cancelledOutcome(result);
             }
@@ -615,7 +617,7 @@ export default function plugin(bb: BbPluginApi) {
             const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
             const machine = await displayContext({...route, hostId: session.hostId}, ctx);
             await progress('awaiting-approval');
-            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Использовать пароль: ' + [...new Set(Object.values(keys).map(k => k.item))].join(', ').slice(0, 120), payload: {mode: 'approve', title: 'Разовая команда с паролем', profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Команда целиком: ' + commandLine + '\nВыполнится на: ' + machine.hostLabel + '\nПароль получит только эта команда; в ответ агенту он не вернётся.', secrets: Object.entries(keys).map(([variable, key]) => ({variable, item: key.item, field: key.field}))}, describeSubmission: () => ({title: 'Critical command approved'})}, {signal: ctx.signal});
+            const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Использовать пароль: ' + [...new Set(Object.values(keys).map(k => k.item))].join(', ').slice(0, 120), payload: {mode: 'approve', title: 'Разовая команда с паролем', profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Команда целиком: ' + commandLine + '\nВыполнится на: ' + machine.hostLabel + '\nПароль получит только эта команда; в ответ агенту он не вернётся.', secrets: Object.entries(keys).map(([variable, key]) => ({variable, item: key.item, field: key.field}))}, describeSubmission: () => ({title: 'Critical command approved'})}, {signal: ctx.signal}, progress);
             if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
             await progress('awaiting-approval', true);
             await requireCredentialHost(route, ctx);
@@ -655,7 +657,7 @@ export default function plugin(bb: BbPluginApi) {
             if (approval) {
                 const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
                 await progress('awaiting-approval');
-                const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: kind === 'check' ? approvalTimeoutMs : setupTimeoutMs, title: 'Настройка 1Password: ' + title.toLowerCase(), payload: {mode: 'approve', title, purpose, profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', secrets: registryTitle ? [{item: registryTitle, field: 'Служебная заметка'}] : []}, describeSubmission: () => ({title: 'Vault operation approved (no credential values)'})}, {signal: ctx.signal});
+                const decision = await requestApproval({threadId: ctx.threadId, rendererId: 'credential', timeoutMs: kind === 'check' ? approvalTimeoutMs : setupTimeoutMs, title: 'Настройка 1Password: ' + title.toLowerCase(), payload: {mode: 'approve', title, purpose, profile: route.profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', secrets: registryTitle ? [{item: registryTitle, field: 'Служебная заметка'}] : []}, describeSubmission: () => ({title: 'Vault operation approved (no credential values)'})}, {signal: ctx.signal}, progress);
                 if (decision.outcome !== 'submitted' || !z.object({approved: z.literal(true)}).strict().safeParse(decision.value).success) return cancelledOutcome(decision);
             }
             if(approval)await progress('awaiting-approval',true);
@@ -686,6 +688,24 @@ export default function plugin(bb: BbPluginApi) {
         return {authentication:route.authentication,credentialHost:{name:source.name,status:source.status},ownerMachines:route.authentication==='desktop'?sources.map(x=>({name:x.name,status:x.status})):[],agentCommands:route.allowAgentCommands,sessionMachines:Object.keys(route.sessionHosts??{}).length,executionHost:{name:target.name,status:target.status},requiresApproval:route.requireApproval,operationCount:route.operations.length,serviceTokenConfigured:route.authentication==='service-account'?tokenConfigured:false,credentialCalls:0};
     }
     bb.agents.registerTool({name: 'oxi_op_history', description: 'Recover this project and session operation states after confirmation, interruption or restart. Contains no credential values. Running or needs-review does not prove that a write was undone; inspect before retrying.', parameters: z.object({}).strict(), execute: async (_, ctx) => JSON.stringify(await journal.list(ctx))});
+    async function approvalTest(profile:string, ctx:OperationContext) {
+        const {route}=await accessFor(ctx.projectId,profile);
+        const display=await displayContext(route,ctx);
+        const cards:{submitted:boolean}[]=[];
+        for(let index=1;index<=2;index++) {
+            const result=await journal.run('approval-test',profile,ctx,async progress=>{
+                await progress('awaiting-approval');
+                const decision=await requestApproval({threadId:ctx.threadId,rendererId:'credential',timeoutMs:approvalTimeoutMs,title:'Проверка подтверждения '+index+' из 2 — без секретов',payload:{mode:'approve',title:'Проверка подтверждения '+index+' из 2',projectId:ctx.projectId,threadId:ctx.threadId,profile,label:'Диагностика подтверждения',hostId:route.hostId,...display,vaultId:route.vaultId,vaultLabel:'Не используется',purpose:'Только проверка доставки и отправки карточки. 1Password не вызывается, команды не выполняются, секреты не читаются. После первого подтверждения появится вторая карточка.',secrets:[]},describeSubmission:()=>({title:'Diagnostic approval submitted; no credentials accessed'})},{signal:ctx.signal},progress);
+                if(decision.outcome!=='submitted'||!z.object({approved:z.literal(true)}).strict().safeParse(decision.value).success)return cancelledOutcome(decision);
+                await progress('running',true);
+                return JSON.stringify({submitted:true,credentialCalls:0});
+            });
+            const submitted=!result.startsWith('Cancelled');
+            cards.push({submitted});if(!submitted)break;
+        }
+        return JSON.stringify({cards,credentialCalls:0});
+    }
+    bb.agents.registerTool({name:'oxi_op_approval_test',description:'Diagnose two sequential native BB approval cards without contacting 1Password, reading secrets or executing commands. Each card waits ten minutes. Run only for owner-requested approval delivery diagnosis; do not retry cancelled tests automatically.',parameters:z.object({profile:z.string().min(1).max(80).default('default')}).strict(),execute:({profile},ctx)=>toolOutcome(()=>approvalTest(profile,ctx))});
     const notifyOption = {type: 'boolean' as const, description: 'Return a completion notice to this same BB session, including after it becomes idle', default: false};
     async function interactiveCli(ctx: OperationContext, notify: boolean, work: () => Promise<string>) {
         ctx.notifyCompletion = notify;
@@ -698,6 +718,7 @@ export default function plugin(bb: BbPluginApi) {
         return result;
     }
     bb.cli.register(defineCli({ name: 'oxi-op', summary: 'Project-scoped 1Password operations', commands: {
+            'approval-test':cliCommand({summary:'Diagnose two sequential approval cards without credentials or commands',options:{profile:{type:'string',description:'Configured same-project profile for labels only',default:'default'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');return {exitCode:0,stdout:await approvalTest(input.options.profile,{projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal})};}}),
             diagnose:cliCommand({summary:'Inspect routing and machine availability without contacting 1Password',options:{profile:{type:'string',description:'Configured access profile',default:'default'}},async run(input,ctx){if(!ctx.projectId)throw new Error('Run in a BB project');return {exitCode:0,stdout:JSON.stringify(await diagnose(ctx.projectId,input.options.profile))};}}),
             automate:cliCommand({summary:'Approve issuing agent-reader and key-intake service accounts for project automation vaults',options:{notify:notifyOption,projects:{type:'string',description:'Comma-separated exact target BB project IDs',required:true},profile:{type:'string',description:'Existing owner desktop setup profile in this session project',required:true},host:{type:'string',description:'Default execution machine ID used for scope proofs',required:true},'session-hosts':{type:'string',description:'JSON object of allowed machine IDs to absolute op paths',required:true},'resume-only':{type:'boolean',description:'Only continue from tokens an earlier approval saved; never open a new approval',default:false},reissue:{type:'boolean',description:'Replace configured agent access with new accounts after one approval',default:false},'expires-in':{type:'string',description:'Optional account lifetime such as 90d; accounts never expire by default'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');const hosts=sessionHostsSchema.parse(JSON.parse(input.options['session-hosts']));const context={projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal};return interactiveCli(context,input.options.notify,()=>automate(input.options.projects.split(',').map(x=>x.trim()).filter(Boolean),input.options.profile,input.options.host,hosts,context,input.options['resume-only'],{reissue:input.options.reissue,expiresIn:input.options['expires-in']===undefined?undefined:z.string().regex(/^[1-9][0-9]{0,3}[dhw]$/).parse(input.options['expires-in'])}));}}),
             keys:cliCommand({summary:'List agent key titles and field names for this project; never values',options:{profile:{type:'string',description:'Agent access profile',default:'routine'}},async run(input,ctx){if(!ctx.projectId||!ctx.threadId)throw new Error('Run from a BB thread');return {exitCode:0,stdout:await listAgentKeys(input.options.profile,{projectId:ctx.projectId,threadId:ctx.threadId,signal:ctx.signal})};}}),

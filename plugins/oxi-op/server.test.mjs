@@ -157,7 +157,7 @@ test('intake shows its BB form before any op authentication and cancellation doe
   assert.deepEqual(h.inspection.experimental_hostRpcCalls, []);
 });
 
-test('native and CLI forms expire at one minute without contacting either credential host', async t => {
+test('native and CLI forms expire at ten minutes without contacting either credential host', async t => {
   t.mock.timers.enable({apis: ['setTimeout']});
   for (const mode of ['native', 'cli']) {
     const notices=[];
@@ -167,7 +167,7 @@ test('native and CLI forms expire at one minute without contacting either creden
       ? h.behavior.callAgentTool('oxi_op_run', {operation: 'example-operation'}, context)
       : h.behavior.runCli(['run', 'example-operation', '--notify'], context)).then(value => {settled = true; return value;});
     await setImmediate();
-    t.mock.timers.tick(59_999);
+    t.mock.timers.tick(599_999);
     await setImmediate();
     assert.equal(settled, false);
     t.mock.timers.tick(1);
@@ -185,6 +185,75 @@ test('an unconfigured project cannot request a form or call a host', async t => 
   assert.equal(JSON.parse(await h.behavior.callAgentTool('oxi_op_store', {title: 'Example'}, {...context, projectId: 'other-project'})).completed, false);
   assert.equal(h.inspection.pendingInteractions.length, 0);
   assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
+});
+
+test('sequential native approvals retain their own display and submit attempts past one minute',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ let h;
+ h=setup(t,{},undefined,undefined,async()=>h.inspection.pendingInteractions.map(x=>({id:x.id,origin:{kind:'plugin',pluginId:'oxi-op'},payload:{kind:'plugin',data:x.payload}})));
+ const first=h.behavior.callAgentTool('oxi_op_run',{operation:'example-operation'},context);
+ await setImmediate();
+ const a=h.inspection.pendingInteractions[0];
+ assert(a.payload.formRequestId);
+ t.mock.timers.tick(65_000);await setImmediate();
+ assert.equal(h.inspection.pendingInteractions.length,1);
+ await h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:a.id,formRequestId:a.payload.formRequestId,visible:true,phase:'submit-started'});
+ await h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:a.id,formRequestId:a.payload.formRequestId,visible:true,phase:'submit-failed'});
+ await h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:a.id,formRequestId:a.payload.formRequestId,visible:true,phase:'submit-started'});
+ let row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
+ assert.equal(row.submissionState,'failed');assert.equal(row.approvedAt,undefined);
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+ h.behavior.submitInteraction(a.id,{approved:true});await first;
+ const second=h.behavior.callAgentTool('oxi_op_run',{operation:'example-operation'},context);
+ await setImmediate();
+ const b=h.inspection.pendingInteractions[0];
+ assert.notEqual(a.payload.formRequestId,b.payload.formRequestId);
+ await assert.rejects(h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:b.id,formRequestId:a.payload.formRequestId,visible:true}));
+ t.mock.timers.tick(600_000);await second;
+ const rows=JSON.parse((await h.behavior.runCli(['history'],context)).stdout);
+ assert(rows.some(x=>x.state==='completed'&&x.approvedAt));
+ const cancelled=rows.find(x=>x.state==='cancelled');assert.equal(cancelled.formState,'not-observed');
+ assert(completionText(cancelled).includes('Показ формы не зарегистрирован'));
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,1);
+});
+
+test('native approval diagnostic opens sequential cards without contacting any credential host',async t=>{
+ const h=setup(t);
+ const pending=h.behavior.callAgentTool('oxi_op_approval_test',{},context);
+ await setImmediate();
+ const a=h.inspection.pendingInteractions[0];assert(a.payload.purpose.includes('1Password не вызывается'));
+ h.behavior.submitInteraction(a.id,{approved:true});await setImmediate();
+ const b=h.inspection.pendingInteractions[0];assert(b);assert.notEqual(a.id,b.id);
+ h.behavior.cancelInteraction(b.id);
+ const result=JSON.parse(await pending);
+ assert.equal(result.credentialCalls,0);assert.equal(result.cards.length,2);
+ assert.equal(result.cards[0].submitted,true);assert.equal(result.cards[1].submitted,false);
+ assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+});
+
+test('client telemetry cannot block a submit or replace its error, and never receives its value',async()=>{
+ const {submitCredential}=await import('./dist/test/app.js');
+ let submitted=0;const phases=[];
+ await submitCredential(async value=>{assert.equal(value.password,'synthetic-sensitive-value');submitted++;},{password:'synthetic-sensitive-value'},phase=>{phases.push(phase);throw new Error('diagnostic unavailable');});
+ assert.equal(submitted,1);assert.deepEqual(phases,['submit-started']);
+ const failure=new Error('submit unavailable');
+ await assert.rejects(submitCredential(async()=>{throw failure;},{approved:true},phase=>{phases.push(phase);throw new Error('diagnostic unavailable');}),error=>error===failure);
+ assert.deepEqual(phases,['submit-started','submit-started','submit-failed']);
+ assert(!JSON.stringify(phases).includes('synthetic-sensitive-value'));
+});
+
+test('client telemetry preserves failure and retry order without blocking submission',async()=>{
+ const {queueSubmission,submitCredential}=await import('./dist/test/app.js');
+ const queue={current:Promise.resolve()};const seen=[];let release;
+ const report=phase=>{void queueSubmission(queue,async()=>{seen.push(phase);if(seen.length===1)await new Promise(r=>{release=r;});});};
+ await assert.rejects(submitCredential(async()=>{throw Error('submit failed');},{approved:true},report));
+ await submitCredential(async()=>{},{approved:true},report);
+ assert.deepEqual(seen,['submit-started']);
+ release();await queue.current;
+ assert.deepEqual(seen,['submit-started','submit-failed','submit-started']);
+ await queueSubmission(queue,async()=>{throw Error('telemetry unavailable');});
+ await queueSubmission(queue,async()=>{seen.push('later');});
+ assert.equal(seen.at(-1),'later');
 });
 
 test('owner registry setup shows a BB approval before any desktop CLI call', async t => {
@@ -294,7 +363,7 @@ test('desktop check and verification require contextual approval before contacti
     await setImmediate();
     assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
     assert.equal(h.inspection.pendingInteractions.length, 1);
-    assert.equal(h.inspection.pendingInteractions[0].timeoutMs, command === 'verify' ? 600_000 : 60_000);
+    assert.equal(h.inspection.pendingInteractions[0].timeoutMs, 600_000);
     h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);
     await pending;
   }
@@ -367,7 +436,7 @@ test('interactive CLI can return completion to the same session without sending 
   const pending = h.behavior.runCli(['run', 'example-operation', '--notify'], context);
   await setImmediate();
   assert.equal(notices.length, 0);
-  assert.equal(h.inspection.pendingInteractions[0].timeoutMs, 60_000);
+  assert.equal(h.inspection.pendingInteractions[0].timeoutMs, 600_000);
   h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id, {approved: true});
   assert.equal((await pending).exitCode, 0);
   assert.equal(notices.length, 1);
@@ -854,7 +923,7 @@ test('a one-off critical command needs the owner card, reads on the owner Mac an
  const work=h.behavior.callAgentTool('oxi_op_exec',{argv:['sshpass','-e','ssh','root@example.test','uptime'],keys:{SSHPASS:{item:'Example server root',field:'password'}},profile:'default'},context);
  await setImmediate();await setImmediate();
  const form=h.inspection.pendingInteractions[0];
- assert.equal(form.timeoutMs,60_000);assert.deepEqual(calls.map(c=>c.method),['programAvailable'],'only the program check runs before the card');
+ assert.equal(form.timeoutMs,600_000);assert.deepEqual(calls.map(c=>c.method),['programAvailable'],'only the program check runs before the card');
  assert(form.payload.purpose.includes('sshpass -e ssh root@example.test uptime')&&form.payload.purpose.includes('Machine linux-server'));
  assert.deepEqual(form.payload.secrets,[{variable:'SSHPASS',item:'Example server root',field:'password'}]);
  h.behavior.submitInteraction(form.id,{approved:true});
