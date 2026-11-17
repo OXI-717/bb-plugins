@@ -47,9 +47,11 @@ export function completionText(row: ActionRecord): string {
         result?.cleaned!==undefined&&'cleaned='+result.cleaned, result?.authorized!==undefined&&'authorized='+result.authorized].filter(Boolean).join(', ');
     return 'Oxi Op: '+status+'. Операция: '+row.id+' ('+row.kind+'). '+(row.approvedAt?'Карточка подтверждена. ':'Карточка не подтверждена. ')+(details?details+'. ':'')+'Подтверждение карточки само по себе не означает успех операции. Результат сохранён в oxi_op_history. Не повторяйте операцию автоматически. Это сообщение с результатом, а не новое поручение. Секретов и вывода команды здесь нет.';
 }
-export function createJournal(storage: Storage, deliver?: (row: ActionRecord) => Promise<boolean>) {
+export function createJournal(storage: Storage, deliver?: (row: ActionRecord, signal?: AbortSignal) => Promise<boolean>) {
     const instance = randomUUID();
     const prefix = (ctx: Context) => 'action:' + encodeURIComponent(ctx.projectId) + ':' + encodeURIComponent(ctx.threadId) + ':';
+    const pendingSignals = new Map<string, {signal:AbortSignal; remove:()=>void}>();
+    const release = (id:string) => {pendingSignals.get(id)?.remove();pendingSignals.delete(id);};
     let flushing: Promise<void> | undefined;
     const flush = () => {
         if (flushing) return flushing;
@@ -58,9 +60,13 @@ export function createJournal(storage: Storage, deliver?: (row: ActionRecord) =>
                 const row = await storage.get<ActionRecord>(key);
                 if (!row || row.notification?.state !== 'pending' || !deliver) continue;
                 try {
-                    const sent = await deliver(row);
-                    row.notification.state = sent ? 'delivered' : 'suppressed';
-                    await storage.set(key, row);
+                    const signal=pendingSignals.get(row.id)?.signal;
+                    const sent = signal?.aborted ? false : await deliver(row, signal);
+                    const latest=await storage.get<ActionRecord>(key);
+                    if (!latest?.notification) continue;
+                    latest.notification.state = signal?.aborted || latest.notification.state==='suppressed' ? 'suppressed' : sent ? 'delivered' : 'suppressed';
+                    await storage.set(key, latest);
+                    release(row.id);
                 } catch { /* Keep only the safe durable result; retry delivery, never the operation. */ }
             }
         })().finally(()=>{flushing=undefined;});
@@ -85,6 +91,17 @@ export function createJournal(storage: Storage, deliver?: (row: ActionRecord) =>
             const finish = async () => {
                 if (deliver && interactive) row.notification = {projectId:ctx.projectId,threadId:ctx.threadId,state:ctx.signal?.aborted || ['thread-stopped','thread-deleted','request-aborted','plugin-disposed'].includes(row.cancelReason ?? '')?'suppressed':'pending'};
                 await save();
+                if (row.notification?.state==='pending' && ctx.signal) {
+                    const signal=ctx.signal;
+                    const cancel=()=>{
+                        row.notification!.state='suppressed';
+                        void storage.set(key, row).catch(()=>{});
+                        release(row.id);
+                    };
+                    pendingSignals.set(row.id,{signal,remove:()=>signal.removeEventListener('abort',cancel)});
+                    signal.addEventListener('abort',cancel,{once:true});
+                    if(signal.aborted)cancel();
+                }
                 if (deliver) await flush().catch(()=>{});
             };
             const save = async () => {row.updatedAt = new Date().toISOString(); await storage.set(key, row);};

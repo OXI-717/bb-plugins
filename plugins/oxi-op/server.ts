@@ -17,11 +17,11 @@ export default function plugin(bb: BbPluginApi) {
     // default of 30 seconds cut working calls off. Calls may run up to 15 minutes.
     const host: typeof rawHost = {...rawHost, call: (method, input, options) => rawHost.call(method, input, {timeoutMs: 15 * 60_000, ...options})};
     const credentialHost = (route: Route) => route.credentialHostId ?? route.hostId;
-    const journal = createJournal(bb.storage.kv, async row => {
+    const journal = createJournal(bb.storage.kv, async (row, requestSignal) => {
         const notice = row.notification!;
-        const signal = AbortSignal.timeout(10_000);
+        const signal = requestSignal ? AbortSignal.any([requestSignal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
         const thread = await bb.sdk.threads.get({threadId:notice.threadId,signal});
-        if (thread.id!==notice.threadId || thread.projectId!==notice.projectId || thread.archivedAt!=null || thread.deletedAt!=null || thread.status==='stopping') return false;
+        if (requestSignal?.aborted || thread.id!==notice.threadId || thread.projectId!==notice.projectId || thread.archivedAt!=null || thread.deletedAt!=null || thread.status==='stopping') return false;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
             await Promise.race([bb.sdk.threads.send({threadId:notice.threadId,mode:'queue-if-active',input:[{type:'text',text:completionText(row),mentions:[]}]}), new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('Completion delivery timed out')),10_000);})]);

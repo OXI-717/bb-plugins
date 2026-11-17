@@ -929,3 +929,22 @@ test('background completion delivery retries after reload without a second opera
  service.controller.abort();await service.done;
  assert.equal(sends,1);assert.equal(reloaded.harness.inspection.experimental_hostRpcCalls.length,0);
 });
+
+
+test('stopping while completion delivery awaits thread lookup suppresses the receipt durably', async () => {
+ const data=new Map();let unblock;let sends=0;const controller=new AbortController();
+ const storage={get:async key=>structuredClone(data.get(key)),set:async(key,value)=>data.set(key,structuredClone(value)),list:async prefix=>[...data.keys()].filter(k=>k.startsWith(prefix))};
+ const journal=createJournal(storage,async(row,signal)=>{await new Promise(r=>{unblock=r;});if(signal?.aborted)return false;sends++;return true;});
+ const pending=journal.run('verify','default',{...context,signal:controller.signal},async progress=>{await progress('awaiting-approval');return JSON.stringify({verified:true,cleaned:true});});
+ await setImmediate();controller.abort();unblock();await pending;
+ const reloaded=createJournal(storage,async()=>{sends++;return true;});await reloaded.flush();assert.equal(sends,0);
+});
+
+test('stopping after a failed send prevents background delivery after reload', async () => {
+ const data=new Map();let sends=0;const controller=new AbortController();
+ const storage={get:async key=>structuredClone(data.get(key)),set:async(key,value)=>data.set(key,structuredClone(value)),list:async prefix=>[...data.keys()].filter(k=>k.startsWith(prefix))};
+ const journal=createJournal(storage,async()=>{throw Error('offline');});
+ await journal.run('verify','default',{...context,signal:controller.signal},async progress=>{await progress('awaiting-approval');return JSON.stringify({verified:true,cleaned:true});});
+ controller.abort();await setImmediate();
+ const reloaded=createJournal(storage,async()=>{sends++;return true;});await reloaded.flush();assert.equal(sends,0);
+});
