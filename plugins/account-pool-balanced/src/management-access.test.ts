@@ -157,6 +157,7 @@ it('closes CLI inventory and mutation paths including forged identities and help
   expect((await execute(manage.token, ['management', 'unlock'])).exitCode).toBe(1);
   expect((await execute(read.token, ['config'])).exitCode).toBe(0);
   expect((await execute(read.token, ['config', 'get'])).exitCode).toBe(0);
+  for(const command of ['diagnostics','history','observations']) expect((await execute(read.token,[command,'--json'])).exitCode).toBe(0);
   actual.mockClear();
   expect((await execute(read.token, ['config', 'set', 'vpnGuardEnabled', 'false'])).exitCode).toBe(1);
   expect(actual).not.toHaveBeenCalled();

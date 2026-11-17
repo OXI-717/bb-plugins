@@ -82,3 +82,8 @@ For an explicitly authorized synthetic recovery test, inspect one thread with
 model response using `--interrupt-request <request-uuid> --confirm`; both identities
 must match. It does not change Guard, replay requests, or interrupt neighbours.
 See [controlled stream recovery](../../docs/cursor-paths.md#controlled-stream-recovery-check).
+
+For a read-only before/after queue measurement, use
+`bb pool diagnostics --from <UTC-hour> --to <UTC-hour> --json` through a short
+`read` management grant. See [diagnostics](../../docs/diagnostics.md) for coverage,
+freshness, losses and updater observation. It never starts updates or traffic.

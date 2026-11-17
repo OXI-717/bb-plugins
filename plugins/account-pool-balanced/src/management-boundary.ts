@@ -20,7 +20,7 @@ const pluginReads = new Map<string, ReadonlySet<string>>([
   ['vpn-guard', new Set(['vpnPolicy.get', 'config.get'])],
 ]);
 const readCli = (argv: string[]) =>
-  (['status', 'readiness'].includes(argv[0] ?? '')) ||
+  (['status', 'readiness', 'diagnostics', 'observations', 'history'].includes(argv[0] ?? '')) ||
   (argv[0] === 'account' && argv[1] === 'list') ||
   (argv[0] === 'config' && (argv.slice(1).every(arg => arg === '--json') || argv[1] === 'get')) ||
   (argv[0] === 'browser' && argv[1] === 'list') ||

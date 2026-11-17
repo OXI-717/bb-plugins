@@ -104,6 +104,7 @@ export class RequestJournal {
    evictedSinceStart:this.evicted,storageFailuresSinceStart:this.failures,oldestAt:this.rows[0]?.at??null,truncated:this.evicted>0||this.rows.length===MAX_ROWS,
    observedAt:now,totalRetainedRows:this.rows.length,rowsTruncated:this.rows.length>limit,providers:[...providers.values()].map(p=>({...p,accounts:[...p.accounts.values()]})),minutes:[...minutes.values()].sort((a,b)=>a.at-b.at),rows:this.rows.slice(-Math.max(1, Math.min(MAX_ROWS,limit))),history:this.history.summary()};
  }
+ historySummary(from:number,to:number){return this.history.periodSummary(from,to);}
  historySnapshot(offset = 0, limit = 100){return this.history.snapshot(offset,limit);}
  private prune():void{
   const now=this.now(),retained=this.rows.filter(r=>r.at>=now-TTL_MS&&r.at<=now);

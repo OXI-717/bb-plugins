@@ -1,3 +1,4 @@
+import { summarizeDiagnostics } from './diagnostics.js';
 import type {AgyAuthorization} from "./agy-oauth-login.js";
 import { createHash } from 'node:crypto';
 import type {
@@ -337,6 +338,33 @@ export class PoolOperations {
 
   isRoutingEnabled(provider: PoolProvider): Promise<boolean> {
     return this.routing.isProviderEnabled(provider);
+  }
+
+  async diagnostics(from:number,to:number) {
+    const first=this.hub.trafficDiagnostics(from,to);
+    const observations=this.hub.observations(2048);
+    const status=await this.hub.status();
+    return {
+      schema:'bb-account-pool/diagnostics/1',period:{from,to},
+      collectedAt:Date.now(),
+      historyCoverage:'history' in first?{
+        observedAt:first.observedAt,startedAt:first.startedAt,extendedCountersStartedAt:first.extendedCountersStartedAt,
+        retentionMs:first.retentionMs,maxRows:first.maxRows,maxBytes:first.maxBytes,totalRows:first.totalRows,
+        rowsRead:first.totalRows,truncated:first.truncated,capacityDroppedEvents:first.capacityDroppedEvents,
+        capacityEvictedBuckets:first.capacityEvictedBuckets,storageFailuresSinceStart:first.storageFailuresSinceStart,
+      }:{unavailable:true},
+      freshCoverage:'rows' in observations?{
+        observedAt:observations.observedAt,oldestAt:observations.oldestAt,
+        newestAt:observations.rows.at(-1)?.at??null,rowsRead:observations.rows.length,
+        totalRetainedRows:observations.totalRetainedRows,rowsTruncated:observations.rowsTruncated,
+        truncated:observations.truncated,evictedSinceStart:observations.evictedSinceStart,
+        retentionMs:observations.retentionMs,storageFailuresSinceStart:observations.storageFailuresSinceStart,
+      }:{unavailable:true},
+      accounts:status.accounts.map(a=>({id:a.id,provider:a.provider,enabled:a.enabled,status:a.status,
+        eligible:a.eligible,inFlight:a.inFlight,queuedRequests:a.queuedRequests,concurrencyLimit:a.concurrencyLimit})),
+      ...summarizeDiagnostics({from,to},[],'rows' in observations?observations.rows:[]),
+      history:'history' in first?first.history:[],
+    };
   }
 
   observations() { return this.hub.observations(); }
