@@ -14,6 +14,10 @@ class ReleaseVectorTests(unittest.TestCase):
                     'plugins/account-pool-balanced/package-lock.json', 'marketplace.json']
         vpn_files = ['plugins/vpn-guard/package.json', 'plugins/vpn-guard/package-lock.json']
         originals = {p: json.loads((source / p).read_text()) for p in relative + vpn_files}
+        # Fixture release vector is 0.4.87 -> 0.4.88 regardless of the checked-out version.
+        package, lock, market = (originals[p] for p in relative)
+        package['version'] = lock['version'] = lock['packages']['']['version'] = '0.4.87'
+        next(p for p in market['plugins'] if p['id'] == 'account-pool-balanced')['source']['git']['range'] = '^0.4.87'
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             def git(*args):
