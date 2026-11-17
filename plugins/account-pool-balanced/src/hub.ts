@@ -696,6 +696,16 @@ export class AccountPoolHub {
 
   maintenanceActivity():number { return this.networkFlights.size + this.refreshes.size + this.usageRefreshes.size; }
 
+  /**
+   * Accounts of this provider that a request from this project could use now, by the same
+   * project-scoped predicates as routing (project role, purpose, schedule, shared quota,
+   * reserve gate). Family-specific quota is not applied: the caller's model is unknown here.
+   */
+  async projectAvailability(provider: PoolProvider, projectId: string | null): Promise<Set<string>> {
+    const accounts = await this.options.accounts.list();
+    return new Set(this.eligibleEntries(provider, projectId, accounts, "other", this.options.now()).available.map(({ account }) => account.id));
+  }
+
   private modelAdmissionOpen(): boolean { return this.accepting && !this.options.maintenance?.status().lease; }
 
   interruptForMaintenance(owner: string): void {

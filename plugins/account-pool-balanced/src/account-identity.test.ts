@@ -94,3 +94,16 @@ it('keeps failover opt-in configurable through CLI without a UI setting',async()
  expect(await host.harness.behavior.callRpc('config.get',null)).toMatchObject({pinnedFailover:true});
  expect((await host.harness.behavior.runCli(['config'])).stdout).toContain('pinnedFailover: true');
 });
+
+it('reports account availability by the thread project role, not the global one',async()=>{
+ const {host,account}=await setup('claude','claude-code');
+ const call=(method:string,input:unknown)=>host.harness.behavior.callRpc(method,input);
+ // A global reserve is suppressed while a global primary is usable, but this project
+ // promotes it to primary: the thread can use it now.
+ const promoted=await call('account.add',{provider:'claude',source:{kind:'api-key',apiKey:'synthetic-promoted'},label:'Promoted',priority:1}) as Account;
+ await call('account.setRole',{accountId:promoted.id,role:'reserve'});
+ await call('account.setProjects',{accountId:promoted.id,projects:{onlySelected:false,rules:[{projectId:'project-one',role:'primary'}]},expectedProjects:null});
+ const choices=await call('thread.accountChoices',{threadId:'thread-one'}) as {accounts:Array<{id:string;state:string}>};
+ expect(choices.accounts.find(item=>item.id===promoted.id)?.state).toBe('ready');
+ expect(choices.accounts.find(item=>item.id===account.id)?.state).toBe('ready');
+});

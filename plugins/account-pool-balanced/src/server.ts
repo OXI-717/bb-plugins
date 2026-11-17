@@ -379,12 +379,14 @@ export function createAccountPoolPlugin(
       const context=await selectionContext(threadId),manual=await manualSelection.get(context.key);
       const rows=(await operations.list()).filter(a=>a.provider===context.provider && projectTier(a,context.projectId)!==null);
       const routes=egress.snapshot();
+      // Global status applies global roles; this thread is admitted by its project's rules.
+      const available=await hub.projectAvailability(context.provider,context.projectId);
       return {currentAccountId:manual??egress.pinnedAccount(context.key),mode:manual?'manual' as const:'auto' as const,pinned:manual!==null || egress.pinnedAccount(context.key)!==null,
         accounts:rows.map(a=>{
           const q=quotas.get(a.id),at=now();
           // The same reset the pool reports when it refuses a request for this account.
           const reset=blockingResetAt(q,'other',policyThresholds(a,currentSettings.switchThreshold),at);
-          const state=!a.enabled?'disabled' as const:q.error?'error' as const:(q.heldUntil??0)>at?'held' as const:!a.eligible?'exhausted' as const:'ready' as const;
+          const state=!a.enabled?'disabled' as const:q.error?'error' as const:(q.heldUntil??0)>at?'held' as const:!available.has(a.id)?'exhausted' as const:'ready' as const;
           return {id:a.id,label:a.email??a.label,state,until:state==='held'?q.heldUntil:state==='exhausted'&&reset!==null&&reset>at?Math.round(reset):null,
             selectable:a.enabled&&!q.error,assigned:routes.bindings[a.id]!==undefined || routes.pins[context.key]?.accountId===a.id};
         })};
