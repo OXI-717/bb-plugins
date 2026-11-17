@@ -663,16 +663,16 @@ it('does not delay an enforcement stop behind optional recovery history reads',a
 });
 
 
-it.each(['neuraldeep','agy'])('admits %s through the existing scoped policy without exempting it',async(providerUnderTest)=>{
+it.each(['networkDecision','networkDecisionV2'].flatMap(method=>['neuraldeep','agy','grok'].map(provider=>({method,provider}))))('admits $provider via $method through the existing scoped policy without exempting it',async({method,provider:providerUnderTest})=>{
  const {fake,states}=await setup();
  let members=['codex','claude','cursor','devin'];
  fake.harness.sdk.stub('plugins.callRpc',async()=>({vpnGuardEnabled:true,vpnPolicyVersion:2,vpnOnlyProviders:members}) as never);
  states.set('host-a','connected');
  await select(fake,['host-a']);await mode(fake,'enforce');
- const decision=(provider:string,hostId='host-a')=>fake.harness.behavior.callRpc('networkDecisionV2',{hostId,provider});
+ const decision=(provider:string,hostId='host-a')=>fake.harness.behavior.callRpc(method,{hostId,provider});
  expect(await decision(providerUnderTest)).toMatchObject({allowed:false,reason:'vpn_unavailable'});
- members=[...members,'neuraldeep','agy'];
- for(const provider of ['codex','claude','cursor','devin','opencode-go','neuraldeep','agy']){
+ members=[...members,'neuraldeep','agy','grok'];
+ for(const provider of ['codex','claude','cursor','devin','opencode-go','neuraldeep','agy','grok']){
    expect(await decision(provider)).toMatchObject({allowed:true,reason:'connected'});
  }
  await expect(decision('synthetic-unknown-provider')).rejects.toThrow('validation');

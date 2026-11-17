@@ -25,3 +25,5 @@ Enable `bb pool config set vpnGuardEnabled true` after upgrading both plugins. G
 Enable the persisted Pooler linkage after upgrading both plugins. Guard covers Cursor/Devin Pool aliases and supplies an uncached network decision for the pool server. Missing/malformed/timed-out Guard fails closed for protected owned traffic. No BB build or system firewall changes; direct/native Send-now and independent maintenance remain outside the strict guarantee. [Реализованные гарантии и ограничения / guarantees and limits](../../docs/vpn-plugin-protection-limits.md).
 
 Automatic recovery uses ordinary BB admission and preserves manual blocks and newer user activity. See [recovery policy / правила продолжения](../../docs/pool-errors.md).
+
+`networkDecision` и `networkDecisionV2` принимают `grok` как защищённого провайдера: к нему применяются те же проверки политики пула, VPN и ручной блокировки. Неизвестные имена по-прежнему отклоняются контрактом.
