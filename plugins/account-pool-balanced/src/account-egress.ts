@@ -34,8 +34,8 @@ const refSchema = z.object({id, version:z.number().int().positive()}).strict();
 export const egressStateSchema = z.object({schema:z.literal(1),profiles:z.array(egressProfileSchema).max(128),
   bindings:z.record(z.string().uuid(),refSchema),
   pins:z.record(z.string().max(2048),z.object({accountId:z.string().uuid(),ref:refSchema}).strict()).default({}),
-  // Absence of a profile is also an immutable route decision. Keep it per
-  // account so unassigned providers retain their existing selection policy.
+  // Historical unassigned decisions prevent creating a later home pin.
+  // Routing always follows the selected account binding.
   unassigned:z.record(z.string().max(2048),z.array(z.string().uuid()).min(1).max(128)).default({}),
   assignmentBlocked:z.boolean().default(false),
 }).strict();
@@ -87,18 +87,13 @@ export class AccountEgress {
     return this.scopeAcceptances.accept(input);
   }
   revokeScope(value:unknown){return this.scopeAcceptances.revoke(value);}
-  /** Only assigned pins constrain account selection; ordinary affinity may fail over. */
+  /** Saved home preference; eligibility is checked by the selector. */
   pinnedAccount(sessionKey:string):string|null{return this.state.pins[sessionKey]?.accountId??null;}
-  /**
-   * Whether the account can serve this conversation without changing the route decision
-   * already recorded for it. Used only to keep optional load placement from moving a
-   * conversation onto an account whose assigned egress it would not use.
-   */
+  /** Placement preference only: keep eligible home accounts despite load. */
   compatible(accountId:string,sessionKey:string|null):boolean{
     if(!sessionKey)return true;
     const pinned=this.sessions.get(sessionKey)?.accountId??this.state.pins[sessionKey]?.accountId;
     if(pinned!==undefined)return pinned===accountId;
-    if(this.state.unassigned[sessionKey]!==undefined)return this.state.bindings[accountId]===undefined;
     return true;
   }
   validateNativeProfile(ref:{id:string;version:number},hostId:string):void{
@@ -148,11 +143,10 @@ export class AccountEgress {
   });}
   async acquire(accountId:string,sessionKey?:string|null):Promise<AccountRoute>{
     const old=sessionKey?this.sessions.get(sessionKey):undefined;
-    if(old){if(old.accountId!==accountId || old.route.profile && !old.route.profile.hostIds.includes(await this.hostId()))throw new EgressUnavailable();return old.route;}
+    if(old?.accountId===accountId){if( old.route.profile && !old.route.profile.hostIds.includes(await this.hostId()))throw new EgressUnavailable();return old.route;}
     const pin=sessionKey?this.state.pins[sessionKey]:undefined;
-    if(pin && pin.accountId!==accountId)throw new EgressUnavailable();
     const previousUnassigned=sessionKey && this.state.unassigned[sessionKey]!==undefined;
-    const ref=pin?.ref??(previousUnassigned?undefined:this.state.bindings[accountId]);
+    const ref=pin?.accountId===accountId?pin.ref:this.state.bindings[accountId];
     let route:AccountRoute={assigned:false,profile:null,fetch:()=>undefined};
     if(ref){
       const value=this.state.profiles.find(p=>p.id===ref.id&&p.version===ref.version);
@@ -195,20 +189,20 @@ export class AccountEgress {
           accountId,hostId:routeHost,profile:{id:profile.id,version:profile.version},profileFingerprint:profileFingerprint(profile),
         },now)};
     }
-    // Pins survive settings edits. Bounded refusal does not evict warm sessions.
+    // Pins survive settings edits. Capacity only limits new bookkeeping.
     // Providers outside central egress retain their policy even at capacity.
     if(sessionKey && (ref || await this.accountExists(accountId))){
       await this.update(async()=>{
         const prior=this.state.pins[sessionKey];
-        if(prior && (prior.accountId!==accountId || prior.ref?.id!==ref?.id || prior.ref?.version!==ref?.version))throw new EgressUnavailable();
+        if(prior)return;
         const unassigned=this.state.unassigned[sessionKey]??[];
-        if(!ref && this.state.assignmentBlocked)return;
-        if(!prior && (ref || !unassigned.includes(accountId))){
+        if(this.state.assignmentBlocked)return;
+        if(!prior && (ref ? !previousUnassigned : !unassigned.includes(accountId))){
           const next=ref
             ? {...this.state,pins:{...this.state.pins,[sessionKey]:{accountId,ref}}}
             : {...this.state,unassigned:{...this.state.unassigned,[sessionKey]:[...unassigned,accountId]}};
           if(decisionCount(this.state)>=4096 || !ref && unassigned.length>=128 || registryBytes(next)>MAX_REGISTRY_BYTES){
-            if(ref)throw new EgressUnavailable();
+            if(ref)return;
             // Preserve ordinary service. Stop new bindings before forgetting
             // an unassigned route, rather than evicting a warm decision.
             const blocked={...this.state,assignmentBlocked:true};
@@ -216,7 +210,7 @@ export class AccountEgress {
           }
           await this.kv.set('account-egress-v1',next);this.state=next;
         }
-        if(ref)this.sessions.set(sessionKey,{accountId,route});
+        if(ref && this.state.pins[sessionKey]?.accountId===accountId)this.sessions.set(sessionKey,{accountId,route});
       });
     }
     return route;

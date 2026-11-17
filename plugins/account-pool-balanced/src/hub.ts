@@ -757,7 +757,6 @@ export class AccountPoolHub {
     const routeSessionKey=threadId===null?affinityKey:JSON.stringify([accountScope?affinityHost:hostId,projectId,threadId,adapter.provider]);
     try {
       const pinnedRouteAccountId=routeSessionKey===null?null:this.options.pinnedRouteAccount?.(routeSessionKey)??null;
-      if(pinnedRouteAccountId!==null && !candidateIds.has(pinnedRouteAccountId))throw new EgressUnavailable();
       while (attempted.size < candidateIds.size) {
         signal.throwIfAborted();
         this.options.maintenance?.assertAllowed();
@@ -1321,7 +1320,6 @@ export class AccountPoolHub {
     // The persisted route pin outlives ordinary affinity. Reuse the same policy
     // predicate, never an arbitrary account lookup or a different candidate.
     const pinned=pinnedRouteAccountId===null?undefined:unattempted.find(({account})=>account.id===pinnedRouteAccountId);
-    if(pinnedRouteAccountId!==null && pinned===undefined)throw new EgressUnavailable();
     const requestHold = (accountId: string) => freeTier ? null : unattempted.find(e => e.account.id === accountId)?.quota.heldUntil ?? null;
     const ready = unattempted.filter(({ account }) => { const hold = requestHold(account.id); return hold === null || hold <= now; });
     const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (requestHold(a.account.id) ?? 0) - (requestHold(b.account.id) ?? 0)).slice(0,1);

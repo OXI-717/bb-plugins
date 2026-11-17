@@ -120,7 +120,7 @@ it('restores Codex pins using provider session affinity without a BB thread bind
 });
 
 for (const reason of ['disabled', 'removed', 'project', 'purpose', 'quota', 'shared-quota', 'family', 'schedule', 'cap'] as const) {
-  it(`refuses an ineligible saved account (${reason}) before any upstream with another eligible account present`, async () => {
+  it(`fails over from an ineligible saved account (${reason}) before any upstream with another eligible account present`, async () => {
     const f = await fixture(); await f.seedAssigned(); f.advance(); await f.restart();
     if (reason === 'disabled') await f.accounts.setEnabled(f.a.id, false);
     if (reason === 'removed') await f.accounts.remove(f.a.id);
@@ -134,8 +134,8 @@ for (const reason of ['disabled', 'removed', 'project', 'purpose', 'quota', 'sha
       reserveDrainHours: null, schedule: { timeZone: 'UTC', intervals: [] } });
     if (reason === 'cap') await f.accounts.setCap(f.a.id, { early: 0, late: 0 });
     const response = await f.request('original', 'claude-sonnet-fixture', reason === 'purpose');
-    expect(response.status).toBe(503); expect(response.headers.get('x-bb-pool-error')).toBe('POOL_EGRESS_UNAVAILABLE');
-    expect(f.sends).toEqual([]);
+    expect(response.status).toBe(200);
+    expect(f.sends.at(-1)?.key).toBe('fixture-b');
     expect(f.egress().snapshot().pins[f.sessionKey]).toEqual({ accountId: f.a.id, ref: { id: profile.id, version: 1 } });
   });
 }
@@ -150,8 +150,8 @@ it('rechecks the pinned account policy after the awaited Guard before dispatch',
   let checks = 0;
   f.onGuard(async () => { if (++checks === 2) await f.accounts.setEnabled(f.a.id, false); });
   const response = await f.request();
-  expect(response.status).toBe(503); expect(response.headers.get('x-bb-pool-error')).toBe('POOL_EGRESS_UNAVAILABLE');
-  expect(checks).toBe(2); expect(f.sends).toEqual([]);
+  expect(response.status).toBe(200);
+  expect(f.sends.at(-1)?.key).toBe('fixture-b');
 });
 
 it('still enforces the shared admission deadline for the pinned account with another account available', async () => {
@@ -169,18 +169,30 @@ it('retains the assigned route after unbind and returns one provider refusal wit
   expect(f.sends).toEqual([{ key: 'fixture-a', assigned: true, model: 'claude-sonnet-fixture' }]); expect(f.versions).toEqual([1]);
 });
 
-it('preserves ordinary failover after restart and later profile binding without retrospectively assigning the warm conversation', async () => {
-  const f = await fixture(); expect((await f.request()).status).toBe(200); expect(f.sends.at(-1)?.key).toBe('fixture-a');
-  await f.egress().configure(profile);
-  for (const account of [f.a, f.b]) await f.egress().bind(account.id, { id: profile.id, version: 1 });
-  f.advance(); await f.restart(); f.sends.length = 0;
-  f.status(key => key === 'fixture-a' ? 500 : 200);
-  expect((await f.request()).status).toBe(200);
-  expect(f.sends).toEqual([
-    { key: 'fixture-a', assigned: false, model: 'claude-sonnet-fixture' },
-    { key: 'fixture-b', assigned: false, model: 'claude-sonnet-fixture' },
-  ]);
-  expect(f.egress().snapshot().pins[f.sessionKey]).toBeUndefined();
+it('routes a warm conversation through a newly assigned profile without provider replay', async () => {
+  const f = await fixture(); await f.request();
+  await f.egress().configure(profile); await f.egress().bind(f.a.id,{id:profile.id,version:1});
+  f.status(500); f.sends.length=0;
+  expect((await f.request()).status).toBe(500);
+  expect(f.sends).toEqual([{key:'fixture-a',assigned:true,model:'claude-sonnet-fixture'}]);
+});
+
+it.each([true,false])('returns home after quota recovery; fallback assigned=%s',async assigned=>{
+ const f=await fixture();await f.seedAssigned();
+ if(assigned)await f.egress().bind(f.b.id,{id:profile.id,version:1});
+ f.quotas.put({...f.quotas.get(f.a.id),fiveHourUtilization:1,fiveHourResetAt:2000000000000});
+ expect((await f.request()).status).toBe(200);
+ expect(f.sends.at(-1)).toMatchObject({key:'fixture-b',assigned});
+ expect(f.egress().pinnedAccount(f.sessionKey)).toBe(f.a.id);
+ f.quotas.put({...f.quotas.get(f.a.id),fiveHourUtilization:0});
+ expect((await f.request()).status).toBe(200);
+ expect(f.sends.at(-1)).toMatchObject({key:'fixture-a',assigned:true});
+});
+it('uses ordinary no-eligible response when all accounts are disabled',async()=>{
+ const f=await fixture();await f.seedAssigned();
+ await f.accounts.setEnabled(f.a.id,false);await f.accounts.setEnabled(f.b.id,false);
+ const r=await f.request();expect(r.status).not.toBe(200);
+ expect(r.headers.get('x-bb-pool-error')).not.toBe('POOL_EGRESS_UNAVAILABLE');expect(f.sends).toEqual([]);
 });
 
 it('leaves an unsupported provider on ordinary selection without registering a route decision', async () => {

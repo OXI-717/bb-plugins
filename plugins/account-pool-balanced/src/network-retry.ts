@@ -8,9 +8,10 @@ export function retryableNetworkFailure(failure:PluginTurnFailedEvent):boolean {
   if(!Number.isInteger(failure.attemptNumber)||failure.attemptNumber<1||failure.attemptNumber>3)return false;
   const error=failure.errorInfo;
   if(!error)return false;
+  if(error.providerCode==='POOL_EGRESS_UNAVAILABLE' && ((error.httpStatusCode??0)<500 || (error.httpStatusCode??0)>=600))return false;
   if(error.category==='connection-failed'||error.category==='stream-disconnected')return true;
   // Stable local codes only; never infer retries from arbitrary exception text.
-  return ['POOL_UPSTREAM_UNAVAILABLE','VPN_REQUIRED','VPN_GUARD_BLOCKED','VPN_GUARD_UNAVAILABLE'].includes(error.providerCode??'') && (error.httpStatusCode??0)>=500 &&
+  return ['POOL_EGRESS_UNAVAILABLE','POOL_UPSTREAM_UNAVAILABLE','VPN_REQUIRED','VPN_GUARD_BLOCKED','VPN_GUARD_UNAVAILABLE'].includes(error.providerCode??'') && (error.httpStatusCode??0)>=500 &&
     !['unauthorized','policy','billing','rate-limit','overloaded'].includes(error.category);
 }
 // ACP drops JSON-RPC error.data. Read only the latest provider error in the
@@ -23,7 +24,7 @@ async function normalizedCursorFailure(bb:BbPluginApi,failure:PluginTurnFailedEv
     if(row.threadId!==failure.threadId)return failure;
     if(row.type==='client/turn/requested'){
       if(row.data.requestId!==failure.requestId||!message)return failure;
-      const match=/^(?:Internal error: )?\[(POOL_UPSTREAM_UNAVAILABLE|VPN_REQUIRED|VPN_GUARD_BLOCKED|VPN_GUARD_UNAVAILABLE)\] Pooler connection temporarily unavailable\.$/.exec(message);
+      const match=/^(?:Internal error: )?\[(POOL_EGRESS_UNAVAILABLE|POOL_UPSTREAM_UNAVAILABLE|VPN_REQUIRED|VPN_GUARD_BLOCKED|VPN_GUARD_UNAVAILABLE)\] Pooler connection temporarily unavailable\.$/.exec(message);
       return match?{...failure,errorInfo:{category:'connection-failed',httpStatusCode:503,providerCode:match[1]!}}:failure;
     }
     if(row.type==='provider/error'&&message===undefined){
