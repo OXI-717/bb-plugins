@@ -242,6 +242,20 @@ test('client telemetry cannot block a submit or replace its error, and never rec
  assert(!JSON.stringify(phases).includes('synthetic-sensitive-value'));
 });
 
+test('client telemetry preserves failure and retry order without blocking submission',async()=>{
+ const {queueSubmission,submitCredential}=await import('./dist/test/app.js');
+ const queue={current:Promise.resolve()};const seen=[];let release;
+ const report=phase=>{void queueSubmission(queue,async()=>{seen.push(phase);if(seen.length===1)await new Promise(r=>{release=r;});});};
+ await assert.rejects(submitCredential(async()=>{throw Error('submit failed');},{approved:true},report));
+ await submitCredential(async()=>{},{approved:true},report);
+ assert.deepEqual(seen,['submit-started']);
+ release();await queue.current;
+ assert.deepEqual(seen,['submit-started','submit-failed','submit-started']);
+ await queueSubmission(queue,async()=>{throw Error('telemetry unavailable');});
+ await queueSubmission(queue,async()=>{seen.push('later');});
+ assert.equal(seen.at(-1),'later');
+});
+
 test('owner registry setup shows a BB approval before any desktop CLI call', async t => {
   const h = setup(t, {authentication: 'desktop', accountId: 'example-account', tokenEnvironment: undefined, credentialHostId: 'example-credential-host'});
   const pending = h.behavior.runCli(['inventory', '--title', 'Example registry'], context);
