@@ -1,8 +1,8 @@
 import {runTaskProcess} from './task-process.js';
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { randomUUID } from 'node:crypto';
-import { contract, type Route } from './contract.js';
-import { CodedError } from './errors.js';
+import { contract, storeFailureCode, type Route } from './contract.js';
+import { CodedError, errorCode } from './errors.js';
 import { runProcess, runOwnedProcess, brokerRunner, storeCredential, serviceEnvironment, readOperationBindings, executeOperationBindings, provisionProjectVault, issueServiceAccounts, probeServiceScope, listVaultKeys, execWithKeys, keyReader, runCommand, overviewVaults, execResolved, runTidy, programAvailable, importFiles, replaceWithReferences } from './core.js';
 const pending = new Set<string>();
 // Owner-approved (desktop) op calls go through the OXI Op broker service when the route names
@@ -176,11 +176,15 @@ export default experimental_defineHostEntry({ contract, handlers: {
         store: async ({ route, title, username, password, serviceAccountToken }, ctx) => {
             const key = route.vaultId + '\0' + title;
             if (pending.has(key))
-                throw new Error('This item is already being stored');
+                return {failed:true as const,code:'store-in-progress' as const};
             pending.add(key);
             const runner: typeof runProcess = (binary, args, env, input, signal) => runOp(route)(route.opBinary, route.authentication === 'desktop' ? ['--account', route.accountId!, ...args] : args, env, input, signal);
             try {
                 return await storeCredential(runner, await environment(route, ctx.signal, serviceAccountToken), route.vaultId, title, username, password, ctx.signal);
+            }
+            catch(error) {
+                const parsed=storeFailureCode.safeParse(errorCode(error));
+                return {failed:true as const,code:ctx.signal.aborted?'store-cancelled' as const:parsed.success?parsed.data:'store-host-failed' as const};
             }
             finally {
                 pending.delete(key);

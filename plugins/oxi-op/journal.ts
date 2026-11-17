@@ -6,8 +6,8 @@ type Storage = {get<T>(key: string): Promise<T | undefined>; set(key: string, va
 type Context = {projectId: string; threadId: string; signal?: AbortSignal; notifyCompletion?: boolean};
 type Kind = 'automate' | 'exec' | 'overview' | 'tidy' | 'migrate' | 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
 type State = 'preparing' | 'awaiting-approval' | 'running' | 'completed' | 'cancelled' | 'failed' | 'needs-review' | 'interrupted';
-export type ActionRecord = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; failureCode?: string; result?: unknown; notification?: {projectId:string;threadId:string;state:'pending'|'delivered'|'suppressed'}};
-export type Progress = (state: 'awaiting-approval' | 'running', approved?: boolean) => Promise<void>;
+export type ActionRecord = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; failureCode?: string; result?: unknown; formState?: 'not-observed' | 'mounted' | 'visible'; notification?: {projectId:string;threadId:string;state:'pending'|'delivered'|'suppressed'}};
+export type Progress = (state?: 'awaiting-approval' | 'running', approved?: boolean, formState?: ActionRecord['formState']) => Promise<void>;
 
 // Persist only these metadata shapes; never persist form input or raw errors.
 const results = {
@@ -45,7 +45,7 @@ export function completionText(row: ActionRecord): string {
     const details = [row.cancelReason && 'reason='+row.cancelReason, row.failureCode && 'code='+row.failureCode,
         result?.exitCode!==undefined&&'exitCode='+result.exitCode, result?.verified!==undefined&&'verified='+result.verified,
         result?.cleaned!==undefined&&'cleaned='+result.cleaned, result?.authorized!==undefined&&'authorized='+result.authorized].filter(Boolean).join(', ');
-    return 'Oxi Op: '+status+'. Операция: '+row.id+' ('+row.kind+'). '+(row.approvedAt?'Карточка подтверждена. ':'Карточка не подтверждена. ')+(details?details+'. ':'')+'Подтверждение карточки само по себе не означает успех операции. Результат сохранён в oxi_op_history. Не повторяйте операцию автоматически. Это сообщение с результатом, а не новое поручение. Секретов и вывода команды здесь нет.';
+    return 'Oxi Op: '+status+'. Операция: '+row.id+' ('+row.kind+'). '+(row.approvedAt?'Карточка подтверждена. ':row.formState==='not-observed'?'Показ формы не зарегистрирован; причина доставки неизвестна. ':row.formState==='mounted'?'Форма загружена, видимость не подтверждена. ':row.formState==='visible'?'Показ формы зарегистрирован; отправка не зарегистрирована. ':'Отправка карточки не зарегистрирована. ')+(details?details+'. ':'')+'Подтверждение карточки само по себе не означает успех операции. Результат сохранён в oxi_op_history. Не повторяйте операцию автоматически. Это сообщение с результатом, а не новое поручение. Секретов и вывода команды здесь нет.';
 }
 export function createJournal(storage: Storage, deliver?: (row: ActionRecord, signal?: AbortSignal) => Promise<boolean>) {
     const instance = randomUUID();
@@ -107,8 +107,9 @@ export function createJournal(storage: Storage, deliver?: (row: ActionRecord, si
             const save = async () => {row.updatedAt = new Date().toISOString(); await storage.set(key, row);};
             await save();
             try {
-                const value = await work(async (state, approved) => {
-                    row.state = state;
+                const value = await work(async (state, approved, formState) => {
+                    if (state) row.state = state;
+                    if (formState) row.formState = formState;
                     if (state === 'awaiting-approval') interactive = true;
                     if (approved) row.approvedAt = new Date().toISOString();
                     await save();

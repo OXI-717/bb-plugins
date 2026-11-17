@@ -3,13 +3,15 @@ import { z } from 'zod';
 import {taskContract,assignmentSchema} from './task-contract.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { CodedError, errorCode } from './errors.js';
-import { contract, routeSchema, resolveRoute, keyReferenceSchema, tidyStepSchema, type Route } from './contract.js';
-import {createJournal, completionText, cancelledOutcome, OperationFailure} from './journal.js';
+import { contract, routeSchema, resolveRoute, keyReferenceSchema, tidyStepSchema, storeFailureCode, type Route } from './contract.js';
+import {createJournal, completionText, cancelledOutcome, OperationFailure, type Progress} from './journal.js';
 type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal; notifyCompletion?: boolean};
 const approvalTimeoutMs = 60_000;
+// Intake needs time for copying a credential; no credential is used before submission.
+const intakeTimeoutMs = 600_000;
 // Setup cards change structure, never reveal or use a password: they wait ten minutes.
 const setupTimeoutMs = 600_000;
-export const deliveryContract = defineRpcContract({formReceipt: {input: z.object({threadId:z.string().min(1).max(100),interactionId:z.string().min(1).max(100),visible:z.boolean()}).strict(),output:z.object({recorded:z.literal(true)})}});
+export const deliveryContract = defineRpcContract({formReceipt: {input: z.object({threadId:z.string().min(1).max(100),interactionId:z.string().min(1).max(100),visible:z.boolean(),formRequestId:z.string().uuid().optional()}).strict(),output:z.object({recorded:z.literal(true)})}});
 export default function plugin(bb: BbPluginApi) {
     const settings = bb.settings.define({ routes: { type: 'string', label: 'Project vault routes (JSON)', default: '[]', experimental_multiline: true }, serviceAccountToken: { type: 'string', label: 'Legacy scoped service account token', secret: true, default: '' }, projectServiceAccounts: {type: 'string', label: 'Project and profile service accounts (encrypted JSON)', secret: true, default: '{}'} });
     const rawHost = bb.hosts.experimental_client({ contract });
@@ -40,14 +42,23 @@ export default function plugin(bb: BbPluginApi) {
     }});
     type Receipt = {interactionId:string;mountedAt:string;lastSeenAt:string;visibleEver:boolean};
     const receiptPrefix = (projectId:string,threadId:string) => 'display:'+encodeURIComponent(projectId)+':'+encodeURIComponent(threadId)+':';
-    bb.rpc.register(deliveryContract,{async formReceipt({threadId,interactionId,visible}) {
+    const activeForms=new Map<string,{threadId:string;projectId:string;progress:Progress;visible:boolean}>();
+    bb.rpc.register(deliveryContract,{async formReceipt({threadId,interactionId,visible,formRequestId}) {
         const requests = await bb.sdk.threads.interactions.list({threadId});
-        if (!requests.some(r => r.id===interactionId && r.origin?.kind==='plugin' && r.origin.pluginId===bb.pluginId)) throw new Error('This form is not pending for this plugin');
+        const interaction=requests.find(r => r.id===interactionId && r.origin?.kind==='plugin' && r.origin.pluginId===bb.pluginId);
+        if (!interaction) throw new Error('This form is not pending for this plugin');
+        if(formRequestId) {
+            const binding=z.object({formRequestId:z.string().uuid()}).safeParse(interaction.payload?.kind==='plugin'?interaction.payload.data:undefined);
+            if(!binding.success || binding.data.formRequestId!==formRequestId) throw new Error('Form request does not match this interaction');
+        }
         const thread=await bb.sdk.threads.get({threadId});
+        const tracked=formRequestId?activeForms.get(formRequestId):undefined;
+        if(formRequestId && (!tracked || tracked.threadId!==threadId || tracked.projectId!==thread.projectId)) throw new Error('Unknown form request');
         const key=receiptPrefix(thread.projectId,threadId)+interactionId;
         const previous=await bb.storage.kv.get<Receipt>(key);
         const now=new Date().toISOString();
         await bb.storage.kv.set(key,{interactionId,mountedAt:previous?.mountedAt??now,lastSeenAt:now,visibleEver:visible||previous?.visibleEver===true});
+        if(tracked && activeForms.get(formRequestId!)===tracked) {tracked.visible ||= visible;await tracked.progress(undefined,false,tracked.visible?'visible':'mounted');}
         return {recorded:true as const};
     }});
     // A one-minute card is easy to miss when the owner looks at another session. Every approval
@@ -157,15 +168,25 @@ export default function plugin(bb: BbPluginApi) {
         const access = {...configured, route};
         await requireCredentialHost(route,ctx);
         const display = await displayContext({...route, hostId: credentialHost(route)}, ctx);
-        await progress('awaiting-approval');
-        const result = await requestApproval({ threadId: ctx.threadId, rendererId: 'credential', timeoutMs: approvalTimeoutMs, title: 'Сохранить пароль: ' + title, payload: { mode: 'store', title, username, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Создать запись и проверить сохранённый пароль', secrets: [{field: 'password', item: title}] }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal });
+        await progress('awaiting-approval',false,'not-observed');
+        const formRequestId=randomUUID();
+        activeForms.set(formRequestId,{threadId:ctx.threadId,projectId:ctx.projectId,progress,visible:false});
+        let result;
+        try {result = await requestApproval({ threadId: ctx.threadId, rendererId: 'credential', timeoutMs: intakeTimeoutMs, title: 'Сохранить пароль: ' + title, payload: { mode: 'store', formRequestId, title, username, profile, projectId: ctx.projectId, threadId: ctx.threadId, label: route.label ?? 'Доступ проекта', hostId: credentialHost(route), ...display, vaultId: route.vaultId, vaultLabel: route.vaultLabel ?? 'Название сейфа не настроено', purpose: 'Создать запись и проверить сохранённый пароль', secrets: [{field: 'password', item: title}] }, describeSubmission: () => ({ title: 'Credential submitted (value omitted)' }) }, { signal: ctx.signal });}
+        finally {activeForms.delete(formRequestId);}
         if (result.outcome !== 'submitted')
             return cancelledOutcome(result);
-        const value = z.object({ password: z.string().min(1).max(16000) }).strict().parse(result.value);
         await progress('awaiting-approval',true);
+        const parsedValue = z.object({ password: z.string().min(1).max(16000) }).strict().safeParse(result.value);
+        if(!parsedValue.success)throw new CodedError('store-invalid-submission','Submitted credential form is invalid');
+        const value=parsedValue.data;
         await requireCredentialHost(route,ctx);
         await progress('running', true);
-        return JSON.stringify(await host.call('store', { ...access, title, username, password: value.password }, { hostId: credentialHost(route), signal: ctx.signal }));
+        let stored;
+        try {stored=await host.call('store', { ...access, title, username, password: value.password }, { hostId: credentialHost(route), signal: ctx.signal });}
+        catch(error) {const parsed=storeFailureCode.safeParse(errorCode(error));throw new CodedError(parsed.success?parsed.data:'store-host-failed','Credential storage did not complete; inspect history before retrying');}
+        if ('failed' in stored) throw new CodedError(stored.code,'Credential storage did not complete; inspect history before retrying');
+        return JSON.stringify(stored);
         }, title);
     }
     let connecting = false;
@@ -694,7 +715,8 @@ export default function plugin(bb: BbPluginApi) {
                 const expected=createHash('sha256').update(value).digest('hex');
                 const rows:Record<string,unknown>[]=[];
                 try{
-                    await host.call('store',{route:intake,serviceAccountToken:tokens.intake,title,username:'synthetic-selftest',password:value},{hostId:intake.hostId,signal:ctx.signal});
+                    const stored=await host.call('store',{route:intake,serviceAccountToken:tokens.intake,title,username:'synthetic-selftest',password:value},{hostId:intake.hostId,signal:ctx.signal});
+                    if('failed' in stored)throw new CodedError(stored.code,'Synthetic intake failed');
                     for(const hostId of hosts){
                         const route={...reader,hostId,opBinary:reader.sessionHosts![hostId]};
                         try{
