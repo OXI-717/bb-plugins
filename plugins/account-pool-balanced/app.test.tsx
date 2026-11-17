@@ -1191,7 +1191,7 @@ describe("Account Pool settings", () => {
         await writeText.mock.results[0]?.value;
       });
       expect(writeText).toHaveBeenCalledWith("ABCD-1234");
-      expect(slot.getByText("Код входа скопирован")).toBeTruthy();
+      expect(await slot.findByText("Код входа скопирован")).toBeTruthy();
       expect(codeCopyButton.querySelector('[data-icon="Check"]')).not.toBeNull();
       expect(expire).toBeTypeOf("function");
       clearTimeout(expirationTimer);
