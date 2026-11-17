@@ -1485,3 +1485,15 @@ it.each([false,true])('switches subscription inside the existing dialog; RPC err
   await waitFor(()=>expect(ui.getByRole('button',{name:'Автоматически (по умолчанию)'}).getAttribute('aria-pressed')).toBe('true'));
  }
 });
+
+it.each(['ready','disabled'] as const)('uses thread choice state %s for confirmed reserve account',async state=>{
+ const a=account({email:'person@example.test',role:'reserve',eligible:false});
+ const choices={currentAccountId:a.id,mode:'auto',pinned:false,accounts:[{id:a.id,label:'person@example.test',state,until:null,selectable:state==='ready',assigned:false}]};
+ const ui=renderSlot(app.threadHeaderActions[0]!,{threadId:'thr-test',projectId:'project',isCompactViewport:false},{
+  rpc:{'thread.account':()=>({state:'observed',account:a,lastUsedAt:1800000000000}),'thread.accountChoices':()=>choices}
+ });
+ fireEvent.click(await ui.findByRole('button',{name:/Подписка треда: person@example.test · сейчас недоступен/}));
+ const expected=state==='ready'?'готов':'выключен';
+ await waitFor(()=>expect(ui.getByRole('button',{name:'Подписка треда: person@example.test · '+expected,hidden:true})).toBeTruthy());
+ expect(ui.getByText(/Последний подтверждённый запрос/).textContent).toContain('person@example.test · '+expected);
+});

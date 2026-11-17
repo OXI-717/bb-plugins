@@ -2784,7 +2784,8 @@ function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threa
   };
   if (status?.state === "unsupported") return null;
   const account = status?.account;
-  const availability = account === null || account === undefined ? "" : !account.enabled ? "выключен" : account.eligible ? "доступен" : "сейчас недоступен";
+  const choice = choices?.accounts.find(item=>item.id===account?.id);
+  const availability = choice ? THREAD_ACCOUNT_STATE[choice.state] : account === null || account === undefined ? "" : !account.enabled ? "выключен" : account.eligible ? "доступен" : "сейчас недоступен";
   const label = error ? "Пул: ошибка проверки" : status === null ? "Пул: проверка…" : status.state === "bypassed" ? "Вне пула" : status.state === "unobserved" ? "Пул: ещё нет данных" : `${(account ? accountFullName(account) : "Удалённый аккаунт")} · ${availability}`;
   const details = status?.state === "observed"
     ? `Последний подтверждённый запрос: ${label}. ${status.lastUsedAt === null ? "" : new Date(status.lastUsedAt).toLocaleString("ru-RU")}. ${choices?.pinned ? 'Тред закреплён за аккаунтом ('+(choices.mode==='manual'?'вручную':'автоматически')+').' : 'Аккаунт выбирается по правилам пула.'} Активных запросов аккаунта: ${account?.inFlight ?? 0}.`
