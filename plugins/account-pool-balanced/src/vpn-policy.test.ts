@@ -1,4 +1,5 @@
 import {vpnProof} from './vpn-test-fixture.js';
+import {GuardRequiredError} from './network-errors.js';
 import { describe, expect, it, vi } from "vitest";
 import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -105,4 +106,44 @@ it('measures only Guard and isolates observer failure from its decision',async()
  await expect(denied.assert('cursor',row=>observed.push(row))).rejects.toBe(failure);
  expect(observed.at(-1)).toMatchObject({outcome:'timeout'});
  const skip:unknown[]=[];await direct.assert('zai',row=>skip.push(row));expect(skip).toEqual([]);
+});
+
+describe('requirement that holds while the Guard gives no answer', () => {
+  const settings = accountPoolConfigSchema.parse({vpnGuardEnabled: true, vpnOnlyProviders: ['codex']});
+  const unanswered = (reason: 'timeout'|'rpc_failed') => new GuardRequiredError('codex', true, reason);
+  it('fails closed when no answered read ever allowed the provider', async () => {
+    const policy = createVpnPolicy(() => settings, () => 1_000_000, async now => vpnProof(now), async () => { throw unanswered('timeout'); });
+    await expect(policy.assert('codex')).rejects.toThrow('VPN_GUARD_UNAVAILABLE');
+    await expect(policy.assertWithoutGuard('codex')).rejects.toBeInstanceOf(VpnRequiredError);
+  });
+  it('needs nothing more after a direct answer, and keeps it across an unanswered read', async () => {
+    let answer: 'direct'|Error = 'direct';
+    const policy = createVpnPolicy(() => settings, () => 1_000_000, async () => null, async () => { if (answer instanceof Error) throw answer; return answer; });
+    await policy.assert('codex');
+    answer = unanswered('rpc_failed');
+    await expect(policy.assert('codex')).rejects.toThrow('VPN_GUARD_UNAVAILABLE');
+    await expect(policy.assertWithoutGuard('codex')).resolves.toBeUndefined();
+  });
+  it('still requires local VPN evidence after an ordinary allow', async () => {
+    let state: 'connected'|'disconnected' = 'connected';
+    let answer: undefined|Error;
+    const policy = createVpnPolicy(() => settings, () => 1_000_000, async now => vpnProof(now, state), async () => { if (answer) throw answer; });
+    await policy.assert('codex');
+    answer = unanswered('timeout');
+    await expect(policy.assertWithoutGuard('codex')).resolves.toBeUndefined();
+    state = 'disconnected';
+    const failure = await policy.assertWithoutGuard('codex').catch(error => error);
+    expect(failure).toBeInstanceOf(VpnRequiredError);
+    expect((failure as VpnRequiredError).code).toBe('VPN_REQUIRED');
+  });
+  it('forgets the previous answer after a refusal or an invalid decision', async () => {
+    for (const refusal of [new GuardRequiredError('codex'), new GuardRequiredError('codex', true, 'invalid_decision')]) {
+      let answer: 'direct'|Error = 'direct';
+      const policy = createVpnPolicy(() => settings, () => 1_000_000, async () => null, async () => { if (answer instanceof Error) throw answer; return answer; });
+      await policy.assert('codex');
+      answer = refusal;
+      await expect(policy.assert('codex')).rejects.toThrow(refusal.code);
+      await expect(policy.assertWithoutGuard('codex')).rejects.toBeInstanceOf(VpnRequiredError);
+    }
+  });
 });

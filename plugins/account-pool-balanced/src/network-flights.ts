@@ -28,20 +28,28 @@ export class NetworkFlights {
     }
     return false;
   }
-  constructor(private readonly upstream:typeof fetch,private readonly stop:()=>AbortSignal,private readonly check:(provider:PoolProvider)=>Promise<void>,private readonly selectFetch:(provider:PoolProvider,drainable:boolean)=>typeof fetch=()=>upstream,private maintenance?:PoolMaintenance,private readonly now:()=>number=Date.now) {}
-  /** True while an unanswered Guard read is still inside the grace for running responses. */
-  private tolerated(provider:PoolProvider,error:unknown):boolean {
-    if(!guardUnreadable(error)){this.unreadableSince.delete(provider);return false;}
+  constructor(private readonly upstream:typeof fetch,private readonly stop:()=>AbortSignal,private readonly check:(provider:PoolProvider)=>Promise<void>,private readonly selectFetch:(provider:PoolProvider,drainable:boolean)=>typeof fetch=()=>upstream,private maintenance?:PoolMaintenance,private readonly now:()=>number=Date.now,
+    /** The pool's own requirement that holds without the Guard (its last answer, local VPN evidence). */
+    private readonly withoutGuard:(provider:PoolProvider)=>Promise<void>=async()=>{}) {}
+  /**
+   * Null while an unanswered Guard read is still inside the grace for running responses;
+   * otherwise the reason to stop them. Guard silence never suspends the pool's own
+   * requirement: when that fails, its error is the reason, with no allowance.
+   */
+  private async refusal(provider:PoolProvider,error:unknown):Promise<unknown> {
+    if(!guardUnreadable(error)){this.unreadableSince.delete(provider);return error;}
+    try{await this.withoutGuard(provider);}catch(own){this.unreadableSince.delete(provider);return own;}
     const now=this.now(),since=this.unreadableSince.get(provider)??now;
     this.unreadableSince.set(provider,since);
-    return now-since<GUARD_UNREADABLE_GRACE_MS;
+    return now-since<GUARD_UNREADABLE_GRACE_MS?null:error;
   }
   get size(){return this.active.size;}
   async enforce() {
     for(const provider of new Set(this.active.values())) {
       try {await this.check(provider);this.unreadableSince.delete(provider);} catch(error) {
-        if(this.tolerated(provider,error))continue;
-        for(const [controller,current] of this.active) if(current===provider) controller.abort(error);
+        const reason=await this.refusal(provider,error);
+        if(reason===null)continue;
+        for(const [controller,current] of this.active) if(current===provider) controller.abort(reason);
       }
     }
     // A provider with no running response has nothing to tolerate: start afresh next time.
@@ -77,7 +85,7 @@ export class NetworkFlights {
       signal.throwIfAborted();
       // The request was admitted by a successful check just before dispatch. If the
       // repeat read merely gets no answer, the periodic enforcement decides within its grace.
-      try{await check();}catch(error){if(!this.tolerated(provider,error))throw error;}
+      try{await check();}catch(error){const reason=await this.refusal(provider,error);if(reason!==null)throw reason;}
       signal.throwIfAborted();
       if(!response.body){finished=true;release();return response;}
       reader=response.body.getReader();

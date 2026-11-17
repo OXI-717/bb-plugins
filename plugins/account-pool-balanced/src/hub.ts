@@ -243,7 +243,7 @@ export class AccountPoolHub {
             elapsedMs, transport: ipv4 ? "ipv4" : "default", stage: "fetch_headers",
             operation: drainable ? "model" : "auxiliary",
           }));
-      },options.maintenance,options.now);
+      },options.maintenance,options.now,provider=>this.vpn.assertWithoutGuard(provider));
   }
 
   /**

@@ -145,3 +145,18 @@ it('refuses a new request on an unanswered Guard read but lets an admitted one r
  checks=0;const refusing=new NetworkFlights(async()=>new Response(new ReadableStream()),()=>stop.signal,async()=>{if(++checks===2)throw new GuardRequiredError('claude');});
  await expect(refusing.fetch('claude','https://example.test')).rejects.toThrow('VPN_GUARD_BLOCKED');
 });
+
+it('never lets Guard silence suspend the pool own requirement',async()=>{
+ const {GuardRequiredError,VpnRequiredError}=await import('./network-errors.js');
+ let silent=false,evidenceLost=false;const stop=new AbortController();
+ const flights=new NetworkFlights(async()=>new Response(new ReadableStream()),()=>stop.signal,
+  async()=>{if(silent)throw new GuardRequiredError('codex',true,'timeout');},undefined,undefined,undefined,
+  async()=>{if(evidenceLost)throw new VpnRequiredError('codex');});
+ const response=await flights.fetch('codex','https://example.test');let outcome='open';
+ void response.text().catch(error=>{outcome=String((error as Error).message);});
+ // Guard silent, own requirement holds: the response continues.
+ silent=true;await flights.enforce();await Promise.resolve();expect(outcome).toBe('open');
+ // Own requirement lost during the silence: stopped at once, for that reason.
+ evidenceLost=true;await flights.enforce();
+ await vi.waitFor(()=>expect(outcome).toContain('VPN_REQUIRED'));expect(outcome).not.toContain('VPN_GUARD_UNAVAILABLE');expect(flights.size).toBe(0);
+});

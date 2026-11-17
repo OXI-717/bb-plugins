@@ -106,6 +106,7 @@ A Guard read that gets no answer (a timeout after both attempts, or a failed cal
 
 - **New requests** are refused locally from the first unanswered read, exactly as before. Nothing is sent.
 - **Responses that were already admitted** by a successful read keep running for at most 30 seconds while the Guard stays unreadable. The repeat read after response headers and the periodic one-second check both follow this rule. If the Guard is still unreadable after 30 seconds they are cancelled with `VPN_GUARD_UNAVAILABLE`; one successful read restarts the allowance.
-- **An explicit refusal** (manual block, VPN unavailable, restore required), an invalid decision and missing or unverified local VPN evidence cancel running responses at the next check, with no allowance.
+- **The pool's own requirement is never suspended by Guard silence.** The allowance applies only when the last answered read allowed the provider. If that answer was not `direct`, the local VPN evidence required for the provider is read again on every check during the silence; missing, stale or unverified evidence cancels running responses at once with `VPN_REQUIRED`.
+- **An explicit refusal** (manual block, VPN unavailable, restore required) and an invalid decision cancel running responses at the next check, with no allowance, and discard the remembered answer: a later unanswered read is then not tolerated.
 
 Before this change one slow control call on a busy server cancelled healthy responses. The allowance narrows the fail-closed guarantee for running responses by at most 30 seconds of Guard silence; it never applies to a decision the Guard actually returned. A heartbeat remains not a packet-level firewall.
