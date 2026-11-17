@@ -89,6 +89,18 @@ export class AccountEgress {
   revokeScope(value:unknown){return this.scopeAcceptances.revoke(value);}
   /** Only assigned pins constrain account selection; ordinary affinity may fail over. */
   pinnedAccount(sessionKey:string):string|null{return this.state.pins[sessionKey]?.accountId??null;}
+  /**
+   * Whether the account can serve this conversation without changing the route decision
+   * already recorded for it. Used only to keep optional load placement from moving a
+   * conversation onto an account whose assigned egress it would not use.
+   */
+  compatible(accountId:string,sessionKey:string|null):boolean{
+    if(!sessionKey)return true;
+    const pinned=this.sessions.get(sessionKey)?.accountId??this.state.pins[sessionKey]?.accountId;
+    if(pinned!==undefined)return pinned===accountId;
+    if(this.state.unassigned[sessionKey]!==undefined)return this.state.bindings[accountId]===undefined;
+    return true;
+  }
   validateNativeProfile(ref:{id:string;version:number},hostId:string):void{
     const profile=this.state.profiles.find(p=>p.id===ref.id&&p.version===ref.version);
     if(!profile||profile.transport!=='ssh-connect'||!profile.hostIds.includes(hostId))throw new EgressUnavailable();

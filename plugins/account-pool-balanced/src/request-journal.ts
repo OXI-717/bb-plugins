@@ -6,6 +6,9 @@ import { providerSchema } from './contracts.js';
 import { codexQuotaObservationSchema } from './codex-quota-observation.js';
 import { TrafficHistory } from './traffic-history.js';
 export const MAX_ROWS=2048, TTL_MS=86400000, MAX_BYTES=2*1024*1024;
+// Background persistence cadence. Each snapshot rewrites a whole file on the server's
+// event loop, so it is deliberately coarse; readers are served from memory.
+export const SNAPSHOT_INTERVAL_MS=15_000, HISTORY_SNAPSHOT_INTERVAL_MS=60_000;
 const number=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
 const binding=(prefix:string)=>z.string().regex(new RegExp(`^${prefix}_[a-z0-9]{6,32}$`)).nullable();
 export const observationSchema=z.object({
@@ -42,6 +45,7 @@ export class RequestJournal {
  private rows:Observation[]=[];
  private evicted=0;private failures=0;private dirty=false;private closed=false;
  private timer:ReturnType<typeof setTimeout>|null=null;private writing:Promise<void>|null=null;
+ private historySnapshotAt=Number.NEGATIVE_INFINITY;
  private readonly history:TrafficHistory;
  constructor(private readonly file:string,private readonly now=Date.now){this.history=new TrafficHistory(path.join(path.dirname(file),'history.json'),now);}
  async initialize():Promise<void>{
@@ -107,7 +111,13 @@ export class RequestJournal {
  }
  private schedule():void{
   if(this.timer!==null||this.closed)return;
-  this.timer=setTimeout(()=>{this.timer=null;void this.flush().finally(()=>this.schedule());},1000);this.timer.unref();
+  this.timer=setTimeout(()=>{this.timer=null;void this.snapshotDue().finally(()=>this.schedule());},SNAPSHOT_INTERVAL_MS);this.timer.unref();
+ }
+ /** Periodic pass: recent rows every tick, the larger hourly history once a minute. */
+ private async snapshotDue():Promise<void>{
+  const now=Date.now(),history=now-this.historySnapshotAt>=HISTORY_SNAPSHOT_INTERVAL_MS;
+  if(history)this.historySnapshotAt=now;
+  await Promise.all([this.flushRecent(),...(history?[this.history.flush()]:[])]);
  }
  async flush():Promise<void>{
   await Promise.all([this.flushRecent(),this.history.flush()]);

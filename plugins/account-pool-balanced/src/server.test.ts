@@ -1,3 +1,4 @@
+import {GUARD_UNREADABLE_GRACE_MS} from './network-flights.js';
 import {vpnProof} from './vpn-test-fixture.js';
 import fs from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -476,6 +477,7 @@ describe("Account Pool config schema", () => {
       devinUpstreamBaseUrl: "https://server.codeium.com",
       maxConcurrentRequestsPerAccount: 2,
       claudeRequestStartIntervalMs: 0,
+      busyOverflow: true,
       switchThreshold: 0.98,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -557,6 +559,7 @@ describe("Account Pool plugin", () => {
       devinUpstreamBaseUrl: "https://server.codeium.com",
       maxConcurrentRequestsPerAccount: 2,
       claudeRequestStartIntervalMs: 0,
+      busyOverflow: true,
       switchThreshold: 0.75,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -8763,7 +8766,7 @@ describe('server-owned account egress dispatch',()=>{
 
 
 it('correlates a mid-frame Cursor policy abort without leaking payload or RPC errors',async()=>{
- let unavailable=false;
+ let unavailable=false,skew=0;
  const outbound=vi.fn(async(input:RequestInfo|URL)=>{
   const url=input instanceof Request?input.url:String(input);
   if(url.startsWith('https://exchange.example/'))return Response.json({accessToken:'synthetic-access'});
@@ -8771,7 +8774,7 @@ it('correlates a mid-frame Cursor policy abort without leaking payload or RPC er
   if(!url.endsWith('/RunSSE'))return Response.json({});
   return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}}),{headers:{'content-type':'application/connect+proto'}});
  });
- const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example/token',cursorUsageUrl:'https://usage.example/usage',fetch:outbound}});
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example/token',cursorUsageUrl:'https://usage.example/usage',fetch:outbound,now:()=>Date.now()+skew}});
  fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
  fixture.host.harness.sdk.stub('plugins.callRpc',async()=>{
   if(unavailable)throw Error('private RPC payload');
@@ -8782,9 +8785,16 @@ it('correlates a mid-frame Cursor policy abort without leaking payload or RPC er
   headers:{authorization:`Bearer ${fixture.key}`,'content-type':'application/connect+proto'},body:'private prompt',
  });
  expect(response.status).toBe(200);const reader=response.body!.getReader();expect((await reader.read()).value).toEqual(new Uint8Array([0,0,0]));
- unavailable=true;const failed=expect(reader.read()).rejects.toThrow('VPN_GUARD_UNAVAILABLE');
+ unavailable=true;let settled=false;const reading=reader.read().finally(()=>{settled=true;});
+ const failed=expect(reading).rejects.toThrow('VPN_GUARD_UNAVAILABLE');
  const policy=fixture.host.harness.behavior.runService('network-policy');
- try {await failed;}finally{policy.controller.abort();await policy.done;}
+ try {
+  // An unanswered Guard read does not cancel the admitted stream inside the grace...
+  await new Promise(resolve=>setTimeout(resolve,200));expect(settled).toBe(false);
+  expect(fixture.host.harness.inspection.logEntries.filter(e=>e.message.startsWith('Account Pooler cursor transport failed:'))).toHaveLength(0);
+  // ...and fails closed once the Guard has stayed unreadable past it.
+  skew=GUARD_UNREADABLE_GRACE_MS+1_000;await failed;
+ }finally{policy.controller.abort();await policy.done;}
  const logs=fixture.host.harness.inspection.logEntries.filter(e=>e.message.startsWith('Account Pooler cursor transport failed:'));
  expect(logs).toHaveLength(1);
  const prefix='Account Pooler cursor transport failed: VPN_GUARD_UNAVAILABLE. ';

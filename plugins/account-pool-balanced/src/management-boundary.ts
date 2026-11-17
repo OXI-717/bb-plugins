@@ -11,6 +11,14 @@ const readMethods = new Set([
   'thread.account', 'account.list', 'projects.list', 'config.get', 'status.get', 'status.routedThreads',
 ]);
 const rpcScope = (method: string): ManagementScope => readMethods.has(method) ? 'read' : 'manage';
+// Read-only methods another installed plugin may call without a grant. Everything else
+// from a plugin caller stays locked.
+const pluginReads = new Map<string, ReadonlySet<string>>([
+  ['model-connections', new Set(['status.get', 'thread.account'])],
+  // Guard's linkage handshake reads the protection settings (no credentials are in them).
+  // Without it Guard reports the linkage as unavailable and refuses a VPN-required pool host.
+  ['vpn-guard', new Set(['config.get'])],
+]);
 const readCli = (argv: string[]) =>
   (['status', 'readiness'].includes(argv[0] ?? '')) ||
   (argv[0] === 'account' && argv[1] === 'list') ||
@@ -43,7 +51,7 @@ export function registerManagementRpc(bb: Pick<BbPluginApi, 'rpc'>, access: Mana
       if(method==='egress.scopeAccept'||method==='egress.scopeRevoke')throw new PoolManagementLocked();
       const caller = (context as { experimental_caller?: { kind?: string; pluginId?: string } } | undefined)?.experimental_caller;
       if (!caller || caller.kind === 'client') return (handler as (input: unknown) => unknown)(input);
-      if (caller?.kind !== 'plugin' || caller.pluginId !== 'model-connections' || !['status.get', 'thread.account'].includes(method)) throw new PoolManagementLocked();
+      if (caller?.kind !== 'plugin' || typeof caller.pluginId !== 'string' || pluginReads.get(caller.pluginId)?.has(method) !== true) throw new PoolManagementLocked();
       return (handler as (input: unknown) => unknown)(input);
     },
   ])) as Handlers;

@@ -87,7 +87,7 @@ const HELP = [
   "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin> [--off]",
   "  bb pool config",
-  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
   "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot] [--account-scope-json <json>]",
   "  bb pool client revoke <name>",
@@ -264,6 +264,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `browserHostId: ${config.browserHostId ?? "local"}`,
     `maxConcurrentRequestsPerAccount: ${config.maxConcurrentRequestsPerAccount}`,
     `claudeRequestStartIntervalMs: ${config.claudeRequestStartIntervalMs}`,
+    `busyOverflow: ${config.busyOverflow}`,
     `switchThreshold: ${config.switchThreshold}`,
     `routingStrategy: ${config.routingStrategy}`,
     `reserveDrainHours: ${config.reserveDrainHours}`,
@@ -340,6 +341,7 @@ function parseConfigUpdate(
     });
   }
   if (key === "vpnGuardEnabled" && ["true","false"].includes(value)) return accountPoolConfigSetInputSchema.parse({vpnGuardEnabled:value==="true"});
+  if (key === "busyOverflow" && ["true","false"].includes(value)) return accountPoolConfigSetInputSchema.parse({busyOverflow:value==="true"});
   if (key === "vpnOnlyProviders") return accountPoolConfigSetInputSchema.parse({ vpnOnlyProviders: value === "none" ? [] : value.split(",") });
   if (key === "browserHostId") return accountPoolConfigSetInputSchema.parse({browserHostId:value === "local" ? null : value});
   if (key === "vpnStatusFile") return accountPoolConfigSetInputSchema.parse({ vpnStatusFile: value === "default" ? null : value });
@@ -352,7 +354,7 @@ function parseConfigUpdate(
     });
   }
   throw new Error(
-    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, opencodeFreeUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, or vpnGuardEnabled.",
+    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, opencodeFreeUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, vpnGuardEnabled, or busyOverflow.",
   );
 }
 
@@ -463,7 +465,7 @@ export function registerPoolCli(
         name: "config-set",
         summary: "Update one Account Pooler routing configuration value",
         usage:
-          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
       },
       {
         name: "token-rotate",
