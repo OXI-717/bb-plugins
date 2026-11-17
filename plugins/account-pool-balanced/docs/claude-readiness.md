@@ -19,6 +19,8 @@ Since 0.4.89 the interval bounds the sustained start rate rather than every sing
 
 A provider hold (an upstream 429 with Retry-After, or a recoverable edge refusal) puts the account into a conservative recovery mode: while the hold lasts and for one minute after it, starts leave strictly one by one, at least one second apart, and the account carries at most two concurrent requests even when the configured limit is higher. Saved burst credit is forfeited by the hold. The two-request cap also binds requests that had taken their slots before the hold arrived: after it expires they start only while fewer than two requests of that account are upstream. This is the purpose the interval was introduced for: requests delayed by a hold never return as a burst. A disabled interval (`0`) stays disabled; the two-request cap during recovery applies regardless. These values are operational choices, not published provider limits or a guarantee against rejection.
 
+Token counting (`/v1/messages/count_tokens`) is not an inference start: since 0.4.90 it is neither spaced by this interval nor counted against the inference slots; a provider hold still delays it.
+
 ## Scheduled installation checks
 
 `scripts/claude-host-doctor.py` supports a local read-only check (`--local`) or checks through existing authenticated BB machine terminals. The latter requires an explicit operator-owned JSON list of 1–8 existing machine IDs (`--hosts-file`) and a private `--state-dir`; it does not discover/enroll new hosts or change permissions. Offline and unknown hosts are recorded as unverified without waking them. The trusted target is the native terminal's host identity, not a field supplied by the diagnostic payload.
