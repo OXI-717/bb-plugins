@@ -11,6 +11,7 @@ export const hostContract = defineRpcContract({
 });
 export const modeSchema = z.enum(['observe','enforce']);
 export const stopReasonSchema=z.enum(['manual_block','host_rpc_failed','host_catalog_unavailable','no_route','no_core','probe_failed','probe_stale','healing','invalid_evidence','file_stale_or_schema','probe_unverified','epoch_changed','sleep_gap','starting']);
+export type StopReason=z.infer<typeof stopReasonSchema>;
 export const stopObservationSchema=z.object({threadId:z.string().max(160),hostId:z.string().max(160),at:z.number().int().nonnegative(),reason:stopReasonSchema});
 export const configurationSchema = z.object({
   mode: modeSchema,
@@ -37,6 +38,8 @@ export const statusSchema = z.object({
   hosts: z.array(z.object({
     id:z.string(), name:z.string(), selected:z.boolean(), available:z.boolean(), networkMode:z.enum(['direct','vpn-required']).optional(),
     vpn:z.enum(['connected','disconnected','unknown']).nullable(),evidence:evidenceSchema.nullable().optional(),rpc:rpcDiagnosticSchema.nullable().optional(),
+    // Selected machines only; absent in older Guard status.
+    lastEvidenceAt:z.number().nullable().optional(),unobservedSince:z.number().nullable().optional(),
   })),
   protectedProviders: z.array(z.string()),
   ownedDisabledPlugins: z.array(z.string()),

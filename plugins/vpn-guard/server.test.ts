@@ -1,9 +1,10 @@
 import {verifiedHostResult} from './vpn-test-fixture.js';
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createFakePluginHost, makeHostResponse, makeThreadResponse, makeMessageDispatchHookContext } from '@get-bb/plugin-sdk/testing';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import plugin from './server.js';
 import {statusSchema} from './contract.js';
+import {OBSERVATION_GRACE_MS} from './observation.js';
 
 type PluginList = Awaited<ReturnType<BbPluginApi['sdk']['plugins']['list']>>;
 async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;failHostRpc?:boolean;evidenceAgeMs?:number;passive?:boolean}={}) {
@@ -90,14 +91,21 @@ describe('guard admission and reconciliation',()=>{
     await reloaded.harness.lifecycle.dispose();
   });
   it('distinguishes unavailable host RPC from VPN evidence without persisting exception text',async()=>{
-    const {fake}=await setup({failHostRpc:true});
-    await select(fake,['host-a']);
-    await mode(fake,'enforce');
-    const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));
-    expect(status.stopHistory?.at(-1)?.reason).toBe('host_rpc_failed');
-    expect(status.hosts.find(h=>h.id==='host-a')).toMatchObject({rpc:{category:'rpc_error',elapsedMs:expect.any(Number)}});
-    expect(JSON.stringify(status.stopHistory)).not.toContain('sensitive-synthetic-payload');
-    await fake.harness.lifecycle.dispose();
+    vi.useFakeTimers({toFake:['Date']});
+    const {fake,stopped}=await setup({failHostRpc:true});
+    try {
+      await select(fake,['host-a']);
+      await mode(fake,'enforce');
+      // A machine that cannot be read is stopped only after the observation grace period.
+      expect(stopped).toEqual([]);
+      vi.setSystemTime(Date.now()+OBSERVATION_GRACE_MS+1);
+      await mode(fake,'enforce');
+      const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));
+      expect(status.stopHistory?.at(-1)?.reason).toBe('host_rpc_failed');
+      expect(status.hosts.find(h=>h.id==='host-a')).toMatchObject({rpc:{category:'rpc_error',elapsedMs:expect.any(Number)}});
+      expect(JSON.stringify(status.stopHistory)).not.toContain('sensitive-synthetic-payload');
+      expect(JSON.stringify(fake.harness.logEntries)).not.toContain('sensitive-synthetic-payload');
+    } finally {vi.useRealTimers();await fake.harness.lifecycle.dispose();}
   });
   it('rejects host evidence that has expired by the time the remote response arrives',async()=>{
     const {fake,dispatch}=await setup({evidenceAgeMs:90_001});
@@ -363,15 +371,21 @@ describe('guard admission and reconciliation',()=>{
     expect(enabled.get('provider-codex')).toBe(false);
     await fake.harness.lifecycle.dispose();
   });
-  it('treats a failed host catalog as unknown for selected machines',async()=>{
+  it('treats a failed host catalog as unknown for admission and for running work after the grace period',async()=>{
+    vi.useFakeTimers({toFake:['Date']});
     const {fake,setFailHostList,enabled,dispatch}=await setup();
-    await select(fake,['host-b']);
-    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});
-    setFailHostList(true);
-    await mode(fake,'enforce');
-    expect(enabled.get('provider-codex')).toBe(false);
-    expect(await dispatch('acp-cursor','host-b')).toMatchObject({action:'wait'});
-    await fake.harness.lifecycle.dispose();
+    try {
+      await select(fake,['host-b']);
+      await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});
+      setFailHostList(true);
+      await mode(fake,'enforce');
+      expect(await dispatch('acp-cursor','host-b')).toMatchObject({action:'wait'});
+      expect(enabled.get('provider-codex')).toBe(true);
+      vi.setSystemTime(Date.now()+OBSERVATION_GRACE_MS+1);
+      await mode(fake,'enforce');
+      expect(enabled.get('provider-codex')).toBe(false);
+      expect(await dispatch('acp-cursor','host-b')).toMatchObject({action:'wait'});
+    } finally {vi.useRealTimers();await fake.harness.lifecycle.dispose();}
   });
   it('attempts Claude and thread cleanup when Codex suspension fails',async()=>{
     const {fake,enabled,stopped,mutations}=await setup({failCodexDisable:true});
