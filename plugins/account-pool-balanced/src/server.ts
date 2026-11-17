@@ -1,3 +1,4 @@
+import {startLoopDelay} from './loop-delay.js';
 import {ThreadAccountSelection} from './thread-account-selection.js';
 import {projectTier} from './project-policy.js';
 import {blockingResetAt} from './quota.js';
@@ -360,6 +361,7 @@ export function createAccountPoolPlugin(
       localList:async()=>listBrowserProfiles({accounts:await operations.list(),routedAccountIds:Object.keys(egress.snapshot().bindings),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
     });
     maintenanceActivity=()=>hub.maintenanceActivity();
+    bb.onDispose(startLoopDelay(message=>bb.log.warn(message),()=>hub.inFlightCount()));
     const maintenanceApi = {
       status:()=>maintenance.status(),
       acquire:(owner:string)=>maintenance.acquire(owner),

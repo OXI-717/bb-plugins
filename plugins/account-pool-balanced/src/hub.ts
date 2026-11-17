@@ -2019,7 +2019,7 @@ export class AccountPoolHub {
     this.drainWaiters.clear();
   }
 
-  private inFlightCount(): number {
+  inFlightCount(): number {
     let total = 0;
     for (const count of this.inFlightByAccount.values()) total += count;
     return total;

@@ -222,3 +222,20 @@ historical proof of no errors. No backfill, expiry extension, additional file,
 scheduler or logging service is added. Existing storage/CLI bounds and isolated
 failure handling apply. These are operational facts, not an account risk score or
 permission to disable, rotate, relogin or reassign an account.
+
+### Event loop stalls
+
+Every ten seconds a diagnostic window is reset. A maximum delay of at least
+1000 ms emits one `Account Pooler event loop delay` warning with numeric fields:
+`maxDelayMs`, `p99DelayMs` (histogram sampled at 20 ms), `windowMs` (actual
+monotonic elapsed time), `utilization` (event loop active fraction over that
+window), `maxGcPauseMs`, `heapUsedMb`, `rssMb`, and `inFlight` (pool requests).
+The timer is unreferenced and all observers are stopped on disposal.
+A diagnostic source failure stops diagnostics without affecting requests.
+
+High delay with utilization near 1 suggests synchronous work or garbage
+collection; compare the maximum GC pause. High delay with low utilization
+suggests the process did not receive CPU time (VM freeze or steal).
+These are clues, not proof: external descheduling during an active callback and
+synchronous I/O can also count as active time. Independent host scheduling
+telemetry and process CPU deltas are needed to distinguish those cases.
