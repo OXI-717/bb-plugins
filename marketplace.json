@@ -24,7 +24,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/account-pool-balanced",
-          "range": "^0.4.91",
+          "range": "^0.4.92",
           "tagPrefix": "account-pool-balanced/"
         }
       }
@@ -96,7 +96,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/oxi-projects",
-          "range": "^0.2.6",
+          "range": "^0.2.7",
           "tagPrefix": "oxi-projects/"
         }
       },
@@ -172,7 +172,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/federation-pilot",
-          "range": "^0.2.9",
+          "range": "^0.2.10",
           "tagPrefix": "federation-pilot/"
         }
       }
@@ -220,8 +220,32 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/oxi-op",
-          "range": "^0.1.13",
+          "range": "^0.1.14",
           "tagPrefix": "oxi-op/"
+        }
+      }
+    },
+    {
+      "id": "oxi-thread-list",
+      "displayName": "OXI Session Tree",
+      "description": "Group sessions by project and then by machine, with per-project controls and preserved parent-child trees.",
+      "author": {
+        "name": "OXI",
+        "github": "OXI-717"
+      },
+      "tags": [
+        "sessions",
+        "sidebar"
+      ],
+      "icon": {
+        "url": "./icons/oxi-thread-list.svg"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/oxi-thread-list",
+          "range": "^0.1.0",
+          "tagPrefix": "oxi-thread-list/"
         }
       }
     }

@@ -1,7 +1,6 @@
 import {Button} from './ui/components/ui/button';
 import React,{useEffect,useState} from 'react';
-import {useRpc} from '@get-bb/plugin-sdk/app';
-import type {accountPoolRpcContract} from './src/rpc.js';
+import {usePoolRpc} from './management-ui';
 import type {AccountEgress} from './src/account-egress.js';
 import type {PoolProvider} from './src/contracts.js';
 type Snapshot=ReturnType<AccountEgress['snapshot']>;
@@ -42,7 +41,7 @@ export function ProxyControl({pending,save}:{pending:boolean;save:(url:string)=>
  </form>;
 }
 export function AccountEgressForm({accountId,provider}:{accountId:string;provider:PoolProvider}){
- const rpc=useRpc<typeof accountPoolRpcContract>();
+ const rpc=usePoolRpc();
  const [state,setState]=useState<Snapshot|null>(null),[pending,setPending]=useState(false),[error,setError]=useState('');
  useEffect(()=>{let active=true;rpc.call('egress.status',null).then(value=>{if(active)setState(value);}).catch(()=>{if(active)setError('Не удалось получить профили выхода.');});return()=>{active=false;};},[accountId]);
  return <><EgressControl accountId={accountId} provider={provider} state={state} pending={pending} error={error}

@@ -458,7 +458,7 @@ export default function plugin(bb: BbPluginApi) {
     }
     // Migration of local secret files: one card per run lists every file. Import writes each file
     // as one item and compares every value; the reference run then replaces imported values in
-    // the files with op:// references and removes imported key files, only where values match.
+    // the files with op:// references and moves imported documents to the approved archive.
     async function migrate(profile: string, mode: 'import' | 'reference', rawPlan: string, ctx: OperationContext, rawArchiveDir?: string) {
         const archiveDir = rawArchiveDir === undefined ? undefined : z.string().regex(/^\/[^\0]*[^/]$/).parse(rawArchiveDir);
         if (archiveDir && mode !== 'reference') throw new Error('An archive folder applies to reference mode only');

@@ -1,7 +1,7 @@
 import {expect,it} from 'vitest';
 import {poolErrorResponse} from './pool-errors.js';
 it('renders Cursor unary Connect errors with a stable policy reason',async()=>{
- const r=poolErrorResponse('cursor',403,'Порог пула 90%, использовано 94.69%',{'x-bb-pool-error':'POOL_QUOTA_THRESHOLD'});
+ const r=poolErrorResponse('cursor',403,'Pool threshold 90%, 94.69% used',{'x-bb-pool-error':'POOL_QUOTA_THRESHOLD'});
  expect(r.status).toBe(403);expect(r.headers.get('retry-after')).toBeNull();
  expect(await r.json()).toMatchObject({code:'permission_denied',message:expect.stringContaining('POOL_QUOTA_THRESHOLD')});
 });

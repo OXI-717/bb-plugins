@@ -661,3 +661,18 @@ test('a file changed while 1Password is consulted is neither deleted nor overwri
   assert.equal(await readFile(envFile,'utf8'),'K=synthetic-rotated\n');assert.equal(await readFile(keyFile,'utf8'),'synthetic-rotated-key');
  }finally{await rm(dir,{recursive:true,force:true});}
 });
+
+test('a source replaced during a same-device archive move is kept',async()=>{
+ const {mkdtemp,writeFile,readFile,rm,link,unlink,access}=await import('node:fs/promises');
+ const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const dir=await mkdtemp(join(tmpdir(),'oxi-op-rotate-'));
+ try{
+  const source=join(dir,'source.key'),target=join(dir,'archive.key');
+  await writeFile(source,'synthetic-original');
+  const rotatingLink=async(from,to)=>{await link(from,to);await unlink(from);await writeFile(from,'synthetic-replacement');};
+  const unchanged=async()=>{if(await readFile(source,'utf8')!=='synthetic-original')throw new Error('[changed-during-run] source replaced');};
+  await assert.rejects(moveNoClobber(source,target,Buffer.from('synthetic-original'),0o100600,rotatingLink,unchanged),/changed-during-run/);
+  assert.equal(await readFile(source,'utf8'),'synthetic-replacement');
+  await assert.rejects(access(target));
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

@@ -4,7 +4,7 @@ import os
 
 
 def validate(needs):
-    for name in ('plan', 'public-hygiene', 'secrets'):
+    for name in ('plan', 'public-hygiene', 'secrets', 'session-tree'):
         if needs.get(name, {}).get('result') != 'success':
             raise ValueError(f'Required check did not succeed: {name}')
     selected = needs['plan']['outputs']

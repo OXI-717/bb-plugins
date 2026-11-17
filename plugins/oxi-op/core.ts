@@ -626,7 +626,7 @@ export async function importFiles(run: Runner, env: NodeJS.ProcessEnv, vaultId: 
     return {results};
 }
 // After a verified import: in env files every checked value becomes an op:// reference (layout,
-// comments, line endings and mode kept); files planned as documents are removed. A file is only
+// comments, line endings and mode kept); documents are moved only with an archive folder. A file is only
 // touched when the vault still holds identical values. Symbolic and hard links are refused so no
 // other path keeps the plaintext. An env file stored as a document is never removed.
 // The OS may refuse to change a file (macOS immutable flag set when a project is frozen, a read-only
@@ -679,11 +679,11 @@ export async function moveNoClobber(source: string, target: string, bytes: Buffe
         try {
             await chmod(target, mode & 0o777);
             if (sha(await readFile(target)) !== sha(bytes)) throw new CodedError('archive-copy-differs', 'The archived copy differs from the checked file');
-            // The source may have been replaced while it was copied; then it stays and the copy goes.
-            await unchanged();
         } catch (failure) {await unlink(target).catch(() => {}); throw failure;}
     }
-    try {await fsStep(() => unlink(source));}
+    // Both link and copy can race with source rotation. Recheck after the archive name exists;
+    // on failure keep the current source and remove only the archive name we created.
+    try {await unchanged(); await fsStep(() => unlink(source));}
     catch (error) {await unlink(target).catch(() => {}); throw error;}
     return copied;
 }

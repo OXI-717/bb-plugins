@@ -60,13 +60,13 @@ class PlanTests(unittest.TestCase):
 class ReleaseGateTests(unittest.TestCase):
     def test_selected_skips_fail_and_unselected_skips_pass(self):
         from ci_release_gate import validate
-        needs = {name: {'result': 'success'} for name in ['plan', 'public-hygiene', 'secrets',
+        needs = {name: {'result': 'success'} for name in ['plan', 'public-hygiene', 'secrets', 'session-tree',
                  'check', 'upgrade-script', 'auto-archive', 'oxi-op']}
         needs['plan']['outputs'] = dict(check='true', upgrade='true', archive='false', op='false')
         needs['auto-archive']['result'] = 'skipped'
         needs['oxi-op']['result'] = 'skipped'
         validate(needs)
-        for name in ['plan', 'public-hygiene', 'secrets', 'check', 'upgrade-script']:
+        for name in ['plan', 'public-hygiene', 'secrets', 'session-tree', 'check', 'upgrade-script']:
             with self.subTest(name=name):
                 original = needs[name]['result']
                 for bad in ['skipped', 'cancelled', 'failure']:

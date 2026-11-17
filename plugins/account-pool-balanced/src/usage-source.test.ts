@@ -45,6 +45,7 @@ describe("pooled providers on the usage surface", () => {
       neuraldeep: "acp-opencode-neuraldeep",
       cursor: "acp-oxi-cursor",
       devin: "acp-devin",
+      grok: "acp-grok",
     });
     expect(new Set(Object.values(USAGE_PROVIDER_IDS)).size).toBe(
       Object.keys(USAGE_PROVIDER_IDS).length,

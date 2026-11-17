@@ -10,6 +10,7 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
   cursorUpstreamBaseUrl: "https://api2.cursor.sh",
   devinUpstreamBaseUrl: "https://server.codeium.com",
+  grokUpstreamBaseUrl: "https://api.x.ai/v1",
   maxConcurrentRequestsPerAccount: 2,
   claudeRequestStartIntervalMs: 0,
   busyOverflow: true,
@@ -93,6 +94,9 @@ export const accountPoolConfigSchema = z
     devinUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.devinUpstreamBaseUrl,
     ),
+    grokUpstreamBaseUrl: httpUrlSchema.default(
+      DEFAULT_ACCOUNT_POOL_CONFIG.grokUpstreamBaseUrl,
+    ),
     claudeRequestStartIntervalMs: z.number().int().min(0).max(60_000).default(DEFAULT_ACCOUNT_POOL_CONFIG.claudeRequestStartIntervalMs),
     maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).default(DEFAULT_ACCOUNT_POOL_CONFIG.maxConcurrentRequestsPerAccount),
     pinnedFailover: z.boolean().default(false),
@@ -128,6 +132,7 @@ export const accountPoolConfigSetInputSchema = z
     neuraldeepUpstreamBaseUrl: httpUrlSchema.optional(),
     cursorUpstreamBaseUrl: httpUrlSchema.optional(),
     devinUpstreamBaseUrl: httpUrlSchema.optional(),
+    grokUpstreamBaseUrl: httpUrlSchema.optional(),
     maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).optional(),
     claudeRequestStartIntervalMs: z.number().int().min(0).max(60_000).optional(),
     busyOverflow: z.boolean().optional(),
@@ -162,6 +167,7 @@ export const providerSchema = z.enum([
   "agy",
   "cursor",
   "devin",
+  "grok",
 ]);
 export type PoolProvider = z.infer<typeof providerSchema>;
 export const accountKindSchema = z.enum(["oauth", "api-key"]);
@@ -309,6 +315,7 @@ export const oauthSecretSchema = z
     refreshToken: z.string().min(1),
     expiresAt: z.number().int().positive().nullable(),
     idToken: z.string().min(1).optional(),
+    clientId: z.string().min(1).max(256).optional(),
     agy: z.object({
       clientId:z.string().min(1).max(256),clientSecret:z.string().min(1).max(256),
       projectId:z.string().min(1).max(512),
@@ -451,6 +458,7 @@ export const statusSchema = z
         agy: z.string().uuid().nullable(),
         cursor: z.string().uuid().nullable(),
         devin: z.string().uuid().nullable(),
+        grok: z.string().uuid().nullable(),
       })
       .strict(),
     routing: z
@@ -464,6 +472,7 @@ export const statusSchema = z
         agy: z.boolean(),
         cursor: z.boolean(),
         devin: z.boolean(),
+        grok: z.boolean(),
       })
       .strict(),
   })

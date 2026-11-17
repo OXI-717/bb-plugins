@@ -38,6 +38,10 @@
     {
       "name": "oxi-op",
       "source": "./plugins/oxi-op"
+    },
+    {
+      "name": "oxi-thread-list",
+      "source": "./plugins/oxi-thread-list"
     }
   ]
 }

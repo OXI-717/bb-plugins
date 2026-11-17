@@ -1,7 +1,6 @@
 import {useCallback,useEffect,useState} from 'react';
-import {useRpc} from '@get-bb/plugin-sdk/app';
+import {usePoolRpc} from './management-ui';
 import type {z} from 'zod';
-import type {accountPoolRpcContract} from './src/rpc.js';
 import type {updateStatusSchema} from './src/pool-update.js';
 import {Button} from './ui/components/ui/button';
 
@@ -12,7 +11,7 @@ const labels = {
   unknown:'Проверяется состояние запуска. Не запускайте обновление повторно; проверьте терминал «Pool update».',
 };
 export function PoolUpdatePanel() {
-  const rpc=useRpc<typeof accountPoolRpcContract>();
+  const rpc=usePoolRpc();
   const [operation,setOperation]=useState<z.infer<typeof updateStatusSchema>>(null);
   const [loading,setLoading]=useState(true);
   const [starting,setStarting]=useState(false);

@@ -167,6 +167,29 @@ function pytestUnreachable(): never {
   throw new Error("upstream must not be called for a local exchange");
 }
 
+async function resolveGrokEnv(
+  host: ReturnType<typeof createFakePluginHost>,
+): Promise<{ token: string; proxy: string; grokHome: string }> {
+  const entries = await host.harness.behavior.resolveProviderEnv("acp-grok", {
+    threadId: "thread-acp-grok",
+    projectId: "project-one",
+    hostId: "host-one",
+  });
+  const token = entries.find((entry) => entry.name === "XAI_API_KEY");
+  const proxy = entries.find((entry) => entry.name === "GROK_CLI_CHAT_PROXY_BASE_URL");
+  const grokHome = entries.find((entry) => entry.name === "GROK_HOME");
+  if (token === undefined || typeof token.value !== "string") {
+    throw new Error("Grok Account Pool token was not resolved.");
+  }
+  if (proxy === undefined || typeof proxy.value !== "object") {
+    throw new Error("Grok Account Pool proxy URL was not resolved.");
+  }
+  if (grokHome === undefined || typeof grokHome.value !== "string") {
+    throw new Error("Isolated Grok config directory was not resolved.");
+  }
+  return { token: token.value, proxy: proxy.value.serverPath, grokHome: grokHome.value };
+}
+
 async function resolveKimiEnv(
   host: ReturnType<typeof createFakePluginHost>,
   providerId = "acp-opencode-kimi",
@@ -263,7 +286,7 @@ function testJwt(payload: object): string {
 async function createFixture(args: {
   upstreamUrl: string;
   options?: AccountPoolPluginOptions;
-  provider?: "claude" | "codex" | "kimi" | "zai" | "opencode-go" | "neuraldeep" | "cursor" | "devin";
+  provider?: "claude" | "codex" | "kimi" | "zai" | "opencode-go" | "neuraldeep" | "cursor" | "devin" | "grok";
   source?: "api-key" | "import";
   apiKey?: string;
   priority?: number;
@@ -275,7 +298,10 @@ async function createFixture(args: {
     pluginId: "account-pool",
     dataDir,
     sdk: sdkStubs(),
-    ...(args.callBrowserHost ? {experimental_callHostRpc:args.callBrowserHost} : {}),
+    experimental_callHostRpc: args.callBrowserHost ?? (async ({ method }) => {
+      if (method === "grokHome") return { path: path.join(dataDir, "grok-acp-home") };
+      throw new Error("Unexpected synthetic host RPC method.");
+    }),
   });
   await host.bb.storage.kv.set("config", {
     anthropicUpstreamBaseUrl: args.upstreamUrl,
@@ -287,6 +313,7 @@ async function createFixture(args: {
     neuraldeepUpstreamBaseUrl: args.upstreamUrl,
     cursorUpstreamBaseUrl: args.upstreamUrl,
     devinUpstreamBaseUrl: args.upstreamUrl,
+    grokUpstreamBaseUrl: args.upstreamUrl,
   });
   const plugin = createAccountPoolPlugin({
     vpnPayload: async (timestamp) => vpnProof(timestamp, "connected"),
@@ -354,6 +381,8 @@ async function createFixture(args: {
               ).token
             : args.provider === "cursor"
               ? await resolveCursorToken(host)
+              : args.provider === "grok"
+                ? (await resolveGrokEnv(host)).token
               : args.provider === "devin"
                 ? await (async () => {
                     const output = path.join(dataDir, "devin-client.token");
@@ -468,6 +497,7 @@ describe("Account Pool config schema", () => {
     expect(accountPoolConfigSchema.parse({})).toEqual({
       anthropicUpstreamBaseUrl: "https://api.anthropic.com",
       codexUpstreamBaseUrl: "https://chatgpt.com/backend-api/codex",
+      grokUpstreamBaseUrl: "https://api.x.ai/v1",
       kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
@@ -505,6 +535,36 @@ describe("Account Pool config schema", () => {
 });
 
 describe("Account Pool plugin", () => {
+  it("routes Grok ACP through the pool and isolates the CLI from machine login state", async () => {
+    let upstreamAuthorization: string | undefined;
+    const upstream = await startUpstream((request, response) => {
+      upstreamAuthorization = request.headers.authorization;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ id: "synthetic-response", choices: [] }));
+    });
+    const fixture = await createFixture({
+      upstreamUrl: upstream.url,
+      provider: "grok",
+      apiKey: "synthetic-xai-key",
+    });
+    const env = await resolveGrokEnv(fixture.host);
+    expect(env.proxy).toBe("/api/v1/plugins/account-pool/http/grok/v1");
+    expect(env.grokHome).toBe(path.join(fixture.dataDir, "grok-acp-home"));
+    expect(env.token).toBe(fixture.key);
+
+    const response = await fixture.host.harness.behavior.fetchHttp(
+      "POST",
+      "/grok/v1/responses",
+      {
+        headers: { authorization: `Bearer ${env.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "grok-build", input: "synthetic" }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(upstreamAuthorization).toBe("Bearer synthetic-xai-key");
+    await response.body?.cancel();
+    cleanups.push(upstream.close);
+  });
   it("reads and updates one full config record through RPC and CLI", async () => {
     const dataDir = await mkdtemp(
       path.join(tmpdir(), "bb-account-pool-config-"),
@@ -534,6 +594,7 @@ describe("Account Pool plugin", () => {
       "codexUpstreamBaseUrl: https://chatgpt.com/backend-api/codex",
     );
     expect(cliGet.stdout).toContain("switchThreshold: 0.98");
+    expect(cliGet.stdout).toContain("grokUpstreamBaseUrl: https://api.x.ai/v1");
 
     const cliSet = await host.harness.behavior.runCli([
       "config",
@@ -551,6 +612,7 @@ describe("Account Pool plugin", () => {
     expect(updated).toEqual({
       anthropicUpstreamBaseUrl: "http://127.0.0.1:9000",
       codexUpstreamBaseUrl: "https://chatgpt.com/backend-api/codex",
+      grokUpstreamBaseUrl: "https://api.x.ai/v1",
       kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
@@ -579,6 +641,14 @@ describe("Account Pool plugin", () => {
       channel: "config-changed",
       payload: {},
     });
+    const grokSet = await host.harness.behavior.runCli([
+      "config",
+      "set",
+      "grokUpstreamBaseUrl",
+      "https://grok.example/v1",
+    ]);
+    expect(grokSet.exitCode).toBe(0);
+    expect(grokSet.stdout).toContain("grokUpstreamBaseUrl: https://grok.example/v1");
   });
 
   it.each([
@@ -773,11 +843,11 @@ describe("Account Pool plugin", () => {
     expect(exchanged.accessToken).not.toBe("cursor-subscription-key");
   });
 
-  it("omits unsupported Devin quota resources without removing the pooled account", async () => {
+  it.each(["devin", "grok"] as const)("omits unsupported %s quota resources without removing the pooled account", async (provider) => {
     const outbound = vi.fn(async () => Response.json({}));
     const fixture = await createFixture({
       upstreamUrl: "https://upstream.example",
-      provider: "devin",
+      provider,
       apiKey: "cog_test_pat",
       options: { fetch: outbound },
     });
@@ -795,7 +865,7 @@ describe("Account Pool plugin", () => {
     for (const refresh of [false, true]) {
       await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
         resourceId: fixture.account.id, refresh,
-      })).rejects.toThrow("Quota reporting is not available for Devin");
+      })).rejects.toThrow(`Quota reporting is not available for ${provider === "grok" ? "Grok" : "Devin"}`);
     }
     expect(outbound).not.toHaveBeenCalled();
   });
@@ -2046,8 +2116,8 @@ describe("Account Pool plugin", () => {
         hostId: "host-one",
       }),
     ).resolves.toEqual({
-      label: "Proxied",
-      statusMessage: "Credentials are provided by the Account Pooler hub.",
+      label: "Ready",
+      statusMessage: "Provider access is ready.",
     });
     const httpResponse = await host.harness.behavior.fetchHttp(
       "POST",
@@ -2431,7 +2501,7 @@ describe("Account Pool plugin", () => {
       }),
     ).resolves.toBeNull();
     expect(host.harness.inspection.needsConfigurationMessages).toEqual([
-      "Add and enable a Claude or Codex account with `bb pool account add`.",
+      "Add and enable a Claude, Codex, or Grok account with `bb pool account add`.",
     ]);
     const hello = helloResponse();
     expect(hello.status).toBe(200);
@@ -2483,7 +2553,12 @@ describe("Account Pool plugin", () => {
     expect(help.stdout).toContain("account login-complete");
     expect(help.stdout).toContain("--code-stdin");
     expect(help.stdout).toContain("--api-key-stdin");
+    expect(help.stdout).toContain(
+      "bb pool account add --provider <kimi|zai|opencode-go|neuraldeep|cursor|devin|grok> --api-key-stdin [--label <text>] [--priority <n>]",
+    );
     expect(help.stdout).toContain("Unsafe: exposes the key");
+    expect(help.stdout).toContain("bb pool account add --provider grok --login");
+    expect(help.stdout).toContain("account login-poll --session <id> [--provider codex|grok]");
     expect(help.stdout).toContain("account refresh <id>");
     const list = await fixture.host.harness.behavior.runCli([
       "account",
@@ -2959,8 +3034,8 @@ describe("Account Pool plugin", () => {
         hostId: "host-one",
       }),
     ).resolves.toEqual({
-      label: "Proxied",
-      statusMessage: "Credentials are provided by the Account Pooler hub.",
+      label: "Ready",
+      statusMessage: "Provider access is ready.",
     });
     const secondToken = await resolveToken(
       fixture.host,
@@ -6756,6 +6831,7 @@ describe("Account Pool plugin", () => {
       agy: true,
       cursor: true,
       devin: true,
+      grok: true,
     });
   });
 
@@ -7342,6 +7418,7 @@ describe("sequential pool recovery", () => {
       agy: null,
       cursor: null,
       devin: null,
+      grok: null,
     });
     expect(
       pool.accounts.find((account) => account.id === fixture.account.id)
@@ -7873,9 +7950,9 @@ describe('VPN Guard linked network policy',()=>{
     fixture.host.harness.sdk.stub('plugins.callRpc',call);
     await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
     const status=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));
-    expect(maxActive).toBe(7);
-    expect(call).toHaveBeenCalledTimes(7);
-    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin','opencode-go','neuraldeep','agy']);
+    expect(maxActive).toBe(8);
+    expect(call).toHaveBeenCalledTimes(8);
+    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin','opencode-go','neuraldeep','agy','grok']);
     expect(outbound).not.toHaveBeenCalled();
   });
   it('shares one deadline across server lookup and a slow successful Guard RPC',async()=>{
@@ -8467,7 +8544,7 @@ describe("busy Codex usage collection", () => {
     const response=await fixture.host.harness.behavior.fetchHttp("POST","/v1/messages",{headers:authHeaders(fixture.key),body:"{}"});
     try {
       const before=usageCalls;
-      await expect(fixture.host.harness.behavior.callRpc("account.refreshUsage",{accountId:fixture.account.id})).rejects.toThrow("Аккаунт занят");
+      await expect(fixture.host.harness.behavior.callRpc("account.refreshUsage",{accountId:fixture.account.id})).rejects.toThrow("Аккаунт занят запросом");
       expect(usageCalls).toBe(before);
     } finally {await response.body?.cancel();}
   });
@@ -8697,7 +8774,7 @@ describe("cached provider readiness", () => {
     const result=await f.host.harness.behavior.runCli(["readiness","--project","project-one","--json"]);
     expect(result.exitCode).toBe(0);
     const entries=JSON.parse(result.stdout);
-    expect(entries).toHaveLength(9);
+    expect(entries).toHaveLength(10);
     expect(entries.find((x:{provider:string})=>x.provider==="agy")).toMatchObject({ready:false,reason:"no-enabled-account",projectId:"project-one"});
     expect(result.stdout).not.toContain("sk-account");
   });

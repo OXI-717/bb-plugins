@@ -2,7 +2,9 @@
 
 - This repository is the source of truth for its public plugins. Keep internal integrations in their own repository; do not maintain a second source copy here.
 - Keep plugin IDs stable: they own persisted settings, secrets and routing.
-- Publish immutable per-plugin tags (`account-pool-balanced/vX.Y.Z`). Never move an existing tag.
+- All code changes and pull requests target `main`, including Account Pool and VPN Guard. Release branches are historical, not a separate source of fixes.
+- Publish immutable per-plugin tags (`account-pool-balanced/vX.Y.Z`) and GitHub releases from `main`. The tagged commit must have the matching package version; never move an existing tag.
+- Install releases only through the standard updater, which requires a published immutable GitHub release. Building a candidate does not authorize publishing or installing it.
 - Treat source, tests, documentation, issues, commit messages and CI logs as public.
 - Use repository-relative paths, the BB host SDK, configuration and temporary directories. Never embed personal home paths, deployment addresses, customer names or real account inventories.
 - Fixtures must be synthetic. Credentials, databases, authentication files and backups never belong in Git.
