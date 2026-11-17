@@ -9,7 +9,7 @@ import { createAccountPoolPlugin } from './management-test-fixture.js';
 import { accountPoolConfigSchema, type PoolProvider } from './contracts.js';
 import { AccountStore, HubTokenStore, PoolAffinityStore, QuotaStore, QUOTA_MIGRATIONS } from './store.js';
 import { combinedTokens } from './external-clients.js';
-import type { AccountRoute } from './account-egress.js';
+import { EgressUnavailable, type AccountRoute } from './account-egress.js';
 import { CURSOR_EXCHANGE_PATH, CURSOR_MOUNT_PREFIX } from './cursor-adapter.js';
 
 const cleanups: Array<()=>Promise<unknown>>=[];
@@ -54,7 +54,7 @@ it.each([null,false,{}, {accountIds:['invalid']}, {...scope(),accountIds:['inval
   await expect(new HubTokenStore(dir).initialize()).rejects.toThrow();
 });
 
-async function fixture(provider:PoolProvider='claude',ids?:string[]) {
+async function fixture(provider:PoolProvider='claude',ids?:string[],proxyScope=false) {
   const dir=await directory();const host=createFakePluginHost({pluginId:'fixture-pool',dataDir:dir});cleanups.push(()=>host.harness.lifecycle.dispose());
   const accounts=new AccountStore(host.bb.storage.kv,path.join(dir,'accounts'));
   const common={provider,kind:'api-key' as const,label:'Fixture',email:null,accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:true};
@@ -65,10 +65,10 @@ async function fixture(provider:PoolProvider='claude',ids?:string[]) {
   const allowed=await add('fixture-permitted',200);
   const db=host.bb.storage.database();for(const sql of QUOTA_MIGRATIONS)db.exec(sql);
   const affinity=new PoolAffinityStore(db),quotas=new QuotaStore(db),tokens=new HubTokenStore(path.join(dir,'tokens'));
-  const authority=scope(ids??[allowed.id]);const token=await tokens.forIssuedClient('external_fixture','project',undefined,authority);
+  const authority:ClientAccountScope={...scope(ids??[allowed.id]),...(proxyScope?{schema:'bb-account-pool/client-proxy-scope/1' as const}:{})};const token=await tokens.forIssuedClient('external_fixture','project',undefined,authority);
   const legacy=await tokens.forIssuedClient('external_fixture_legacy','project');
   let status=200;const seen:string[]=[];const direct=vi.fn<typeof fetch>(async(_url,init)=>{if(String(_url).includes('exchange_user_api_key'))return Response.json({accessToken:'fixture-minted'});seen.push(new Headers(init?.headers).get('x-api-key')??new Headers(init?.headers).get('authorization')!);return Response.json({id:'fixture-response'},{status});});
-  let route:AccountRoute={assigned:true,profile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>direct(...args)):direct(...args)};
+  let route:AccountRoute={assigned:true,profile:proxyScope?httpProfile:profile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>direct(...args)):direct(...args)};
   const fallback=vi.fn<typeof fetch>(async()=>{throw Error('Unexpected personal transport');});
   let guardAction=async()=>{};
   const settings=accountPoolConfigSchema.parse({vpnOnlyProviders:[],vpnPolicyVersion:2,vpnGuardEnabled:true});
@@ -315,4 +315,107 @@ it('records Claude spacing at actual dispatch after delayed host validation',asy
   expect(f.transport).toHaveBeenCalledTimes(1);
   f.advance(1001);expect((await second).status).toBe(200);
   expect(f.transport).toHaveBeenCalledTimes(2);
+});
+
+
+it('keeps VPN scope required and makes proxy scope an explicit strict authority',()=>{
+  const proxy={...scope(),schema:'bb-account-pool/client-proxy-scope/1'};
+  expect(clientAccountScopeSchema.parse(proxy)).toEqual(proxy);
+  const {egress,...missingRoute}=scope();
+  for(const invalid of [missingRoute,{...missingRoute,schema:proxy.schema},{...proxy,extra:true},
+    {...proxy,accountIds:['bad']},{...proxy,accountIds:Array(33).fill(syntheticId)},
+    {...proxy,egress:{...egress,version:0}},{...proxy,egress:{...egress,optional:true}}])
+    expect(clientAccountScopeSchema.safeParse(invalid).success).toBe(false);
+});
+it('proxy scope preserves exact authority on restart/rotation and requires replacement to change it',async()=>{
+  const dir=await directory(),tokens=new HubTokenStore(dir);
+  const authority:ClientAccountScope={...scope(),schema:'bb-account-pool/client-proxy-scope/1'};
+  const token=await tokens.forIssuedClient('external_proxy','project',undefined,authority);
+  for(const other of [undefined,scope(),{...authority,accountIds:[]},{...authority,egress:{id:'other',version:1}}])
+    await expect(tokens.forIssuedClient('external_proxy','project',undefined,other)).rejects.toThrow('binding differs');
+  await tokens.rotate('external_proxy');
+  const fresh=await tokens.forIssuedClient('external_proxy','project',undefined,authority);
+  const restored=new HubTokenStore(dir);
+  expect((await restored.authenticateContext(token))?.accountScope).toEqual(authority);
+  expect((await restored.authenticateContext(fresh))?.accountScope).toEqual(authority);
+  await restored.remove('external_proxy');
+  expect(await restored.authenticateContext(token)).toBeNull();
+  expect(await restored.authenticateContext(fresh)).toBeNull();
+});
+it.each([200,401,429,503])('proxy-scoped Codex %s uses only its permitted account without replay or VPN observer',async status=>{
+  const f=await fixture('codex',undefined,true);f.status(status);
+  const prepare=vi.fn(async()=>{throw Error('VPN observer must not be called');});
+  f.route({assigned:true,profile:httpProfile,prepareScope:prepare,scopeAccepted:()=>false,
+    fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args)});
+  expect((await f.request()).status).toBe(status);
+  expect(f.seen).toEqual(['Bearer fixture-permitted']);expect(f.fallback).not.toHaveBeenCalled();expect(prepare).not.toHaveBeenCalled();
+});
+it.each(['disabled','deleted','project','quota','purpose'] as const)('proxy scope denies unavailable permitted account (%s) with another eligible account present',async gate=>{
+  const f=await fixture('codex',undefined,true);
+  if(gate==='disabled')await f.accounts.setEnabled(f.allowed.id,false);
+  if(gate==='deleted')await f.accounts.remove(f.allowed.id);
+  if(gate==='project')await f.accounts.setProjects(f.allowed.id,{onlySelected:true,rules:[{projectId:'other',role:'inherit'}]});
+  if(gate==='quota')f.quotas.put({...f.quotas.get(f.allowed.id),error:'fixture unavailable'});
+  const key=gate==='purpose'?await f.tokens.forIssuedClient('external_auto','project','autopilot',f.authority):f.token;
+  expect((await f.request(key)).status).not.toBe(200);
+  expect(f.seen).toEqual([]);expect(f.fallback).not.toHaveBeenCalled();
+});
+it.each([{ids:[]},{ids:['22222222-2222-4222-8222-222222222222']}])('proxy scope denies empty/missing account set %j',async({ids})=>{
+  const f=await fixture('codex',ids,true);
+  expect((await f.request()).status).not.toBe(200);expect(f.seen).toEqual([]);expect(f.fallback).not.toHaveBeenCalled();
+});
+it.each([
+  {name:'unassigned',assigned:false,profile:null},
+  {name:'wrong-id',assigned:true,profile:{...httpProfile,id:'other'}},
+  {name:'wrong-version',assigned:true,profile:{...httpProfile,version:2}},
+  {name:'wrong-transport',assigned:true,profile},
+  {name:'wrong-failure',assigned:true,profile:{...httpProfile,failure:'open'}},
+])('proxy scope denies $name with no direct or other-account fallback',async metadata=>{
+  const f=await fixture('codex',undefined,true),read=vi.spyOn(f.accounts,'readSecret');
+  f.route({...metadata,fetch:()=>f.transport} as unknown as AccountRoute);
+  expect((await f.request()).status).toBe(503);
+  expect(read).not.toHaveBeenCalled();expect(f.seen).toEqual([]);expect(f.fallback).not.toHaveBeenCalled();
+});
+it('proxy scope checks models, inherited affinity and final account eligibility',async()=>{
+  const f=await fixture('codex',undefined,true);
+  expect((await f.request(f.legacy)).status).toBe(200);
+  expect((await f.request(f.token,'same')).status).toBe(200);
+  expect((await f.request(f.token,undefined,'GET')).status).toBe(200);
+  expect(f.seen).toEqual(['Bearer fixture-personal','Bearer fixture-permitted','Bearer fixture-permitted']);
+  const snapshot=f.accounts.withSnapshot.bind(f.accounts);
+  vi.spyOn(f.accounts,'withSnapshot').mockImplementationOnce(async action=>{
+    await f.accounts.setEnabled(f.allowed.id,false);return snapshot(action);
+  });
+  expect((await f.request()).status).toBe(403);expect(f.seen).toHaveLength(3);
+  expect(f.fallback).not.toHaveBeenCalled();
+});
+it('proxy scope fences credential revocation at final send',async()=>{
+  const f=await fixture('codex',undefined,true),snapshot=f.accounts.withSnapshot.bind(f.accounts);
+  vi.spyOn(f.accounts,'withSnapshot').mockImplementationOnce(async action=>{
+    await f.tokens.remove('external_fixture');return snapshot(action);
+  });
+  expect((await f.request()).status).toBe(403);expect(f.seen).toEqual([]);expect(f.fallback).not.toHaveBeenCalled();
+});
+
+it('CLI issues private project-bound proxy authority and revokes its credential',async()=>{
+  const dir=await directory(),transport=vi.fn<typeof fetch>(async()=>{throw Error('No upstream');});
+  const host=createFakePluginHost({pluginId:'account-pool-balanced',dataDir:dir,sdk:{hosts:{list:async()=>[]},system:{providerStates:async()=>({providers:[]})}}});
+  cleanups.push(()=>host.harness.lifecycle.dispose());
+  await createAccountPoolPlugin({fetch:transport,fetchIpv4:transport})(host.bb);
+  const file=path.join(dir,'proxy.token'),authority={...scope(),schema:'bb-account-pool/client-proxy-scope/1'};
+  const issued=await host.harness.behavior.runCli(['client','add','proxy','--output',file,'--project','project','--account-scope-json',JSON.stringify(authority)]);
+  expect(issued.exitCode).toBe(0);
+  const token=(await fs.readFile(file,'utf8')).trim();
+  expect(issued.stdout).not.toContain(token);expect((await fs.stat(file)).mode&0o777).toBe(0o600);
+  const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
+  const exchange=()=>host.harness.behavior.fetchHttp('POST',`/${CURSOR_MOUNT_PREFIX}${CURSOR_EXCHANGE_PATH}`,{headers,body:'{}'});
+  expect((await exchange()).status).toBe(200);
+  expect((await host.harness.behavior.runCli(['client','revoke','proxy'])).exitCode).toBe(0);
+  expect((await exchange()).status).toBe(401);expect(transport).not.toHaveBeenCalled();
+});
+it('proxy scope refuses proxy transport failure without replay',async()=>{
+  const f=await fixture('codex',undefined,true);
+  f.transport.mockRejectedValueOnce(new EgressUnavailable());
+  expect((await f.request()).status).toBe(503);
+  expect(f.transport).toHaveBeenCalledTimes(1);expect(f.seen).toEqual([]);expect(f.fallback).not.toHaveBeenCalled();
 });

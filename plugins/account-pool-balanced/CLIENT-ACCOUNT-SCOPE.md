@@ -43,6 +43,34 @@ credential refresh or dispatch. Assigned-route errors return without fallback
 or replay. The existing registry supports Claude and Codex accounts; this
 change does not expand its provider inventory.
 
+## Account scope with an existing HTTP proxy
+
+For an account allowlist using an ordinary assigned HTTP CONNECT proxy, issue a
+separate explicit authority with the same CLI flag:
+
+```json
+{
+  "schema": "bb-account-pool/client-proxy-scope/1",
+  "accountIds": ["11111111-1111-4111-8111-111111111111"],
+  "egress": {"id": "example-proxy", "version": 1}
+}
+```
+
+This credential requires an assigned `http-connect` route with the exact immutable
+profile ID/version, `closed` failure and available transport. It retains the same
+server-side account intersection, final admission/revocation checks, scoped
+namespace and restart/rotation rules. An empty, deleted or ineligible account set
+refuses dispatch even when other project accounts are eligible. An unavailable
+proxy refuses without direct transport or other-account fallback. Models and
+budget inventory remain scoped. Clients cannot choose this authority themselves.
+
+This is proxy enforcement, not independent VPN acceptance. It does not call the
+managed VPN observer and grants no VPN guarantee. The original
+`client-account-scope/1` contract and its HTTP acceptance requirement are unchanged;
+missing egress or acceptance never converts it into proxy scope. Switching modes
+requires revoke and new issuance. Replace an earlier unscoped credential and
+revoke it before handing the new credential to a client.
+
 ## Managed HTTP CONNECT acceptance
 
 `management.call` with a short-lived **manage** grant exposes `egress.scopeAccept`
