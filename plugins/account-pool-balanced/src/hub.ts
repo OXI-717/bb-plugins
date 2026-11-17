@@ -395,7 +395,8 @@ export class AccountPoolHub {
     return this.adapter(provider).importAccount();
   }
 
-  observations() { return this.options.journal?.snapshot(100) ?? { unavailable:true }; }
+  observations(limit=100) { return this.options.journal?.snapshot(limit) ?? { unavailable:true }; }
+  trafficDiagnostics(from:number,to:number){return this.options.journal?.historySummary(from,to)??{unavailable:true as const};}
   trafficHistory(offset = 0, limit = 100) { return this.options.journal?.historySnapshot(offset,limit) ?? { unavailable:true as const }; }
   private observe(trace: Trace, fields: Partial<Observation>): void {
     try {

@@ -1,3 +1,4 @@
+import { summarizeDiagnostics } from './diagnostics.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
@@ -166,6 +167,10 @@ export class TrafficHistory {
       recentPressure:[...providers].map(([provider,total])=>({provider,lastUpstream429At:total.lastUpstream429At,
         lastAuthErrorAt:total.lastAuthErrorAt,lastQueueFailureAt:total.lastQueueFailureAt,
         lastUpstream503At:total.lastUpstream503At,lastAuthRefreshFailureAt:total.lastAuthRefreshFailureAt}))};
+  }
+  periodSummary(from:number,to:number) {
+    const metadata=this.metadata();
+    return {...metadata,history:summarizeDiagnostics({from,to},this.rows.values(),[]).history};
   }
   snapshot(offset = 0, limit = 100) {
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > HISTORY_MAX_ROWS || !Number.isSafeInteger(limit) || limit < 1 || limit > 200)
