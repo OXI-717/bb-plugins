@@ -9027,3 +9027,10 @@ describe('account HTTP proxy operator wiring',()=>{
   }
  });
 });
+
+it('exposes route and history capacity through pool status',async()=>{
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example'});
+ const status=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));
+ expect(status.routeTracking).toMatchObject({decisions:0,maxDecisions:4096,maxBytes:240*1024,retentionMs:30*86400000});
+ expect(status.historyCapacity).toEqual({rows:0,maxRows:65536,maxBytes:64*1024*1024});
+});

@@ -86,7 +86,7 @@ const HELP = [
   "  bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]",
   "  bb pool observations [--json]",
   "  bb pool guard-probe --provider cursor [--delay-stage guard-rpc] [--delay-ms 4100] [--delay-attempts first|all] [--json]",
-  "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
+  "  bb pool history [--offset <0..65536>] [--limit <1..200>] [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin|grok> [--off]",
   "  bb pool config",
   "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|pinnedFailover|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
@@ -228,6 +228,8 @@ function formatStatus(status: PoolStatusReport): string {
     `Accepting: ${status.accepting}`,
     `Enabled accounts: ${status.enabledAccountCount}`,
     `In flight: ${status.inFlight}`,
+    ...(status.routeTracking?[`Route tracking: ${status.routeTracking.decisions}/${status.routeTracking.maxDecisions} decisions; ${status.routeTracking.bytes}/${status.routeTracking.maxBytes} bytes`]:[]),
+    ...(status.historyCapacity?[`History: ${status.historyCapacity.rows}/${status.historyCapacity.maxRows} rows; byte limit ${status.historyCapacity.maxBytes}`]:[]),
     "",
     "Machine tokens:",
     ...(status.hosts.length === 0
@@ -454,7 +456,7 @@ export function registerPoolCli(
       {name:"stream-probe",summary:"Inspect one thread or interrupt one exact observed Cursor body",usage:"bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]"},
       { name:"guard-probe", summary:"Rehearse read-only Guard admission, optionally delaying only this probe", usage:"bb pool guard-probe --provider cursor [--delay-stage server-host|guard-rpc|server-host-recheck] [--delay-ms 0..4500] [--delay-attempts first|all] [--json]" },
       { name:"observations", summary:"Inspect bounded request metadata and retained-event minute counts", usage:"bb pool observations [--json]" },
-      { name:"history", summary:"Inspect bounded fourteen-day hourly account and client counters", usage:"bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]" },
+      { name:"history", summary:"Inspect bounded fourteen-day hourly provider and account counters", usage:"bb pool history [--offset <0..65536>] [--limit <1..200>] [--json]" },
       {
         name: "status",
         summary: "Show hub, machine token, routing, and account status",
@@ -901,7 +903,7 @@ export function registerPoolCli(
               throw Error(`--${name} requires an integer ${min}..${max}.`);
             return Number(raw);
           };
-          return {exitCode:0,stdout:json(await operations.trafficHistory(integer('offset',0,0,8192),integer('limit',100,1,200)))};
+          return {exitCode:0,stdout:json(await operations.trafficHistory(integer('offset',0,0,65536),integer('limit',100,1,200)))};
         }
         if (argv[0] === "status") {
           const flags = parseFlags(argv.slice(1), ["json"], []);

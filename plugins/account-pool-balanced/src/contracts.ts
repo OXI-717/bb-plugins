@@ -441,6 +441,8 @@ export type ProviderReadiness = z.infer<typeof providerReadinessSchema>;
 export const statusSchema = z
   .object({
     route: z.string(),
+    routeTracking:z.object({decisions:z.number(),maxDecisions:z.number(),bytes:z.number(),maxBytes:z.number(),retentionMs:z.number(),trackedKeys:z.number().optional(),cachedRoutes:z.number().optional()}).optional(),
+    historyCapacity:z.object({rows:z.number(),maxRows:z.number(),maxBytes:z.number()}).optional(),
     vpn: z.object({ state: z.enum(["connected", "disconnected", "unknown"]), blockedProviders: z.array(providerSchema), guardEnabled:z.boolean().default(false), assurance:z.enum(["verified_ipv4","unverified","invalid"]).optional(),reason:z.string().optional() }).strict().optional(),
     enabledAccountCount: z.number().int().nonnegative(),
     inFlight: z.number().int().nonnegative(),
