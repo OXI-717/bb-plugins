@@ -29,3 +29,10 @@ enrolled machine even when it is outside the protected scope. This command
 changes no scope, mode, manual block or VPN setting and runs no enforcement.
 `system_ipv4` with source `incy` or `tailscale` reports local operating-system
 state, without an upstream traffic probe. It does not verify external egress.
+
+A selected machine that cannot be read (failed host RPC, unavailable machine
+list) holds new turns at once, but its running threads, native suspension and
+automation hold wait for 90 seconds of continuous unobservability; explicit
+not-connected evidence and manual blocks act immediately. In status,
+`hosts[].lastEvidenceAt` and `hosts[].unobservedSince` show when the last
+evidence arrived and since when the machine has been unobservable.
