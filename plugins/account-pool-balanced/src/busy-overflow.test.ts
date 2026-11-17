@@ -16,7 +16,7 @@ const session=(id:string)=>JSON.stringify({metadata:{user_id:`user_fixture_accou
 const SESSION_A='11111111-1111-4111-8111-111111111111';
 const SESSION_B='22222222-2222-4222-8222-222222222222';
 
-async function fixture(config:Partial<AccountPoolConfig>,options:{routeCompatible?:(accountId:string,sessionKey:string|null)=>boolean}={}){
+async function fixture(config:Partial<AccountPoolConfig>,options:{routeCompatible?:(accountId:string,sessionKey:string|null)=>boolean;guardCheck?:()=>Promise<void>}={}){
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'busy-overflow-'));
  const host=createFakePluginHost({pluginId:'fixture-pool',dataDir:dir});
  const accounts=new AccountStore(host.bb.storage.kv,path.join(dir,'secrets'));
@@ -24,12 +24,13 @@ async function fixture(config:Partial<AccountPoolConfig>,options:{routeCompatibl
  const quotas=new QuotaStore(db,Date.now);
  const settings=accountPoolConfigSchema.parse({vpnOnlyProviders:[],routingStrategy:'balanced',maxConcurrentRequestsPerAccount:1,...config});
  const used:string[]=[];const streams:ReadableStreamDefaultController<Uint8Array>[]=[];
+ const upstream:typeof fetch=async(_input,init)=>{
+  used.push(new Headers(init?.headers).get('x-api-key')??'');
+  return new Response(new ReadableStream<Uint8Array>({start(controller){streams.push(controller);}}));
+ };
  const hub=createHub({route:'/pool',accounts,quotas,affinity:new PoolAffinityStore(db),getSettings:()=>settings,
-  hubTokens:{authenticate:async()=>'host',list:async()=>[]},now:Date.now,routeCompatible:options.routeCompatible,
-  fetch:async(_input,init)=>{
-   used.push(new Headers(init?.headers).get('x-api-key')??'');
-   return new Response(new ReadableStream<Uint8Array>({start(controller){streams.push(controller);}}));
-  }});
+  hubTokens:{authenticate:async()=>'host',list:async()=>[]},now:Date.now,routeCompatible:options.routeCompatible,guardCheck:options.guardCheck,
+  fetch:upstream,fetchIpv4:upstream});
  cleanups.push(async()=>{for(const stream of streams){try{stream.close();}catch{/* already closed */}}
   await hub.stop();await host.harness.lifecycle.dispose();await fs.rm(dir,{recursive:true,force:true});});
  const add=async(key:string,role:'primary'|'reserve'='primary')=>{
@@ -157,4 +158,32 @@ it('spreads a simultaneous burst over the free slots of every allowed account',a
  // (the waiter starts as soon as one slot frees), then collect all bodies.
  f.closeAll();await f.started(7);f.closeAll();
  await Promise.all([...burst,extra].map(async response=>(await response).text()));
+});
+
+it('waits for a held home account in place even when its slots are taken by requests waiting for that hold',async()=>{
+ const f=await fixture({});const one=await f.add('key-one');const two=await f.add('key-two');
+ const warm=f.send(session(SESSION_A));await f.started(1);const homeKey=f.used[0]!;const home=homeKey==='key-one'?one:two;
+ await f.finish(0,warm);
+ // The provider holds the home account. One request of the conversation takes its only
+ // slot and waits for the hold; a second one must wait too instead of moving to the peer.
+ f.quotas.put({...f.quotas.get(home.id),heldUntil:Date.now()+250});
+ const first=f.send(session(SESSION_A));const second=f.send(session(SESSION_A));
+ await f.settle();expect(f.used).toHaveLength(1);
+ await f.started(2);expect(f.used[1]).toBe(homeKey);
+ await f.finish(1,first);await f.started(3);expect(f.used[2]).toBe(homeKey);
+ await f.finish(2,second);
+});
+
+it('applies the recovery cap to requests that took their slots before the hold arrived',async()=>{
+ let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+ const f=await fixture({maxConcurrentRequestsPerAccount:4,vpnGuardEnabled:true},{guardCheck:()=>gate});
+ const account=await f.add('key-one');
+ // Four requests reserve all four slots and are still before dispatch...
+ const reserved=Array.from({length:4},()=>f.send());await f.settle();expect(f.used).toHaveLength(0);
+ // ...when a provider hold arrives. After it expires only two may be upstream together.
+ f.quotas.put({...f.quotas.get(account.id),heldUntil:Date.now()+150});release();
+ await f.started(2);await f.settle();await f.settle();expect(f.used).toHaveLength(2);
+ // Each finished response lets exactly one more start.
+ f.closeAll();await f.started(4);f.closeAll();
+ await Promise.all(reserved.map(async response=>(await response).text()));
 });

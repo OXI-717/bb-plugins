@@ -227,6 +227,8 @@ export class AccountPoolHub {
   private recoveryWake: ReturnType<typeof setTimeout> | null = null;
   private recoveryWakeAt = 0;
   private readonly placementsByAccount = new Map<string, number[]>();
+  /** Requests actually sent upstream and not finished yet (a slot may be held before that). */
+  private readonly dispatchedByAccount = new Map<string, number>();
   constructor(private readonly options: HubOptions) {
     // A burst no larger than the account's own concurrency may start together; the
     // interval then bounds the sustained start rate.
@@ -259,6 +261,26 @@ export class AccountPoolHub {
     if (this.options.now() >= recoveredAt) return limit;
     this.wakeAdmissionAt(recoveredAt);
     return RECOVERY_CONCURRENCY;
+  }
+
+  /** End of the account's recovery window, or null when it is not recovering. */
+  private recoveryEndsAt(accountId: string): number | null {
+    const heldUntil = this.options.quotas.get(accountId).heldUntil;
+    if (heldUntil === null) return null;
+    const recoveredAt = heldUntil + RECOVERY_WINDOW_MS;
+    return this.options.now() < recoveredAt ? recoveredAt : null;
+  }
+
+  /**
+   * The recovery cap also binds requests that took a slot before the hold arrived: they
+   * may not start while the account already has that many requests upstream.
+   */
+  private recoveryFullUntil(accountId: string): number | null {
+    if (this.options.getSettings().maxConcurrentRequestsPerAccount <= RECOVERY_CONCURRENCY) return null;
+    const recoveredAt = this.recoveryEndsAt(accountId);
+    if (recoveredAt === null || (this.dispatchedByAccount.get(accountId) ?? 0) < RECOVERY_CONCURRENCY) return null;
+    this.wakeAdmissionAt(recoveredAt);
+    return recoveredAt;
   }
 
   /** Waiting requests are re-evaluated when a recovery window ends, not only on the next release. */
@@ -1388,8 +1410,11 @@ export class AccountPoolHub {
           .find((candidate) => candidate !== undefined);
     // A warm conversation keeps its account unless that account cannot start the request
     // now and another one can. The binding is kept, so later requests return to it.
+    // A provider hold is not "busy": a held home account is waited for in place, however
+    // many requests are already waiting behind that hold.
+    const held = (entry: (typeof eligible)[number]) => !freeTier && (entry.quota.heldUntil ?? 0) > now;
     const detour = (home: (typeof eligible)[number]) =>
-      overflow && next !== undefined && next !== home && !startsNow(home) && placeable(next);
+      overflow && next !== undefined && next !== home && !held(home) && !startsNow(home) && placeable(next);
     const selected = pinned ?? (
       bound !== undefined && unattempted.includes(bound) && (candidates.length === 0 || tier(bound) <= bestTier) && !detour(bound)
         ? bound
@@ -1665,7 +1690,10 @@ export class AccountPoolHub {
         ? null
         : this.options.quotas.get(account.id).heldUntil;
       const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id, hold) : null;
-      return hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
+      const ready = hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
+      // Woken by the release of a running request or by the end of the recovery window.
+      const full = admission.freeTier ? null : this.recoveryFullUntil(account.id);
+      return full === null ? ready : Math.max(ready ?? 0, full);
     };
     // Cursor streams depend on append and startup RPCs. Sharing their capacity
     // lets two open streams prevent the requests needed to make either finish.
@@ -1690,6 +1718,7 @@ export class AccountPoolHub {
     this.activeControllers.add(controller);
     this.increment(account.id);
     let released = false;
+    let upstreamStarted = false;
     const openedAt=this.options.now();
     let upstreamStatus:number|null=null;
     const release = (outcome: "complete"|"error"|"canceled" = "complete") => {
@@ -1699,7 +1728,13 @@ export class AccountPoolHub {
       controller.signal.removeEventListener("abort", abortRelease);
       this.activeControllers.delete(controller);
       this.decrement(account.id);
+      if (upstreamStarted) {
+        const running = (this.dispatchedByAccount.get(account.id) ?? 1) - 1;
+        if (running <= 0) this.dispatchedByAccount.delete(account.id); else this.dispatchedByAccount.set(account.id, running);
+      }
       slotRelease();
+      // A request held back by the recovery cap can start now.
+      if (upstreamStarted && this.recoveryEndsAt(account.id) !== null) this.admissionLimitsChanged();
       this.observe(trace,{event:'stream-end',attempt,accountId:account.id,status:upstreamStatus,durationMs:Math.max(0,this.options.now()-openedAt),outcome:controller.signal.aborted?'canceled':upstreamStatus===null?'error':outcome,errorClass:controller.signal.aborted?'canceled':(upstreamStatus===null||outcome==='error')?'stream-error':null});
     };
     // A queued downstream chunk can stop pull() indefinitely after disconnect.
@@ -1741,6 +1776,7 @@ export class AccountPoolHub {
               this.stopped.signal.throwIfAborted();
               this.options.maintenance?.assertAllowed();
               admission.onDispatch?.();
+              if (!upstreamStarted) { upstreamStarted = true; this.dispatchedByAccount.set(account.id, (this.dispatchedByAccount.get(account.id) ?? 0) + 1); }
               this.observe(trace,{event:'attempt',attempt,accountId:account.id});
               if (account.provider === 'claude') this.claudeStarts.dispatched(account.id, admission.freeTier ? null : this.options.quotas.get(account.id).heldUntil);
               phase='after-headers';return {response: send()};

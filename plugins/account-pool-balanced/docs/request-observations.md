@@ -77,7 +77,7 @@ With the `balanced` strategy the pool no longer queues a request behind a full a
 - When every preferred account is busy, the nearest less preferred tier that can start the request now is used (for example a reserve account of the same project). Project access, purpose opt-in, schedules, quota thresholds and reserve caps are evaluated exactly as before: only accounts that were already eligible for this request are considered.
 - A warm conversation keeps its account. It is moved for a single request only when that account is full and another one can start now; the binding is kept, so later requests return to it. A detour costs the prompt cache of that request on the other account.
 - A conversation is never moved onto an account that would leave its recorded egress decision: a pinned conversation stays on its pinned account, and a conversation recorded without a profile is not moved onto an account that has one.
-- A waiting request is not re-placed when another account frees up later, and a provider hold on the home account still waits in place.
+- A waiting request is not re-placed when another account frees up later. A provider hold on the home account still waits in place: a held account is never treated as busy, however many requests are already waiting behind that hold.
 
 `busyOverflow` (default `true`) turns this off: `bb pool config set busyOverflow false` restores the former placement without a reload. The `sequential` strategy is unchanged.
 
