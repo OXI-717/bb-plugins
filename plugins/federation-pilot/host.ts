@@ -1,3 +1,4 @@
+import {boundedFrame} from './realtime-frame.ts';
 import {validRequestPath} from './policy.ts';
 import {randomUUID} from 'node:crypto';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
@@ -102,8 +103,8 @@ export default experimental_defineHostEntry({
       const close=()=>{try{ws.close(1000,'Plugin lifecycle ended');}catch{}};
       context.lifecycle.signal.addEventListener('abort',close,{once:true});
       ws.addEventListener('message',e=>{
-        const data=String(e.data);
-        if(data.length<=65536) void context.experimental_emitSignal('frame',{id:input.id,data}).catch(()=>{});
+        const data=boundedFrame(String(e.data));
+        if(data!==null) void context.experimental_emitSignal('frame',{id:input.id,data}).catch(()=>{});
       });
       ws.addEventListener('close',()=>{
         sockets.delete(input.id);socketDestinations.delete(input.id);socketGenerations.delete(input.id);lease.dispose();context.lifecycle.signal.removeEventListener('abort',close);
