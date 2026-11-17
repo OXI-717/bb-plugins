@@ -100,7 +100,7 @@ it('permits owner UI RPCs while refusing untrusted plugin dispatch', async () =>
     expect(() => handler(null,{experimental_caller:{kind:'plugin',pluginId:'untrusted'}})).toThrow(PoolManagementLocked);
     if (!['status.get', 'thread.account'].includes(method)) expect(() => handler(null, { experimental_caller: { kind: 'plugin', pluginId: 'model-connections' } })).toThrow(PoolManagementLocked);
     // Guard may read the protection settings for its linkage handshake and nothing else.
-    if (method !== 'config.get') expect(() => handler(null, { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } })).toThrow(PoolManagementLocked);
+    if (!['config.get', 'vpnPolicy.get'].includes(method)) expect(() => handler(null, { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } })).toThrow(PoolManagementLocked);
     expect(() => handler(null, { experimental_caller: { kind: 'plugin' } })).toThrow(PoolManagementLocked);
   }
   for (const handler of Object.values(handlers)) expect(handler).not.toHaveBeenCalled();
@@ -155,6 +155,11 @@ it('closes CLI inventory and mutation paths including forged identities and help
   expect((await execute(manage.token, ['account', 'disable', 'target'])).exitCode).toBe(0);
   expect(actual).toHaveBeenCalledOnce();
   expect((await execute(manage.token, ['management', 'unlock'])).exitCode).toBe(1);
+  expect((await execute(read.token, ['config'])).exitCode).toBe(0);
+  expect((await execute(read.token, ['config', 'get'])).exitCode).toBe(0);
+  actual.mockClear();
+  expect((await execute(read.token, ['config', 'set', 'vpnGuardEnabled', 'false'])).exitCode).toBe(1);
+  expect(actual).not.toHaveBeenCalled();
 });
 
 it('does not leak resource names through the separate quota RPC registration', async () => {

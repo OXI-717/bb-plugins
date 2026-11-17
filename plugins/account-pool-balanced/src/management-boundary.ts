@@ -8,7 +8,7 @@ import { managementRpcContract, managementUnlockSchema, type ManagementScope } f
 type Handlers = PluginRpcHandlers<typeof accountPoolRpcContract>;
 const readMethods = new Set([
   'maintenance.status', 'update.status', 'native.accounts', 'egress.status', 'readiness.get',
-  'thread.accountChoices', 'thread.account', 'account.list', 'projects.list', 'config.get', 'status.get', 'status.routedThreads',
+  'thread.accountChoices', 'thread.account', 'account.list', 'projects.list', 'vpnPolicy.get', 'config.get', 'status.get', 'status.routedThreads',
 ]);
 const rpcScope = (method: string): ManagementScope => readMethods.has(method) ? 'read' : 'manage';
 // Read-only methods another installed plugin may call without a grant. Everything else
@@ -17,12 +17,12 @@ const pluginReads = new Map<string, ReadonlySet<string>>([
   ['model-connections', new Set(['status.get', 'thread.account'])],
   // Guard's linkage handshake reads the protection settings (no credentials are in them).
   // Without it Guard reports the linkage as unavailable and refuses a VPN-required pool host.
-  ['vpn-guard', new Set(['config.get'])],
+  ['vpn-guard', new Set(['vpnPolicy.get', 'config.get'])],
 ]);
 const readCli = (argv: string[]) =>
   (['status', 'readiness'].includes(argv[0] ?? '')) ||
   (argv[0] === 'account' && argv[1] === 'list') ||
-  (argv[0] === 'config' && argv[1] === 'get') ||
+  (argv[0] === 'config' && (argv.slice(1).every(arg => arg === '--json') || argv[1] === 'get')) ||
   (argv[0] === 'browser' && argv[1] === 'list') ||
   (['egress', 'native', 'maintenance'].includes(argv[0] ?? '') && argv[1] === 'status');
 

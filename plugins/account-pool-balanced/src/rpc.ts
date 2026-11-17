@@ -151,6 +151,10 @@ export const accountPoolRpcContract = defineRpcContract({
       .object({ provider: providerSchema, enabled: z.boolean() })
       .strict(),
   },
+  "vpnPolicy.get": {
+    input: z.null(),
+    output: accountPoolConfigSchema.pick({ vpnGuardEnabled: true, vpnPolicyVersion: true, vpnOnlyProviders: true }).strict(),
+  },
   "config.get": {
     input: z.null(),
     output: accountPoolConfigSchema,
@@ -298,6 +302,10 @@ export function createRpcHandlers(
     "routing.set": async ({ provider, enabled }) => {
       await operations.setRouting(provider, enabled);
       return { provider, enabled };
+    },
+    "vpnPolicy.get": async () => {
+      const { vpnGuardEnabled, vpnPolicyVersion, vpnOnlyProviders } = await config.get();
+      return { vpnGuardEnabled, vpnPolicyVersion, vpnOnlyProviders };
     },
     "config.get": () => config.get(),
     "config.set": (input) => config.set(input),

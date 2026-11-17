@@ -3,6 +3,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
+import guardPlugin from '../../vpn-guard/server.js';
 import { createAccountPoolPlugin } from './server.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -32,4 +33,37 @@ it('keeps owner RPCs available while CLI and delegated management remain guarded
   await call('management.lock', { token: grant.token });
   await expect(call('management.call', { token: grant.token, method: 'account.list', input: null })).resolves.toEqual({ ok: false, code: 'pool-management-locked' });
   expect(upstream).not.toHaveBeenCalled();
+});
+
+it('links the real Guard to the registered narrow policy RPC while preserving config.get', async () => {
+  const dataDir = await fs.mkdtemp(path.join(tmpdir(), 'pool-guard-link-'));
+  cleanups.push(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const pool = createFakePluginHost({ pluginId: 'account-pool-balanced', dataDir, sdk: { hosts: { list: async () => [] } } });
+  cleanups.push(() => pool.harness.lifecycle.dispose());
+  const registrations: Record<string, (input: unknown, context?: unknown) => unknown> = {};
+  const register = pool.bb.rpc.register.bind(pool.bb.rpc);
+  vi.spyOn(pool.bb.rpc, 'register').mockImplementation(((contract: unknown, handlers: typeof registrations) => {
+    Object.assign(registrations, handlers); return register(contract as never, handlers as never);
+  }) as typeof pool.bb.rpc.register);
+  await createAccountPoolPlugin({ fetch: async () => { throw Error('Unexpected network'); } })(pool.bb);
+  await pool.harness.behavior.callRpc('config.set', { vpnGuardEnabled: true });
+  const calls: string[] = [];
+  const guard = createFakePluginHost({ pluginId: 'vpn-guard', sdk: {
+    hosts: { list: async () => [] },
+    plugins: { callRpc: async ({ method, input }) => {
+      calls.push(method);
+      if (!registrations[method]) throw Error('RPC not registered');
+      return await registrations[method]!(input, { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } }) as never;
+    } },
+  } });
+  cleanups.push(() => guard.harness.lifecycle.dispose());
+  // The plugins pin different SDK versions; this fixture supplies the shared runtime API.
+  await guardPlugin(guard.bb as unknown as Parameters<typeof guardPlugin>[0]);
+  const status = await guard.harness.behavior.callRpc('status', null) as { pool: unknown };
+  expect(status.pool).toEqual({ linked: true, vpnPolicyVersion: 2, error: null });
+  expect(calls).toContain('vpnPolicy.get');
+  const policy = await pool.harness.behavior.callRpc('vpnPolicy.get', null);
+  expect(Object.keys(policy as object).sort()).toEqual(['vpnGuardEnabled', 'vpnOnlyProviders', 'vpnPolicyVersion']);
+  expect(await pool.harness.behavior.callRpc('config.get', null)).toMatchObject(policy as object);
+  expect(() => registrations['vpnPolicy.get']!(null, { experimental_caller: { kind: 'plugin', pluginId: 'untrusted' } })).toThrow();
 });
