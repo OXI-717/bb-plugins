@@ -97,9 +97,10 @@ class ReleaseVectorTests(unittest.TestCase):
                                        check=True, capture_output=True, timeout=30)
                         plan = {k: json.loads(v) for k, v in (line.split('=', 1) for line in output.read_text().splitlines())}
                         expected = 1 if case == 'version' else 14
-                        self.assertEqual(len(plan['matrix']['include']), expected)
+                        self.assertEqual(len([row for row in plan['matrix']['include'] if row['run']]), expected)
                         self.assertEqual(plan['upgrade_mac'], case != 'version')
                         if case == 'version':
+                            self.assertEqual(len(plan['matrix']['include']), 4)
                             self.assertEqual(plan['matrix']['include'][0]['os'], 'ubuntu-latest')
                             self.assertFalse(plan['op'])
                             self.assertFalse(plan['archive'])
@@ -118,6 +119,6 @@ class ReleaseVectorTests(unittest.TestCase):
                                             'GITHUB_OUTPUT': str(output)},
                                        check=True, capture_output=True, timeout=30)
                         result = dict(line.split('=', 1) for line in output.read_text().splitlines())
-                        self.assertEqual(len(json.loads(result['matrix'])['include']), 1)
+                        self.assertEqual(len([row for row in json.loads(result['matrix'])['include'] if row['run']]), 1)
                     # Branch from the original base; each case is a fresh release diff.
                     git('checkout', '--detach', base)

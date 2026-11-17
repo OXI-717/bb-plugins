@@ -63,7 +63,7 @@ jobs:
 
   check:
     needs: plan
-    if: needs.plan.outputs.check == 'true'
+    name: check (${{ matrix.os }}, ${{ matrix.plugin }})
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -73,41 +73,48 @@ jobs:
       OXI_TEST_REMOTE_EXECUTION: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: matrix.run
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.run
         with:
           node-version: ${{ (matrix.plugin == 'oxi-projects' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance') && '24' || '22' }}
           cache: npm
           cache-dependency-path: plugins/${{ matrix.plugin }}/package-lock.json
       - name: Check publication manifests
+        if: matrix.run
         run: |
           node scripts/check-manifests.mjs
           node scripts/check-vpn-contract.mjs
       - name: Install dependencies
+        if: matrix.run
         working-directory: plugins/${{ matrix.plugin }}
         run: npm ci ${{ matrix.plugin == 'pool-maintenance' && '--legacy-peer-deps' || '' }}
       - name: Typecheck
+        if: matrix.run
         working-directory: plugins/${{ matrix.plugin }}
         run: npm run typecheck
       - name: Test
+        if: matrix.run
         working-directory: plugins/${{ matrix.plugin }}
         run: npm test
       - name: Project UI and integration tests
-        if: matrix.plugin == 'oxi-projects'
+        if: matrix.run && (matrix.plugin == 'oxi-projects')
         working-directory: plugins/oxi-projects
         run: npx vitest run
       - name: Collector tests
-        if: matrix.plugin == 'automation-catalog'
+        if: matrix.run && (matrix.plugin == 'automation-catalog')
         working-directory: plugins/automation-catalog/scripts
         run: python3 -m unittest discover -p 'test_catalog*.py'
       - name: Build with the published BB CLI
-        if: matrix.plugin != 'vpn-guard' && matrix.plugin != 'oxi-projects' && matrix.plugin != 'model-connections' && matrix.plugin != 'federation-pilot' && matrix.plugin != 'pool-maintenance'
+        if: matrix.run && (matrix.plugin != 'vpn-guard' && matrix.plugin != 'oxi-projects' && matrix.plugin != 'model-connections' && matrix.plugin != 'federation-pilot' && matrix.plugin != 'pool-maintenance')
         working-directory: plugins/${{ matrix.plugin }}
         run: npm exec --yes --package=bb-app@${{ matrix.plugin == 'account-pool-balanced' && '0.46.1' || '0.43.3' }} -- bb plugin build .
       - name: Build plugins requiring BB 0.46
-        if: matrix.plugin == 'vpn-guard' || matrix.plugin == 'oxi-projects' || matrix.plugin == 'model-connections' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance'
+        if: matrix.run && (matrix.plugin == 'vpn-guard' || matrix.plugin == 'oxi-projects' || matrix.plugin == 'model-connections' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance')
         working-directory: plugins/${{ matrix.plugin }}
         run: npm exec --yes --package=bb-app@${{ (matrix.plugin == 'model-connections' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance') && '0.46.1' || '0.46.0' }} -- bb plugin build .
       - name: Ensure checks leave tracked files clean
+        if: matrix.run
         run: git diff --exit-code
 
   session-tree:

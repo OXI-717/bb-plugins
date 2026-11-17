@@ -7,6 +7,7 @@ from ci_versions import git, version_only
 
 PLUGINS = ['account-pool-balanced', 'automation-catalog', 'vpn-guard', 'oxi-projects',
            'model-connections', 'federation-pilot', 'pool-maintenance']
+REQUIRED_CHECK_PLUGINS = {'account-pool-balanced', 'automation-catalog'}
 PORTABLE = {'balancer', 'account-policy', 'project-policy', 'purpose-affinity',
             'provider-budget', 'codex-budget', 'zai-budget', 'usage-error'}
 # OP's native task integration fixture loads these Pooler modules directly.
@@ -61,9 +62,14 @@ def plan(paths, full=False, version_plugin=None, version_paths=()):
     if full:
         selected, mac = set(PLUGINS), set(PLUGINS)
         upgrade = upgrade_mac = op = archive = True
-    matrix = [{'os': osname, 'plugin': plugin} for plugin in PLUGINS if plugin in selected
+    # Required branch-protection contexts must exist even for docs-only PRs.
+    # Keep selection separate so these placeholder rows do no expensive work.
+    matrix = [{'os': osname, 'plugin': plugin,
+               'run': plugin in selected and (osname == 'ubuntu-latest' or plugin in mac)}
+              for plugin in PLUGINS
               for osname in ['ubuntu-latest', 'macos-latest']
-              if osname == 'ubuntu-latest' or plugin in mac]
+              if plugin in REQUIRED_CHECK_PLUGINS or
+              (plugin in selected and (osname == 'ubuntu-latest' or plugin in mac))]
     return {'matrix': {'include': matrix}, 'check': bool(matrix),
             'upgrade': upgrade, 'upgrade_mac': upgrade_mac, 'op': op, 'archive': archive}
 
