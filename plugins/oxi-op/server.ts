@@ -4,8 +4,8 @@ import {taskContract,assignmentSchema} from './task-contract.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { CodedError, errorCode } from './errors.js';
 import { contract, routeSchema, resolveRoute, keyReferenceSchema, tidyStepSchema, type Route } from './contract.js';
-import {createJournal, cancelledOutcome, OperationFailure} from './journal.js';
-type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal};
+import {createJournal, completionText, cancelledOutcome, OperationFailure} from './journal.js';
+type OperationContext = {threadId: string; projectId: string; signal?: AbortSignal; notifyCompletion?: boolean};
 const approvalTimeoutMs = 60_000;
 // Setup cards change structure, never reveal or use a password: they wait ten minutes.
 const setupTimeoutMs = 600_000;
@@ -17,7 +17,27 @@ export default function plugin(bb: BbPluginApi) {
     // default of 30 seconds cut working calls off. Calls may run up to 15 minutes.
     const host: typeof rawHost = {...rawHost, call: (method, input, options) => rawHost.call(method, input, {timeoutMs: 15 * 60_000, ...options})};
     const credentialHost = (route: Route) => route.credentialHostId ?? route.hostId;
-    const journal = createJournal(bb.storage.kv);
+    const journal = createJournal(bb.storage.kv, async (row, requestSignal) => {
+        const notice = row.notification!;
+        const signal = requestSignal ? AbortSignal.any([requestSignal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
+        const thread = await bb.sdk.threads.get({threadId:notice.threadId,signal});
+        if (requestSignal?.aborted || thread.id!==notice.threadId || thread.projectId!==notice.projectId || thread.archivedAt!=null || thread.deletedAt!=null || thread.status==='stopping') return false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            await Promise.race([bb.sdk.threads.send({threadId:notice.threadId,mode:'queue-if-active',input:[{type:'text',text:completionText(row),mentions:[]}]}), new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('Completion delivery timed out')),10_000);})]);
+        } finally {clearTimeout(timer);}
+        return true;
+    });
+    bb.background.service('completion-delivery', {async start(signal) {
+        while (!signal.aborted) {
+            await journal.flush().catch(()=>{});
+            if (signal.aborted) break;
+            await new Promise<void>(resolve=>{
+                const done=()=>{clearTimeout(timer);signal.removeEventListener('abort',done);resolve();};
+                const timer=setTimeout(done,15_000);signal.addEventListener('abort',done,{once:true});
+            });
+        }
+    }});
     type Receipt = {interactionId:string;mountedAt:string;lastSeenAt:string;visibleEver:boolean};
     const receiptPrefix = (projectId:string,threadId:string) => 'display:'+encodeURIComponent(projectId)+':'+encodeURIComponent(threadId)+':';
     bb.rpc.register(deliveryContract,{async formReceipt({threadId,interactionId,visible}) {
@@ -647,18 +667,12 @@ export default function plugin(bb: BbPluginApi) {
     bb.agents.registerTool({name: 'oxi_op_history', description: 'Recover this project and session operation states after confirmation, interruption or restart. Contains no credential values. Running or needs-review does not prove that a write was undone; inspect before retrying.', parameters: z.object({}).strict(), execute: async (_, ctx) => JSON.stringify(await journal.list(ctx))});
     const notifyOption = {type: 'boolean' as const, description: 'Return a completion notice to this same BB session, including after it becomes idle', default: false};
     async function interactiveCli(ctx: OperationContext, notify: boolean, work: () => Promise<string>) {
+        ctx.notifyCompletion = notify;
         let result: {exitCode: number; stdout: string; stderr?: string};
         try {result = {exitCode: 0, stdout: await work()};}
         catch (error) {
             if (!notify) throw error;
             result = {exitCode: 1, stdout: JSON.stringify({completed: false, message: 'Operation failed; inspect oxi-op history before retrying.'})};
-        }
-        if (notify && !ctx.signal?.aborted) {
-            try {
-                const thread = await bb.sdk.threads.get({threadId: ctx.threadId, signal: ctx.signal});
-                if (thread.id !== ctx.threadId || thread.projectId !== ctx.projectId || thread.archivedAt != null || thread.deletedAt != null || ctx.signal?.aborted) return result;
-                await bb.sdk.threads.send({threadId: ctx.threadId, mode: 'queue-if-active', input: [{type: 'text', text: result.stdout === 'Cancelled: timeout' ? 'Oxi Op: запрос отменён по истечении 60 секунд. Это не отказ пользователя и не подтверждение показа формы. Проверьте журнал; не открывайте запрос повторно автоматически. Значения секретов не передавались в уведомлении.' : result.stdout.startsWith('Cancelled') ? 'Oxi Op: запрос отменён. Причина сохранена в журнале. Проверьте oxi_op_history или bb oxi-op history перед продолжением; автоматически не повторяйте запрос. Значений секретов в уведомлении нет.' : 'Oxi Op: обработка интерактивной операции завершена. Проверьте oxi_op_history или bb oxi-op history: завершение обработки не означает успех всех действий. Не повторяйте неопределённую запись автоматически. Значений секретов в уведомлении нет.', mentions: []}]});
-            } catch {result.stderr = 'Completion notice could not be delivered; inspect oxi-op history. The credential operation was not retried.';}
         }
         return result;
     }

@@ -6,7 +6,7 @@ import {loadPluginApp} from '@get-bb/plugin-sdk/testing/app';
 import React from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import plugin from './dist/test/server.js';
-import {createJournal, cancelledOutcome} from './dist/test/journal.js';
+import {createJournal, completionText, cancelledOutcome} from './dist/test/journal.js';
 import {routeSchema} from './dist/test/contract.js';
 
 const route = {
@@ -103,7 +103,7 @@ test('native and CLI forms expire at one minute without contacting either creden
     assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
     assert.equal(JSON.parse((await h.behavior.runCli(['history'], context)).stdout)[0].state, 'cancelled');
     assert.equal(JSON.parse((await h.behavior.runCli(['history'], context)).stdout)[0].cancelReason, 'timeout');
-    if(mode==='cli')assert(notices[0].input[0].text.includes('отменён по истечении 60 секунд'));
+    assert(notices[0].input[0].text.includes('cancelled'));assert(notices[0].input[0].text.includes('reason=timeout'));assert(!notices[0].input[0].text.includes('60 секунд'));
   }
 });
 
@@ -872,4 +872,79 @@ test('migration shows every file on one card, grouped by vault, and calls each v
  assert(bareCard.payload.purpose.includes('не трогать файлы-ключи'));
  h.behavior.submitInteraction(bareCard.id,{approved:true});await bare;
  assert(calls.every(c=>!('archiveDir' in c.input)));
+});
+
+
+test('interactive CLI automatically returns a precise result without notify', async t => {
+ const notices=[];
+ const h=setup(t, {authentication:'desktop',accountId:'example-account',tokenEnvironment:undefined}, () => ({verified:true,cleaned:true}), async x=>{notices.push(x);return {delivery:'sent'};});
+ const pending=h.behavior.runCli(['verify'],context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});await pending;
+ assert.equal(notices.length,1);
+ const text=notices[0].input[0].text;
+ assert(text.includes('verified=true'));assert(text.includes('cleaned=true'));assert(text.includes('Операция:'));
+ assert(!text.includes('example-vault'));
+});
+
+
+test('completion delivery survives reload and never reruns the credential operation', async () => {
+ const data=new Map();let operations=0;const messages=[];
+ const storage={get:async key=>structuredClone(data.get(key)),set:async(key,value)=>data.set(key,structuredClone(value)),list:async prefix=>[...data.keys()].filter(k=>k.startsWith(prefix))};
+ const first=createJournal(storage,async()=>{throw Error('synthetic-sensitive-value');});
+ await first.run('verify','default',context,async progress=>{operations++;await progress('awaiting-approval');await progress('running',true);return JSON.stringify({verified:true,cleaned:true});});
+ const reloaded=createJournal(storage,async row=>{messages.push(completionText(row));return true;});
+ await Promise.all([reloaded.flush(),reloaded.flush()]);await reloaded.flush();
+ assert.equal(operations,1);assert.equal(messages.length,1);assert(messages[0].includes('verified=true'));
+ assert(!JSON.stringify([...data.values()]).includes('synthetic-sensitive-value'));
+});
+
+test('completion receipts distinguish denied approval, SSH failure and incomplete batch', async () => {
+ const data=new Map();const notices=[];
+ const storage={get:async key=>structuredClone(data.get(key)),set:async(key,value)=>data.set(key,structuredClone(value)),list:async prefix=>[...data.keys()].filter(k=>k.startsWith(prefix))};
+ const journal=createJournal(storage,async row=>{notices.push(completionText(row));return true;});
+ await journal.run('run','default',context,async progress=>{await progress('awaiting-approval');return 'Cancelled: user';});
+ await journal.run('exec','default',context,async progress=>{await progress('awaiting-approval');await progress('running',true);return JSON.stringify({exitCode:255,truncated:false,output:'synthetic-sensitive-output'});});
+ await journal.run('migrate','default',context,async progress=>{await progress('awaiting-approval');await progress('running',true);return JSON.stringify({results:[{state:'failed',code:'file-locked',file:'synthetic-private-file'}]});});
+ assert(notices[0].includes('cancelled'));assert(notices[0].includes('reason=user'));
+ assert(notices[1].includes('failed'));assert(notices[1].includes('exitCode=255'));assert(notices[1].includes('Карточка подтверждена'));
+ assert(notices[2].includes('needs-review'));assert(!notices.join('').includes('synthetic-'));
+});
+
+test('native intake cancellation returns its outcome to the requesting thread without a CLI flag', async t=>{
+ const notices=[];const h=setup(t,{},undefined,async x=>{notices.push(x);return {delivery:'queued'};});
+ const pending=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);await setImmediate();
+ h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);await pending;
+ assert.equal(notices.length,1);assert(notices[0].input[0].text.includes('cancelled'));assert.equal(notices[0].threadId,context.threadId);
+});
+
+
+test('background completion delivery retries after reload without a second operation', async t=>{
+ let online=false;let sends=0;
+ const h=setup(t,{},undefined,async()=>{if(!online)throw Error('synthetic network failure');sends++;return {delivery:'queued'};});
+ const pending=h.behavior.callAgentTool('oxi_op_run',{operation:'example-operation'},context);await setImmediate();
+ h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{approved:true});await pending;
+ const calls=h.inspection.experimental_hostRpcCalls.length;assert.equal(calls,1);assert.equal(sends,0);
+ online=true;const reloaded=await h.lifecycle.reload(plugin);t.after(()=>reloaded.harness.lifecycle.dispose());
+ const service=reloaded.harness.runService('completion-delivery');await setImmediate();
+ service.controller.abort();await service.done;
+ assert.equal(sends,1);assert.equal(reloaded.harness.inspection.experimental_hostRpcCalls.length,0);
+});
+
+
+test('stopping while completion delivery awaits thread lookup suppresses the receipt durably', async () => {
+ const data=new Map();let unblock;let sends=0;const controller=new AbortController();
+ const storage={get:async key=>structuredClone(data.get(key)),set:async(key,value)=>data.set(key,structuredClone(value)),list:async prefix=>[...data.keys()].filter(k=>k.startsWith(prefix))};
+ const journal=createJournal(storage,async(row,signal)=>{await new Promise(r=>{unblock=r;});if(signal?.aborted)return false;sends++;return true;});
+ const pending=journal.run('verify','default',{...context,signal:controller.signal},async progress=>{await progress('awaiting-approval');return JSON.stringify({verified:true,cleaned:true});});
+ await setImmediate();controller.abort();unblock();await pending;
+ const reloaded=createJournal(storage,async()=>{sends++;return true;});await reloaded.flush();assert.equal(sends,0);
+});
+
+test('stopping after a failed send prevents background delivery after reload', async () => {
+ const data=new Map();let sends=0;const controller=new AbortController();
+ const storage={get:async key=>structuredClone(data.get(key)),set:async(key,value)=>data.set(key,structuredClone(value)),list:async prefix=>[...data.keys()].filter(k=>k.startsWith(prefix))};
+ const journal=createJournal(storage,async()=>{throw Error('offline');});
+ await journal.run('verify','default',{...context,signal:controller.signal},async progress=>{await progress('awaiting-approval');return JSON.stringify({verified:true,cleaned:true});});
+ controller.abort();await setImmediate();
+ const reloaded=createJournal(storage,async()=>{sends++;return true;});await reloaded.flush();assert.equal(sends,0);
 });
