@@ -107,3 +107,56 @@ it('does not expose or interrupt unknown, header-pending, completed or cancelled
  respond(new Response('ok'));const response=await pending;expect(await response.text()).toBe('ok');
  expect(flights.interruptCursorStream('pending','thr_one')).toBe(false);expect(flights.cursorStreams('thr_one')).toEqual([]);
 });
+
+it('keeps running responses for a bounded time while the Guard gives no answer, and stops them on refusal',async()=>{
+ const {GuardRequiredError}=await import('./network-errors.js');const {GUARD_UNREADABLE_GRACE_MS}=await import('./network-flights.js');
+ let failure:Error|null=null,now=1_000_000;const stop=new AbortController();
+ const flights=new NetworkFlights(async()=>new Response(new ReadableStream()),()=>stop.signal,async()=>{if(failure)throw failure;},undefined,undefined,()=>now);
+ const open=async()=>{const response=await flights.fetch('codex','https://example.test');let outcome='open';
+  void response.text().catch(error=>{outcome=String((error as Error).message);});return ()=>outcome;};
+ // No answer (timeout, then failed call): the admitted response continues inside the grace.
+ failure=null;const first=await open();
+ failure=new GuardRequiredError('codex',true,'timeout');await flights.enforce();
+ now+=GUARD_UNREADABLE_GRACE_MS-1;failure=new GuardRequiredError('codex',true,'rpc_failed');await flights.enforce();
+ await Promise.resolve();expect(first()).toBe('open');expect(flights.size).toBe(1);
+ // A successful read restarts the grace.
+ failure=null;await flights.enforce();
+ now+=GUARD_UNREADABLE_GRACE_MS-1;failure=new GuardRequiredError('codex',true,'timeout');await flights.enforce();
+ await Promise.resolve();expect(first()).toBe('open');
+ // Still unanswered when the grace ends: fail closed.
+ now+=GUARD_UNREADABLE_GRACE_MS;await flights.enforce();
+ await vi.waitFor(()=>expect(first()).toContain('VPN_GUARD_UNAVAILABLE'));expect(flights.size).toBe(0);
+ // An explicit refusal and an invalid decision are never tolerated.
+ for(const refusal of [new GuardRequiredError('codex'),new GuardRequiredError('codex',true,'invalid_decision')]){
+  failure=null;const next=await open();failure=refusal;await flights.enforce();
+  await vi.waitFor(()=>expect(next()).toContain(refusal.code));expect(flights.size).toBe(0);
+ }
+});
+it('refuses a new request on an unanswered Guard read but lets an admitted one receive its response',async()=>{
+ const {GuardRequiredError}=await import('./network-errors.js');
+ let checks=0,failOn=0;const stop=new AbortController();const fetcher=vi.fn(async()=>new Response('OK'));
+ const flights=new NetworkFlights(fetcher,()=>stop.signal,async()=>{if(++checks===failOn)throw new GuardRequiredError('claude',true,'timeout');});
+ // First read (before dispatch) unanswered: nothing is sent.
+ failOn=1;await expect(flights.fetch('claude','https://example.test')).rejects.toThrow('VPN_GUARD_UNAVAILABLE');
+ expect(fetcher).not.toHaveBeenCalled();
+ // Admitted by the first read; the repeat read after headers gets no answer: the response is delivered.
+ checks=0;failOn=2;expect(await(await flights.fetch('claude','https://example.test')).text()).toBe('OK');
+ // A refusal on the repeat read still cancels the response.
+ checks=0;const refusing=new NetworkFlights(async()=>new Response(new ReadableStream()),()=>stop.signal,async()=>{if(++checks===2)throw new GuardRequiredError('claude');});
+ await expect(refusing.fetch('claude','https://example.test')).rejects.toThrow('VPN_GUARD_BLOCKED');
+});
+
+it('never lets Guard silence suspend the pool own requirement',async()=>{
+ const {GuardRequiredError,VpnRequiredError}=await import('./network-errors.js');
+ let silent=false,evidenceLost=false;const stop=new AbortController();
+ const flights=new NetworkFlights(async()=>new Response(new ReadableStream()),()=>stop.signal,
+  async()=>{if(silent)throw new GuardRequiredError('codex',true,'timeout');},undefined,undefined,undefined,
+  async()=>{if(evidenceLost)throw new VpnRequiredError('codex');});
+ const response=await flights.fetch('codex','https://example.test');let outcome='open';
+ void response.text().catch(error=>{outcome=String((error as Error).message);});
+ // Guard silent, own requirement holds: the response continues.
+ silent=true;await flights.enforce();await Promise.resolve();expect(outcome).toBe('open');
+ // Own requirement lost during the silence: stopped at once, for that reason.
+ evidenceLost=true;await flights.enforce();
+ await vi.waitFor(()=>expect(outcome).toContain('VPN_REQUIRED'));expect(outcome).not.toContain('VPN_GUARD_UNAVAILABLE');expect(flights.size).toBe(0);
+});

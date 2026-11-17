@@ -222,6 +222,7 @@ export function createAccountPoolPlugin(
       maintenance,
       accountRoute:(accountId,sessionKey)=>egress.acquire(accountId,sessionKey),
       pinnedRouteAccount:sessionKey=>egress.pinnedAccount(sessionKey),
+      routeCompatible:(accountId,sessionKey)=>egress.compatible(accountId,sessionKey),
       nativeAgyManaged:()=>nativeSessions.managed(),
       agyModels:registerAgyModels,
       route: hubBasePath(bb.pluginId),

@@ -1,5 +1,18 @@
 import type {PoolMaintenance} from './maintenance.js';
 import type {PoolProvider} from './contracts.js';
+import {GuardRequiredError} from './network-errors.js';
+
+/**
+ * How long responses that were already admitted may continue while the Guard cannot be
+ * read at all (timeout or failed call). An explicit refusal, an invalid decision or missing
+ * VPN evidence is never tolerated, and new requests are refused from the first failed read.
+ */
+export const GUARD_UNREADABLE_GRACE_MS = 30_000;
+/** The Guard gave no answer. It did not refuse, and nothing indicates the network changed. */
+export function guardUnreadable(error:unknown):boolean {
+  return error instanceof GuardRequiredError && error.code==='VPN_GUARD_UNAVAILABLE' &&
+    (error.failureReason==='timeout'||error.failureReason==='rpc_failed');
+}
 
 export type StreamIdentity={requestId:string;threadId:string|null};
 export type CursorStream={requestId:string;threadId:string;bytesRead:number;contentType:string};
@@ -7,6 +20,7 @@ export type CursorStream={requestId:string;threadId:string;bytesRead:number;cont
 export class NetworkFlights {
   private readonly active=new Map<AbortController,PoolProvider>();
   private readonly cursorBodies=new Map<AbortController,CursorStream>();
+  private readonly unreadableSince=new Map<PoolProvider,number>();
   cursorStreams(threadId:string):CursorStream[]{return [...this.cursorBodies.values()].filter(s=>s.threadId===threadId).map(s=>({...s}));}
   interruptCursorStream(requestId:string,threadId:string):boolean {
     for(const [owner,stream] of this.cursorBodies) if(stream.requestId===requestId&&stream.threadId===threadId&&stream.bytesRead>0){
@@ -14,14 +28,32 @@ export class NetworkFlights {
     }
     return false;
   }
-  constructor(private readonly upstream:typeof fetch,private readonly stop:()=>AbortSignal,private readonly check:(provider:PoolProvider)=>Promise<void>,private readonly selectFetch:(provider:PoolProvider,drainable:boolean)=>typeof fetch=()=>upstream,private maintenance?:PoolMaintenance) {}
+  constructor(private readonly upstream:typeof fetch,private readonly stop:()=>AbortSignal,private readonly check:(provider:PoolProvider)=>Promise<void>,private readonly selectFetch:(provider:PoolProvider,drainable:boolean)=>typeof fetch=()=>upstream,private maintenance?:PoolMaintenance,private readonly now:()=>number=Date.now,
+    /** The pool's own requirement that holds without the Guard (its last answer, local VPN evidence). */
+    private readonly withoutGuard:(provider:PoolProvider)=>Promise<void>=async()=>{}) {}
+  /**
+   * Null while an unanswered Guard read is still inside the grace for running responses;
+   * otherwise the reason to stop them. Guard silence never suspends the pool's own
+   * requirement: when that fails, its error is the reason, with no allowance.
+   */
+  private async refusal(provider:PoolProvider,error:unknown):Promise<unknown> {
+    if(!guardUnreadable(error)){this.unreadableSince.delete(provider);return error;}
+    try{await this.withoutGuard(provider);}catch(own){this.unreadableSince.delete(provider);return own;}
+    const now=this.now(),since=this.unreadableSince.get(provider)??now;
+    this.unreadableSince.set(provider,since);
+    return now-since<GUARD_UNREADABLE_GRACE_MS?null:error;
+  }
   get size(){return this.active.size;}
   async enforce() {
     for(const provider of new Set(this.active.values())) {
-      try {await this.check(provider);} catch(error) {
-        for(const [controller,current] of this.active) if(current===provider) controller.abort(error);
+      try {await this.check(provider);this.unreadableSince.delete(provider);} catch(error) {
+        const reason=await this.refusal(provider,error);
+        if(reason===null)continue;
+        for(const [controller,current] of this.active) if(current===provider) controller.abort(reason);
       }
     }
+    // A provider with no running response has nothing to tolerate: start afresh next time.
+    for(const provider of this.unreadableSince.keys())if(![...this.active.values()].includes(provider))this.unreadableSince.delete(provider);
   }
   async fetch(provider:PoolProvider,input:RequestInfo|URL,init?:RequestInit,drainable=false,admit?: (send:()=>Promise<Response>)=>Promise<Response>,requestCheck?:()=>Promise<void>, accountFetch?:typeof fetch,onBodyError?:(error:unknown,bytesRead:number)=>void,identity?:StreamIdentity):Promise<Response> {
     const maintenanceSignal=this.maintenance?.signal;
@@ -51,7 +83,9 @@ export class NetworkFlights {
       const send=()=>{signal.throwIfAborted();this.maintenance?.assertAllowed();return (accountFetch??this.selectFetch(provider,drainable))(input,{...init,signal});};
       response=await (admit?admit(send):send());
       signal.throwIfAborted();
-      await check();
+      // The request was admitted by a successful check just before dispatch. If the
+      // repeat read merely gets no answer, the periodic enforcement decides within its grace.
+      try{await check();}catch(error){const reason=await this.refusal(provider,error);if(reason!==null)throw reason;}
       signal.throwIfAborted();
       if(!response.body){finished=true;release();return response;}
       reader=response.body.getReader();

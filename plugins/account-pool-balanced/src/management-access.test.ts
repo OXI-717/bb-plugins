@@ -99,10 +99,16 @@ it('permits owner UI RPCs while refusing untrusted plugin dispatch', async () =>
     vi.mocked(handlers[method as keyof typeof handlers]).mockClear();
     expect(() => handler(null,{experimental_caller:{kind:'plugin',pluginId:'untrusted'}})).toThrow(PoolManagementLocked);
     if (!['status.get', 'thread.account'].includes(method)) expect(() => handler(null, { experimental_caller: { kind: 'plugin', pluginId: 'model-connections' } })).toThrow(PoolManagementLocked);
+    // Guard may read the protection settings for its linkage handshake and nothing else.
+    if (method !== 'config.get') expect(() => handler(null, { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } })).toThrow(PoolManagementLocked);
+    expect(() => handler(null, { experimental_caller: { kind: 'plugin' } })).toThrow(PoolManagementLocked);
   }
   for (const handler of Object.values(handlers)) expect(handler).not.toHaveBeenCalled();
   await legacy['thread.account']!({ threadId: 'target' }, { experimental_caller: { kind: 'plugin', pluginId: 'model-connections' } });
   expect(handlers['thread.account']).toHaveBeenCalledOnce();
+  await legacy['config.get']!(null, { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } });
+  expect(handlers['config.get']).toHaveBeenCalledOnce();
+  expect(() => legacy['config.set']!({ vpnGuardEnabled: false }, { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } })).toThrow(PoolManagementLocked);
 });
 
 it('uses one capability policy for RPC input validation, reads and writes with no prototype dispatch', async () => {
