@@ -146,3 +146,13 @@ test('timeline subscriptions forward only verified subscribed thread frames',asy
   await handlers.onClose();
  }finally{await h.dispose();}
 });
+
+test('host and server share the bounded stop metadata path contract',async()=>{
+ const {validRequestPath}=await import('../policy.ts');
+ const {readFileSync}=await import('node:fs');
+ const host=readFileSync(new URL('../host.ts',import.meta.url),'utf8');
+ assert.match(host,/validRequestPath\(input.method,input.path\)/,'host must use the same guard as server');
+ const path='/api/v1/threads/thr_alpha/events?limit=1&order=desc&types=turn%2Fstarted%2Csystem%2Fthread%2Finterrupted';
+ assert.equal(validRequestPath('GET',path),true);
+ for(const [method,value]of [['POST',path],['GET',path.replace('limit=1','limit=2')],['GET',path+'&other=%2Fsecret'],['GET',path.replace('/events','/%2eevents')]])assert.equal(validRequestPath(method,value),false);
+});

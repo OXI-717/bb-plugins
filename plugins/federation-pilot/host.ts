@@ -1,3 +1,4 @@
+import {validRequestPath} from './policy.ts';
 import {randomUUID} from 'node:crypto';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { createServer, connect as connectTcp } from 'node:net';
@@ -54,10 +55,7 @@ const tunnels=createTunnelCache({listening,open:async(key,signal)=>{
  }catch{close();signal.removeEventListener('abort',close);throw Error('federation:ssh_unavailable');}
 }});
 function ensureTunnel(target:string,port:number){return tunnels.get(`${target}:${port}`);}
-function validPath(path:string):boolean {
-  return path.startsWith('/api/v1/') && !/[\\\r\n#]/.test(path) && !/%2f|%5c|%2e/i.test(path)
-    && !path.split('?')[0].split('/').some(s=>s==='.'||s==='..');
-}
+
 
 export default experimental_defineHostEntry({
   contract:hostContract,
@@ -77,7 +75,7 @@ export default experimental_defineHostEntry({
     },
     async request(input,context){
       retain=()=>context.experimental_retainWorker();
-      if(!validPath(input.path)) throw Error('Invalid upstream path');
+      if(!validRequestPath(input.method,input.path)) throw Error('Invalid upstream path');
       const tunnel=await ensureTunnel(input.sshTarget,input.port);const port=tunnel.port;
       let response:Response;try{response=await fetch(`http://127.0.0.1:${port}${input.path}`,{
         method:input.method,redirect:'error',

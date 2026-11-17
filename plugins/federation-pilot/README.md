@@ -183,3 +183,7 @@ read/unread behavior; the bridge does not manufacture completion or mark rows re
 
 Acceptance covers cold load, reconnect, late ownership discovery, native attention
 fields, and remote timeline updates. No status overlay is mounted.
+
+Server and host share the request-path guard, including the bounded stop-boundary
+metadata read used by BB. Encoded event-name separators are permitted only for that
+read; encoded route separators and unrelated query values remain rejected.
