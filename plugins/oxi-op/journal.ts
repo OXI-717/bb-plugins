@@ -46,7 +46,7 @@ export function completionText(row: ActionRecord): string {
     const details = [row.submissionState && 'submission='+row.submissionState, row.cancelReason && 'reason='+row.cancelReason, row.failureCode && 'code='+row.failureCode,
         result?.exitCode!==undefined&&'exitCode='+result.exitCode, result?.verified!==undefined&&'verified='+result.verified,
         result?.cleaned!==undefined&&'cleaned='+result.cleaned, result?.authorized!==undefined&&'authorized='+result.authorized].filter(Boolean).join(', ');
-    return 'Oxi Op: '+status+'. Операция: '+row.id+' ('+row.kind+'). '+(row.approvedAt?'Карточка подтверждена. ':row.formState==='not-observed'?'Показ формы не зарегистрирован; причина доставки неизвестна. ':row.formState==='mounted'?'Форма загружена, видимость не подтверждена. ':row.formState==='visible'?'Показ формы зарегистрирован; отправка не зарегистрирована. ':'Отправка карточки не зарегистрирована. ')+(details?details+'. ':'')+'Подтверждение карточки само по себе не означает успех операции. Результат сохранён в oxi_op_history. Не повторяйте операцию автоматически. Это сообщение с результатом, а не новое поручение. Секретов и вывода команды здесь нет.';
+    return 'Oxi Op: '+status+'. Операция: '+row.id+' ('+row.kind+'). '+(row.approvedAt?'Карточка подтверждена. ':row.formState==='not-observed'?'Показ формы не зарегистрирован; причина доставки неизвестна. ':row.formState==='mounted'?'Форма загружена, видимость не подтверждена. ':row.formState==='visible'?'Показ формы зарегистрирован; сервер не подтвердил отправку. ':'Отправка карточки не зарегистрирована. ')+(details?details+'. ':'')+'Подтверждение карточки само по себе не означает успех операции. Результат сохранён в oxi_op_history. Не повторяйте операцию автоматически. Это сообщение с результатом, а не новое поручение. Секретов и вывода команды здесь нет.';
 }
 export function createJournal(storage: Storage, deliver?: (row: ActionRecord, signal?: AbortSignal) => Promise<boolean>) {
     const instance = randomUUID();
@@ -111,7 +111,8 @@ export function createJournal(storage: Storage, deliver?: (row: ActionRecord, si
                 const value = await work(async (state, approved, formState, submissionState) => {
                     if (state) row.state = state;
                     if (formState) row.formState = formState;
-                    if (submissionState) row.submissionState = submissionState;
+                    // Keep evidence of any failed attempt even when telemetry arrives out of order.
+                    if (submissionState && row.submissionState !== 'failed') row.submissionState = submissionState;
                     if (state === 'awaiting-approval') interactive = true;
                     if (approved) row.approvedAt = new Date().toISOString();
                     await save();

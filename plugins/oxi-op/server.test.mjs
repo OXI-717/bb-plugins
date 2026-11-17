@@ -199,6 +199,7 @@ test('sequential native approvals retain their own display and submit attempts p
  assert.equal(h.inspection.pendingInteractions.length,1);
  await h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:a.id,formRequestId:a.payload.formRequestId,visible:true,phase:'submit-started'});
  await h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:a.id,formRequestId:a.payload.formRequestId,visible:true,phase:'submit-failed'});
+ await h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:a.id,formRequestId:a.payload.formRequestId,visible:true,phase:'submit-started'});
  let row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
  assert.equal(row.submissionState,'failed');assert.equal(row.approvedAt,undefined);
  assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
