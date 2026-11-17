@@ -159,7 +159,11 @@ export default async function plugin(bb: BbPluginApi) {
     return {kind:'evidence',state,reason:reason.success?reason.data:'invalid_evidence'};
   }
   async function vpn(hostId:string):Promise<VpnState> {
-    return trustedState(await readHost(hostId));
+    const readAt=Date.now();
+    const result=await readHost(hostId);
+    if(config.hostIds.includes(hostId)&&!directHost(hostId))
+      observations.record(hostId,'vpn-required',readingOf(result),readAt,Date.now());
+    return trustedState(result);
   }
   const manuallyBlocked = (hostId:string) => config.manualBlock || config.manualBlockHostIds.includes(hostId);
   const directHost = (hostId:string) => config.hostIds.includes(hostId) && config.directHostIds.includes(hostId);

@@ -88,6 +88,37 @@ describe('observation grace for running work',()=>{
       expect(s.stopped).toEqual(['turn-a']);
     } finally {await s.fake.harness.lifecycle.dispose();}
   });
+  it.each(['message.dispatch','networkDecisionV2'])('restarts grace after successful admission via %s',async method=>{
+    const s=await setup();
+    try {
+      await enforce(s);
+      s.failing.add('host-a');await s.cycle();
+      s.advance(60_000);s.failing.delete('host-a');
+      if(method==='message.dispatch')expect(await s.dispatch('host-a')).toEqual({action:'proceed'});
+      else expect(await s.rpc(method,{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:true});
+      s.advance(10_000);s.failing.add('host-a');await s.cycle();
+      s.advance(30_000);await s.cycle();
+      // The original outage is over 90 seconds old; the new one is only 30 seconds old.
+      expect(s.stopped).toEqual([]);
+      s.advance(60_000);await s.cycle();
+      expect(s.stopped).toEqual([]);
+      s.advance(1);await s.cycle();
+      expect(s.stopped).toEqual(['turn-a']);
+    } finally {await s.fake.harness.lifecycle.dispose();}
+  });
+  it.each(['message.dispatch','networkDecisionV2'])('starts unobservability at failed admission via %s',async method=>{
+    const s=await setup();
+    try {
+      await enforce(s);
+      s.advance(1_000);s.failing.add('host-a');
+      if(method==='message.dispatch')expect(await s.dispatch('host-a')).toMatchObject({action:'wait'});
+      else expect(await s.rpc(method,{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:false});
+      s.advance(60_000);await s.cycle();
+      expect(s.stopped).toEqual([]);
+      s.advance(30_001);await s.cycle();
+      expect(s.stopped).toEqual(['turn-a']);
+    } finally {await s.fake.harness.lifecycle.dispose();}
+  });
   it('stops immediately on not-connected evidence, which stays effective during the grace period',async()=>{
     const s=await setup();
     try {
