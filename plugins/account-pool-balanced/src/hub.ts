@@ -757,7 +757,9 @@ export class AccountPoolHub {
         : JSON.stringify([adapter.provider, affinityHost, parsed.parentAffinityId]);
     const routeSessionKey=threadId===null?affinityKey:JSON.stringify([accountScope?affinityHost:hostId,projectId,threadId,adapter.provider]);
     try {
-      const pinnedRouteAccountId=routeSessionKey===null?null:(await this.options.manualRouteAccount?.(routeSessionKey))??this.options.pinnedRouteAccount?.(routeSessionKey)??null;
+      // A manual choice of an account this caller can no longer use (removed, other scope) is ignored.
+      const manualAccountId=routeSessionKey===null?null:(await this.options.manualRouteAccount?.(routeSessionKey))??null;
+      const pinnedRouteAccountId=routeSessionKey===null?null:(manualAccountId!==null&&candidateIds.has(manualAccountId)?manualAccountId:null)??this.options.pinnedRouteAccount?.(routeSessionKey)??null;
       if(pinnedRouteAccountId && !this.options.getSettings().pinnedFailover && !candidateIds.has(pinnedRouteAccountId))return result(this.noEligibleResponse(accounts.filter(a=>a.id===pinnedRouteAccountId),family,adapter,projectId,request,purpose));
       while (attempted.size < candidateIds.size) {
         signal.throwIfAborted();

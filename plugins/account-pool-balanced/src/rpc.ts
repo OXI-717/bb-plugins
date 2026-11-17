@@ -50,7 +50,7 @@ export type ThreadAccountStatus = z.infer<typeof threadAccountStatusSchema>;
 
 export const threadAccountChoicesSchema=z.object({
  currentAccountId:z.string().uuid().nullable(),mode:z.enum(['auto','manual']),pinned:z.boolean(),
- accounts:z.array(z.object({id:z.string().uuid(),label:z.string(),status:z.string(),selectable:z.boolean(),assigned:z.boolean()}))
+ accounts:z.array(z.object({id:z.string().uuid(),label:z.string(),state:z.enum(['ready','exhausted','held','disabled','error']),until:z.number().int().nonnegative().nullable(),selectable:z.boolean(),assigned:z.boolean()}))
 });
 export type ThreadAccountChoices=z.infer<typeof threadAccountChoicesSchema>;
 const browserOpenInputSchema = z.object({

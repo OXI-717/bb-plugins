@@ -102,6 +102,7 @@ type DialogState =
   | { kind: "api-key"; provider: PoolProvider }
   | null;
 
+const THREAD_ACCOUNT_STATE={ready:'готов',exhausted:'лимит исчерпан',held:'придержан провайдером',disabled:'выключен',error:'ошибка'} as const;
 type ConfigField = Exclude<
   keyof AccountPoolConfig,
   "pinnedFailover" | "claudeRequestStartIntervalMs" | "busyOverflow" | "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "browserHostId" | "vpnGuardEnabled" | "vpnPolicyVersion"
@@ -2799,7 +2800,7 @@ function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threa
           {choices && <div className="max-h-[35dvh] overflow-y-auto space-y-1" role="group" aria-label="Аккаунты треда">
             <button type="button" className="w-full min-h-11 rounded-md border p-3 text-left text-sm aria-pressed:bg-accent aria-pressed:font-medium" aria-pressed={choices.mode==='auto'} disabled={switching} onClick={()=>void switchAccount(null)}>Автоматически (по умолчанию)</button>
             {choices.accounts.map(item=><button type="button" key={item.id} className="w-full min-h-11 rounded-md border p-3 text-left text-sm aria-pressed:bg-accent aria-pressed:font-medium break-words disabled:opacity-50" aria-pressed={choices.mode==='manual'&&choices.currentAccountId===item.id} disabled={switching||!item.selectable} onClick={()=>void switchAccount(item.id)}>
-              {item.label} · {item.status}{item.assigned?' · назначенный выход':''}
+              {item.label} · {THREAD_ACCOUNT_STATE[item.state]}{item.until===null?'':' до '+new Date(item.until).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}{item.assigned?' · назначенный выход':''}
             </button>)}
           </div>}
         </section>}

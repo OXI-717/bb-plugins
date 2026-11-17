@@ -1469,7 +1469,7 @@ it('keeps a saved account awaiting login with a dedicated sign-in action',async(
 
 it.each([false,true])('switches subscription inside the existing dialog; RPC error=%s',async fails=>{
  const id='11111111-1111-4111-8111-111111111111';
- const choices={currentAccountId:null,mode:'auto',pinned:false,accounts:[{id,label:'person@example.test',status:'готов',selectable:true,assigned:true}]};
+ const choices={currentAccountId:null,mode:'auto',pinned:false,accounts:[{id,label:'person@example.test',state:'ready',until:null,selectable:true,assigned:true}]};
  const ui=renderSlot(app.threadHeaderActions[0]!,{threadId:'thr-test',projectId:'project',isCompactViewport:true},{
   rpc:{'thread.account':()=>({state:'unobserved',account:null,lastUsedAt:null}),
    'thread.accountChoices':()=>choices,
