@@ -4,13 +4,14 @@ import {CodedError, errorCode} from './errors.js';
 
 type Storage = {get<T>(key: string): Promise<T | undefined>; set(key: string, value: unknown): Promise<void>; list(prefix?: string): Promise<string[]>};
 type Context = {projectId: string; threadId: string; signal?: AbortSignal; notifyCompletion?: boolean};
-type Kind = 'automate' | 'exec' | 'overview' | 'tidy' | 'migrate' | 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
+type Kind = 'approval-test' | 'automate' | 'exec' | 'overview' | 'tidy' | 'migrate' | 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
 type State = 'preparing' | 'awaiting-approval' | 'running' | 'completed' | 'cancelled' | 'failed' | 'needs-review' | 'interrupted';
-export type ActionRecord = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; failureCode?: string; result?: unknown; formState?: 'not-observed' | 'mounted' | 'visible'; notification?: {projectId:string;threadId:string;state:'pending'|'delivered'|'suppressed'}};
-export type Progress = (state?: 'awaiting-approval' | 'running', approved?: boolean, formState?: ActionRecord['formState']) => Promise<void>;
+export type ActionRecord = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; failureCode?: string; result?: unknown; submissionState?: 'started' | 'failed'; formState?: 'not-observed' | 'mounted' | 'visible'; notification?: {projectId:string;threadId:string;state:'pending'|'delivered'|'suppressed'}};
+export type Progress = (state?: 'awaiting-approval' | 'running', approved?: boolean, formState?: ActionRecord['formState'], submissionState?: ActionRecord['submissionState']) => Promise<void>;
 
 // Persist only these metadata shapes; never persist form input or raw errors.
 const results = {
+    'approval-test': z.object({submitted:z.literal(true),credentialCalls:z.literal(0)}).strict(),
     migrate: z.object({results: z.array(z.object({state: z.string(), code: z.string().optional()}))}),
     tidy: z.object({results: z.array(z.object({kind: z.string(), ok: z.boolean(), code: z.string().optional(), same: z.boolean().optional(), sameUsername: z.boolean().optional()}))}),
     // Only the summary is kept; the full map is returned to the caller and never stored.
@@ -42,7 +43,7 @@ export function completionText(row: ActionRecord): string {
         const uncertain = result?.escapedProcess || result?.complete === false || result?.projects?.some(x=>x.state==='needs-review') || result?.results?.some(x=>x.ok===false || (x.state!==undefined&&!['imported','already-imported','referenced','moved','empty'].includes(x.state)));
         status = result?.timedOut || (result?.exitCode!==undefined&&result.exitCode!==0) ? 'failed' : uncertain ? 'needs-review' : 'success';
     }
-    const details = [row.cancelReason && 'reason='+row.cancelReason, row.failureCode && 'code='+row.failureCode,
+    const details = [row.submissionState && 'submission='+row.submissionState, row.cancelReason && 'reason='+row.cancelReason, row.failureCode && 'code='+row.failureCode,
         result?.exitCode!==undefined&&'exitCode='+result.exitCode, result?.verified!==undefined&&'verified='+result.verified,
         result?.cleaned!==undefined&&'cleaned='+result.cleaned, result?.authorized!==undefined&&'authorized='+result.authorized].filter(Boolean).join(', ');
     return 'Oxi Op: '+status+'. Операция: '+row.id+' ('+row.kind+'). '+(row.approvedAt?'Карточка подтверждена. ':row.formState==='not-observed'?'Показ формы не зарегистрирован; причина доставки неизвестна. ':row.formState==='mounted'?'Форма загружена, видимость не подтверждена. ':row.formState==='visible'?'Показ формы зарегистрирован; отправка не зарегистрирована. ':'Отправка карточки не зарегистрирована. ')+(details?details+'. ':'')+'Подтверждение карточки само по себе не означает успех операции. Результат сохранён в oxi_op_history. Не повторяйте операцию автоматически. Это сообщение с результатом, а не новое поручение. Секретов и вывода команды здесь нет.';
@@ -107,9 +108,10 @@ export function createJournal(storage: Storage, deliver?: (row: ActionRecord, si
             const save = async () => {row.updatedAt = new Date().toISOString(); await storage.set(key, row);};
             await save();
             try {
-                const value = await work(async (state, approved, formState) => {
+                const value = await work(async (state, approved, formState, submissionState) => {
                     if (state) row.state = state;
                     if (formState) row.formState = formState;
+                    if (submissionState) row.submissionState = submissionState;
                     if (state === 'awaiting-approval') interactive = true;
                     if (approved) row.approvedAt = new Date().toISOString();
                     await save();
