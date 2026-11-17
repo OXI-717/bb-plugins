@@ -23,3 +23,16 @@ Pooler0.4.14+: `bb pool config set vpnGuardEnabled true` включает fail-c
 Use `bb vpn-guard block --host <host-id>` / `unblock --host <host-id>` for an independent manual block on one selected machine. The panel exposes the same control beside each selected machine. Machine names and IDs come from the enrolled host inventory. This blocks protected BB sessions on that execution host even with connected VPN; it does not change other hosts, the VPN enforcement mode, or global native-plugin enablement. It persists across reload and VPN recovery. Release a machine block before removing that machine from protection. Legacy `block` / `unblock` without `--host` control the separate all-selected-machines block; releasing either kind does not clear the other.
 
 Pooler network decisions still use the actual pool server host: a laptop execution block must not deny unrelated server requests. Automation coordination follows only the pinned controller host. Send-now, standalone clients and already-running network traffic retain the documented limitations.
+
+Use `bb vpn-guard check <host-id> --json` to read current VPN evidence from an
+enrolled machine even when it is outside the protected scope. This command
+changes no scope, mode, manual block or VPN setting and runs no enforcement.
+`system_ipv4` with source `incy` or `tailscale` reports local operating-system
+state, without an upstream traffic probe. It does not verify external egress.
+
+A selected machine that cannot be read (failed host RPC, unavailable machine
+list) holds new turns at once, but its running threads, native suspension and
+automation hold wait for 90 seconds of continuous unobservability; explicit
+not-connected evidence and manual blocks act immediately. In status,
+`hosts[].lastEvidenceAt` and `hosts[].unobservedSince` show when the last
+evidence arrived and since when the machine has been unobservable.
