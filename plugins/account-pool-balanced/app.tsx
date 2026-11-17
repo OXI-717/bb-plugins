@@ -1,5 +1,5 @@
 import {AccountDraftForm} from './account-draft-form';
-import {ManagementGate,useManagementGrant,usePoolRpc} from './management-ui';
+import {NativeAccountCard,NativeAccountSettings} from './native-account-settings';
 import {PoolUpdatePanel} from './pool-update-panel';
 import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
@@ -38,6 +38,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   definePluginApp,
   useBbNavigate,
+  useRpc,
   useRealtime,
 } from "@get-bb/plugin-sdk/app";
 import { Button } from "./ui/components/ui/button";
@@ -76,7 +77,7 @@ import type {
   PoolProvider,
   PoolStatus,
 } from "./src/contracts.js";
-import type { ThreadAccountStatus } from "./src/rpc.js";
+import type { ThreadAccountStatus, accountPoolRpcContract } from "./src/rpc.js";
 import type { OAuthLoginStart } from "./src/oauth-login.js";
 import type { CodexDeviceLoginStart } from "./src/codex-device-login.js";
 import {
@@ -102,9 +103,10 @@ type DialogState =
   | { kind: "api-key"; provider: PoolProvider }
   | null;
 
+const THREAD_ACCOUNT_STATE={ready:'готов',exhausted:'лимит исчерпан',held:'придержан провайдером',disabled:'выключен',error:'ошибка'} as const;
 type ConfigField = Exclude<
   keyof AccountPoolConfig,
-  "claudeRequestStartIntervalMs" | "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "browserHostId" | "vpnGuardEnabled" | "vpnPolicyVersion"
+  "pinnedFailover" | "claudeRequestStartIntervalMs" | "busyOverflow" | "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "browserHostId" | "vpnGuardEnabled" | "vpnPolicyVersion"
 >;
 
 const PROVIDERS: Array<{
@@ -1035,11 +1037,11 @@ function ConfigFieldRow({
 }
 
 function AccountPoolSettings() {
-  return <ManagementGate><UnlockedAccountPoolSettings /></ManagementGate>;
+  return <UnlockedAccountPoolSettings />;
 }
 
 function UnlockedAccountPoolSettings() {
-  const rpc = usePoolRpc();
+  const rpc = useRpc<typeof accountPoolRpcContract>();
   const navigate = useBbNavigate();
   const [status, setStatus] = useState<PoolStatus | null>(null);
   const [nativeAccounts, setNativeAccounts] = useState<NativeAccounts | null>(null);
@@ -1644,16 +1646,7 @@ function UnlockedAccountPoolSettings() {
           >
             {provider.id === "agy" && nativeError !== null ? <p role="alert" className="py-2.5 text-sm text-destructive-text">Не удалось загрузить исполнителей: {nativeError}</p> : null}
             {provider.id === "agy" ? nativeAccounts?.accounts.map(account => (
-              <div key={account.accountId} className="space-y-2 border-b border-border py-3 last:border-b-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <button type="button" className="text-sm font-medium text-foreground hover:underline" onClick={() => setNativeSettings(account.accountId)}>Google · {account.label ?? "Antigravity"}</button>
-                  <SettingsBadge>{!nativeAccounts.managed ? "Управляемый режим выключен" : account.uncertain > 0 ? "Требуется проверка остановки" : account.executors.some(executor => executor.enabled) ? "Настроен" : "Исполнители выключены"}</SettingsBadge>
-                </div>
-                <p className="break-all text-xs text-muted-foreground">Подписка: {account.accountId}</p>
-                <ul className="space-y-1 text-xs text-muted-foreground">{account.executors.map(executor => <li key={executor.id} className="flex flex-wrap items-center gap-2 break-words"><span>{executor.id} · {executor.enabled ? "включён" : "выключен"} · автопилот {executor.autopilotAllowed ? "разрешён" : "выключен"}</span>{executor.preferred ? <SettingsBadge>Выбран для новых сессий</SettingsBadge> : executor.enabled && nativeAccounts.selectionRevision ? <Button size="sm" disabled={pending !== null} aria-label={`Выбрать ${executor.id}`} onClick={() => void run('native-prefer',async()=>{await rpc.call('native.prefer',{executorId:executor.id,expectedRevision:nativeAccounts.selectionRevision!});await refreshNative();})}>Использовать</Button> : null}</li>)}</ul>
-                <p className="text-xs text-muted-foreground">В работе: {account.active}; в очереди: {account.queued}; остановка не подтверждена: {account.uncertain}.</p>
-                <p className="text-xs text-muted-foreground">Лимит здесь не измеряется. Состояние входа проверяет официальный клиент на машине исполнителя.</p>
-              </div>
+              <NativeAccountCard key={account.accountId} managed={nativeAccounts.managed} account={account} open={()=>setNativeSettings(account.accountId)} loadProjects={()=>rpc.call('projects.list',null)}/>
             )) : null}
             {status === null ? (
               <p className="py-2.5 text-sm text-muted-foreground">Загрузка…</p>
@@ -2371,12 +2364,11 @@ function UnlockedAccountPoolSettings() {
       <AccountSettingsStyle />
       <Dialog open={nativeSettings !== null} onOpenChange={open => {if(!open)setNativeSettings(null);}}>
         <DialogContent className="pool-settings max-h-[85vh] overflow-y-auto">
-          <DialogHeader><DialogTitle>Google · Antigravity</DialogTitle></DialogHeader>
-          {nativeAccounts?.accounts.filter(a=>a.accountId===nativeSettings).map(account=><div key={account.accountId}>
-            {account.mixedProjects && <p className="text-sm text-muted-foreground">У исполнителей разные настройки проектов. Сохранение применит выбранные настройки ко всей подписке.</p>}
-            <AccountProjectsForm account={{role:'primary',projects:account.projects}} showRoles={false}
+          <DialogHeader><DialogTitle>Настройки · {nativeAccounts?.accounts.find(a=>a.accountId===nativeSettings)?.label??'Google Antigravity'}</DialogTitle></DialogHeader>
+          {nativeAccounts?.selectionRevision&&nativeAccounts.accounts.filter(a=>a.accountId===nativeSettings).map(account=><NativeAccountSettings
+            key={account.accountId} account={account} revision={nativeAccounts.selectionRevision!}
             loadProjects={()=>rpc.call('projects.list',null)}
-            save={async projects=>{await rpc.call('native.setProjects',{accountId:account.accountId,projects,expectedRevision:account.projectsRevision});await refreshNative();}} /></div>)}
+            save={async input=>{await rpc.call('native.updateAccount',input);await refreshNative();}} probe={input=>rpc.call('native.probe',input)}/>)}
         </DialogContent>
       </Dialog>
     </div>
@@ -2831,14 +2823,16 @@ function LoginDialog({
 }
 
 export function ThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
-  const grant = useManagementGrant();
-  if (!grant) return null;
   return <UnlockedThreadAccountIndicator threadId={threadId} isCompactViewport={isCompactViewport} />;
 }
 
 function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
-  const rpc = usePoolRpc();
+  const rpc = useRpc<typeof accountPoolRpcContract>();
   const [status, setStatus] = useState<ThreadAccountStatus | null>(null);
+  const [choices,setChoices]=useState<import('./src/rpc.js').ThreadAccountChoices|null>(null);
+  const [selectionError,setSelectionError]=useState<string|null>(null);
+  const [switching,setSwitching]=useState(false);
+
   const [open, setOpen] = useState(false);
   const [error, setError] = useState(false);
   useEffect(() => {
@@ -2859,18 +2853,43 @@ function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threa
     const timer = setInterval(() => void refresh(), 15000);
     return () => { disposed = true; clearInterval(timer); };
   }, [rpc, threadId]);
+  useEffect(()=>{
+    setChoices(null);setSelectionError(null);
+    if(!open || status?.state==='bypassed' || status?.state==='unsupported')return;
+    let disposed=false;
+    rpc.call('thread.accountChoices',{threadId}).then(value=>{if(!disposed)setChoices(value);}).catch(()=>{if(!disposed)setSelectionError('Не удалось загрузить аккаунты');});
+    return ()=>{disposed=true;};
+  },[open,rpc,threadId,status?.state]);
+  const switchAccount=async(accountId:string|null)=>{
+    setSwitching(true);setSelectionError(null);
+    try{setChoices(await rpc.call('thread.switchAccount',{threadId,accountId}));}
+    catch{setSelectionError('Не удалось переключить аккаунт. Попробуйте ещё раз.');}
+    finally{setSwitching(false);}
+  };
   if (status?.state === "unsupported") return null;
   const account = status?.account;
-  const availability = account === null || account === undefined ? "" : !account.enabled ? "выключен" : account.eligible ? "доступен" : "сейчас недоступен";
+  const choice = choices?.accounts.find(item=>item.id===account?.id);
+  const availability = choice ? THREAD_ACCOUNT_STATE[choice.state] : account === null || account === undefined ? "" : !account.enabled ? "выключен" : account.eligible ? "доступен" : "сейчас недоступен";
   const label = error ? "Пул: ошибка проверки" : status === null ? "Пул: проверка…" : status.state === "bypassed" ? "Вне пула" : status.state === "unobserved" ? "Пул: ещё нет данных" : `${(account ? accountFullName(account) : "Удалённый аккаунт")} · ${availability}`;
   const details = status?.state === "observed"
-    ? `Последний подтверждённый запрос: ${label}. ${status.lastUsedAt === null ? "" : new Date(status.lastUsedAt).toLocaleString("ru-RU")}. Следующий запрос может выбрать другой аккаунт. Активных запросов аккаунта: ${account?.inFlight ?? 0}.`
+    ? `Последний подтверждённый запрос: ${label}. ${status.lastUsedAt === null ? "" : new Date(status.lastUsedAt).toLocaleString("ru-RU")}. ${choices?.pinned ? 'Тред закреплён за аккаунтом ('+(choices.mode==='manual'?'вручную':'автоматически')+').' : 'Аккаунт выбирается по правилам пула.'} Активных запросов аккаунта: ${account?.inFlight ?? 0}.`
     : "Аккаунт выбирается при запросе. Здесь отображаются только подтверждённые данные пула.";
   return <>
     <button type="button" className="max-w-64 truncate text-xs text-muted-foreground" title={details} aria-label={`Подписка треда: ${label}`} onClick={() => setOpen(true)}>{isCompactViewport ? "Пул" : label}</button>
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogFrame title="Подписка треда" footer={<Button onClick={() => setOpen(false)}>Закрыть</Button>}>
         <p>{label}</p><p className="text-sm text-muted-foreground">{details}</p>
+        {status?.state!=='bypassed' && <section aria-label="Выбор аккаунта" className="min-w-0 space-y-2">
+          <p className="text-sm">Аккаунт треда{choices ? ' · '+(choices.mode==='manual'?'выбран вручную':'автоматически') : ''}</p>
+          {selectionError && <p role="alert" className="text-sm text-destructive">{selectionError}</p>}
+          {choices && <div className="max-h-[35dvh] overflow-y-auto space-y-1" role="group" aria-label="Аккаунты треда">
+            <button type="button" className="w-full min-h-11 rounded-md border p-3 text-left text-sm aria-pressed:bg-accent aria-pressed:font-medium" aria-pressed={choices.mode==='auto'} disabled={switching} onClick={()=>void switchAccount(null)}>Автоматически (по умолчанию)</button>
+            {choices.accounts.map(item=><button type="button" key={item.id} className="w-full min-h-11 rounded-md border p-3 text-left text-sm aria-pressed:bg-accent aria-pressed:font-medium break-words disabled:opacity-50" aria-pressed={choices.mode==='manual'&&choices.currentAccountId===item.id} disabled={switching||!item.selectable} onClick={()=>void switchAccount(item.id)}>
+              {item.label} · {THREAD_ACCOUNT_STATE[item.state]}{item.until===null?'':' до '+new Date(item.until).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}{item.assigned?' · назначенный выход':''}
+            </button>)}
+          </div>}
+        </section>}
+
         {account ? <p className="text-sm">{account.role === "reserve" ? "Резерв" : "Основной"} · {account.provider} · квоты обновлены {account.observedAt === null ? "никогда" : new Date(account.observedAt).toLocaleString("ru-RU")}</p> : null}
       </DialogFrame>
     </Dialog>

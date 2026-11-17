@@ -1,12 +1,13 @@
 import {verifiedHostResult} from './vpn-test-fixture.js';
 import type { BbPluginApi } from '@get-bb/plugin-sdk';
 import { createFakePluginHost, makeHostResponse, makeThreadResponse, makeMessageDispatchHookContext } from '@get-bb/plugin-sdk/testing';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import plugin from './server.js';
 import {statusSchema} from './contract.js';
+import {OBSERVATION_GRACE_MS} from './observation.js';
 
 type PluginList = Awaited<ReturnType<BbPluginApi['sdk']['plugins']['list']>>;
-async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;failHostRpc?:boolean;evidenceAgeMs?:number}={}) {
+async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;failHostRpc?:boolean;evidenceAgeMs?:number;passive?:boolean}={}) {
   const states=new Map([['host-a','disconnected'],['host-b','connected']]);
   const available=new Set(['host-a','host-b']);
   const enabled=new Map([['provider-codex',true],['provider-claude-code',false],['provider-acp',true]]);
@@ -41,7 +42,7 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;fai
         stop:async({threadId})=>{stopped.push(threadId);stoppedTimes.set(threadId,Date.now());return {} as never;},
       },
     },
-    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(options.failHostRpc)throw Error('sensitive-synthetic-payload');if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}const result=verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');if(options.evidenceAgeMs!==undefined)result.evidence.updatedAt-=options.evidenceAgeMs;return result;},
+    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(options.failHostRpc)throw Error('sensitive-synthetic-payload');if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}const result=verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');if(options.evidenceAgeMs!==undefined)result.evidence.updatedAt-=options.evidenceAgeMs;if(options.passive&&result.state==='connected')return {state:'connected' as const,evidence:{state:'connected' as const,assurance:'system_ipv4' as const,source:'tailscale' as const,reason:'ok',updatedAt:Date.now(),probeAt:null}};return result;},
   });
   await plugin(fake.bb);
   const hook=fake.harness.registrations.hooks['message.dispatch'];
@@ -90,14 +91,21 @@ describe('guard admission and reconciliation',()=>{
     await reloaded.harness.lifecycle.dispose();
   });
   it('distinguishes unavailable host RPC from VPN evidence without persisting exception text',async()=>{
-    const {fake}=await setup({failHostRpc:true});
-    await select(fake,['host-a']);
-    await mode(fake,'enforce');
-    const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));
-    expect(status.stopHistory?.at(-1)?.reason).toBe('host_rpc_failed');
-    expect(status.hosts.find(h=>h.id==='host-a')).toMatchObject({rpc:{category:'rpc_error',elapsedMs:expect.any(Number)}});
-    expect(JSON.stringify(status.stopHistory)).not.toContain('sensitive-synthetic-payload');
-    await fake.harness.lifecycle.dispose();
+    vi.useFakeTimers({toFake:['Date']});
+    const {fake,stopped}=await setup({failHostRpc:true});
+    try {
+      await select(fake,['host-a']);
+      await mode(fake,'enforce');
+      // A machine that cannot be read is stopped only after the observation grace period.
+      expect(stopped).toEqual([]);
+      vi.setSystemTime(Date.now()+OBSERVATION_GRACE_MS+1);
+      await mode(fake,'enforce');
+      const status=statusSchema.parse(await fake.harness.behavior.callRpc('status',null));
+      expect(status.stopHistory?.at(-1)?.reason).toBe('host_rpc_failed');
+      expect(status.hosts.find(h=>h.id==='host-a')).toMatchObject({rpc:{category:'rpc_error',elapsedMs:expect.any(Number)}});
+      expect(JSON.stringify(status.stopHistory)).not.toContain('sensitive-synthetic-payload');
+      expect(JSON.stringify(fake.harness.logEntries)).not.toContain('sensitive-synthetic-payload');
+    } finally {vi.useRealTimers();await fake.harness.lifecycle.dispose();}
   });
   it('rejects host evidence that has expired by the time the remote response arrives',async()=>{
     const {fake,dispatch}=await setup({evidenceAgeMs:90_001});
@@ -363,15 +371,21 @@ describe('guard admission and reconciliation',()=>{
     expect(enabled.get('provider-codex')).toBe(false);
     await fake.harness.lifecycle.dispose();
   });
-  it('treats a failed host catalog as unknown for selected machines',async()=>{
+  it('treats a failed host catalog as unknown for admission and for running work after the grace period',async()=>{
+    vi.useFakeTimers({toFake:['Date']});
     const {fake,setFailHostList,enabled,dispatch}=await setup();
-    await select(fake,['host-b']);
-    await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});
-    setFailHostList(true);
-    await mode(fake,'enforce');
-    expect(enabled.get('provider-codex')).toBe(false);
-    expect(await dispatch('acp-cursor','host-b')).toMatchObject({action:'wait'});
-    await fake.harness.lifecycle.dispose();
+    try {
+      await select(fake,['host-b']);
+      await fake.harness.behavior.callRpc('setGlobalSuspension',{enabled:true,acknowledgeGlobalImpact:true});
+      setFailHostList(true);
+      await mode(fake,'enforce');
+      expect(await dispatch('acp-cursor','host-b')).toMatchObject({action:'wait'});
+      expect(enabled.get('provider-codex')).toBe(true);
+      vi.setSystemTime(Date.now()+OBSERVATION_GRACE_MS+1);
+      await mode(fake,'enforce');
+      expect(enabled.get('provider-codex')).toBe(false);
+      expect(await dispatch('acp-cursor','host-b')).toMatchObject({action:'wait'});
+    } finally {vi.useRealTimers();await fake.harness.lifecycle.dispose();}
   });
   it('attempts Claude and thread cleanup when Codex suspension fails',async()=>{
     const {fake,enabled,stopped,mutations}=await setup({failCodexDisable:true});
@@ -672,4 +686,135 @@ it.each(['neuraldeep','agy'])('admits %s through the existing scoped policy with
  states.set('host-a','unknown');
  expect(await decision(providerUnderTest)).toMatchObject({allowed:false,reason:'vpn_unavailable'});
  await fake.harness.lifecycle.dispose();
+});
+
+describe('independent machine manual blocks',()=>{
+  it('holds a connected laptop while server dispatch/network and exempt routes continue',async()=>{
+    const {fake,states,dispatch,stopped,mutations}=await setup();
+    states.set('host-a','connected');
+    try {
+      await select(fake,['host-a','host-b']);
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+      expect(await dispatch('codex','host-a')).toMatchObject({action:'wait'});
+      expect(await dispatch('acp-agy','host-a')).toMatchObject({action:'wait'});
+      expect(await dispatch('codex','host-b')).toEqual({action:'proceed'});
+      expect(await dispatch('kimi','host-a')).toEqual({action:'proceed'});
+      expect(await dispatch('acp-opencode-zai','host-a')).toEqual({action:'proceed'});
+      for(const method of ['networkDecision','networkDecisionV2']) {
+        expect(await fake.harness.behavior.callRpc(method,{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:false,reason:'manual_block'});
+        expect(await fake.harness.behavior.callRpc(method,{hostId:'host-b',provider:'codex'})).toMatchObject({allowed:true});
+      }
+      expect(stopped).toEqual(['protected']);
+      expect(mutations).toEqual([]);
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('does not stop an unrelated disconnected host in observe mode',async()=>{
+    const {fake,states,stopped}=await setup();states.set('host-b','disconnected');
+    try {
+      await select(fake,['host-a','host-b']);
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+      expect(stopped).toEqual(['protected']);
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('persists per-machine intent across reload and VPN reconnect; global unblock cannot clear it',async()=>{
+    const {fake,states}=await setup();
+    await select(fake,['host-a','host-b']);
+    await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+    states.set('host-a','connected');
+    const reloaded=await fake.harness.lifecycle.reload(plugin);
+    try {
+      await reloaded.harness.behavior.callRpc('setManualBlock',{blocked:false});
+      expect(await reloaded.harness.behavior.callRpc('status',null)).toMatchObject({manualBlock:false,manualBlockHostIds:['host-a']});
+      expect(await reloaded.harness.behavior.callRpc('networkDecisionV2',{hostId:'host-a',provider:'codex'})).toMatchObject({allowed:false,reason:'manual_block'});
+      expect(await reloaded.harness.behavior.callRpc('networkDecisionV2',{hostId:'host-b',provider:'codex'})).toMatchObject({allowed:true});
+    } finally {await reloaded.harness.lifecycle.dispose();}
+  });
+  it('only releases the requested machine; global block and other machine blocks remain',async()=>{
+    const {fake,dispatch}=await setup();
+    try {
+      await select(fake,['host-a','host-b']);
+      for(const hostId of ['host-a','host-b'])await fake.harness.behavior.callRpc('setHostManualBlock',{hostId,blocked:true});
+      await fake.harness.behavior.callRpc('setManualBlock',{blocked:true});
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:false});
+      expect(await dispatch('codex','host-a')).toMatchObject({action:'wait'});
+      await fake.harness.behavior.callRpc('setManualBlock',{blocked:false});
+      expect(await dispatch('codex','host-a')).toEqual({action:'proceed'});
+      expect(await dispatch('codex','host-b')).toMatchObject({action:'wait'});
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('unblock rechecks admission while preserving unavailable VPN denial',async()=>{
+    const {fake,dispatch}=await setup();
+    try {
+      await select(fake,['host-a','host-b']);await mode(fake,'enforce');
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+      const before=fake.harness.recheckCount;
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:false});
+      expect(fake.harness.recheckCount).toBeGreaterThan(before);
+      expect(await dispatch('codex','host-a')).toMatchObject({action:'wait'});
+      expect(await dispatch('codex','host-b')).toEqual({action:'proceed'});
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('rejects unselected IDs and removing a blocked machine instead of silently losing intent',async()=>{
+    const {fake}=await setup();
+    try {
+      await select(fake,['host-a','host-b']);
+      await expect(fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'unknown',blocked:true})).rejects.toThrow('Select');
+      await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-a',blocked:true});
+      await expect(select(fake,['host-b'])).rejects.toThrow('manual block');
+      expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({manualBlockHostIds:['host-a'],hostIds:['host-a','host-b']});
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+  it('supports explicit host CLI while leaving legacy global block separate',async()=>{
+    const {fake}=await setup();
+    try {
+      await select(fake,['host-a','host-b']);
+      const result=await fake.harness.behavior.runCli(['block','--host','host-a','--json']);
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout!)).toMatchObject({manualBlock:false,manualBlockHostIds:['host-a']});
+      expect((await fake.harness.behavior.runCli(['unblock','--host','host-a'])).exitCode).toBe(0);
+      expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({manualBlockHostIds:[]});
+      expect((await fake.harness.behavior.runCli(['block','--host'])).exitCode).toBe(1);
+    } finally {await fake.harness.lifecycle.dispose();}
+  });
+});
+
+
+it('does not replace malformed saved machine blocks with an unprotected default',async()=>{
+ const fake=createFakePluginHost({pluginId:'vpn-guard'});
+ await fake.bb.storage.kv.set('configuration-v2',{mode:'enforce',manualBlock:false,manualBlockHostIds:null,hostIds:['host-a'],suspendNativePluginsGlobally:false});
+ try {await expect(plugin(fake.bb)).rejects.toThrow('Invalid saved machine block');}
+ finally {await fake.harness.lifecycle.dispose();}
+});
+
+it('rejects saved blocks outside the selected scope',async()=>{
+ const fake=createFakePluginHost({pluginId:'vpn-guard'});
+ await fake.bb.storage.kv.set('configuration-v2',{mode:'enforce',manualBlock:false,manualBlockHostIds:['host-b'],hostIds:['host-a'],suspendNativePluginsGlobally:false});
+ try {await expect(plugin(fake.bb)).rejects.toThrow('outside protected scope');}
+ finally {await fake.harness.lifecycle.dispose();}
+});
+
+it('accepts passive VPN state without releasing a manual machine block',async()=>{
+ const {fake,dispatch}=await setup({passive:true});
+ try{
+  await select(fake,['host-b']);await mode(fake,'enforce');
+  expect(await dispatch('codex','host-b')).toEqual({action:'proceed'});
+  expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({hosts:expect.arrayContaining([expect.objectContaining({id:'host-b',vpn:'connected',evidence:expect.objectContaining({assurance:'system_ipv4'})})])});
+  await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-b',blocked:true});
+  expect(await dispatch('codex','host-b')).toMatchObject({action:'wait'});
+ }finally{await fake.harness.lifecycle.dispose();}
+});
+
+it('checks an unselected enrolled machine without changing protection or running enforcement',async()=>{
+ const {fake,stopped,mutations,hostCalls}=await setup({passive:true});
+ try {
+  const before=await fake.harness.behavior.callRpc('status',null);
+  const result=await fake.harness.behavior.runCli(['check','host-b','--json']);
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout!)).toMatchObject({hostId:'host-b',selected:false,state:'connected',evidence:{assurance:'system_ipv4',source:'tailscale'},rpc:{category:'ok'}});
+  expect(await fake.harness.behavior.callRpc('status',null)).toEqual(before);
+  expect(stopped).toEqual([]);expect(mutations).toEqual([]);
+  const calls=hostCalls.length;
+  expect((await fake.harness.behavior.runCli(['check','unregistered'])).exitCode).toBe(1);
+  expect(hostCalls).toHaveLength(calls);
+ } finally {await fake.harness.lifecycle.dispose();}
 });

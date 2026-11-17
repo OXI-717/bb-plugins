@@ -1,3 +1,4 @@
+import { clientAccountScopeSchema, type ClientAccountScope } from "./client-scope.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -43,11 +44,14 @@ const storedHubTokenSchema = z
     projectId: z.string().min(1).max(200).optional(),
     threadId: z.string().min(1).max(200).optional(),
     purpose: z.literal("autopilot").optional(),
+    accountScope: clientAccountScopeSchema.optional(),
     mintedAt: z.number().int().nonnegative(),
     lastUsedAt: z.number().int().nonnegative().nullable(),
     previous: z.array(priorHubTokenSchema),
   })
-  .strict().refine(value => value.purpose === undefined || value.projectId !== undefined, "Purpose requires a project binding");
+  .strict().refine(value => value.purpose === undefined || value.projectId !== undefined, "Purpose requires a project binding").refine(value => value.accountScope === undefined ||
+    value.hostId.startsWith("external_") && value.machineHostId === undefined && value.projectId !== undefined,
+    "Account scope requires an external project-bound identity");
 type StoredHubToken = z.infer<typeof storedHubTokenSchema>;
 
 const routedThreadSchema = z
@@ -426,7 +430,11 @@ export class HubTokenStore {
   }
 
   /** Operator-issued identity; neither the name nor request fields grant purpose. */
-  async forIssuedClient(hostId: string, projectId: string | null, purpose?: "autopilot"): Promise<string> {
+  async forIssuedClient(hostId: string, projectId: string | null, purpose?: "autopilot", accountScope?:ClientAccountScope): Promise<string> {
+    if (accountScope !== undefined) {
+      accountScope=clientAccountScopeSchema.parse(accountScope);
+      if (!hostId.startsWith("external_") || projectId === null) throw Error("Account scope requires an external project binding.");
+    }
     if (purpose !== undefined) z.literal("autopilot").parse(purpose);
     if (purpose === "autopilot" && projectId === null) throw Error('Autopilot clients require a project binding.');
     if (projectId !== null) z.string().min(1).max(200).parse(projectId);
@@ -436,11 +444,11 @@ export class HubTokenStore {
       // Older project credentials also have a base host record. That record is not their authority.
       const scoped = all.filter(token => token.machineHostId === hostId);
       const issued = scoped.length ? scoped : all;
-      if (issued.some(token => (token.projectId ?? null) !== projectId || token.purpose !== purpose)) {
+      if (issued.some(token => (token.projectId ?? null) !== projectId || token.purpose !== purpose || JSON.stringify(token.accountScope) !== JSON.stringify(accountScope))) {
         throw Error('Client binding differs; revoke before issuing a new identity.');
       }
       if (issued.length) return issued[0]!.value;
-      const value = storedHubTokenSchema.parse({ ...this.create(hostId), ...(projectId === null ? {} : {projectId}), ...(purpose ? {purpose} : {}) });
+      const value = storedHubTokenSchema.parse({ ...this.create(hostId), ...(projectId === null ? {} : {projectId}), ...(purpose ? {purpose} : {}), ...(accountScope ? {accountScope} : {}) });
       await this.write(hostId, value);
       return value.value;
     }), this.groupLocks);
@@ -483,7 +491,7 @@ export class HubTokenStore {
     return this.serialized(hostId, async () => {
       const current = this.read(hostId);
       const now = this.now();
-      const next = { ...this.create(hostId), ...(current ? {projectId:current.projectId,purpose:current.purpose} : {}), ...(current?.machineHostId ? { machineHostId: current.machineHostId, projectId: current.projectId,threadId:current.threadId } : {}) };
+      const next = { ...this.create(hostId), ...(current ? {projectId:current.projectId,purpose:current.purpose,accountScope:current.accountScope} : {}), ...(current?.machineHostId ? { machineHostId: current.machineHostId, projectId: current.projectId,threadId:current.threadId } : {}) };
       if (current !== null) {
         next.previous = [
           { value: current.value, expiresAt: now + HUB_TOKEN_GRACE_MS },
@@ -499,17 +507,26 @@ export class HubTokenStore {
     return (await this.authenticateContext(presented))?.hostId ?? null;
   }
 
+  /** Synchronous dispatch fence: called inside the account snapshot lock, with no await before send. */
+  validatesAccountScope(presented: string | null, scope: ClientAccountScope): boolean {
+    if (presented === null) return false;
+    const key = this.tokenIndex.get(this.tokenDigest(presented));
+    const token = key === undefined ? undefined : this.tokens.get(key);
+    return token !== undefined && matchesStoredToken(token, presented, this.now()) &&
+      JSON.stringify(token.accountScope) === JSON.stringify(scope);
+  }
+
   /** Inspect only already-initialized state; never load, prune or update usage. */
-  async inspectContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot" } | null> {
+  async inspectContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot"; accountScope?:ClientAccountScope } | null> {
     if (presented === null || this.initialization === null) return null;
     await this.initialization;
     const key = this.tokenIndex.get(this.tokenDigest(presented));
     const token = key === undefined ? null : this.tokens.get(key) ?? null;
     if (token === null || !matchesStoredToken(token, presented, this.now())) return null;
-    return { hostId: token.machineHostId ?? token.hostId, projectId: token.projectId ?? null, ...(token.threadId ? { threadId: token.threadId } : {}), ...(token.purpose ? {purpose:token.purpose} : {}) };
+    return { hostId: token.machineHostId ?? token.hostId, projectId: token.projectId ?? null, ...(token.threadId ? { threadId: token.threadId } : {}), ...(token.purpose ? {purpose:token.purpose} : {}), ...(token.accountScope ? {accountScope:structuredClone(token.accountScope)} : {}) };
   }
 
-  async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot" } | null> {
+  async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot"; accountScope?:ClientAccountScope } | null> {
     if (presented === null) return null;
     await this.initialize();
     const matchedHostId=this.tokenIndex.get(this.tokenDigest(presented));
@@ -536,7 +553,7 @@ export class HubTokenStore {
       } else {
         this.cacheToken(next);
       }
-      return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null,...(matched.threadId?{threadId:matched.threadId}:{}),...(matched.purpose?{purpose:matched.purpose}:{}) };
+      return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null,...(matched.threadId?{threadId:matched.threadId}:{}),...(matched.purpose?{purpose:matched.purpose}:{}),...(matched.accountScope?{accountScope:structuredClone(matched.accountScope)}:{}) };
     });
   }
 

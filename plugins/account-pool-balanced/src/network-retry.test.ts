@@ -254,3 +254,8 @@ it('reports a failure after scheduling as unconfirmed rather than queued',async(
  expect(retry).toHaveBeenCalledTimes(1);
  await fake.harness.lifecycle.dispose();
 });
+
+it.each([503,403])('retries egress failure only for 5xx (%s)',async httpStatusCode=>{
+ const {fake,retry,fail}=await setup();await fail({errorInfo:{category:'connection-failed',httpStatusCode,providerCode:'POOL_EGRESS_UNAVAILABLE'}});
+ expect(retry).toHaveBeenCalledTimes(httpStatusCode===503?1:0);await fake.harness.lifecycle.dispose();
+});

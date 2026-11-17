@@ -12,7 +12,7 @@ export class AccountAdmission {
   private readonly lanes = new Map<string, Lane>();
   private queued = 0;
   private readonly cooldownWakeups = new Set<() => void>();
-  constructor(private readonly limit: () => number, private readonly now = Date.now,
+  constructor(private readonly limit: (id: string) => number, private readonly now = Date.now,
     private readonly maxWaitMs = ACCOUNT_QUEUE_MAX_WAIT_MS, private readonly maxPerAccount = 64,
     private readonly maxQueued = 1024) {}
   reserved(id: string): number { return this.lanes.get(id)?.active ?? 0; }
@@ -31,7 +31,7 @@ export class AccountAdmission {
       this.lanes.set(id, lane);
     }
     const current = lane;
-    if ((current.active >= this.limit() || current.waiting.length > 0) && (current.waiting.length >= this.maxPerAccount || this.queued >= this.maxQueued)) {
+    if ((current.active >= this.limit(id) || current.waiting.length > 0) && (current.waiting.length >= this.maxPerAccount || this.queued >= this.maxQueued)) {
       if (!current.active && !current.waiting.length) this.lanes.delete(id);
       throw new AdmissionUnavailable('POOL_QUEUE_FULL');
     }
@@ -91,7 +91,7 @@ export class AccountAdmission {
     }
   }
   private pump(id: string, lane: Lane): void {
-    while (lane.active < this.limit() && lane.waiting.length) lane.waiting[0]!.grant();
+    while (lane.active < this.limit(id) && lane.waiting.length) lane.waiting[0]!.grant();
     if (!lane.active && !lane.waiting.length) this.lanes.delete(id);
   }
 }

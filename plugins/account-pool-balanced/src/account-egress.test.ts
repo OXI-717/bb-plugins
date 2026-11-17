@@ -26,7 +26,7 @@ it('pins account and version across edits and server restart without changing pr
  await e.configure({...profile,version:2,endpoint:'http://127.0.0.1:19082'});await e.bind(a,{id:profile.id,version:2});
  expect((await e.acquire(a,'trusted-session')).profile?.version).toBe(1);
  expect((await e.acquire(a,'new-session')).profile?.version).toBe(2);
- await expect(e.acquire(b,'trusted-session')).rejects.toBeInstanceOf(EgressUnavailable);
+ expect((await e.acquire(b,'trusted-session')).assigned).toBe(false);
  const restarted=new AccountEgress(kv,async()=>'host-one',async()=>true);cleanup.push(()=>restarted.close());await restarted.initialize();
  expect((await restarted.acquire(a,'trusted-session')).profile?.version).toBe(1);
  const observed=vi.fn(async(_input:unknown,init?:RequestInit)=>{expect((init as any).dispatcher).toBeDefined();expect(init?.redirect).toBe('error');return Response.json({ok:true});});
@@ -35,19 +35,19 @@ it('pins account and version across edits and server restart without changing pr
  await initial.fetch(false)!('https://model.example/v1');expect(observed).toHaveBeenCalledOnce();
  expect(process.env.HTTPS_PROXY).toBe('http://127.0.0.1:1');
 });
-it('keeps an already warm unassigned session on its previous route across binding and restart',async()=>{
+it('uses current bindings for warm unassigned conversations',async()=>{
  const kv=storage(),e=new AccountEgress(kv,async()=>'host-one',async()=>true);cleanup.push(()=>e.close());
  expect((await e.acquire(a,'already-warm')).assigned).toBe(false);
  await e.configure(profile);await e.bind(a,{id:profile.id,version:1});
- expect((await e.acquire(a,'already-warm')).assigned).toBe(false);
+ expect((await e.acquire(a,'already-warm')).assigned).toBe(true);
  expect((await e.acquire(a,'started-after-binding')).profile?.version).toBe(1);
  const restarted=new AccountEgress(kv,async()=>'host-one',async()=>true);cleanup.push(()=>restarted.close());await restarted.initialize();
- expect((await restarted.acquire(a,'already-warm')).assigned).toBe(false);
+ expect((await restarted.acquire(a,'already-warm')).assigned).toBe(true);
  expect((await restarted.acquire(b,'already-warm')).assigned).toBe(false);
  await restarted.bind(b,{id:profile.id,version:1});
- expect((await restarted.acquire(b,'already-warm')).assigned).toBe(false);
+ expect((await restarted.acquire(b,'already-warm')).assigned).toBe(true);
  expect((await restarted.acquire(b,'new-after-b-binding')).assigned).toBe(true);
- await expect(restarted.acquire(a,'new-after-b-binding')).rejects.toBeInstanceOf(EgressUnavailable);
+ expect((await restarted.acquire(a,'new-after-b-binding')).assigned).toBe(true);
 });
 it('rejects unsupported server hosts and IPv6 destinations',async()=>{
  const e=new AccountEgress(storage(),async()=>'host-two',async()=>true);cleanup.push(()=>e.close());
@@ -57,11 +57,11 @@ it('refuses new route decisions at capacity without evicting a warm unassigned r
  const kv=storage(),pins=Object.fromEntries(Array.from({length:4095},(_,i)=>['assigned-'+i,{accountId:a,ref:{id:profile.id,version:1}}]));
  await kv.set('account-egress-v1',{schema:1,profiles:[profile],bindings:{[a]:{id:profile.id,version:1}},pins,unassigned:{warm:[a]}});
  const e=new AccountEgress(kv,async()=>'host-one',async id=>id===a);cleanup.push(()=>e.close());await e.initialize();
- expect((await e.acquire(a,'warm')).assigned).toBe(false);
+ expect((await e.acquire(a,'warm')).assigned).toBe(true);
  expect((await e.acquire(a,'assigned-0')).assigned).toBe(true);
- await expect(e.acquire(a,'new')).rejects.toBeInstanceOf(EgressUnavailable);
+ expect((await e.acquire(a,'new')).assigned).toBe(true);expect(e.snapshot().pins.new).toBeUndefined();
  expect((await e.acquire(b,'unrelated-provider')).assigned).toBe(false);
- expect((await e.acquire(a,'warm')).assigned).toBe(false);
+ expect((await e.acquire(a,'warm')).assigned).toBe(true);
 });
 it('keeps ordinary traffic working at historical capacity in real SDK storage and refuses new assignments',async()=>{
  const host=createFakePluginHost({pluginId:'account-pool-balanced'}),kv=host.bb.storage.kv;
@@ -85,7 +85,7 @@ it('bounds real KV bytes without making unassigned traffic a storage quota or gi
  expect(e.snapshot().assignmentBlocked).toBe(true);
  expect((await e.acquire(a,'ordinary-after-byte-cap')).assigned).toBe(false);
  expect((await e.acquire(b,'warm-assigned')).assigned).toBe(true);
- await expect(e.acquire(b,'y'.repeat(2040))).rejects.toBeInstanceOf(EgressUnavailable);
+ expect((await e.acquire(b,'y'.repeat(2040))).assigned).toBe(true);expect(e.snapshot().pins['y'.repeat(2040)]).toBeUndefined();
  await expect(e.bind(a,{id:profile.id,version:1})).rejects.toThrow('tracking capacity');
 });
 it('sends CONNECT to the assigned socket despite NO_PROXY; socket failure never reaches the origin',async()=>{
@@ -113,4 +113,18 @@ it('revalidates the server host for warm sessions and refuses IPv6 before dispat
  host='host-two';await expect(e.acquire(a,'session')).rejects.toBeInstanceOf(EgressUnavailable);
  await expect(route.fetch(false)!('https://model.example/')).rejects.toBeInstanceOf(EgressUnavailable);
  expect(outgoing).not.toHaveBeenCalled();
+});
+it('reports which accounts keep a conversation on its recorded route decision',async()=>{
+ const e=new AccountEgress(storage(),async()=>'host-one',async()=>true);cleanup.push(()=>e.close());
+ await e.initialize();await e.configure(profile);await e.bind(a,{id:profile.id,version:1});
+ // No conversation, or one nothing is recorded for yet: either decision is still open.
+ expect(e.compatible(a,null)).toBe(true);expect(e.compatible(a,'new')).toBe(true);expect(e.compatible(b,'new')).toBe(true);
+ // Pinned to an assigned account: only that account.
+ await e.acquire(a,'pinned');
+ expect(e.compatible(a,'pinned')).toBe(true);expect(e.compatible(b,'pinned')).toBe(false);
+ // Recorded without a profile: never an account that has one.
+ await e.acquire(b,'plain');
+ expect(e.compatible(b,'plain')).toBe(true);expect(e.compatible(a,'plain')).toBe(true);
+ // Unbinding changes new decisions only; it makes the account plain for a plain conversation.
+ await e.bind(a,null);expect(e.compatible(a,'plain')).toBe(true);expect(e.compatible(b,'pinned')).toBe(false);
 });

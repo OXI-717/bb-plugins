@@ -2,7 +2,23 @@ import { createHash } from "node:crypto";
 import { accountProjectsSchema, type AccountProjects } from "./contracts.js";
 import { z } from "zod";
 
-export const nativeProjectsSchema = accountProjectsSchema.refine(value => value.rules.length <= 32 && value.rules.every(rule => /^[A-Za-z0-9_-]{1,80}$/.test(rule.projectId) && rule.role === 'inherit'), 'Native project lists allow at most 32 project IDs and inherited roles');
+export const nativeProjectsSchema = accountProjectsSchema.refine(value => value.rules.length <= 32 && value.rules.every(rule => /^[A-Za-z0-9_-]{1,80}$/.test(rule.projectId)), 'Native project lists allow at most 32 project IDs');
+
+export const nativeAccountRoutingSchema = z.object({
+  role: z.enum(['primary', 'reserve']),
+  priority: z.number().int().min(-10000).max(10000),
+  label: z.string().trim().min(1).max(120).optional(),
+}).strict();
+export const nativeAccountUpdateSchema = z.object({
+  accountId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
+  expectedRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  label: nativeAccountRoutingSchema.shape.label,
+  role: nativeAccountRoutingSchema.shape.role.optional(),
+  priority: nativeAccountRoutingSchema.shape.priority.optional(),
+  projects: nativeProjectsSchema.optional(),
+  executor: z.object({id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/), enabled: z.boolean().optional(), autopilotAllowed: z.boolean().optional()}).strict().optional(),
+}).strict();
+export type NativeAccountUpdate = z.infer<typeof nativeAccountUpdateSchema>;
 
 export const nativeAccountsSchema = z.object({
   managed: z.boolean(),
@@ -10,11 +26,13 @@ export const nativeAccountsSchema = z.object({
   accounts: z.array(z.object({
     accountId: z.string(),
     label:z.string().optional(),
+    role: nativeAccountRoutingSchema.shape.role.optional(),
+    priority: nativeAccountRoutingSchema.shape.priority.optional(),
     projects: accountProjectsSchema,
     projectsRevision: z.string(),
     mixedProjects: z.boolean(),
     executors: z.array(z.object({
-      id: z.string(), enabled: z.boolean(), autopilotAllowed: z.boolean(),
+      id: z.string(), hostId: z.string().optional(), enabled: z.boolean(), autopilotAllowed: z.boolean(),
       preferred:z.boolean().optional(),
     }).strict()),
     active: z.number().int().nonnegative(),
@@ -28,6 +46,7 @@ export type NativeAccounts = z.infer<typeof nativeAccountsSchema>;
 export function summarizeNativeAccounts(state: {
   managed: boolean;
   preferredExecutors?:Record<string,string>;
+  accountRouting?:Record<string,z.infer<typeof nativeAccountRoutingSchema>>;
   executors: Array<{id: string; accountId: string; hostId?:string; label?:string; enabled: boolean; autopilotAllowed: boolean; projectIds: string[]; projects?: AccountProjects}>;
   leases: Array<{executor: {accountId: string}; state: "active" | "queued" | "uncertain"}>;
 }): NativeAccounts {
@@ -39,10 +58,12 @@ export function summarizeNativeAccounts(state: {
       const policies = group.map(e => e.projects ?? {onlySelected: true, rules: e.projectIds.map(projectId => ({projectId, role: 'inherit' as const}))});
       const projects=policies[0];
       account = {accountId: executor.accountId, projects:structuredClone(projects), mixedProjects:policies.some(p=>JSON.stringify(p)!==JSON.stringify(projects)), projectsRevision: createHash('sha256').update(JSON.stringify(group.map(e => [e.id,e.projectIds,e.projects]))).digest('hex'), executors: [], active: 0, queued: 0, uncertain: 0};
+      const routing = state.accountRouting&&Object.hasOwn(state.accountRouting,executor.accountId)?state.accountRouting[executor.accountId]:undefined;
+      if (routing) { account.role = routing.role; account.priority = routing.priority; if(routing.label)account.label=routing.label; }
       accounts.push(account);
     }
     if(executor.label&&!account.label)account.label=executor.label;
-    account.executors.push({id: executor.id, enabled: executor.enabled, autopilotAllowed: executor.autopilotAllowed,
+    account.executors.push({id: executor.id, ...(executor.hostId?{hostId:executor.hostId}:{}), enabled: executor.enabled, autopilotAllowed: executor.autopilotAllowed,
       ...(executor.hostId&&state.preferredExecutors?.[executor.hostId]===executor.id?{preferred:true}:{})});
   }
   for (const lease of state.leases) {
@@ -51,3 +72,5 @@ export function summarizeNativeAccounts(state: {
   }
   return {managed: state.managed, accounts};
 }
+
+export {nativeProbeInputSchema,nativeProbeResultSchema} from './native-probe-wire.js';

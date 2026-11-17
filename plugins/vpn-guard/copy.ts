@@ -1,6 +1,7 @@
 export type Language = 'ru' | 'en';
 export const copy = {
   ru: {
+    blockHost:'Заблокировать',unblockHost:'Снять блок',hostBlocked:'Ручной блок этой машины',hostNotBlocked:'Ручного блока нет',globalBlocked:'Общий ручной блок',hostBlockHelp:'Блокировка у машины действует только на её защищённые сессии. Другие машины продолжают работать. Подключение VPN не снимает ручной блок.',
     statusUnavailable:'Статус недоступен',events:'Журнал событий',noEvents:'Событий пока нет.',checking:'Проверяется',coordinating:'Применяется',coordinatingHelp:'Контроллер выполняет запрос. Проверка защиты продолжает работать.',retryAfter:'Следующая попытка не раньше',
     noNativeRecovery:'Нет пауз от Guard',
     nativeScope:'Действует на всех машинах: только встроенные Codex и Claude.',nativeDetails:'Область и ограничения отключения',
@@ -14,7 +15,7 @@ export const copy = {
     connected:'VPN подключён',disconnected:'VPN отключён',unknown:'VPN неизвестен',outside:'Вне защиты',unavailable:'Недоступна',
     control:'Управление',observe:'Наблюдение',enforce:'Защита по VPN',refresh:'Обновить статус',refreshing:'Обновляем…',statusReceived:'Данные получены',
     modeHelp:'Наблюдение не блокирует работу. Защита по VPN удерживает новые сообщения и останавливает защищённые треды при потере VPN.',
-    block:'Заблокировать',unblock:'Снять блок',blocked:'Ручной блок включён',notBlocked:'Ручной блок выключен',
+    block:'Заблокировать все выбранные',unblock:'Снять общий блок',blocked:'Ручной блок включён',notBlocked:'Ручной блок выключен',
     blockHelp:'Ручной блок действует даже при подключённом VPN и в режиме наблюдения. Он сохраняется после перезапуска. Снятие блока возвращает выбранный режим; остановленные задачи не запускаются повторно.',
     stopped:'Ранее остановлено Guard',stoppedHelp:'Это история до 100 тредов, которые Guard ранее останавливал, а не число заблокированных сейчас. Они могли уже продолжить работу или завершиться. Guard не продолжает остановленные треды автоматически. «Продолжить» отправляет обычное сообщение в тред после проверки VPN. Если после остановки в треде уже были изменения, откройте его и продолжите вручную.',resumeThread:'Продолжить',resumeRequested:'Запуск запрошен',resumeThreadError:'Не удалось продолжить. Откройте тред: он мог уже измениться, либо VPN ещё не подтверждён.',noStopHistory:'Записей об остановках пока нет.',loadingThreadTitles:'Загружаем названия тредов…',untitledThread:'Без названия',threadUnavailable:'Тред недоступен',native:'Блокировка встроенных плагинов',
     nativeHelp:'Отключает встроенные плагины Codex и Claude на ВСЕХ машинах при ручном блоке или потере VPN в режиме защиты. Cursor и Devin не отключаются этим способом. Уже открытые соединения могут продолжать работать.',
@@ -25,6 +26,7 @@ export const copy = {
     errorDetails:'Технические подробности',error:'Не удалось выполнить действие',loading:'Загрузка',mode:'Режим',
   },
   en: {
+    blockHost:'Block',unblockHost:'Unblock',hostBlocked:'This machine is manually blocked',hostNotBlocked:'No manual block',globalBlocked:'Global manual block',hostBlockHelp:'A machine block affects only its protected sessions. Other machines keep working. VPN recovery does not release a manual block.',
     statusUnavailable:'Status unavailable',events:'Event history',noEvents:'No events yet.',checking:'Checking',coordinating:'Applying',coordinatingHelp:'A controller request is in progress. Protection checks continue independently.',retryAfter:'Next retry no earlier than',
     noNativeRecovery:'None paused by Guard',
     nativeScope:'Applies to all machines: native Codex and Claude only.',nativeDetails:'Suspension scope and limits',
@@ -38,7 +40,7 @@ export const copy = {
     connected:'VPN connected',disconnected:'VPN disconnected',unknown:'VPN unknown',outside:'Outside scope',unavailable:'Unavailable',
     control:'Controls',observe:'Observe',enforce:'Enforce VPN',refresh:'Refresh status',refreshing:'Refreshing…',statusReceived:'Data received',
     modeHelp:'Observe does not block work. Enforce VPN holds new messages and stops protected threads when VPN is unavailable.',
-    block:'Block',unblock:'Unblock',blocked:'Manual block is on',notBlocked:'Manual block is off',
+    block:'Block all selected',unblock:'Release global block',blocked:'Manual block is on',notBlocked:'Manual block is off',
     blockHelp:'Manual block applies even with connected VPN and in Observe mode. It survives restart. Unblock returns to the selected mode; stopped tasks are not replayed.',
     stopped:'Previously stopped by Guard',stoppedHelp:'This records up to 100 distinct threads, not a count of threads currently blocked. They may have resumed or finished. Guard does not automatically continue stopped threads. Continue sends a normal message after checking VPN. Threads changed since their stop must be continued from the thread itself.',resumeThread:'Continue',resumeRequested:'Start requested',resumeThreadError:'Could not continue. Open the thread: it may have changed or VPN is not verified yet.',noStopHistory:'No recorded stops yet.',loadingThreadTitles:'Loading thread titles…',untitledThread:'Untitled thread',threadUnavailable:'Thread unavailable',native:'Additional global suspension',
     nativeHelp:'Disables native Codex and Claude plugins on ALL machines during manual block or VPN loss in Enforce mode. Cursor and Devin are not disabled this way. Existing connections may continue.',

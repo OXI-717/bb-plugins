@@ -14,6 +14,11 @@ The output file is created on the **BB server**, exclusively with mode 0600. Tra
 
 Pool credentials are for trusted clients belonging to the operator. Their server-side project and purpose binding, account policies and quota rules determine access; this is not a tenant billing or per-client spending isolation system. Use a separate pool for untrusted tenants.
 
+For an external pilot restricted to specific accounts and a dedicated exit, see
+[server-owned account scope](../CLIENT-ACCOUNT-SCOPE.md). The BB issuance command
+accepts `--account-scope-json`; scope requires a project and survives rotation.
+This is an account allowlist, not a per-client spending budget.
+
 ## Standalone setup
 
 Requirements: Node 22+, npm, and a compiler toolchain if the SQLite native prebuild is unavailable. No BB installation is needed for this mode:

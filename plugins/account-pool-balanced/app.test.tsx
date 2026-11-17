@@ -144,6 +144,7 @@ function status(
 
 function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
   return {
+    pinnedFailover:false,
     anthropicUpstreamBaseUrl: "https://api.anthropic.com",
     codexUpstreamBaseUrl: "https://chatgpt.com/backend-api/codex",
     kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
@@ -162,6 +163,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     restDays: [0, 6],
     vpnOnlyProviders: ["codex", "claude", "cursor", "devin"],
     vpnGuardEnabled: false,
+    busyOverflow: true,
     vpnPolicyVersion:2,
     vpnStatusFile: null,
     browserHostId: null,
@@ -209,24 +211,48 @@ describe("Account Pool settings", () => {
 
   it('opens the native card and saves the existing all-projects control',async()=>{
     const projects={onlySelected:true,rules:[{projectId:'project-one',role:'inherit' as const}]};
-    const slot=render([],{"native.accounts":()=>({managed:true,accounts:[{accountId:'subscription-one',projects,projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.setProjects":()=>null});
+    const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[{accountId:'subscription-one',projects,projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.updateAccount":()=>null});
     fireEvent.click(await slot.findByRole('button',{name:'Google · Antigravity'}));
     const control=await slot.findByLabelText('Где использовать');
     expect(control.closest('.pool-settings')).not.toBeNull();
     expect((control as HTMLSelectElement).value).toBe('selected');
-    expect(slot.queryByLabelText('Роль в project-one')).toBeNull();
+    expect(await slot.findByLabelText('Роль в project-one')).toBeTruthy();
     fireEvent.change(control,{target:{value:'all'}});
-    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.setProjects',input:{accountId:'subscription-one',projects:{...projects,onlySelected:false},expectedRevision:'a'.repeat(64)}}));
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-one',projects:{...projects,onlySelected:false},expectedRevision:'b'.repeat(64)}}));
   });
 
-  it('shows a named second Google account and selects only through the revision-bound action',async()=>{
+  it('opens explicit settings and saves priority through the revision-bound action',async()=>{
     const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[{
       accountId:'subscription-two',label:'Second Google',projects:{onlySelected:false,rules:[]},projectsRevision:'a'.repeat(64),mixedProjects:false,
       executors:[{id:'second-host',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0,
-    }]}),"native.prefer":()=>null});
+    }]}),"native.updateAccount":()=>null});
     expect(await slot.findByRole('button',{name:'Google · Second Google'})).toBeTruthy();
-    fireEvent.click(await slot.findByRole('button',{name:'Выбрать second-host'}));
-    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.prefer',input:{executorId:'second-host',expectedRevision:'b'.repeat(64)}}));
+    expect(slot.queryByRole('button',{name:'Использовать'})).toBeNull();
+    fireEvent.click(await slot.findByRole('button',{name:'Настройки Google · Second Google'}));
+    const priority=await slot.findByLabelText('Приоритет аккаунта');
+    fireEvent.change(priority,{target:{value:'2'}});fireEvent.blur(priority);
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',priority:2,expectedRevision:'b'.repeat(64)}}));
+  });
+
+  it('saves native role, project role and automation switches in the same account settings without legacy preference calls',async()=>{
+    const item={accountId:'subscription-two',label:'Second Google',role:'primary',priority:1,projects:{onlySelected:false,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[{id:'second-host',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0};
+    const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[item]}),"native.updateAccount":()=>null});
+    fireEvent.click(await slot.findByRole('button',{name:'Настройки Google · Second Google'}));
+    fireEvent.change(await slot.findByLabelText('Роль по умолчанию'),{target:{value:'reserve'}});
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',expectedRevision:'b'.repeat(64),role:'reserve'}}));
+    await waitFor(()=>expect(slot.getByLabelText('Разрешить автопилоту second-host').closest('fieldset')?.disabled).toBe(false));
+    fireEvent.click(slot.getByLabelText('Разрешить автопилоту second-host'));
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',expectedRevision:'b'.repeat(64),executor:{id:'second-host',autopilotAllowed:true}}}));
+    await waitFor(()=>expect(slot.getByLabelText('Роль в project-one').closest('fieldset')?.disabled).toBe(false));
+    fireEvent.change(slot.getByLabelText('Роль в project-one'),{target:{value:'primary'}});
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',expectedRevision:'b'.repeat(64),projects:{onlySelected:false,rules:[{projectId:'project-one',role:'primary'}]}}}));
+    expect(slot.rpcCalls.some(call=>call.method==='native.prefer')).toBe(false);
+  });
+  it('shows a useful error when native settings conflict instead of claiming a saved priority',async()=>{
+    const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[{accountId:'subscription-two',label:'Second Google',role:'primary',priority:1,projects:{onlySelected:false,rules:[]},projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.updateAccount":()=>{throw Error('native-selection-changed');}});
+    fireEvent.click(await slot.findByRole('button',{name:'Настройки Google · Second Google'}));
+    fireEvent.change(slot.getByLabelText('Роль по умолчанию'),{target:{value:'reserve'}});
+    await slot.findByText('Настройки изменились в другой сессии. Обновите данные и повторите.');
   });
 
   it("shows one official Google subscription across executors without an OAuth sign-in", async () => {
@@ -235,7 +261,7 @@ describe("Account Pool settings", () => {
       {id: "official-worker", enabled: true, autopilotAllowed: true},
     ], active: 1, queued: 2, uncertain: 0}]})});
     expect(await slot.findAllByText("Google · Antigravity")).toHaveLength(1);
-    await slot.findByText("official-worker · включён · автопилот разрешён");
+    await slot.findByText("Автопилот: разрешён.");
     expect(slot.queryByText("В пуле нет аккаунтов")).toBeNull();
     expect(slot.getByRole("switch", {name: "Направлять треды Antigravity"})).toBeTruthy();
     expect(slot.queryByRole("button", {name: "Добавить аккаунт Antigravity"})).toBeNull();
@@ -265,7 +291,7 @@ describe("Account Pool settings", () => {
     const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
       {id: "official-desktop", enabled: true, autopilotAllowed: false},
     ], active: 0, queued: 0, uncertain: 1}]})});
-    await slot.findByText("Требуется проверка остановки");
+    await slot.findByText(/Требуется проверка остановки/);
   });
 
   it("saves the explicit account permission with compare-and-set and reports conflicts", async () => {
@@ -1443,4 +1469,35 @@ it('keeps a saved account awaiting login with a dedicated sign-in action',async(
  fireEvent.click(await slot.findByRole('button',{name:'Войти в аккаунт'}));
  await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'login.reauthorize',input:{accountId:a.id}}));
  expect(slot.rpcCalls.some(c=>c.method==='account.enable')).toBe(false);
+});
+
+it.each([false,true])('switches subscription inside the existing dialog; RPC error=%s',async fails=>{
+ const id='11111111-1111-4111-8111-111111111111';
+ const choices={currentAccountId:null,mode:'auto',pinned:false,accounts:[{id,label:'person@example.test',state:'ready',until:null,selectable:true,assigned:true}]};
+ const ui=renderSlot(app.threadHeaderActions[0]!,{threadId:'thr-test',projectId:'project',isCompactViewport:true},{
+  rpc:{'thread.account':()=>({state:'unobserved',account:null,lastUsedAt:null}),
+   'thread.accountChoices':()=>choices,
+   'thread.switchAccount':(input:any)=>{if(fails)throw Error('synthetic');return {...choices,currentAccountId:input.accountId,mode:input.accountId?'manual':'auto',pinned:!!input.accountId};}}
+ });
+ fireEvent.click(await ui.findByRole('button',{name:/Подписка треда/}));
+ fireEvent.click(await ui.findByRole('button',{name:/person@example.test/}));
+ if(fails){expect(await ui.findByRole('alert')).toBeTruthy();expect(ui.getByRole('button',{name:'Автоматически (по умолчанию)'}).getAttribute('aria-pressed')).toBe('true');}
+ else{
+  await waitFor(()=>expect(ui.getByRole('button',{name:/person@example.test/}).getAttribute('aria-pressed')).toBe('true'));
+  expect(ui.rpcCalls).toContainEqual({method:'thread.switchAccount',input:{threadId:'thr-test',accountId:id}});
+  fireEvent.click(ui.getByRole('button',{name:'Автоматически (по умолчанию)'}));
+  await waitFor(()=>expect(ui.getByRole('button',{name:'Автоматически (по умолчанию)'}).getAttribute('aria-pressed')).toBe('true'));
+ }
+});
+
+it.each(['ready','disabled'] as const)('uses thread choice state %s for confirmed reserve account',async state=>{
+ const a=account({email:'person@example.test',role:'reserve',eligible:false});
+ const choices={currentAccountId:a.id,mode:'auto',pinned:false,accounts:[{id:a.id,label:'person@example.test',state,until:null,selectable:state==='ready',assigned:false}]};
+ const ui=renderSlot(app.threadHeaderActions[0]!,{threadId:'thr-test',projectId:'project',isCompactViewport:false},{
+  rpc:{'thread.account':()=>({state:'observed',account:a,lastUsedAt:1800000000000}),'thread.accountChoices':()=>choices}
+ });
+ fireEvent.click(await ui.findByRole('button',{name:/Подписка треда: person@example.test · сейчас недоступен/}));
+ const expected=state==='ready'?'готов':'выключен';
+ await waitFor(()=>expect(ui.getByRole('button',{name:'Подписка треда: person@example.test · '+expected,hidden:true})).toBeTruthy());
+ expect(ui.getByText(/Последний подтверждённый запрос/).textContent).toContain('person@example.test · '+expected);
 });

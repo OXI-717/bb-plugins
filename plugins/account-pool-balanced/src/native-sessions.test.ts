@@ -241,8 +241,8 @@ it('projects registered subscriptions without exposing execution authority, and 
   await sessions.request(caller,acquire());
   await sessions.request({...caller,hostId:'worker'},acquire('worker-official'));
   expect(await sessions.accounts()).toEqual({managed:true,selectionRevision:expect.any(String),accounts:[
-    {accountId:'subscription-one',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'mac-official',enabled:true,autopilotAllowed:false},{id:'worker-official',enabled:true,autopilotAllowed:true}],active:1,queued:1,uncertain:0},
-    {accountId:'subscription-two',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'disabled-official',enabled:false,autopilotAllowed:false}],active:0,queued:0,uncertain:0},
+    {accountId:'subscription-one',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'mac-official',hostId:'mac',enabled:true,autopilotAllowed:false},{id:'worker-official',hostId:'worker',enabled:true,autopilotAllowed:true}],active:1,queued:1,uncertain:0},
+    {accountId:'subscription-two',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'disabled-official',hostId:'mac',enabled:false,autopilotAllowed:false}],active:0,queued:0,uncertain:0},
   ]});
   clock(1000+NATIVE_LEASE_MS+1);
   expect((await sessions.accounts()).accounts[0]).toMatchObject({active:0,queued:0,uncertain:1});
@@ -269,13 +269,13 @@ describe('native subscription project settings',()=>{
     expect(await sessions.executorFor({...caller,projectId:'future-project'})).toBe(executor.id);
     await expect(sessions.setProjects(executor.accountId,{onlySelected:false,rules:[]},revision)).rejects.toThrow('native-projects-changed');
   });
-  it('rejects changes during a lease, unknown subscriptions and unsupported project roles',async()=>{
+  it('rejects changes during a lease, unknown subscriptions and redirects project role edits to account settings',async()=>{
     const {sessions}=await fixture();const account=(await sessions.accounts()).accounts[0];
     const lease=await sessions.request(caller,acquire());
     await expect(sessions.setProjects(executor.accountId,{onlySelected:false,rules:[]},account.projectsRevision)).rejects.toThrow('native-executor-busy');
     await sessions.request(caller,release(lease.leaseId!));
     await expect(sessions.setProjects('missing',{onlySelected:false,rules:[]},account.projectsRevision)).rejects.toThrow('native-account-not-found');
-    await expect(sessions.setProjects(executor.accountId,{onlySelected:true,rules:[{projectId:'project-one',role:'primary'}]},account.projectsRevision)).rejects.toThrow();
+    await expect(sessions.setProjects(executor.accountId,{onlySelected:true,rules:[{projectId:'project-one',role:'primary'}]},account.projectsRevision)).rejects.toThrow('native-use-account-settings');
   });
 });
 
@@ -296,4 +296,66 @@ it('bounds native project metadata and prevents callers from mutating the stored
   await sessions.setProjects(executor.accountId,{onlySelected:false,rules:[]},account.projectsRevision);
   account=(await sessions.accounts()).accounts[0];account.projects.onlySelected=true;account.projects.rules.push({projectId:'foreign',role:'inherit'});
   expect(await sessions.executorFor(caller)).toBe(executor.id);
+});
+
+
+describe('native account routing settings',()=>{
+  const all={onlySelected:false,rules:[]};
+  async function second(sessions:NativeSessions){await sessions.configure({...executor,id:'second',accountId:'subscription-two',projects:all,catalogCallerIds:['catalog-two']});}
+  async function update(sessions:NativeSessions,input:Omit<Parameters<NativeSessions['updateAccount']>[0],'expectedRevision'>){return sessions.updateAccount({...input,expectedRevision:(await sessions.accounts()).selectionRevision!});}
+  it('uses the shared project roles before account priority and persists routing after restart',async()=>{
+    const {sessions,kv}=await fixture();await second(sessions);
+    await update(sessions,{accountId:executor.accountId,role:'primary',priority:0,projects:all});
+    await update(sessions,{accountId:'subscription-two',role:'reserve',priority:100,projects:{onlySelected:false,rules:[{projectId:'project-one',role:'primary'}]}});
+    expect(await sessions.executorFor(caller)).toBe('second');
+    expect(await sessions.executorFor({...caller,projectId:'other'})).toBe(executor.id);
+    await update(sessions,{accountId:'subscription-two',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'reserve'}]}});
+    expect(await sessions.executorFor(caller)).toBe('second');
+    expect(await sessions.executorFor({...caller,projectId:'other'})).toBe(executor.id);
+    const restarted=new NativeSessions(kv);await restarted.initialize();
+    expect(await restarted.executorFor(caller)).toBe('second');
+  });
+  it('changes priority during an active session without rebinding it and refuses stale writes',async()=>{
+    const {sessions}=await fixture();await second(sessions);
+    await update(sessions,{accountId:executor.accountId,role:'primary',priority:1,projects:all});
+    await update(sessions,{accountId:'subscription-two',role:'primary',priority:2});
+    const lease=await sessions.request(caller,acquire());const rev=(await sessions.accounts()).selectionRevision!;
+    await sessions.updateAccount({accountId:executor.accountId,expectedRevision:rev,priority:3});
+    expect(await sessions.executorFor(caller)).toBe('second');
+    expect((await sessions.request(caller,poll(lease.leaseId!))).accountId).toBe(executor.accountId);
+    await expect(sessions.updateAccount({accountId:executor.accountId,expectedRevision:rev,priority:0})).rejects.toThrow('native-selection-changed');
+    await expect(update(sessions,{accountId:executor.accountId,executor:{id:executor.id,enabled:false}})).rejects.toThrow('native-executor-busy');
+  });
+  it('preserves authenticated host, purpose and catalog restrictions across settings and rejects cross-account executor edits',async()=>{
+    const {sessions}=await fixture();await second(sessions);
+    await update(sessions,{accountId:'subscription-two',priority:-5,projects:all});
+    expect(await sessions.executorFor({...caller,hostId:'foreign'})).toBeNull();
+    expect(await sessions.executorFor({...caller,purpose:'autopilot'})).toBeNull();
+    await expect(update(sessions,{accountId:'subscription-two',executor:{id:executor.id,enabled:false}})).rejects.toThrow('native-executor-denied');
+    await update(sessions,{accountId:'subscription-two',executor:{id:'second',autopilotAllowed:true}});
+    expect(await sessions.executorFor({...caller,purpose:'autopilot'})).toBe('second');
+    await expect(sessions.request({hostId:'catalog-two',projectId:'project-one'},{...acquire(executor.id),kind:'catalog'})).rejects.toThrow('native-executor-denied');
+    await update(sessions,{accountId:'subscription-two',executor:{id:'second',enabled:false}});
+    expect(await sessions.executorFor({...caller,purpose:'autopilot'})).toBeNull();
+  });
+});
+
+it('renames a native account without changing executor identity or breaking its active lease',async()=>{
+  const {sessions}=await fixture();const lease=await sessions.request(caller,acquire());
+  await sessions.updateAccount({accountId:executor.accountId,expectedRevision:(await sessions.accounts()).selectionRevision!,label:'Example Google',priority:1});
+  expect((await sessions.accounts()).accounts[0].label).toBe('Example Google');
+  expect((await sessions.request(caller,poll(lease.leaseId!))).accountId).toBe(executor.accountId);
+  expect((await sessions.snapshot()).executors[0]).not.toHaveProperty('label');
+  await sessions.updateAccount({accountId:executor.accountId,expectedRevision:(await sessions.accounts()).selectionRevision!,role:'reserve'});
+  expect((await sessions.accounts()).accounts[0].label).toBe('Example Google');
+});
+
+
+it('treats account identifiers as opaque keys even when they match object properties',async()=>{
+  const {sessions,kv}=await fixture();
+  await sessions.configure({...executor,id:'other-executor',accountId:'toString',enabled:true});
+  await sessions.updateAccount({accountId:'toString',expectedRevision:(await sessions.accounts()).selectionRevision!,role:'primary',priority:-1});
+  expect(await sessions.executorFor(caller)).toBe('other-executor');
+  const restarted=new NativeSessions(kv);await restarted.initialize();
+  expect(await restarted.executorFor(caller)).toBe('other-executor');
 });

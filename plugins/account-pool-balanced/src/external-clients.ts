@@ -1,3 +1,4 @@
+import type { ClientAccountScope } from "./client-scope.js";
 import fs from "node:fs/promises";
 import { z } from "zod";
 import { HubTokenStore } from "./store.js";
@@ -5,10 +6,10 @@ import { HubTokenStore } from "./store.js";
 export class ExternalClients {
   readonly tokens: HubTokenStore;
   constructor(directory: string) { this.tokens = new HubTokenStore(directory); }
-  async add(name: string, outputFile: string, projectId: string | null = null, purpose?: "autopilot") {
+  async add(name: string, outputFile: string, projectId: string | null = null, purpose?: "autopilot", accountScope?:ClientAccountScope) {
     const id = this.id(name);
     const file = await fs.open(outputFile, "wx", 0o600);
-    try { await file.writeFile(`${await this.tokens.forIssuedClient(id, projectId, purpose)}\n`); }
+    try { await file.writeFile(`${await this.tokens.forIssuedClient(id, projectId, purpose, accountScope)}\n`); }
     finally { await file.close(); }
   }
   async revoke(name: string) {
@@ -17,8 +18,9 @@ export class ExternalClients {
   private id(name: string) { return `external_${z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).parse(name)}`; }
 }
 
-export function combinedTokens(hosts: HubTokenStore, clients: HubTokenStore): Pick<HubTokenStore, "authenticate" | "authenticateContext" | "inspectContext" | "list" | "projectForToken"> {
+export function combinedTokens(hosts: HubTokenStore, clients: HubTokenStore): Pick<HubTokenStore, "authenticate" | "authenticateContext" | "inspectContext" | "validatesAccountScope" | "list" | "projectForToken"> {
   return {
+    validatesAccountScope(token, scope) { return hosts.validatesAccountScope(token, scope) || clients.validatesAccountScope(token, scope); },
     async inspectContext(token) { return await hosts.inspectContext(token) ?? await clients.inspectContext(token); },
     async authenticateContext(token) { return await hosts.authenticateContext(token) ?? await clients.authenticateContext(token); },
     async authenticate(token) { return await hosts.authenticate(token) ?? await clients.authenticate(token); },

@@ -23,6 +23,7 @@ REPO = 'https://github.com/OXI-717/bb-plugins.git'
 PREFIX = PLUGIN + '/'
 VERSION = re.compile(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)')
 MANAGEMENT_KEY_FILE = None
+MANAGEMENT_GRANT_FILE = None
 
 
 class UpgradeError(Exception):
@@ -79,6 +80,22 @@ def run(*args, timeout=60):
 
 
 def bb(*args):
+    if args and args[0] == 'pool' and MANAGEMENT_GRANT_FILE is not None:
+        fd = os.open(MANAGEMENT_GRANT_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as stream:
+            stat = os.fstat(stream.fileno())
+            if stat.st_mode & 0o077 or stat.st_size > 4096:
+                raise UpgradeError('Unsafe management grant file')
+            grant = json.load(stream)
+        token = grant.get('token')
+        if not isinstance(token, str) or not token:
+            raise UpgradeError('Invalid operator-issued grant')
+        result = subprocess.run(('bb', 'pool', 'management', 'execute', '--request-stdin'),
+                                input=json.dumps({'token': token, 'argv': [*args[1:], '--json']}),
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise UpgradeError('Operator-authorized pool command failed; no fallback')
+        return json.loads(result.stdout)
     if args and args[0] == 'pool' and MANAGEMENT_KEY_FILE is not None and MANAGEMENT_KEY_FILE.exists():
         return managed_pool(args[1:], MANAGEMENT_KEY_FILE)
     return json.loads(run('bb', *args, '--json'))
@@ -277,7 +294,7 @@ def native_in_flight():
 
 
 def verify_pause(args):
-    if getattr(args, 'pause_sessions', False):
+    if getattr(args, 'pause_sessions', False) or getattr(args, 'drain_sessions', False):
         from pool_session_pause import verify_hold, verify_model_hold
         verify_model_hold(bb('pool', 'maintenance', 'status'), args.maintenance_owner)
         verify_hold(bb('pool-maintenance', 'status'), args.maintenance_owner)
@@ -301,7 +318,7 @@ def perform(args, data, output, say):
         say('Preflight passed; no update performed.')
         return 'PREFLIGHT_PASS'
     verify_pause(args)
-    paused = getattr(args, 'pause_sessions', False)
+    paused = getattr(args, 'pause_sessions', False) or getattr(args, 'drain_sessions', False)
     forced = wait_idle(say, args.interrupt_now, offer_interrupt=not paused,
                        deadline_seconds=90 if paused else 900, include_native=paused)
     before = bb('pool', 'status')
@@ -347,14 +364,34 @@ def perform(args, data, output, say):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--candidate-preflight', help='Candidate manifest: artifact hashes, focused tests, network checks; no installation')
+    parser.add_argument('--receipt-output', help='Private candidate receipt output path')
     parser.add_argument('--check', action='store_true', help='Validate release without waiting or updating')
     parser.add_argument('--wait-idle', action='store_true', help='Wait for three idle checks without updating anything')
     parser.add_argument('--version', help='Require this to be the latest compatible release; not a downgrade selector')
     parser.add_argument('--interrupt-now', action='store_true', help='Offer the interactive interruption prompt immediately')
+    parser.add_argument('--drain-sessions', action='store_true', help='Hold dispatch and await natural session completion; never cancel active work')
+    parser.add_argument('--drain-timeout', type=int, default=600, help='Natural drain deadline in seconds (1..600)')
+    parser.add_argument('--operator-key-file', help='Explicit private operator key for durable per-command grants across reload; no autodiscovery')
+    parser.add_argument('--grant-file', help='Explicit private operator-issued management grant JSON; no automatic root-key access')
     parser.add_argument('--pause-sessions', action='store_true', help='Stop active sessions on ALL hosts, update, then continue the same sessions; history retained, current turns interrupted')
     parser.add_argument('--resume-sessions', help='Recover session continuation from a previous private operation receipt; never updates the pool')
     parser.add_argument('--sandbox', action='store_true', help='Exercise the full workflow on temporary synthetic state; no live BB or network')
     args = parser.parse_args()
+    if args.operator_key_file and args.grant_file:
+        parser.error('Choose operator key or one short-lived grant')
+    if args.candidate_preflight:
+        if not args.receipt_output or any((args.check,args.wait_idle,args.version,args.pause_sessions,args.drain_sessions,args.resume_sessions,args.sandbox,args.interrupt_now)):
+            parser.error('Candidate preflight requires receipt output and no live-operation flags')
+        os.umask(0o077)
+        from pool_candidate_preflight import preflight
+        result = preflight(args.candidate_preflight, args.receipt_output)
+        print(json.dumps(result))
+        return 0 if result['status'] == 'pass' else 2
+    if not 1 <= args.drain_timeout <= 600:
+        parser.error('--drain-timeout must be 1..600')
+    if args.drain_sessions and (args.pause_sessions or args.check or args.wait_idle or args.interrupt_now or args.resume_sessions or args.sandbox):
+        parser.error('--drain-sessions cannot combine with other operation modes')
     if args.sandbox:
         if args.version or args.check or args.interrupt_now or args.wait_idle or args.pause_sessions or args.resume_sessions:
             parser.error('--sandbox cannot be combined with live-operation options')
@@ -376,7 +413,9 @@ def main():
             raise UpgradeError('Run this script on the BB server host with a local BB connection')
         root = Path(bb('status')['dataDir']).resolve()
         global MANAGEMENT_KEY_FILE
-        MANAGEMENT_KEY_FILE = root / 'plugins' / PLUGIN / 'secrets' / 'accounts' / 'management' / 'operator.env'
+        MANAGEMENT_KEY_FILE = Path(args.operator_key_file).resolve() if args.operator_key_file else None
+        global MANAGEMENT_GRANT_FILE
+        MANAGEMENT_GRANT_FILE = Path(args.grant_file).resolve() if args.grant_file else None
         data = root / 'plugins' / PLUGIN
         if not (data / 'data.db').is_file():
             raise UpgradeError('Local plugin database not found; run on the BB server host')
@@ -404,6 +443,30 @@ def main():
                             raise UpgradeError('Recovery receipt must belong to this server upgrade backups')
                         SessionPause(receipt, bb, say).recover()
                         result = 'SESSIONS_RECOVERED'
+                    elif args.drain_sessions:
+                        from pool_session_pause import SessionPause
+                        preflight = argparse.Namespace(**vars(args))
+                        preflight.check = True
+                        checked = perform(preflight, data, output, say)
+                        if checked == 'ALREADY_CURRENT':
+                            result = checked
+                        else:
+                            pause = SessionPause(output / 'sessions.json', bb, say)
+                            try:
+                                pause.acquire_hold()
+                                args.maintenance_owner = pause.state['operationId']
+                                def idle():
+                                    return (bb('pool', 'status')['inFlight'] == 0
+                                            and native_in_flight() == 0 and model_activity() == 0)
+                                pause.drain(idle, args.drain_timeout)
+                                # Requires the explicit non-cancelling API; no fallback.
+                                pause.acquire_graceful_model_hold()
+                                result = perform(args, data, output, say)
+                            finally:
+                                try:
+                                    pause.release_model_hold()
+                                finally:
+                                    pause.release_hold()
                     elif args.pause_sessions:
                         from pool_session_pause import SessionPause
                         # Verify release and server before interrupting any session.

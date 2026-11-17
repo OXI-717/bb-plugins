@@ -36,12 +36,13 @@ export class PoolMaintenance {
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.writer.then(operation); this.writer = result.catch(() => {}); return result;
   }
-  acquire(owner: string) { return this.serial(async () => {
+  acquireGraceful(owner: string) { return this.acquire(owner, false); }
+  acquire(owner: string, interrupt = true) { return this.serial(async () => {
     z.uuid().parse(owner);
     const current = this.status().lease;
     if (current) { if (current.owner !== owner) throw Error('Another operation owns pool maintenance'); return this.status(); }
     const now = this.now(); const lease = {owner, createdAt: now, expiresAt: now + 1_800_000};
-    await this.persist(lease); this.lease = lease; this.controller.abort(new PoolMaintenanceError()); return this.status();
+    await this.persist(lease); this.lease = lease; if (interrupt) this.controller.abort(new PoolMaintenanceError()); return this.status();
   }); }
   release(owner: string) { return this.serial(async () => {
     z.uuid().parse(owner);

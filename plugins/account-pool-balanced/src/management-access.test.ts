@@ -81,7 +81,7 @@ function handlerFixture(overrides: Partial<PluginRpcHandlers<typeof accountPoolR
   } as PluginRpcHandlers<typeof accountPoolRpcContract>;
 }
 
-it('protects every legacy RPC before dispatch and permits only the exact trusted plugin reads', async () => {
+it('permits owner UI RPCs while refusing untrusted plugin dispatch', async () => {
   const { access } = await setup();
   const registrations: Array<{ contract: unknown; handlers: Record<string, (input: unknown, context?: unknown) => unknown> }> = [];
   const bb = { rpc: { register: (contract: unknown, handlers: Record<string, (input: unknown, context?: unknown) => unknown>) => registrations.push({ contract, handlers }) } } as unknown as Pick<BbPluginApi, 'rpc'>;
@@ -89,14 +89,26 @@ it('protects every legacy RPC before dispatch and permits only the exact trusted
   registerManagementRpc(bb, access, handlers);
   const legacy = registrations[0]!.handlers;
   for (const [method, handler] of Object.entries(legacy)) {
-    for (const caller of [undefined, { kind: 'client', pluginId: 'model-connections' }, { kind: 'plugin', pluginId: 'untrusted' }]) {
-      expect(() => handler({ threadId: 'owner-thread', projectId: 'owner-project' }, { experimental_caller: caller })).toThrow(PoolManagementLocked);
+    if(['egress.scopeAccept','egress.scopeRevoke'].includes(method)){
+      expect(()=>handler(null)).toThrow(PoolManagementLocked);
+      continue;
     }
+    for (const caller of [undefined, { kind: 'client', pluginId: 'model-connections' }])
+      await handler({ threadId: 'owner-thread', projectId: 'owner-project' }, { experimental_caller: caller });
+    expect(handlers[method as keyof typeof handlers]).toHaveBeenCalledTimes(2);
+    vi.mocked(handlers[method as keyof typeof handlers]).mockClear();
+    expect(() => handler(null,{experimental_caller:{kind:'plugin',pluginId:'untrusted'}})).toThrow(PoolManagementLocked);
     if (!['status.get', 'thread.account'].includes(method)) expect(() => handler(null, { experimental_caller: { kind: 'plugin', pluginId: 'model-connections' } })).toThrow(PoolManagementLocked);
+    // Guard may read the protection settings for its linkage handshake and nothing else.
+    if (!['config.get', 'vpnPolicy.get'].includes(method)) expect(() => handler(null, { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } })).toThrow(PoolManagementLocked);
+    expect(() => handler(null, { experimental_caller: { kind: 'plugin' } })).toThrow(PoolManagementLocked);
   }
   for (const handler of Object.values(handlers)) expect(handler).not.toHaveBeenCalled();
   await legacy['thread.account']!({ threadId: 'target' }, { experimental_caller: { kind: 'plugin', pluginId: 'model-connections' } });
   expect(handlers['thread.account']).toHaveBeenCalledOnce();
+  await legacy['config.get']!(null, { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } });
+  expect(handlers['config.get']).toHaveBeenCalledOnce();
+  expect(() => legacy['config.set']!({ vpnGuardEnabled: false }, { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } })).toThrow(PoolManagementLocked);
 });
 
 it('uses one capability policy for RPC input validation, reads and writes with no prototype dispatch', async () => {
@@ -143,6 +155,11 @@ it('closes CLI inventory and mutation paths including forged identities and help
   expect((await execute(manage.token, ['account', 'disable', 'target'])).exitCode).toBe(0);
   expect(actual).toHaveBeenCalledOnce();
   expect((await execute(manage.token, ['management', 'unlock'])).exitCode).toBe(1);
+  expect((await execute(read.token, ['config'])).exitCode).toBe(0);
+  expect((await execute(read.token, ['config', 'get'])).exitCode).toBe(0);
+  actual.mockClear();
+  expect((await execute(read.token, ['config', 'set', 'vpnGuardEnabled', 'false'])).exitCode).toBe(1);
+  expect(actual).not.toHaveBeenCalled();
 });
 
 it('does not leak resource names through the separate quota RPC registration', async () => {
@@ -173,39 +190,4 @@ it('issues CLI grants only into new private server files and never into command 
   expect(JSON.stringify(result).includes(grant.token)).toBe(false);
   expect((await run(argv, {})).exitCode).toBe(1);
   expect(await fs.readFile(output, 'utf8')).toBe(text);
-});
-
-it('a read grant inspects the single-argument config command without mutations', async () => {
-  const { access, directory, key } = await setup();
-  let run!: (argv: string[], context: object) => Promise<{ exitCode: number; stdout?: string; stderr?: string }>;
-  const executed = vi.fn(async () => ({ exitCode: 0, stdout: 'config-output' }));
-  const bb = { pluginId: 'test', server: {}, cli: { register: (registration: { run: typeof run }) => { run = registration.run; } } } as unknown as Pick<BbPluginApi, 'cli' | 'server' | 'pluginId'>;
-  managementCli(bb, access).cli.register({ name: 'pool', summary: 'test', commands: [], run: executed });
-  const output = path.join(directory, 'read-config-grant.json');
-  const unlock = ['management', 'unlock', '--request', JSON.stringify({ key, scope: 'read', ttlSeconds: 60, output })];
-  expect((await run(unlock, {})).exitCode).toBe(0);
-  const grant = JSON.parse(await fs.readFile(output, 'utf8')) as { token: string };
-  const execute = (argv: string[]) => run(['management', 'execute', '--request', JSON.stringify({ token: grant.token, argv })], {});
-  expect((await execute(['config'])).stdout).toBe('config-output');
-  expect((executed.mock.calls[0] as unknown[][])[0]).toEqual(['config']);
-  expect((await execute(['config', 'set', 'vpnGuardEnabled', 'false'])).exitCode).toBe(1);
-  expect(executed).toHaveBeenCalledTimes(1);
-});
-
-it("vpn-guard's policy read returns only the enforcement subset without a grant", async () => {
-  const { access } = await setup();
-  const registrations: Array<{ contract: unknown; handlers: Record<string, (input: unknown, context?: unknown) => unknown> }> = [];
-  const bb = { rpc: { register: (contract: unknown, handlers: Record<string, (input: unknown, context?: unknown) => unknown>) => registrations.push({ contract, handlers }) } } as unknown as Pick<BbPluginApi, 'rpc'>;
-  const policy = { vpnGuardEnabled: true, vpnPolicyVersion: 2, vpnOnlyProviders: ['codex'], upstreamBaseUrl: 'https://secret.example' };
-  const handlers = handlerFixture({ 'config.get': vi.fn(() => policy) as unknown as PluginRpcHandlers<typeof accountPoolRpcContract>['config.get'] });
-  registerManagementRpc(bb, access, handlers);
-  const legacy = registrations[0]!.handlers;
-  const guard = { experimental_caller: { kind: 'plugin', pluginId: 'vpn-guard' } };
-  expect(await (registrations[1]!.handlers as Record<string, (input: unknown, context?: unknown) => unknown>)['vpnPolicy.get']!(null, { experimental_caller: guard })).toEqual({
-    vpnGuardEnabled: true, vpnPolicyVersion: 2, vpnOnlyProviders: ['codex'],
-  });
-  expect(handlers['config.get']).toHaveBeenCalledOnce();
-  // Ordinary tokenless administrative callers stay locked, including vpn-guard on other methods.
-  expect(() => legacy['account.list']!(null, { experimental_caller: guard })).toThrow(PoolManagementLocked);
-  expect(() => legacy['config.get']!(null, { experimental_caller: guard })).toThrow(PoolManagementLocked);
 });

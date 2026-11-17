@@ -21,7 +21,7 @@ it('authenticates prepared runtime grants against the server profile registry be
     expect((await configure()).exitCode).toBe(0);
     expect((await host.harness.behavior.runCli(['native','mode','managed'])).exitCode).toBe(0);
     const visible=await host.harness.behavior.callRpc('native.accounts',null);
-    expect(visible).toEqual({managed:true,selectionRevision:expect.any(String),accounts:[{accountId:'subscription-one',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'native-one',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0}]});
+    expect(visible).toEqual({managed:true,selectionRevision:expect.any(String),accounts:[{accountId:'subscription-one',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'native-one',hostId:'host-one',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0}]});
     const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
     const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
     const sessionId=randomUUID();
@@ -115,5 +115,47 @@ it('maintenance denies native acquire and poll while allowing confirmed cleanup'
     expect(JSON.parse((await host.harness.behavior.runCli(['native','status','--json'])).stdout).leases).toHaveLength(1);
     expect((await request({action:'release',leaseId:lease.leaseId,stopped:true})).status).toBe(200);
     expect(JSON.parse((await host.harness.behavior.runCli(['native','status','--json'])).stdout).leases).toHaveLength(0);
+  }finally{await host.harness.lifecycle.dispose();}
+});
+
+it('applies native account settings through the real RPC contract and routes each project without widening caller authority',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  try{
+    await createAccountPoolPlugin({fetch:vi.fn(async()=>new Response('{}'))})(host.bb);
+    for(const [id,accountId] of [['native-one','subscription-one'],['native-two','subscription-two']]){
+      expect((await host.harness.behavior.runCli(['native','configure',JSON.stringify({id,accountId,hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true})])).exitCode).toBe(0);
+    }
+    await host.harness.behavior.runCli(['native','mode','managed']);
+    const update=async(input:Record<string,unknown>)=>{
+      const state=nativeAccountsSchema.parse(await host.harness.behavior.callRpc('native.accounts',null));
+      return host.harness.behavior.callRpc('native.updateAccount',{...input,expectedRevision:state.selectionRevision});
+    };
+    await update({accountId:'subscription-one',role:'primary',priority:1,projects:{onlySelected:false,rules:[]}});
+    await update({accountId:'subscription-two',role:'reserve',priority:2,projects:{onlySelected:true,rules:[{projectId:'project-two',role:'primary'}]}});
+    const context={hostId:'host-one',projectId:'project-two',threadId:'thread-one'};
+    const chosen=await host.harness.behavior.resolveProviderEnv('acp-agy',context);
+    expect(chosen.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('native-two');
+    const other=await host.harness.behavior.resolveProviderEnv('acp-agy',{...context,projectId:'other'});
+    expect(other.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('native-one');
+    const foreign=await host.harness.behavior.resolveProviderEnv('acp-agy',{...context,hostId:'foreign'});
+    expect(foreign.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('');
+    await expect(update({accountId:'subscription-two',callerIds:['foreign']})).rejects.toThrow();
+    await expect(update({accountId:'subscription-two',executor:{id:'native-one',enabled:false}})).rejects.toThrow();
+  }finally{await host.harness.lifecycle.dispose();}
+});
+
+it('targeted probe reports unavailable without enabling, acquiring or calling upstream',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  const upstream=vi.fn(async()=>new Response('{}'));
+  try{
+    await createAccountPoolPlugin({fetch:upstream})(host.bb);
+    const executor={id:'native-second',accountId:'subscription-two',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:false};
+    expect((await host.harness.behavior.runCli(['native','configure',JSON.stringify(executor)])).exitCode).toBe(0);
+    expect((await host.harness.behavior.runCli(['native','mode','managed'])).exitCode).toBe(0);
+    const before=await host.harness.behavior.runCli(['native','status','--json']);
+    expect(await host.harness.behavior.callRpc('native.probe',{accountId:'subscription-two',executorId:'native-second',hostId:'host-one',projectId:'project-one'})).toEqual({accountId:'subscription-two',executorId:'native-second',hostId:'host-one',projectId:'project-one',status:'runtime-unavailable',verified:false,observedAt:expect.any(Number),catalog:[]});
+    await expect(host.harness.behavior.callRpc('native.probe',{accountId:'other',executorId:'native-second',hostId:'host-one',projectId:'project-one'})).rejects.toThrow('native-diagnostic-denied');
+    expect(await host.harness.behavior.runCli(['native','status','--json'])).toEqual(before);
+    expect(upstream).not.toHaveBeenCalled();
   }finally{await host.harness.lifecycle.dispose();}
 });

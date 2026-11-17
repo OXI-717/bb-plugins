@@ -1,3 +1,9 @@
+import {startLoopDelay} from './loop-delay.js';
+import {ThreadAccountSelection} from './thread-account-selection.js';
+import {projectTier} from './project-policy.js';
+import {blockingResetAt} from './quota.js';
+import {policyThresholds} from './account-policy.js';
+import {createManagedConnectSource} from './managed-connect-source.js';
 import {ProxySecrets} from './proxy-secrets.js';
 import {ManagementAccess} from './management-access.js';
 import {managementCli,registerManagementRpc} from './management-boundary.js';
@@ -6,6 +12,7 @@ import {PoolUpdate} from './pool-update.js';
 import {serverGuardRead,runGuardProbe,type GuardServerAccess} from './guard-server.js';
 import {registerNativeUnlockRpc} from "./native-unlock-rpc.js";
 import { AccountEgress } from "./account-egress.js";
+import type { HttpScopeEnforcementSource } from './http-scope-acceptance.js';
 import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
 import {NativeSessions,NativeSessionError,nativeHttp} from './native-sessions.js';
 import {AgyOAuthLogin,readNativeAgyConfig,type AgyAppConfig} from "./agy-oauth-login.js";
@@ -68,6 +75,9 @@ import {
 } from "./store.js";
 
 export interface AccountPoolPluginOptions {
+  // Internal override; production uses the root-owned Fleet observer by default.
+  // Never substitute Guard readiness, a receipt file or caller-supplied metadata.
+  httpScopeEnforcement?:HttpScopeEnforcementSource;
   agyAppConfig?:()=>Promise<AgyAppConfig>;
   fetch?: typeof fetch;
   fetchIpv4?:typeof fetch;
@@ -178,6 +188,7 @@ export function createAccountPoolPlugin(
     await hubTokens.prune(enrolledHosts.map((host) => host.id));
     const externalClients = new ExternalClients(path.join(secretDir, "external-clients"));
     await externalClients.tokens.initialize();
+    const manualSelection=new ThreadAccountSelection(bb.storage.kv,async id=>(await accounts.list()).some(a=>a.id===id));
     const routing = new RoutingStore(bb.storage.kv, now);
     // bb resolves provider env with a null thread and project when it lists models.
     const isThreadBypassed = async (context: ProviderEnvScope) =>
@@ -192,7 +203,7 @@ export function createAccountPoolPlugin(
     const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
     await journal.initialize();
     bb.onDispose(()=>journal.close());
-    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';},new ProxySecrets(path.join(secretDir,'account-proxies')));
+    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';},new ProxySecrets(path.join(secretDir,'account-proxies')),now,options.httpScopeEnforcement??createManagedConnectSource(now));
     await egress.initialize();
     bb.onDispose(()=>egress.close());
     const transport =
@@ -220,7 +231,9 @@ export function createAccountPoolPlugin(
     const hub = createHub({
       maintenance,
       accountRoute:(accountId,sessionKey)=>egress.acquire(accountId,sessionKey),
+      manualRouteAccount:sessionKey=>manualSelection.get(sessionKey),
       pinnedRouteAccount:sessionKey=>egress.pinnedAccount(sessionKey),
+      routeCompatible:(accountId,sessionKey)=>egress.compatible(accountId,sessionKey),
       nativeAgyManaged:()=>nativeSessions.managed(),
       agyModels:registerAgyModels,
       route: hubBasePath(bb.pluginId),
@@ -359,12 +372,43 @@ export function createAccountPoolPlugin(
       localList:async()=>listBrowserProfiles({accounts:await operations.list(),routedAccountIds:Object.keys(egress.snapshot().bindings),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
     });
     maintenanceActivity=()=>hub.maintenanceActivity();
+    bb.onDispose(startLoopDelay(message=>bb.log.warn(message),()=>hub.inFlightCount()));
     const maintenanceApi = {
       status:()=>maintenance.status(),
       acquire:(owner:string)=>maintenance.acquire(owner),
+      acquireGraceful:(owner:string)=>maintenance.acquireGraceful(owner),
       release:(owner:string)=>maintenance.release(owner),
       interrupt:async(owner:string)=>{hub.interruptForMaintenance(owner);return maintenance.status();},
     };
+    const selectionContext=async(threadId:string)=>{
+      const thread=await bb.sdk.threads.get({threadId,include:'environment'});
+      const provider:PoolProvider|null=({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi'} as Record<string,PoolProvider>)[thread.providerId]??null;
+      if(!provider || await routing.isBypassed(threadId) || !await operations.isRoutingEnabled(provider))throw Error('Тред не использует пул аккаунтов');
+      const hostId='environment' in thread?thread.environment?.hostId:undefined;
+      if(!hostId)throw Error('Окружение треда недоступно');
+      return {provider,key:JSON.stringify([hostId,thread.projectId,threadId,provider]),projectId:thread.projectId};
+    };
+    const choices=async(threadId:string)=>{
+      const context=await selectionContext(threadId),manual=await manualSelection.get(context.key);
+      const rows=(await operations.list()).filter(a=>a.provider===context.provider && projectTier(a,context.projectId)!==null);
+      const routes=egress.snapshot();
+      // Global status applies global roles; this thread is admitted by its project's rules.
+      const available=await hub.projectAvailability(context.provider,context.projectId);
+      return {currentAccountId:manual??egress.pinnedAccount(context.key),mode:manual?'manual' as const:'auto' as const,pinned:manual!==null || egress.pinnedAccount(context.key)!==null,
+        accounts:rows.map(a=>{
+          const q=quotas.get(a.id),at=now();
+          // The same reset the pool reports when it refuses a request for this account.
+          const reset=blockingResetAt(q,'other',policyThresholds(a,currentSettings.switchThreshold),at);
+          const state=!a.enabled?'disabled' as const:q.error?'error' as const:(q.heldUntil??0)>at?'held' as const:!available.has(a.id)?'exhausted' as const:'ready' as const;
+          return {id:a.id,label:a.email??a.label,state,until:state==='held'?q.heldUntil:state==='exhausted'&&reset!==null&&reset>at?Math.round(reset):null,
+            selectable:a.enabled&&!q.error,assigned:routes.bindings[a.id]!==undefined || routes.pins[context.key]?.accountId===a.id};
+        })};
+    };
+    const selection={choices,switch:async(threadId:string,accountId:string|null)=>{
+      const context=await selectionContext(threadId);
+      if(accountId!==null && !(await choices(threadId)).accounts.some(a=>a.id===accountId && a.selectable))throw Error('Аккаунт недоступен для этого треда');
+      await manualSelection.set(context.key,accountId);return choices(threadId);
+    }};
     registerManagementRpc(bb, management,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
         const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
@@ -396,10 +440,10 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update,input=>nativeSessions.updateAccount(input),input=>nativeSessions.probe(input,async()=>{try{return (await browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})).protocol===1;}catch{return false;}},request=>browserHost.call('nativeProbe',request,{hostId:input.hostId,timeoutMs:125000})),selection),
     );
-    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi);
-    registerUsageSource(bb, hub, true);
+    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})));
+    registerUsageSource(bb, hub, false);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
       if (readiness.reason === "routing-disabled") return null;
@@ -473,7 +517,7 @@ export function createAccountPoolPlugin(
     );
     bb.http.route('GET','/agy/v1beta/models',context=>hub.handle(context.req.raw,'agy'),{auth:'none'});
     bb.http.route('POST','/native/agy',context=>nativeHttp(context.req.raw,nativeSessions,
-      token=>combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token)),{auth:'none'});
+      async token=>{const caller=await combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token);return caller?.accountScope?null:caller;}),{auth:'none'});
     bb.providers.experimental_contributeEnv('acp-agy',async context=>{
       if(nativeSessions.managed()){
         const catalog=context.threadId===null;

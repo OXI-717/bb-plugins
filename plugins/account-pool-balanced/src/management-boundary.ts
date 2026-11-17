@@ -8,13 +8,21 @@ import { managementRpcContract, managementUnlockSchema, type ManagementScope } f
 type Handlers = PluginRpcHandlers<typeof accountPoolRpcContract>;
 const readMethods = new Set([
   'maintenance.status', 'update.status', 'native.accounts', 'egress.status', 'readiness.get',
-  'thread.account', 'account.list', 'projects.list', 'config.get', 'status.get', 'status.routedThreads',
+  'thread.accountChoices', 'thread.account', 'account.list', 'projects.list', 'vpnPolicy.get', 'config.get', 'status.get', 'status.routedThreads',
 ]);
 const rpcScope = (method: string): ManagementScope => readMethods.has(method) ? 'read' : 'manage';
+// Read-only methods another installed plugin may call without a grant. Everything else
+// from a plugin caller stays locked.
+const pluginReads = new Map<string, ReadonlySet<string>>([
+  ['model-connections', new Set(['status.get', 'thread.account'])],
+  // Guard's linkage handshake reads the protection settings (no credentials are in them).
+  // Without it Guard reports the linkage as unavailable and refuses a VPN-required pool host.
+  ['vpn-guard', new Set(['vpnPolicy.get', 'config.get'])],
+]);
 const readCli = (argv: string[]) =>
   (['status', 'readiness'].includes(argv[0] ?? '')) ||
   (argv[0] === 'account' && argv[1] === 'list') ||
-  (argv[0] === 'config' && (argv.length === 1 || argv[1] === 'get')) ||
+  (argv[0] === 'config' && (argv.slice(1).every(arg => arg === '--json') || argv[1] === 'get')) ||
   (argv[0] === 'browser' && argv[1] === 'list') ||
   (['egress', 'native', 'maintenance'].includes(argv[0] ?? '') && argv[1] === 'status');
 
@@ -39,8 +47,11 @@ export function registerManagementRpc(bb: Pick<BbPluginApi, 'rpc'>, access: Mana
   const invoke = managementInvoke(access, handlers);
   const guarded = Object.fromEntries(Object.entries(handlers).map(([method, handler]) => [method,
     (input: unknown, context?: unknown) => {
+      // These declarations may only enter through management.call with a manage grant.
+      if(method==='egress.scopeAccept'||method==='egress.scopeRevoke')throw new PoolManagementLocked();
       const caller = (context as { experimental_caller?: { kind?: string; pluginId?: string } } | undefined)?.experimental_caller;
-      if (caller?.kind !== 'plugin' || caller.pluginId !== 'model-connections' || !['status.get', 'thread.account'].includes(method)) throw new PoolManagementLocked();
+      if (!caller || caller.kind === 'client') return (handler as (input: unknown) => unknown)(input);
+      if (caller?.kind !== 'plugin' || typeof caller.pluginId !== 'string' || pluginReads.get(caller.pluginId)?.has(method) !== true) throw new PoolManagementLocked();
       return (handler as (input: unknown) => unknown)(input);
     },
   ])) as Handlers;
@@ -53,14 +64,6 @@ export function registerManagementRpc(bb: Pick<BbPluginApi, 'rpc'>, access: Mana
     },
     'management.lock': ({ token }) => { access.revoke(token); return null; },
     'public.status': () => ({ management: 'locked' as const }),
-    'vpnPolicy.get': () => {
-      const full = (handlers['config.get'] as unknown as () => Record<string, unknown>)();
-      return {
-        vpnGuardEnabled: typeof full.vpnGuardEnabled === 'boolean' ? full.vpnGuardEnabled : false,
-        vpnPolicyVersion: typeof full.vpnPolicyVersion === 'number' ? full.vpnPolicyVersion : 2,
-        vpnOnlyProviders: Array.isArray(full.vpnOnlyProviders) ? full.vpnOnlyProviders.map(String) : [],
-      };
-    },
   });
 }
 

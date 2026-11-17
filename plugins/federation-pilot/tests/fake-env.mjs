@@ -3,6 +3,14 @@ export const R = (body, status) => ({ __r: true, body, status });
 export const ORIGIN = "http://primary.invalid";
 export const BRIDGE = "/api/v1/plugins/federation-pilot/http";
 
+// Browser event used by the fake WebSocket; Node 22 has no global CloseEvent.
+const CloseEvent = globalThis.CloseEvent ?? class extends Event {
+  constructor(type, { code = 0, reason = "", wasClean = false } = {}) {
+    super(type);
+    Object.assign(this, { code, reason, wasClean });
+  }
+};
+
 export function createEnv({ primary = {}, remote = {}, remotes = {} } = {}) {
   const calls = [];
   const timers = new Map();

@@ -89,13 +89,17 @@ export function GuardPage() {
         <div><dt>{t.automations}</dt><dd>{!statusFresh?t.unknown:status?.automations.busy?(status.automations.needsReconcile?t.coordinating:t.checking):!status?.coordinateAutomations&&!status?.automations.held&&!status?.automations.needsReconcile?t.notLinked:status?.automations.error||status?.automations.status?.activeRuns.length?t.partial:status?.automations.needsReconcile&&status?.coordinateAutomations?t.coordinating:!status?.coordinateAutomations?t.notLinked:!status.automations.status?t.unknown:status.automations.status.blocked?t.paused:t.available}</dd></div>
         <div><dt>{t.nativeState}</dt><dd>{!statusFresh?t.unknown:needsNativeRecovery?t.pendingRecovery:t.noNativeRecovery}</dd></div>
       </dl>
-      <ul className="vg-machines vg-current-machines">{selectedHosts.map(host=><li key={host.id}><span>{host.name}</span><span className={statusFresh&&isHostReady(host)?'vg-help':'vg-error'}>{statusFresh&&host.networkMode==='direct'?(host.available?t.direct:t.unavailable):t[statusFresh?host.vpn??'unknown':'unknown']}</span></li>)}</ul>
+      <p className="vg-help">{t.hostBlockHelp}</p>
+      <ul className="vg-machines vg-current-machines">{selectedHosts.map(host=>{
+        const blocked=status?.manualBlockHostIds.includes(host.id)??false;
+        return <li key={host.id}><div><span>{host.name}</span><p className={statusFresh&&(blocked||status?.manualBlock)?'vg-blocked':'vg-help'}>{!statusFresh?t.unknown:status?.manualBlock?t.globalBlocked:blocked?t.hostBlocked:t.hostNotBlocked}</p></div><div className="vg-host-control"><span className={statusFresh&&isHostReady(host)?'vg-help':'vg-error'}>{statusFresh&&host.networkMode==='direct'?(host.available?t.direct:t.unavailable):t[statusFresh?host.vpn??'unknown':'unknown']}</span><button type="button" aria-label={`${blocked?t.unblockHost:t.blockHost}: ${host.name}`} aria-pressed={blocked} disabled={!ready} onClick={()=>void change(()=>rpc.call('setHostManualBlock',{hostId:host.id,blocked:!blocked}))}>{blocked?t.unblockHost:t.blockHost}</button></div></li>;
+      })}</ul>
       {statusFresh&&!selectedHosts.length&&<p className="vg-help">{t.noMachines}</p>}
     </section>
     <details className="vg-section" onToggle={event=>{if(event.target===event.currentTarget)setHistoryOpen(event.currentTarget.open);}}><summary><span>{t.stopped}</span> · {statusFresh?status?.stoppedThreadIds.length:'—'}</summary>
       <p className="vg-help">{t.stoppedHelp}</p>
       {statusFresh&&!status?.stoppedThreadIds.length&&<p className="vg-help">{t.noStopHistory}</p>}
-      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language} stopHistory={status.stopHistory} canResume={(hostId,providerId)=>{const native=providerId==='codex'?'provider-codex':providerId==='claude'||providerId==='claude-code'?'provider-claude-code':'';return ready&&!status.manualBlock&&status.hosts.some(host=>host.id===hostId&&host.selected&&isHostReady(host))&&!status.ownedDisabledPlugins.includes(native)&&!status.ambiguousPluginChanges.includes(native);}}/> }
+      {statusFresh&&historyOpen&&status&&<StoppedThreads key={JSON.stringify(status.stoppedThreadIds)} threadIds={status.stoppedThreadIds} language={language} stopHistory={status.stopHistory} canResume={(hostId,providerId)=>{const native=providerId==='codex'?'provider-codex':providerId==='claude'||providerId==='claude-code'?'provider-claude-code':'';return ready&&!status.manualBlock&&!status.manualBlockHostIds.includes(hostId)&&status.hosts.some(host=>host.id===hostId&&host.selected&&isHostReady(host))&&!status.ownedDisabledPlugins.includes(native)&&!status.ambiguousPluginChanges.includes(native);}}/> }
     </details>
     <details className="vg-section" open={status?.automations.status?.recoveryPending||!!status?.automations.error}>
       <summary>{t.automations}</summary>
@@ -110,7 +114,7 @@ export function GuardPage() {
       {!!status?.automations.status?.activeRuns.length&&<details><summary>{t.activeRun}: {status.automations.status.activeRuns.length}</summary><pre className="vg-error-detail">{status.automations.status.activeRuns.join("\n")}</pre></details>}
       <div className="vg-actions">
         <button disabled={!ready||automationActionBusy||status.automations.busy||!status.coordinateAutomations} onClick={()=>void automationChange('pause')}>{t.pauseAutomations}</button>
-        <button disabled={!ready||automationActionBusy||status.automations.busy||!status.coordinateAutomations||status.manualBlock||status.automations.held||status.hosts.some(h=>h.selected&&!isHostReady(h))} onClick={()=>void automationChange('resume')}>{t.resumeAutomations}</button>
+        <button disabled={!ready||automationActionBusy||status.automations.busy||!status.coordinateAutomations||status.manualBlock||status.automations.held||status.hosts.some(h=>h.id===(status.automationHostId??status.serverHostId)&&h.selected&&(!isHostReady(h)||status.manualBlockHostIds.includes(h.id)))} onClick={()=>void automationChange('resume')}>{t.resumeAutomations}</button>
       </div>
       <p className="vg-help">{t.restoreAutomationsHelp}</p>
       {!!status?.automations.status?.pendingRestore.length&&<details><summary>{t.restoreInventory}</summary>{status.automations.status.pendingRestore.map(r=><p className="vg-help" key={r.projectId+':'+r.id}>{r.name}</p>)}</details>}

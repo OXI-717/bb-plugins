@@ -110,6 +110,32 @@ class SessionPause:
             self.state['modelAdmission'] = 'not-owned-or-expired'
         self.save()
 
+    def drain(self, idle, deadline_seconds=600):
+        """Hold dispatch, wait for natural completion; never stop or continue turns."""
+        self.state['mode'] = 'graceful'
+        self.state['phase'] = 'draining'
+        self.save()
+        deadline = self.clock() + deadline_seconds
+        stable = 0
+        while self.clock() < deadline:
+            verify_hold(self.bb('pool-maintenance', 'status'), self.state['operationId'])
+            rows = self.running()
+            stable = stable + 1 if not rows and idle() else 0
+            if stable == 3:
+                self.state['phase'] = 'drained'
+                self.save()
+                return
+            self.sleep(3)
+        raise RuntimeError('Natural session drain expired; no sessions interrupted, nothing updated')
+
+    def acquire_graceful_model_hold(self):
+        self.state['modelAdmission'] = 'acquire-intent'
+        self.save()
+        value = self.bb('pool', 'maintenance', 'acquire-graceful', '--owner', self.state['operationId'])
+        verify_model_hold(value, self.state['operationId'])
+        self.state['modelAdmission'] = 'held'
+        self.save()
+
     def stop(self):
         # The CLI thread list is paginated; never use it as a complete inventory.
         rows = self.running()

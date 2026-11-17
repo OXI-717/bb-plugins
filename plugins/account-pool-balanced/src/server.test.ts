@@ -1,3 +1,4 @@
+import {GUARD_UNREADABLE_GRACE_MS} from './network-flights.js';
 import {vpnProof} from './vpn-test-fixture.js';
 import fs from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -506,6 +507,8 @@ describe("Account Pool config schema", () => {
       devinUpstreamBaseUrl: "https://server.codeium.com",
       maxConcurrentRequestsPerAccount: 2,
       claudeRequestStartIntervalMs: 0,
+      busyOverflow: true,
+      pinnedFailover: false,
       switchThreshold: 0.98,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -619,6 +622,8 @@ describe("Account Pool plugin", () => {
       devinUpstreamBaseUrl: "https://server.codeium.com",
       maxConcurrentRequestsPerAccount: 2,
       claudeRequestStartIntervalMs: 0,
+      busyOverflow: true,
+      pinnedFailover: false,
       switchThreshold: 0.75,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -838,11 +843,11 @@ describe("Account Pool plugin", () => {
     expect(exchanged.accessToken).not.toBe("cursor-subscription-key");
   });
 
-  it("omits unsupported Devin quota resources without removing the pooled account", async () => {
+  it.each(["devin", "grok"] as const)("omits unsupported %s quota resources without removing the pooled account", async (provider) => {
     const outbound = vi.fn(async () => Response.json({}));
     const fixture = await createFixture({
       upstreamUrl: "https://upstream.example",
-      provider: "devin",
+      provider,
       apiKey: "cog_test_pat",
       options: { fetch: outbound },
     });
@@ -853,35 +858,14 @@ describe("Account Pool plugin", () => {
       priority: 100,
     }));
     const inventory = await fixture.host.harness.behavior.callRpc("provider-usage.v1.listResources", {});
-    expect(inventory).toEqual({ label: "Provider access", resources: [] });
+    expect(inventory).toMatchObject({label:"Account Pooler",resources:[{id:supported.id}]});
     const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
     expect(accounts.some(account => account.id === fixture.account.id && account.enabled)).toBe(true);
     outbound.mockClear(); // Ignore the supported account's initial quota collection.
     for (const refresh of [false, true]) {
       await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
         resourceId: fixture.account.id, refresh,
-      })).rejects.toThrow("Pool management is locked");
-    }
-    expect(outbound).not.toHaveBeenCalled();
-  });
-
-  it("omits unsupported Grok quota resources without removing the pooled account", async () => {
-    const outbound = vi.fn(async () => Response.json({}));
-    const fixture = await createFixture({
-      upstreamUrl: "https://upstream.example",
-      provider: "grok",
-      apiKey: "sk-grok-test",
-      options: { fetch: outbound },
-    });
-    const inventory = await fixture.host.harness.behavior.callRpc("provider-usage.v1.listResources", {});
-    // The management-access boundary keeps the inventory private by default.
-    expect(inventory).toMatchObject({ label: "Provider access", resources: [] });
-    const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
-    expect(accounts.some(account => account.id === fixture.account.id && account.enabled)).toBe(true);
-    for (const refresh of [false, true]) {
-      await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
-        resourceId: fixture.account.id, refresh,
-      })).rejects.toThrow("Pool management is locked");
+      })).rejects.toThrow(`Quota reporting is not available for ${provider === "grok" ? "Grok" : "Devin"}`);
     }
     expect(outbound).not.toHaveBeenCalled();
   });
@@ -970,6 +954,9 @@ describe("Account Pool plugin", () => {
       seen.push(new URL(r.url).pathname);
       return r.url.endsWith("/RunSSE")?new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array([1]));}})):Response.json({ok:true});
     }}});
+    await fixture.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:4});
+    const recoveryQuota=new QuotaStore(fixture.host.bb.storage.database());
+    recoveryQuota.put({...recoveryQuota.get(fixture.account.id),heldUntil:Date.now()-1});
     const call=(rpc:string)=>fixture.host.harness.behavior.fetchHttp("POST",dynamic?"/cursor/rpc":`/cursor/${rpc}`,{headers:{authorization:`Bearer ${fixture.key}`,"content-type":"application/connect+proto",...(dynamic?{"x-bb-cursor-rpc-path":rpc}:{})},body:"synthetic"});
     const streams=await Promise.all([call("agent.v1.AgentService/RunSSE"),call("agent.v1.AgentService/RunSSE")]);
     try {
@@ -7865,7 +7852,7 @@ describe("VPN-only outbound protection", () => {
     expect(outbound).not.toHaveBeenCalled();
     await expect(fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id })).rejects.toThrow("VPN_REQUIRED");
     await expect(fixture.host.harness.behavior.callRpc("codexLogin.start", null)).rejects.toThrow("VPN_REQUIRED");
-    await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", { resourceId: fixture.account.id, refresh: true })).rejects.toThrow("Pool management is locked");
+    await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", { resourceId: fixture.account.id, refresh: true })).rejects.toThrow("VPN_REQUIRED");
     await expect(fixture.host.harness.behavior.callRpc("login.start", null)).rejects.toThrow("VPN_REQUIRED");
     expect(outbound).not.toHaveBeenCalled();
     connected = true;
@@ -8032,7 +8019,7 @@ it('blocks Guard-linked OAuth quotas and login without corrupting account eligib
  await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});outbound.mockClear();
  for(const method of ['account.refreshUsage','provider-usage.v1.getResource'] as const) {
    const input=method==='account.refreshUsage'?{accountId:fixture.account.id}:{resourceId:fixture.account.id,refresh:true};
-   await expect(fixture.host.harness.behavior.callRpc(method,input)).rejects.toThrow(method==='account.refreshUsage'?'VPN_GUARD_BLOCKED':'Pool management is locked');
+   await expect(fixture.host.harness.behavior.callRpc(method,input)).rejects.toThrow('VPN_GUARD_BLOCKED');
  }
  await expect(fixture.host.harness.behavior.callRpc('codexLogin.start',null)).rejects.toThrow('VPN_GUARD_BLOCKED');
  expect(outbound).not.toHaveBeenCalled();
@@ -8861,7 +8848,7 @@ describe('server-owned account egress dispatch',()=>{
 
 
 it('correlates a mid-frame Cursor policy abort without leaking payload or RPC errors',async()=>{
- let unavailable=false;
+ let unavailable=false,skew=0;
  const outbound=vi.fn(async(input:RequestInfo|URL)=>{
   const url=input instanceof Request?input.url:String(input);
   if(url.startsWith('https://exchange.example/'))return Response.json({accessToken:'synthetic-access'});
@@ -8869,7 +8856,7 @@ it('correlates a mid-frame Cursor policy abort without leaking payload or RPC er
   if(!url.endsWith('/RunSSE'))return Response.json({});
   return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}}),{headers:{'content-type':'application/connect+proto'}});
  });
- const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example/token',cursorUsageUrl:'https://usage.example/usage',fetch:outbound}});
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example/token',cursorUsageUrl:'https://usage.example/usage',fetch:outbound,now:()=>Date.now()+skew}});
  fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
  fixture.host.harness.sdk.stub('plugins.callRpc',async()=>{
   if(unavailable)throw Error('private RPC payload');
@@ -8880,9 +8867,16 @@ it('correlates a mid-frame Cursor policy abort without leaking payload or RPC er
   headers:{authorization:`Bearer ${fixture.key}`,'content-type':'application/connect+proto'},body:'private prompt',
  });
  expect(response.status).toBe(200);const reader=response.body!.getReader();expect((await reader.read()).value).toEqual(new Uint8Array([0,0,0]));
- unavailable=true;const failed=expect(reader.read()).rejects.toThrow('VPN_GUARD_UNAVAILABLE');
+ unavailable=true;let settled=false;const reading=reader.read().finally(()=>{settled=true;});
+ const failed=expect(reading).rejects.toThrow('VPN_GUARD_UNAVAILABLE');
  const policy=fixture.host.harness.behavior.runService('network-policy');
- try {await failed;}finally{policy.controller.abort();await policy.done;}
+ try {
+  // An unanswered Guard read does not cancel the admitted stream inside the grace...
+  await new Promise(resolve=>setTimeout(resolve,200));expect(settled).toBe(false);
+  expect(fixture.host.harness.inspection.logEntries.filter(e=>e.message.startsWith('Account Pooler cursor transport failed:'))).toHaveLength(0);
+  // ...and fails closed once the Guard has stayed unreadable past it.
+  skew=GUARD_UNREADABLE_GRACE_MS+1_000;await failed;
+ }finally{policy.controller.abort();await policy.done;}
  const logs=fixture.host.harness.inspection.logEntries.filter(e=>e.message.startsWith('Account Pooler cursor transport failed:'));
  expect(logs).toHaveLength(1);
  const prefix='Account Pooler cursor transport failed: VPN_GUARD_UNAVAILABLE. ';

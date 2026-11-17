@@ -60,14 +60,14 @@ it('keeps manual Block available while automation Resume waits and ignores its s
  const resume=new Promise<typeof status>(resolve=>{finish=resolve;});
  const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,automationAction:()=>resume,setManualBlock:()=>{status={...status,manualBlock:true};return status;}}});
  fireEvent.click(await slot.findByRole('button',{name:'Возобновить'}));
- const block=slot.getByRole('button',{name:'Заблокировать'}) as HTMLButtonElement;
+ const block=slot.getByRole('button',{name:'Заблокировать все выбранные'}) as HTMLButtonElement;
  expect(block.disabled).toBe(false);fireEvent.click(block);
  await slot.findByText('Ручной блок включён');
  const reads=slot.rpcCalls.filter(c=>c.method==='status').length;
  finish({...status,manualBlock:false});
  await waitFor(()=>expect(slot.rpcCalls.filter(c=>c.method==='status').length).toBeGreaterThan(reads));
- await waitFor(()=>expect(slot.getByRole('button',{name:'Снять блок'})).toBeTruthy());
- expect(slot.queryByRole('button',{name:'Заблокировать'})).toBeNull();
+ await waitFor(()=>expect(slot.getByRole('button',{name:'Снять общий блок'})).toBeTruthy());
+ expect(slot.queryByRole('button',{name:'Заблокировать все выбранные'})).toBeNull();
 });
 
 it('renders event causes and controller progress in Russian',async()=>{
@@ -76,7 +76,7 @@ it('renders event causes and controller progress in Russian',async()=>{
  const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status}});
  await slot.findByText('Применяется');
  expect(slot.getByText(/машина не ответила на запрос статуса/)).toBeTruthy();
- expect((slot.getByRole('button',{name:'Заблокировать'}) as HTMLButtonElement).disabled).toBe(false);
+ expect((slot.getByRole('button',{name:'Заблокировать все выбранные'}) as HTMLButtonElement).disabled).toBe(false);
 });
 
 it('shows unavailable state instead of indefinite loading after the first status failure',async()=>{
@@ -140,7 +140,7 @@ it('does not treat cached connected evidence as fresh after a status failure',as
 it('releases a manual block without restoring native plugins or changing VPN policy',async()=>{
   const status=guardFixture();status.manualBlock=true;status.ownedDisabledPlugins=['provider-codex'];
   const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,setManualBlock:()=>({...status,manualBlock:false})}});
-  fireEvent.click(await slot.findByRole('button',{name:'Снять блок'}));
+  fireEvent.click(await slot.findByRole('button',{name:'Снять общий блок'}));
   await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'setManualBlock',input:{blocked:false}}));
   expect(slot.rpcCalls.some(call=>['restoreOwned','setMode'].includes(call.method))).toBe(false);
   expect((slot.getByRole('checkbox',{name:'Защита по VPN'}) as HTMLInputElement).checked).toBe(true);
@@ -254,4 +254,17 @@ it('uses the OXI name in navigation and the rendered heading',()=>{
  expect(app.navPanels[0]!.title).toBe('OXI VPN Guard');
  const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>guardFixture()}});
  expect(slot.getByRole('heading',{name:'OXI VPN Guard',level:1})).toBeTruthy();
+});
+
+it('toggles only the chosen machine using a server-owned host ID',async()=>{
+ const status=guardFixture();status.hostIds.push('demo-laptop');
+ status.hosts.push({...status.hosts[0]!,id:'demo-laptop',name:'Demo laptop'});
+ const slot=renderSlot(app.navPanels[0]!,{subPath:''},{rpc:{status:()=>status,setHostManualBlock:(input:unknown)=>{const {hostId,blocked}=rpcContract.setHostManualBlock.input.parse(input);return {...status,manualBlockHostIds:blocked?[hostId]:[]};}}});
+ fireEvent.click(await slot.findByRole('button',{name:'Заблокировать: Demo laptop'}));
+ await slot.findByRole('button',{name:'Снять блок: Demo laptop'});
+ expect(slot.rpcCalls).toContainEqual({method:'setHostManualBlock',input:{hostId:'demo-laptop',blocked:true}});
+ expect(slot.getByRole('button',{name:'Заблокировать: Demo machine'})).toBeTruthy();
+ expect(slot.rpcCalls.some(c=>c.method==='setManualBlock')).toBe(false);
+ fireEvent.click(slot.getByRole('button',{name:'Снять блок: Demo laptop'}));
+ await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'setHostManualBlock',input:{hostId:'demo-laptop',blocked:false}}));
 });

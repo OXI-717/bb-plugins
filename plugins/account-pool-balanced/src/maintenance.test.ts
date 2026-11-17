@@ -42,3 +42,26 @@ describe('persisted pool admission pause',()=>{
     await expect(new PoolMaintenance(async()=>{}).initialize({owner,expiresAt:1})).rejects.toThrow();
   });
 });
+
+describe('graceful pool admission',()=>{
+  it('blocks new admission while preserving active transport signals through acquire and release',async()=>{
+    let activity=1;
+    const gate=new PoolMaintenance(async()=>{},Date.now,()=>activity);
+    const signal=gate.signal;
+    await gate.acquireGraceful(owner);
+    expect(signal.aborted).toBe(false);
+    expect(()=>gate.assertAllowed()).toThrow('maintenance');
+    expect(gate.status().transportInFlight).toBe(1);
+    await expect(gate.acquireGraceful(foreign)).rejects.toThrow();
+    activity=0;
+    await gate.release(owner);
+    expect(signal.aborted).toBe(false);
+    expect(()=>gate.assertAllowed()).not.toThrow();
+  });
+  it('does not acknowledge or block admission when graceful persistence fails',async()=>{
+    const gate=new PoolMaintenance(async()=>{throw Error('storage failed');});
+    await expect(gate.acquireGraceful(owner)).rejects.toThrow('storage failed');
+    expect(gate.signal.aborted).toBe(false);
+    expect(()=>gate.assertAllowed()).not.toThrow();
+  });
+});
