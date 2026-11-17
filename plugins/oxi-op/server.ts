@@ -45,7 +45,12 @@ export default function plugin(bb: BbPluginApi) {
     const activeForms=new Map<string,{threadId:string;projectId:string;progress:Progress;visible:boolean}>();
     bb.rpc.register(deliveryContract,{async formReceipt({threadId,interactionId,visible,formRequestId}) {
         const requests = await bb.sdk.threads.interactions.list({threadId});
-        if (!requests.some(r => r.id===interactionId && r.origin?.kind==='plugin' && r.origin.pluginId===bb.pluginId)) throw new Error('This form is not pending for this plugin');
+        const interaction=requests.find(r => r.id===interactionId && r.origin?.kind==='plugin' && r.origin.pluginId===bb.pluginId);
+        if (!interaction) throw new Error('This form is not pending for this plugin');
+        if(formRequestId) {
+            const binding=z.object({formRequestId:z.string().uuid()}).safeParse(interaction.payload?.kind==='plugin'?interaction.payload.data:undefined);
+            if(!binding.success || binding.data.formRequestId!==formRequestId) throw new Error('Form request does not match this interaction');
+        }
         const thread=await bb.sdk.threads.get({threadId});
         const tracked=formRequestId?activeForms.get(formRequestId):undefined;
         if(formRequestId && (!tracked || tracked.threadId!==threadId || tracked.projectId!==thread.projectId)) throw new Error('Unknown form request');

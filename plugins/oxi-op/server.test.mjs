@@ -110,7 +110,7 @@ test('store distinguishes unobserved, mounted and visible forms and stays live a
   t.mock.timers.enable({apis:['setTimeout']});
   for(const visible of [undefined,false,true]) {
     let h;
-    h=setup(t,{},undefined,undefined,async()=>h.inspection.pendingInteractions.map(x=>({id:x.id,origin:{kind:'plugin',pluginId:'oxi-op'}})));
+    h=setup(t,{},undefined,undefined,async()=>h.inspection.pendingInteractions.map(x=>({id:x.id,origin:{kind:'plugin',pluginId:'oxi-op'},payload:{kind:'plugin',data:x.payload}})));
     const pending=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);
     await setImmediate();
     const form=h.inspection.pendingInteractions[0];
@@ -128,6 +128,23 @@ test('store distinguishes unobserved, mounted and visible forms and stays live a
     assert(!text.includes('Карточка не подтверждена'));
     assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
   }
+});
+
+test('a display receipt cannot attribute one pending form to another operation',async t=>{
+  let h;
+  h=setup(t,{},undefined,undefined,async()=>h.inspection.pendingInteractions.map(x=>({id:x.id,origin:{kind:'plugin',pluginId:'oxi-op'},payload:{kind:'plugin',data:x.payload}})));
+  const a=h.behavior.callAgentTool('oxi_op_store',{title:'First'},context);
+  const b=h.behavior.callAgentTool('oxi_op_store',{title:'Second'},context);
+  await setImmediate();
+  const [first,second]=h.inspection.pendingInteractions;
+  await assert.rejects(h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:first.id,formRequestId:second.payload.formRequestId,visible:true}));
+  let rows=JSON.parse((await h.behavior.runCli(['history'],context)).stdout);
+  assert(rows.every(x=>x.formState==='not-observed'));
+  await h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:second.id,formRequestId:second.payload.formRequestId,visible:true});
+  rows=JSON.parse((await h.behavior.runCli(['history'],context)).stdout);
+  assert.equal(rows.find(x=>x.label==='Second').formState,'visible');
+  assert.equal(rows.find(x=>x.label==='First').formState,'not-observed');
+  h.behavior.cancelInteraction(first.id);h.behavior.cancelInteraction(second.id);await Promise.all([a,b]);
 });
 
 test('intake shows its BB form before any op authentication and cancellation does not contact op', async t => {
