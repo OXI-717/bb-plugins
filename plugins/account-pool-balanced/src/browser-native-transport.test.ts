@@ -4,15 +4,19 @@ import {afterEach,describe,it,expect} from 'vitest';
 import {startBrowserTransport,handoffBrowser,type TransportLaunch} from './browser-transport.js';
 const cleanup:Array<()=>Promise<void>>=[];const delay=(ms:number)=>new Promise(r=>setTimeout(r,ms));
 afterEach(async()=>{for(const fn of cleanup.splice(0).reverse())await fn();});
-async function fixture(){
+async function fixture(navigationDelayMs=0,confirmDocument=true){
  const root=await mkdtemp(path.join(tmpdir(),'native-login-')),executable=path.join(root,'browser');
  await writeFile(executable,`#!${process.execPath}
 const fs=require('node:fs'),{fileURLToPath}=require('node:url'),args=process.argv.slice(2),root=args.find(a=>a.startsWith('--user-data-dir=')).slice(16);
 let first=false;try{fs.writeFileSync(root+'/pid',String(process.pid),{flag:'wx'});first=true;}catch{}
+setTimeout(async()=>{
 const url=args.at(-1),doc=url.startsWith('file:')?fs.readFileSync(fileURLToPath(url),'utf8'):null;
-if(doc){const ready=doc.match(/const ready="([^"]+)"/)[1],proxy=new URL(args.find(a=>a.startsWith('--proxy-server=')).slice(15));require('node:http').get({hostname:proxy.hostname,port:proxy.port,path:ready},r=>r.resume()).on('error',()=>{});}
+if(doc&&${confirmDocument}){const ready=doc.match(/const ready="([^"]+)"/)[1],proxy=new URL(args.find(a=>a.startsWith('--proxy-server=')).slice(15));await new Promise((resolve,reject)=>{require('node:http').get({hostname:proxy.hostname,port:proxy.port,path:ready},r=>{r.resume();r.on('end',()=>r.statusCode===204?resolve():reject(new Error('Unexpected receipt status')));r.on('error',reject);}).on('error',reject);});}
 fs.appendFileSync(root+'/calls',JSON.stringify({args,doc,tz:process.env.TZ,secret:process.env.SYNTHETIC_SECRET})+'\\n');
-if(!first){setTimeout(()=>process.exit(fs.existsSync(root+'/fail')?3:0),30);}else setInterval(()=>{},1000);setTimeout(()=>process.exit(0),20000);
+// A successful selector exit must follow the completed document receipt.
+if(!first){setTimeout(()=>process.exit(fs.existsSync(root+'/fail')?3:0),30);}else setInterval(()=>{},1000);
+},${navigationDelayMs});
+setTimeout(()=>process.exit(0),20000);
 `,{mode:0o700});
  const o:TransportLaunch={root,executable,socketPath:path.join(root,'control.sock'),profileDirectory:'Profile 1',profileDirectories:['Profile 1','Profile 2'],timezone:'UTC',url:'about:blank',settleMs:150,env:{PATH:process.env.PATH,SYNTHETIC_SECRET:'synthetic'}};
  cleanup.push(async()=>{try{process.kill(Number(await readFile(root+'/pid','utf8')),'SIGTERM');}catch{}for(let i=0;i<100;i++){try{await access(o.socketPath);await delay(20);}catch{break;}}await rm(root,{recursive:true,force:true});});return o;
@@ -66,11 +70,18 @@ describe('interactive native browser transport',()=>{
   expect(await send('127.0.0.1:'+(upstream.address() as any).port)).toContain('synthetic-response');expect(await send('[::1]:443')).toContain('400');
  });
  it('bounds outstanding private URL documents without affecting blank opens',async()=>{
-  const o=await fixture();o.url='https://example.test/first';await startBrowserTransport(o);
+  // Model a slow browser reading its document after the old 30ms exit window.
+  const o=await fixture(150);o.url='https://example.test/first';await startBrowserTransport(o);
   for(let i=1;i<32;i++)await handoffBrowser({...o,url:'https://example.test/'+i});
   await expect(handoffBrowser({...o,url:'https://example.test/overflow'})).rejects.toThrow(/busy/);
   await expect(handoffBrowser({...o,url:'about:blank'})).resolves.toBe(true);
  },20000);
+ it('rejects a successful browser exit without a document receipt',async()=>{
+  const o=await fixture(150,false);await startBrowserTransport(o);
+  await expect(handoffBrowser({...o,url:'https://example.test/unconfirmed'})).rejects.toThrow('Browser did not confirm opening the local navigation document.');
+  const rows=await calls(o);expect(rows).toHaveLength(2);
+  expect(rows[1].doc).toContain('example.test/unconfirmed');
+ },10000);
  it('rejects protocol3 before sending a URL',async()=>{
   const o=await fixture();let received='';const server=createServer(s=>s.on('data',b=>{received+=b;s.write(JSON.stringify({protocol:3,navigation:'pipe',profiles:'native'})+'\n');}));await new Promise<void>(r=>server.listen(o.socketPath,r));await chmod(o.socketPath,0o600);cleanup.push(()=>new Promise<void>(r=>server.close(()=>r())));
   await expect(handoffBrowser({...o,url:'https://example.test/private'})).rejects.toThrow(/reopen/);expect(received).not.toContain('private');
