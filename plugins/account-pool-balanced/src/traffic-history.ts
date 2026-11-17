@@ -34,7 +34,7 @@ const snapshotSchema = z.object({
 });
 const empty = (): Counters => Object.fromEntries(Object.keys(counters.shape).map(k => [k, 0])) as Counters;
 const add = (a: number, b: number) => Math.min(Number.MAX_SAFE_INTEGER, a + b);
-const key = (r: Row) => JSON.stringify([r.hour, r.provider, r.accountId]);
+const key = (r: Pick<Row, 'hour' | 'provider' | 'accountId'>) => JSON.stringify([r.hour, r.provider, r.accountId]);
 
 /** Called only with validated journal events. No request/attempt IDs or free text survive. */
 export class TrafficHistory {
@@ -87,7 +87,7 @@ export class TrafficHistory {
     if (r.at > this.now() || hour < this.cutoff()) return;
     this.prune();
     const identity = { hour, provider: r.provider, accountId: r.accountId, clientHash: null, projectId: null };
-    const id = key({ ...identity, ...empty() });
+    const id = key(identity);
     let row = this.rows.get(id);
     if (!row) {
       if (this.rows.size >= HISTORY_MAX_ROWS) {
