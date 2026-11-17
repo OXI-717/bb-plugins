@@ -114,3 +114,17 @@ it('revalidates the server host for warm sessions and refuses IPv6 before dispat
  await expect(route.fetch(false)!('https://model.example/')).rejects.toBeInstanceOf(EgressUnavailable);
  expect(outgoing).not.toHaveBeenCalled();
 });
+it('reports which accounts keep a conversation on its recorded route decision',async()=>{
+ const e=new AccountEgress(storage(),async()=>'host-one',async()=>true);cleanup.push(()=>e.close());
+ await e.initialize();await e.configure(profile);await e.bind(a,{id:profile.id,version:1});
+ // No conversation, or one nothing is recorded for yet: either decision is still open.
+ expect(e.compatible(a,null)).toBe(true);expect(e.compatible(a,'new')).toBe(true);expect(e.compatible(b,'new')).toBe(true);
+ // Pinned to an assigned account: only that account.
+ await e.acquire(a,'pinned');
+ expect(e.compatible(a,'pinned')).toBe(true);expect(e.compatible(b,'pinned')).toBe(false);
+ // Recorded without a profile: never an account that has one.
+ await e.acquire(b,'plain');
+ expect(e.compatible(b,'plain')).toBe(true);expect(e.compatible(a,'plain')).toBe(false);
+ // Unbinding changes new decisions only; it makes the account plain for a plain conversation.
+ await e.bind(a,null);expect(e.compatible(a,'plain')).toBe(true);expect(e.compatible(b,'pinned')).toBe(false);
+});

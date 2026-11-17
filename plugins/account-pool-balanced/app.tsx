@@ -104,7 +104,7 @@ type DialogState =
 
 type ConfigField = Exclude<
   keyof AccountPoolConfig,
-  "claudeRequestStartIntervalMs" | "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "browserHostId" | "vpnGuardEnabled" | "vpnPolicyVersion"
+  "claudeRequestStartIntervalMs" | "busyOverflow" | "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "browserHostId" | "vpnGuardEnabled" | "vpnPolicyVersion"
 >;
 
 const PROVIDERS: Array<{

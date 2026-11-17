@@ -42,3 +42,36 @@ it('migrates legacy config with pacing disabled and rejects malformed interval v
  for(const value of [-1,60001,1.5,true,'1000',null,NaN,Infinity])expect(accountPoolConfigSetInputSchema.safeParse({claudeRequestStartIntervalMs:value}).success).toBe(false);
  expect(accountPoolConfigSetInputSchema.parse({claudeRequestStartIntervalMs:1000}).claudeRequestStartIntervalMs).toBe(1000);
 });
+it('lets a burst no larger than the configured size start together, then keeps the sustained rate',()=>{
+ let now=10_000;const pacing=new AccountStartPacing(()=>250,()=>now,()=>4);
+ for(let i=0;i<4;i++){expect(pacing.readyAt('a')??0).toBeLessThanOrEqual(now);pacing.dispatched('a');}
+ expect(pacing.readyAt('a')).toBe(10_250);
+ now=10_250;pacing.dispatched('a');expect(pacing.readyAt('a')).toBe(10_500);
+ // Half a second of idle time earns two starts, not a full burst.
+ now=10_750;pacing.dispatched('a');pacing.dispatched('a');expect(pacing.readyAt('a')).toBe(11_000);
+ // A long idle period restores the whole burst, never more.
+ now=60_000;for(let i=0;i<4;i++){expect(pacing.readyAt('a')??0).toBeLessThanOrEqual(now);pacing.dispatched('a');}
+ expect(pacing.readyAt('a')).toBe(60_250);
+ // Other accounts keep their own credit.
+ expect(pacing.readyAt('b')).toBeNull();
+});
+it('releases requests one by one, at least a second apart, during and for a minute after a provider hold',()=>{
+ let now=10_000;const pacing=new AccountStartPacing(()=>250,()=>now,()=>4);
+ pacing.dispatched('a');expect(pacing.readyAt('a')??0).toBeLessThanOrEqual(now);
+ // Saved burst credit is forfeited as soon as the provider holds the account.
+ const heldUntil=12_000;expect(pacing.readyAt('a',heldUntil)).toBe(11_000);
+ now=12_000;pacing.dispatched('a',heldUntil);expect(pacing.readyAt('a',heldUntil)).toBe(13_000);
+ now=13_000;pacing.dispatched('a',heldUntil);expect(pacing.readyAt('a',heldUntil)).toBe(14_000);
+ // Still recovering 59 seconds after the hold: idle time does not rebuild a burst.
+ now=71_000;pacing.dispatched('a',heldUntil);expect(pacing.readyAt('a',heldUntil)).toBe(72_000);
+ // After the recovery minute normal pacing and its burst return.
+ now=72_000;pacing.dispatched('a',heldUntil);
+ now=80_000;for(let i=0;i<4;i++){expect(pacing.readyAt('a',heldUntil)??0).toBeLessThanOrEqual(now);pacing.dispatched('a',heldUntil);}
+ expect(pacing.readyAt('a',heldUntil)).toBe(80_250);
+});
+it('spaces the very first start seen during a hold and keeps a disabled interval disabled',()=>{
+ let now=5_000;const paced=new AccountStartPacing(()=>250,()=>now,()=>4);
+ paced.dispatched('a',5_000);expect(paced.readyAt('a',5_000)).toBe(6_000);
+ const disabled=new AccountStartPacing(()=>0,()=>now,()=>4);
+ disabled.dispatched('a',5_000);expect(disabled.readyAt('a',5_000)??0).toBeLessThanOrEqual(now);
+});

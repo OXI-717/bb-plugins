@@ -4,7 +4,7 @@ import {GuardRequiredError} from './network-errors.js';
 import {CURSOR_RPC_PATH_HEADER} from './cursor-rpc.js';
 import { EgressUnavailable, type AccountRoute } from "./account-egress.js";
 import { providerBudgetQuota, providerEvidenceFromUsage, PROVIDER_BUDGET_MAX_AGE_MS, NUMERIC_BUDGET_PROVIDERS } from './provider-budget.js';
-import {AccountStartPacing} from "./account-start-pacing.js";
+import {AccountStartPacing, RECOVERY_WINDOW_MS} from "./account-start-pacing.js";
 import { AccountAdmission, AdmissionUnavailable, ACCOUNT_QUEUE_MAX_WAIT_MS } from "./account-admission.js";
 import {createAgyAdapter} from "./agy-adapter.js";
 import { observeCodexQuotaHeaders } from './codex-quota-observation.js';
@@ -103,6 +103,10 @@ const MAX_FAILURE_DETAIL_BYTES = 1_024;
 const FAILURE_DISPOSAL_TIMEOUT_MS = 250;
 const AFFINITY_IDLE_TTL_MS = 30 * 60 * 1_000;
 const MAX_AFFINITY_BINDINGS = 4_096;
+// While an account recovers from a provider hold it keeps the former default pressure.
+const RECOVERY_CONCURRENCY = 2;
+// A selected request counts toward its account before it reaches the admission lane.
+const PLACEMENT_TTL_MS = 5_000;
 const DROPPED_RESPONSE_HEADERS = new Set([
   "content-encoding",
   "content-length",
@@ -120,6 +124,8 @@ interface HubOptions {
   maintenance?: PoolMaintenance;
   accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
   pinnedRouteAccount?: (sessionKey:string)=>string|null;
+  /** False when the account would serve this conversation outside its recorded route decision. */
+  routeCompatible?: (accountId:string,sessionKey:string|null)=>boolean;
   nativeAgyManaged?:()=>boolean;
   journal?: RequestJournal;
   route: string;
@@ -146,6 +152,8 @@ interface SelectedAccount {
   quota: AccountQuota;
   keepAffinity: boolean;
   accept: () => void;
+  /** The request reached this account's admission lane (or gave up): drop its placement. */
+  placed: () => void;
 }
 
 interface ActiveAccount {
@@ -216,10 +224,16 @@ export class AccountPoolHub {
   private readonly admission: AccountAdmission;
   private readonly cursorControlAdmission: AccountAdmission;
   private readonly claudeStarts: AccountStartPacing;
+  private recoveryWake: ReturnType<typeof setTimeout> | null = null;
+  private recoveryWakeAt = 0;
+  private readonly placementsByAccount = new Map<string, number[]>();
   constructor(private readonly options: HubOptions) {
-    this.claudeStarts = new AccountStartPacing(() => options.getSettings().claudeRequestStartIntervalMs, options.now);
-    this.admission = new AccountAdmission(() => options.getSettings().maxConcurrentRequestsPerAccount, options.now);
-    this.cursorControlAdmission = new AccountAdmission(() => options.getSettings().maxConcurrentRequestsPerAccount, options.now);
+    // A burst no larger than the account's own concurrency may start together; the
+    // interval then bounds the sustained start rate.
+    this.claudeStarts = new AccountStartPacing(() => options.getSettings().claudeRequestStartIntervalMs, options.now,
+      () => options.getSettings().maxConcurrentRequestsPerAccount);
+    this.admission = new AccountAdmission(id => this.accountLimit(id), options.now);
+    this.cursorControlAdmission = new AccountAdmission(id => this.accountLimit(id), options.now);
     this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnPayload,options.guardCheck);
     this.networkFlights = new NetworkFlights(options.fetch, () => this.stopped.signal,
       provider => this.assertNetworkAllowed(provider), (provider, drainable) => {
@@ -230,6 +244,66 @@ export class AccountPoolHub {
             operation: drainable ? "model" : "auxiliary",
           }));
       },options.maintenance,options.now);
+  }
+
+  /**
+   * Concurrent requests one account may carry now. For a minute after a provider hold the
+   * account keeps the former conservative pressure, whatever the configured limit is.
+   */
+  private accountLimit(accountId: string): number {
+    const limit = this.options.getSettings().maxConcurrentRequestsPerAccount;
+    if (limit <= RECOVERY_CONCURRENCY) return limit;
+    const heldUntil = this.options.quotas.get(accountId).heldUntil;
+    if (heldUntil === null) return limit;
+    const recoveredAt = heldUntil + RECOVERY_WINDOW_MS;
+    if (this.options.now() >= recoveredAt) return limit;
+    this.wakeAdmissionAt(recoveredAt);
+    return RECOVERY_CONCURRENCY;
+  }
+
+  /** Waiting requests are re-evaluated when a recovery window ends, not only on the next release. */
+  private wakeAdmissionAt(at: number): void {
+    if (this.recoveryWake !== null && this.recoveryWakeAt <= at) return;
+    if (this.recoveryWake !== null) clearTimeout(this.recoveryWake);
+    this.recoveryWakeAt = at;
+    this.recoveryWake = setTimeout(() => {
+      this.recoveryWake = null;
+      this.admissionLimitsChanged();
+    }, Math.min(Math.max(0, at - this.options.now()) + 1, 2_147_483_647));
+    this.recoveryWake.unref?.();
+  }
+
+  /**
+   * Requests holding or waiting for a slot on the ordinary lane of this account, plus
+   * requests already placed on it that have not reached the lane yet. Without the latter
+   * a simultaneous burst would see one free account and pile onto it.
+   */
+  private accountLoad(accountId: string): number {
+    return this.admission.reserved(accountId) + this.admission.waiting(accountId) + this.placements(accountId).length;
+  }
+
+  private placements(accountId: string): number[] {
+    const now = this.options.now();
+    const live = (this.placementsByAccount.get(accountId) ?? []).filter(expiresAt => expiresAt > now);
+    if (live.length === 0) this.placementsByAccount.delete(accountId);
+    else this.placementsByAccount.set(accountId, live);
+    return live;
+  }
+
+  /** Bounded by its expiry even if a caller never reports reaching the lane. */
+  private place(accountId: string): () => void {
+    const expiresAt = this.options.now() + PLACEMENT_TTL_MS;
+    this.placementsByAccount.set(accountId, [...this.placements(accountId), expiresAt]);
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      const live = this.placementsByAccount.get(accountId);
+      const index = live?.indexOf(expiresAt) ?? -1;
+      if (live === undefined || index < 0) return;
+      live.splice(index, 1);
+      if (live.length === 0) this.placementsByAccount.delete(accountId);
+    };
   }
 
   private requiresIpv4(provider:PoolProvider):boolean {const settings=this.options.getSettings();return settings.vpnOnlyProviders.some(value=>value===provider)||(settings.vpnGuardEnabled&&provider!=="kimi"&&provider!=="zai");}
@@ -458,6 +532,7 @@ export class AccountPoolHub {
   }
 
   private async drainAndStop(): Promise<void> {
+    if (this.recoveryWake !== null) { clearTimeout(this.recoveryWake); this.recoveryWake = null; }
     this.accepting = false;
     this.stopped.abort(new Error("Account Pooler stopped accepting requests."));
     if (this.inFlightCount() === 0) return;
@@ -679,6 +754,7 @@ export class AccountPoolHub {
           freeTier,
           pinnedRouteAccountId,
           accountScope ? affinityHost : undefined,
+          routeSessionKey,
         );
         if (selected === null) break;
         const acquired=await this.acquireRoute(selected.account,routeSessionKey);
@@ -729,6 +805,7 @@ export class AccountPoolHub {
             signal,
           );
         } catch (error) {
+          selected.placed();
           if (error instanceof EgressUnavailable || error instanceof VpnRequiredError || error instanceof ClientPolicyDenied || error instanceof AdmissionUnavailable) throw error;
           if(route.assigned)throw new EgressUnavailable();
           if (pacing !== null) {
@@ -754,7 +831,7 @@ export class AccountPoolHub {
           if (purpose === "autopilot") {
             const current = this.eligibleEntries(adapter.provider, projectId,
               await this.options.accounts.list(), family, this.options.now(), purpose, freeTier).eligible;
-            if (!current.some(entry => entry.account.id === selected.account.id)) break;
+            if (!current.some(entry => entry.account.id === selected.account.id)) { selected.placed(); break; }
           }
           let upstream: UpstreamResult;
           attempt++;
@@ -768,7 +845,7 @@ export class AccountPoolHub {
               secret,
               adapter,
               trace, attempt, route,
-              {purpose,projectId,family,freeTier,accountScope,credential,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
+              {purpose,projectId,family,freeTier,accountScope,credential,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onQueued:selected.placed,onDispatch:()=>{
                 switched = lastDispatchedAccount !== null && lastDispatchedAccount !== selected.account.id;
                 if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'dispatched'});
                 lastDispatchedAccount = selected.account.id;
@@ -1200,6 +1277,7 @@ export class AccountPoolHub {
     freeTier?: boolean,
     pinnedRouteAccountId: string | null = null,
     scopeNamespace?: string,
+    routeSessionKey: string | null = null,
   ): Promise<SelectedAccount | null> {
     const accounts = (await this.routingAccounts()).filter(account=>scopeNamespace === undefined || candidateIds.has(account.id)).sort(
       (left, right) => left.priority - right.priority,
@@ -1268,24 +1346,54 @@ export class AccountPoolHub {
       return base;
     };
     const bestTier = Math.min(...candidates.map(tier));
-    const preferredCandidates = candidates.filter(entry => tier(entry) === bestTier);
-    const draining = preferredCandidates.filter(({ account }) => account.drainOnce);
-    const next = balanced
+    const tierCandidates = candidates.filter(entry => tier(entry) === bestTier);
+    const draining = tierCandidates.filter(({ account }) => account.drainOnce);
+    // Load-aware placement (balanced strategy). A request should not wait behind a full
+    // account while another account this caller may already use can start it now. Only
+    // accounts the existing project, purpose, quota and schedule policy already admits
+    // are considered, and never one that would leave the conversation's recorded route.
+    const overflow = balanced && settings.busyOverflow;
+    const startsNow = (entry: (typeof eligible)[number]) =>
+      this.accountLoad(entry.account.id) < this.accountLimit(entry.account.id);
+    const placeable = (entry: (typeof eligible)[number]) =>
+      startsNow(entry) && (this.options.routeCompatible?.(entry.account.id, routeSessionKey) ?? true);
+    let preferredCandidates = tierCandidates;
+    if (overflow && !tierCandidates.some(placeable)) {
+      // Every preferred account is busy: admit the nearest less preferred tier that can
+      // start now. Their own caps and reserve rules were applied when they became eligible.
+      for (const level of [...new Set(candidates.map(tier))].sort((left, right) => left - right)) {
+        if (level <= bestTier) continue;
+        const spare = candidates.filter(entry => tier(entry) === level && placeable(entry));
+        if (spare.length > 0) { preferredCandidates = [...tierCandidates, ...spare]; break; }
+      }
+    }
+    const ranked = balanced
       ? rankByBalance(
           preferredCandidates,
-          (accountId) => this.inFlightByAccount.get(accountId) ?? 0,
+          (accountId) => overflow ? this.accountLoad(accountId) : this.inFlightByAccount.get(accountId) ?? 0,
           now,
           workWeek,
-        )[0]
+        )
+      : [];
+    // With nothing free, prefer the shortest line among the preferred tier (stable on rank).
+    const leastLoaded = (entries: typeof ranked) => entries
+      .map((entry, index) => ({ entry, index, load: this.accountLoad(entry.account.id) / this.accountLimit(entry.account.id) }))
+      .sort((left, right) => left.load - right.load || left.index - right.index)[0]?.entry;
+    const next = balanced
+      ? (overflow ? ranked.find(placeable) ?? leastLoaded(ranked.filter(entry => tierCandidates.includes(entry))) : ranked[0])
       : ordered
           .map((account) =>
             preferredCandidates.find((candidate) => candidate.account.id === account.id),
           )
           .find((candidate) => candidate !== undefined);
+    // A warm conversation keeps its account unless that account cannot start the request
+    // now and another one can. The binding is kept, so later requests return to it.
+    const detour = (home: (typeof eligible)[number]) =>
+      overflow && next !== undefined && next !== home && !startsNow(home) && placeable(next);
     const selected = pinned ?? (
-      bound !== undefined && unattempted.includes(bound) && (candidates.length === 0 || tier(bound) <= bestTier)
+      bound !== undefined && unattempted.includes(bound) && (candidates.length === 0 || tier(bound) <= bestTier) && !detour(bound)
         ? bound
-        : ((inherited && (candidates.length === 0 || tier(inherited) <= bestTier) ? inherited : undefined) ??
+        : ((inherited && (candidates.length === 0 || tier(inherited) <= bestTier) && !detour(inherited) ? inherited : undefined) ??
           (draining.length === 0 && !balanced &&
           boundAccountId === null &&
           previousAccountId === null &&
@@ -1343,6 +1451,7 @@ export class AccountPoolHub {
     return {
       ...selected,
       keepAffinity: selected.account.id === routing.pinnedAccountId,
+      placed: this.place(selected.account.id),
       accept: () => {
         if (affinityKey !== null) this.options.affinity.recordObservation(affinityKey, selected.account.id, this.options.now());
         if (rebind && this.affinityBindings.get(affinityKey) === binding) {
@@ -1546,7 +1655,7 @@ export class AccountPoolHub {
     secret: AccountSecret,
     adapter: ProviderAdapter,
     trace: Trace, attempt: number, route:AccountRoute,
-    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;accountScope?:ClientAccountScope;credential?:string|null;deadline:number;onDispatch?:()=>void},
+    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;accountScope?:ClientAccountScope;credential?:string|null;deadline:number;onQueued?:()=>void;onDispatch?:()=>void},
     signal: AbortSignal, requestLifetime: AbortSignal,
   ): Promise<UpstreamResult> {
     const admissionSignal = signal;
@@ -1555,7 +1664,7 @@ export class AccountPoolHub {
       const hold = admission.freeTier
         ? null
         : this.options.quotas.get(account.id).heldUntil;
-      const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id) : null;
+      const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id, hold) : null;
       return hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
     };
     // Cursor streams depend on append and startup RPCs. Sharing their capacity
@@ -1569,9 +1678,12 @@ export class AccountPoolHub {
       && !['agent.v1.AgentService/Run','agent.v1.AgentService/RunSSE','agent.v1.AgentService/RunPoll'].includes(rpc);
     const gate = control ? this.cursorControlAdmission : this.admission;
     const queuedAt = this.options.now();
-    const waiting = gate.waiting(account.id)>0 || gate.reserved(account.id)>=this.options.getSettings().maxConcurrentRequestsPerAccount || (cooldown() ?? 0)>queuedAt;
+    const waiting = gate.waiting(account.id)>0 || gate.reserved(account.id)>=this.accountLimit(account.id) || (cooldown() ?? 0)>queuedAt;
     this.options.maintenance?.assertAllowed();
-    const slotRelease = await gate.acquire(account.id, admissionSignal, cooldown, deadline);
+    // acquire() enters the lane synchronously: from here the lane itself carries the load.
+    const entering = gate.acquire(account.id, admissionSignal, cooldown, deadline);
+    admission.onQueued?.();
+    const slotRelease = await entering;
     if (waiting) this.observe(trace,{event:'queue-wait',attempt,accountId:account.id,durationMs:Math.max(0,this.options.now()-queuedAt)});
     const controller = new AbortController();
     const abortFromRequest = () => controller.abort(requestLifetime.reason);
@@ -1630,7 +1742,7 @@ export class AccountPoolHub {
               this.options.maintenance?.assertAllowed();
               admission.onDispatch?.();
               this.observe(trace,{event:'attempt',attempt,accountId:account.id});
-              if (account.provider === 'claude') this.claudeStarts.dispatched(account.id);
+              if (account.provider === 'claude') this.claudeStarts.dispatched(account.id, admission.freeTier ? null : this.options.quotas.get(account.id).heldUntil);
               phase='after-headers';return {response: send()};
             });
             if (started.value !== null) return started.value.response;
@@ -1863,6 +1975,7 @@ export function createHub(options: {
   maintenance?: PoolMaintenance;
   accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
   pinnedRouteAccount?: (sessionKey:string)=>string|null;
+  routeCompatible?: (accountId:string,sessionKey:string|null)=>boolean;
   nativeAgyManaged?:()=>boolean;
   route: string;
   agyModels?:(ids:string[])=>Promise<void>;
@@ -1988,7 +2101,7 @@ export function createHub(options: {
     vpnPayload: options.vpnPayload,
     guardCheck: options.guardCheck,
     adapters,
-    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,pinnedRouteAccount:options.pinnedRouteAccount,
+    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,pinnedRouteAccount:options.pinnedRouteAccount,routeCompatible:options.routeCompatible,
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),

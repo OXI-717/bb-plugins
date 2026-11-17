@@ -69,6 +69,18 @@ may use another already-authorized eligible account under existing routing;
 family-specific quota rejections retain their existing quota/reset behavior.
 No new account is enabled or opted into any workload.
 
+### Load-aware placement (0.4.89)
+
+With the `balanced` strategy the pool no longer queues a request behind a full account while another account that the same caller may already use can start it now. "Full" means the account's slots are taken, counting requests that are running, waiting, or already placed on the account but not yet in its queue; a simultaneous burst therefore spreads over the free slots of all allowed accounts instead of piling onto the first one.
+
+- Among accounts of the preferred tier a free one is chosen first; the existing quota balance decides between free accounts. When none is free the request waits on the shortest line of the preferred tier.
+- When every preferred account is busy, the nearest less preferred tier that can start the request now is used (for example a reserve account of the same project). Project access, purpose opt-in, schedules, quota thresholds and reserve caps are evaluated exactly as before: only accounts that were already eligible for this request are considered.
+- A warm conversation keeps its account. It is moved for a single request only when that account is full and another one can start now; the binding is kept, so later requests return to it. A detour costs the prompt cache of that request on the other account.
+- A conversation is never moved onto an account that would leave its recorded egress decision: a pinned conversation stays on its pinned account, and a conversation recorded without a profile is not moved onto an account that has one.
+- A waiting request is not re-placed when another account frees up later, and a provider hold on the home account still waits in place.
+
+`busyOverflow` (default `true`) turns this off: `bb pool config set busyOverflow false` restores the former placement without a reload. The `sequential` strategy is unchanged.
+
 `status` adds per-account `queuedRequests` and `concurrencyLimit`. The settings UI
 shows current active/queued requests by provider and edits the shared account
 limit. `observations` returns only the last 100 rows plus aggregates over **all
