@@ -1690,7 +1690,7 @@ export class AccountPoolHub {
       const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id, hold) : null;
       const ready = hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
       // Woken by the release of a running request or by the end of the recovery window.
-      const full = admission.freeTier ? null : this.recoveryFullUntil(account.id);
+      const full = admission.freeTier || control ? null : this.recoveryFullUntil(account.id);
       return full === null ? ready : Math.max(ready ?? 0, full);
     };
     // Cursor streams depend on append and startup RPCs. Sharing their capacity
@@ -1726,7 +1726,7 @@ export class AccountPoolHub {
       controller.signal.removeEventListener("abort", abortRelease);
       this.activeControllers.delete(controller);
       this.decrement(account.id);
-      if (upstreamStarted) {
+      if (upstreamStarted && !control) {
         const running = (this.dispatchedByAccount.get(account.id) ?? 1) - 1;
         if (running <= 0) this.dispatchedByAccount.delete(account.id); else this.dispatchedByAccount.set(account.id, running);
       }
@@ -1774,7 +1774,7 @@ export class AccountPoolHub {
               this.stopped.signal.throwIfAborted();
               this.options.maintenance?.assertAllowed();
               admission.onDispatch?.();
-              if (!upstreamStarted) { upstreamStarted = true; this.dispatchedByAccount.set(account.id, (this.dispatchedByAccount.get(account.id) ?? 0) + 1); }
+              if (!upstreamStarted) { upstreamStarted = true; if (!control) this.dispatchedByAccount.set(account.id, (this.dispatchedByAccount.get(account.id) ?? 0) + 1); }
               this.observe(trace,{event:'attempt',attempt,accountId:account.id});
               if (account.provider === 'claude') this.claudeStarts.dispatched(account.id, admission.freeTier ? null : this.options.quotas.get(account.id).heldUntil);
               phase='after-headers';return {response: send()};

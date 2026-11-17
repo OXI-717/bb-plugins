@@ -882,6 +882,9 @@ describe("Account Pool plugin", () => {
       seen.push(new URL(r.url).pathname);
       return r.url.endsWith("/RunSSE")?new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array([1]));}})):Response.json({ok:true});
     }}});
+    await fixture.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:4});
+    const recoveryQuota=new QuotaStore(fixture.host.bb.storage.database());
+    recoveryQuota.put({...recoveryQuota.get(fixture.account.id),heldUntil:Date.now()-1});
     const call=(rpc:string)=>fixture.host.harness.behavior.fetchHttp("POST",dynamic?"/cursor/rpc":`/cursor/${rpc}`,{headers:{authorization:`Bearer ${fixture.key}`,"content-type":"application/connect+proto",...(dynamic?{"x-bb-cursor-rpc-path":rpc}:{})},body:"synthetic"});
     const streams=await Promise.all([call("agent.v1.AgentService/RunSSE"),call("agent.v1.AgentService/RunSSE")]);
     try {
