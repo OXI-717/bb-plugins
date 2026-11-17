@@ -145,7 +145,6 @@ export class AccountEgress {
     const old=sessionKey?this.sessions.get(sessionKey):undefined;
     if(old?.accountId===accountId){if( old.route.profile && !old.route.profile.hostIds.includes(await this.hostId()))throw new EgressUnavailable();return old.route;}
     const pin=sessionKey?this.state.pins[sessionKey]:undefined;
-    const previousUnassigned=sessionKey && this.state.unassigned[sessionKey]!==undefined;
     const ref=pin?.accountId===accountId?pin.ref:this.state.bindings[accountId];
     let route:AccountRoute={assigned:false,profile:null,fetch:()=>undefined};
     if(ref){
@@ -197,7 +196,7 @@ export class AccountEgress {
         if(prior)return;
         const unassigned=this.state.unassigned[sessionKey]??[];
         if(this.state.assignmentBlocked)return;
-        if(!prior && (ref ? !previousUnassigned : !unassigned.includes(accountId))){
+        if(!prior && (ref ? this.state.unassigned[sessionKey]===undefined : !unassigned.includes(accountId))){
           const next=ref
             ? {...this.state,pins:{...this.state.pins,[sessionKey]:{accountId,ref}}}
             : {...this.state,unassigned:{...this.state.unassigned,[sessionKey]:[...unassigned,accountId]}};

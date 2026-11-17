@@ -43,6 +43,11 @@ it('accepts newly persisted decisions with the 0.4.88 schema',async()=>{
  const kv={get:async(k:string)=>records.get(k),set:async(k:string,v:unknown)=>{records.set(k,v);},delete:async(k:string)=>{records.delete(k);},list:async()=>[...records.keys()]};
  const e=new AccountEgress(kv,async()=>'fixture-host',async()=>true);
  await e.acquire('11111111-1111-4111-8111-111111111111','conversation');
+ await e.configure({id:'fixture-proxy',version:1,label:'Fixture',hostIds:['fixture-host'],transport:'http-connect',endpoint:'http://proxy.example.test:8080/',secretRef:'22222222-2222-4222-8222-222222222222',failure:'closed'});
+ // Persisted profile/binding shapes also remain accepted by the old parser.
+ await e.bind('11111111-1111-4111-8111-111111111111',{id:'fixture-proxy',version:1});
+ const state=records.get('account-egress-v1') as any;
+ state.pins.home={accountId:'11111111-1111-4111-8111-111111111111',ref:{id:'fixture-proxy',version:1}};
  expect(egressStateSchema.parse(records.get('account-egress-v1'))).toEqual(records.get('account-egress-v1'));
  await e.close();
 });

@@ -13,6 +13,7 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   maxConcurrentRequestsPerAccount: 2,
   claudeRequestStartIntervalMs: 0,
   busyOverflow: true,
+  pinnedFailover: false,
   switchThreshold: 0.98,
   routingStrategy: "sequential" as const,
   reserveDrainHours: 24,
@@ -94,6 +95,7 @@ export const accountPoolConfigSchema = z
     ),
     claudeRequestStartIntervalMs: z.number().int().min(0).max(60_000).default(DEFAULT_ACCOUNT_POOL_CONFIG.claudeRequestStartIntervalMs),
     maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).default(DEFAULT_ACCOUNT_POOL_CONFIG.maxConcurrentRequestsPerAccount),
+    pinnedFailover: z.boolean().default(false),
     busyOverflow: z.boolean().default(DEFAULT_ACCOUNT_POOL_CONFIG.busyOverflow),
     switchThreshold: switchThresholdSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.switchThreshold,
@@ -129,6 +131,7 @@ export const accountPoolConfigSetInputSchema = z
     maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).optional(),
     claudeRequestStartIntervalMs: z.number().int().min(0).max(60_000).optional(),
     busyOverflow: z.boolean().optional(),
+    pinnedFailover: z.boolean().optional(),
     switchThreshold: switchThresholdSchema.optional(),
     routingStrategy: routingStrategySchema.optional(),
     reserveDrainHours: reserveDrainHoursSchema.optional(),

@@ -66,3 +66,31 @@ it.each(['bypass','routing-off','account-disabled'] as const)('cancels queued re
  const hook=host.harness.registrations.hooks['message.dispatch']!;
  expect(await hook(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},requestedExecution:{providerId:'acp-opencode-kimi'},queuedMessage:{id:'retry-one',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}}))).toMatchObject({action:'reject'});
 });
+
+it('validates manual choices, persists selection and rejects bypass and foreign accounts',async()=>{
+ const {host,account,token}=await setup('claude','claude-code');
+ const call=(method:string,input:unknown)=>host.harness.behavior.callRpc(method,input);
+ const other=await call('account.add',{provider:'claude',source:{kind:'api-key',apiKey:'synthetic-other'},label:'Other',priority:1}) as Account;
+ const foreign=await call('account.add',{provider:'kimi',source:{kind:'api-key',apiKey:'synthetic-foreign'},label:'Foreign',priority:1}) as Account;
+ expect(await call('thread.accountChoices',{threadId:'thread-one'})).toMatchObject({mode:'auto'});
+ expect(await call('thread.switchAccount',{threadId:'thread-one',accountId:other.id})).toMatchObject({mode:'manual',currentAccountId:other.id});
+ await expect(call('thread.switchAccount',{threadId:'thread-one',accountId:foreign.id})).rejects.toThrow();
+ const response=await host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:'{}'});
+ expect(response.status).toBe(200);await response.text();
+ expect(await call('thread.account',{threadId:'thread-one'})).toMatchObject({account:{id:other.id}});
+ await call('account.disable',{id:other.id});
+ await expect(call('thread.switchAccount',{threadId:'thread-one',accountId:other.id})).rejects.toThrow();
+ await call('account.setProjects',{accountId:account.id,projects:{onlySelected:true,rules:[{projectId:'other-project',role:'primary'}]}});
+ await expect(call('thread.switchAccount',{threadId:'thread-one',accountId:account.id})).rejects.toThrow();
+ await call('bypass.set',{threadId:'thread-one',bypassed:true});
+ await expect(call('thread.switchAccount',{threadId:'thread-one',accountId:null})).rejects.toThrow();
+});
+
+it('keeps failover opt-in configurable through CLI without a UI setting',async()=>{
+ const {host}=await setup('claude','claude-code');
+ expect(await host.harness.behavior.callRpc('config.get',null)).toMatchObject({pinnedFailover:false});
+ const result=await host.harness.behavior.runCli(['config','set','pinnedFailover','true']);
+ expect(result.exitCode).toBe(0);
+ expect(await host.harness.behavior.callRpc('config.get',null)).toMatchObject({pinnedFailover:true});
+ expect((await host.harness.behavior.runCli(['config'])).stdout).toContain('pinnedFailover: true');
+});

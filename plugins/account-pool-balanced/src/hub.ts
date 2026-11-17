@@ -123,8 +123,9 @@ const DROPPED_RESPONSE_HEADERS = new Set([
 interface HubOptions {
   maintenance?: PoolMaintenance;
   accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  manualRouteAccount?: (sessionKey:string)=>Promise<string|null>;
   pinnedRouteAccount?: (sessionKey:string)=>string|null;
-  /** False when the account would serve this conversation outside its recorded route decision. */
+  /** Placement preference only: load must not move an eligible home account. */
   routeCompatible?: (accountId:string,sessionKey:string|null)=>boolean;
   nativeAgyManaged?:()=>boolean;
   journal?: RequestJournal;
@@ -756,7 +757,8 @@ export class AccountPoolHub {
         : JSON.stringify([adapter.provider, affinityHost, parsed.parentAffinityId]);
     const routeSessionKey=threadId===null?affinityKey:JSON.stringify([accountScope?affinityHost:hostId,projectId,threadId,adapter.provider]);
     try {
-      const pinnedRouteAccountId=routeSessionKey===null?null:this.options.pinnedRouteAccount?.(routeSessionKey)??null;
+      const pinnedRouteAccountId=routeSessionKey===null?null:(await this.options.manualRouteAccount?.(routeSessionKey))??this.options.pinnedRouteAccount?.(routeSessionKey)??null;
+      if(pinnedRouteAccountId && !this.options.getSettings().pinnedFailover && !candidateIds.has(pinnedRouteAccountId))return result(this.noEligibleResponse(accounts.filter(a=>a.id===pinnedRouteAccountId),family,adapter,projectId,request,purpose));
       while (attempted.size < candidateIds.size) {
         signal.throwIfAborted();
         this.options.maintenance?.assertAllowed();
@@ -1048,7 +1050,7 @@ export class AccountPoolHub {
       }
       signal.throwIfAborted();
       return result(failure === null
-        ? this.noEligibleResponse(accounts, family, adapter, projectId, request, purpose)
+        ? this.noEligibleResponse(!this.options.getSettings().pinnedFailover && pinnedRouteAccountId ? accounts.filter(a=>a.id===pinnedRouteAccountId) : accounts, family, adapter, projectId, request, purpose)
         : this.errorResponse(adapter, request,
             failure.status,
             failure.message,
@@ -1315,7 +1317,7 @@ export class AccountPoolHub {
     const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose, freeTier);
     const unattempted = eligible.filter(
       ({ account }) =>
-        candidateIds.has(account.id) && !attempted.has(account.id),
+        candidateIds.has(account.id) && !attempted.has(account.id) && (settings.pinnedFailover || pinnedRouteAccountId===null || account.id===pinnedRouteAccountId),
     );
     // The persisted route pin outlives ordinary affinity. Reuse the same policy
     // predicate, never an arbitrary account lookup or a different candidate.
@@ -1371,7 +1373,7 @@ export class AccountPoolHub {
     // Load-aware placement (balanced strategy). A request should not wait behind a full
     // account while another account this caller may already use can start it now. Only
     // accounts the existing project, purpose, quota and schedule policy already admits
-    // are considered, and never one that would leave the conversation's recorded route.
+    // are considered; placement preferences keep eligible home accounts in place.
     const overflow = balanced && settings.busyOverflow;
     const startsNow = (entry: (typeof eligible)[number]) =>
       this.accountLoad(entry.account.id) < this.accountLimit(entry.account.id);
@@ -2008,6 +2010,7 @@ export class AccountPoolHub {
 export function createHub(options: {
   maintenance?: PoolMaintenance;
   accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  manualRouteAccount?: (sessionKey:string)=>Promise<string|null>;
   pinnedRouteAccount?: (sessionKey:string)=>string|null;
   routeCompatible?: (accountId:string,sessionKey:string|null)=>boolean;
   nativeAgyManaged?:()=>boolean;
@@ -2135,7 +2138,7 @@ export function createHub(options: {
     vpnPayload: options.vpnPayload,
     guardCheck: options.guardCheck,
     adapters,
-    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,pinnedRouteAccount:options.pinnedRouteAccount,routeCompatible:options.routeCompatible,
+    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,manualRouteAccount:options.manualRouteAccount,pinnedRouteAccount:options.pinnedRouteAccount,routeCompatible:options.routeCompatible,
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),

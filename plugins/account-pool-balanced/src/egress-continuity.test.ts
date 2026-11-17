@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
+import {ThreadAccountSelection} from './thread-account-selection.js';
 import { AccountEgress } from './account-egress.js';
 import { createHub } from './hub.js';
 import { accountPoolConfigSchema, type PoolProvider } from './contracts.js';
@@ -45,8 +46,9 @@ async function fixture(provider: PoolProvider = 'claude', threadBound = true) {
     egressInstances.push(e); await e.initialize(); return e;
   };
   let egress = await newEgress();
+  const manual=new ThreadAccountSelection(host.bb.storage.kv,async id=>(await accounts.list()).some(a=>a.id===id));
   cleanups.push(async () => { for (const e of egressInstances) await e.close(); });
-  const settings = accountPoolConfigSchema.parse({ vpnOnlyProviders: [], vpnGuardEnabled: true, vpnPolicyVersion: 2 });
+  const settings = accountPoolConfigSchema.parse({ vpnOnlyProviders: [], vpnGuardEnabled: true, vpnPolicyVersion: 2, pinnedFailover:true });
   let guardAllowed = true;
   let guardAction = async () => {};
   const sends: Array<{ key: string | null; assigned: boolean; model: string }> = [];
@@ -69,6 +71,7 @@ async function fixture(provider: PoolProvider = 'claude', threadBound = true) {
           ...(threadBound ? { threadId: token!.replace(/^auto:/, '') } : {}),
           ...(token!.startsWith('auto:') ? { purpose: 'autopilot' as const } : {}) }) },
       accountRoute: async (id, key) => { const route = await egress.acquire(id, key); if (key) versions.push(route.profile?.version ?? null); return route; },
+      manualRouteAccount:key=>manual.get(key),
       pinnedRouteAccount: key => egress.pinnedAccount(key),
       guardCheck: async () => { await guardAction(); if (!guardAllowed) throw Error('fixture guard refusal'); return 'direct'; },
       fetch: transport(false), fetchIpv4: transport(false), now: () => now });
@@ -79,7 +82,7 @@ async function fixture(provider: PoolProvider = 'claude', threadBound = true) {
   };
   let hub = newHub();
   return { accounts, quotas, affinity, a, b, sends, versions, sessionKey, affinityKey,
-    egress: () => egress, settings,
+    egress: () => egress, settings, manual,
     advance: (ms = TTL + 1) => { now += ms; },
     guard: (allowed: boolean) => { guardAllowed = allowed; },
     onGuard: (action: () => Promise<void>) => { guardAction = action; },
@@ -103,7 +106,7 @@ async function fixture(provider: PoolProvider = 'claude', threadBound = true) {
         method: 'POST', headers: { authorization: `Bearer ${autopilot ? 'auto:' : ''}${thread}`, 'content-type': 'application/json', 'session_id': thread },
         body: JSON.stringify({ model, messages: [], metadata: { user_id: JSON.stringify({ session_id: thread }) } }),
       }), provider);
-      await response.text(); return response;
+      await response.clone().text(); return response;
     },
   };
 }
@@ -214,3 +217,20 @@ for (const mode of ['ttl', 'restart'] as const) {
     expect(f.egress().snapshot().pins[f.sessionKey]).toEqual({ accountId: f.a.id, ref: { id: profile.id, version: 1 } });
   });
 }
+
+it('keeps exhausted home by default and returns its reset reason',async()=>{
+ const f=await fixture();await f.seedAssigned();f.settings.pinnedFailover=false;
+ f.quotas.put({...f.quotas.get(f.a.id),fiveHourUtilization:1,fiveHourResetAt:2000000000000});
+ const r=await f.request();expect(r.status).toBe(403);
+ expect(r.headers.get('x-bb-pool-error')).not.toBe('POOL_EGRESS_UNAVAILABLE');
+ expect(await r.text()).toContain(new Date(2000000000000).toISOString());expect(f.sends).toEqual([]);
+});
+it.each([true,false])('applies manual account immediately with own route assigned=%s and returns home',async assigned=>{
+ const f=await fixture();await f.seedAssigned();f.settings.pinnedFailover=false;
+ if(assigned)await f.egress().bind(f.b.id,{id:profile.id,version:1});
+ await f.request();await f.manual.set(f.sessionKey,f.b.id);
+ expect((await f.request()).status).toBe(200);expect(f.sends.at(-1)).toMatchObject({key:'fixture-b',assigned});
+ await f.restart();expect((await f.request()).status).toBe(200);expect(f.sends.at(-1)?.key).toBe('fixture-b');
+ await f.manual.set(f.sessionKey,null);expect((await f.request()).status).toBe(200);
+ expect(f.sends.at(-1)).toMatchObject({key:'fixture-a',assigned:true});
+});
