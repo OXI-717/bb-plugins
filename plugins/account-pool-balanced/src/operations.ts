@@ -36,6 +36,7 @@ interface PoolProviderState {
 const ROUTED_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 export class PoolOperations {
+  routeTracking?:()=>Promise<NonNullable<PoolStatus["routeTracking"]>>;
   constructor(
     private readonly accounts: AccountStore,
     private readonly quotas: QuotaStore,
@@ -361,6 +362,8 @@ export class PoolOperations {
     const hosts = await this.listHosts();
     await this.hubTokens.prune(hosts.map((host) => host.id));
     const status = await this.hub.status();
+    const routeTracking=await this.routeTracking?.();
+    const history=this.hub.trafficHistory(0,1);
     const hostNames = new Map(hosts.map((host) => [host.id, host.name]));
     const [claude, codex, kimi, zai, opencodeGo, neuraldeep, agy, cursor, devin, grok] = await Promise.all([
       this.routing.isProviderEnabled("claude"),
@@ -376,6 +379,8 @@ export class PoolOperations {
     ]);
     return {
       ...status,
+      routeTracking,
+      historyCapacity:"totalRows" in history?{rows:history.totalRows,maxRows:history.maxRows,maxBytes:history.maxBytes}:undefined,
       hosts: status.hosts.map((token) => ({
         ...token,
         hostName: hostNames.get(token.hostId) ?? null,

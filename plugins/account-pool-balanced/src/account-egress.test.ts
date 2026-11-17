@@ -128,3 +128,30 @@ it('reports which accounts keep a conversation on its recorded route decision',a
  // Unbinding changes new decisions only; it makes the account plain for a plain conversation.
  await e.bind(a,null);expect(e.compatible(a,'plain')).toBe(true);expect(e.compatible(b,'pinned')).toBe(false);
 });
+it('prunes expired and removed decisions without changing the persisted schema',async()=>{
+ const kv=storage();const clock=40*86400000;const seen=new Map([['expired',1],['warm',clock]]);
+ const e=new AccountEgress(kv,async()=>'host-one',async id=>id===a,undefined,()=>clock,undefined,key=>seen.get(key)??null);
+ cleanup.push(()=>e.close());
+ await kv.set('account-egress-v1',{schema:1,profiles:[profile],bindings:{},pins:{expired:{accountId:a,ref:{id:profile.id,version:1}},warm:{accountId:a,ref:{id:profile.id,version:1}}},unassigned:{removed:[b],unknown:[a]},assignmentBlocked:true});
+ await e.initialize();
+ expect(Object.keys(e.snapshot().pins)).toEqual(['warm']);expect(e.snapshot().unassigned).toEqual({unknown:[a]});expect(e.snapshot().assignmentBlocked).toBe(false);
+ expect(e.capacity()).toMatchObject({decisions:2,maxDecisions:4096});
+});
+it('gives unknown-age records a grace period and retains recently used routes',async()=>{
+ const kv=storage();let clock=40*86400000;
+ await kv.set('account-egress-v1',{schema:1,profiles:[],bindings:{},pins:{},unassigned:{idle:[a],active:[a]},assignmentBlocked:false});
+ const e=new AccountEgress(kv,async()=>'host-one',async()=>true,undefined,()=>clock);cleanup.push(()=>e.close());await e.initialize();
+ clock+=29*86400000;await e.acquire(a,'active');
+ clock+=2*86400000;await e.cleanup();
+ expect(e.snapshot().unassigned).toEqual({active:[a]});
+});
+
+it('releases memory bookkeeping after the last account decision disappears',async()=>{
+ const kv=storage();let present=true,clock=40*86400000;
+ const e=new AccountEgress(kv,async()=>'host-one',async()=>present,undefined,()=>clock);cleanup.push(()=>e.close());
+ await e.initialize();await e.configure(profile);await e.bind(a,{id:profile.id,version:1});await e.acquire(a,'gone');
+ clock+=3600001;await e.cleanup();expect(e.capacity()).toMatchObject({trackedKeys:1,cachedRoutes:1});
+ present=false;clock+=3600001;await e.cleanup();
+ expect(e.capacity()).toMatchObject({decisions:0,trackedKeys:0,cachedRoutes:0});
+ clock+=3600001;await e.cleanup();expect(e.capacity()).toMatchObject({trackedKeys:0,cachedRoutes:0});
+});

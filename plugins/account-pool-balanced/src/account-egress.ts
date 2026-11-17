@@ -39,6 +39,7 @@ export const egressStateSchema = z.object({schema:z.literal(1),profiles:z.array(
   unassigned:z.record(z.string().max(2048),z.array(z.string().uuid()).min(1).max(128)).default({}),
   assignmentBlocked:z.boolean().default(false),
 }).strict();
+export const ROUTE_RETENTION_MS=30*86400000;
 const MAX_REGISTRY_BYTES=240*1024; // Reserve space below the SDK's 256 KiB value bound.
 const registryBytes=(state:unknown)=>Buffer.byteLength(JSON.stringify(state),'utf8');
 const decisionCount=(state:z.infer<typeof egressStateSchema>)=>Object.keys(state.pins).length+
@@ -65,18 +66,46 @@ export class AccountEgress {
   private state:z.infer<typeof egressStateSchema> = {schema:1,profiles:[],bindings:{},pins:{},unassigned:{},assignmentBlocked:false};
   private readonly agents = new Map<string,ProxyAgent>();
   private readonly sessions = new Map<string,{accountId:string;route:AccountRoute}>();
+  private readonly lastSeen=new Map<string,number>();
+  private lastCleanup=Number.NEGATIVE_INFINITY;
   private mutation:Promise<unknown> = Promise.resolve();
   private readonly scopeAcceptances:HttpScopeAcceptances;
   constructor(private readonly kv:PoolKvStorage,private readonly hostId:()=>Promise<string>,
     private readonly accountExists:(id:string)=>Promise<boolean>,private readonly proxySecrets?:ProxySecrets,
-    now:()=>number=Date.now,enforcement?:HttpScopeEnforcementSource){
+    private readonly now:()=>number=Date.now,enforcement?:HttpScopeEnforcementSource,
+    private readonly observedAt:(key:string)=>number|null=()=>null){
       this.scopeAcceptances=new HttpScopeAcceptances(kv,now,enforcement);
     }
   async initialize(){
     const stored=await this.kv.get('account-egress-v1');if(stored!==undefined)this.state=egressStateSchema.parse(stored);
     await this.scopeAcceptances.initialize();
+    await this.cleanup();
     if(decisionCount(this.state)>=4096 || registryBytes(this.state)>=MAX_REGISTRY_BYTES)this.state.assignmentBlocked=true;
   }
+  capacity(){return {decisions:decisionCount(this.state),maxDecisions:4096,bytes:registryBytes(this.state),maxBytes:MAX_REGISTRY_BYTES,retentionMs:ROUTE_RETENTION_MS,trackedKeys:this.lastSeen.size,cachedRoutes:this.sessions.size};}
+  cleanup(){return this.update(async()=>{
+    const now=this.now();if(now-this.lastCleanup<3600000)return;
+    const next=structuredClone(this.state),known=new Map<string,boolean>();
+    const exists=async(id:string)=>{if(!known.has(id))known.set(id,await this.accountExists(id));return known.get(id)!;};
+    for(const key of new Set([...Object.keys(next.pins),...Object.keys(next.unassigned)])){
+      const observed=this.observedAt(key);
+      const last=Math.max(this.lastSeen.get(key)??observed??now,observed??0);
+      this.lastSeen.set(key,last);
+      if(now-last>ROUTE_RETENTION_MS){delete next.pins[key];delete next.unassigned[key];this.sessions.delete(key);this.lastSeen.delete(key);continue;}
+      const pin=next.pins[key];
+      if(pin&&!await exists(pin.accountId)){delete next.pins[key];this.sessions.delete(key);}
+      if(next.unassigned[key]){
+        const retained=[];for(const id of next.unassigned[key])if(await exists(id))retained.push(id);
+        if(retained.length)next.unassigned[key]=retained;else delete next.unassigned[key];
+      }
+    }
+    // Only cleanup that actually frees decisions may reopen bookkeeping.
+    if(decisionCount(next)<decisionCount(this.state)&&decisionCount(next)<4096&&registryBytes(next)<MAX_REGISTRY_BYTES)next.assignmentBlocked=false;
+    if(JSON.stringify(next)!==JSON.stringify(this.state)){await this.kv.set('account-egress-v1',next);this.state=next;}
+    for(const key of this.lastSeen.keys())if(!next.pins[key]&&!next.unassigned[key]){this.lastSeen.delete(key);this.sessions.delete(key);}
+    for(const key of this.sessions.keys())if(!next.pins[key]&&!next.unassigned[key])this.sessions.delete(key);
+    this.lastCleanup=now;
+  });}
   snapshot(){return structuredClone(this.state);}
   async acceptScope(value:unknown){
     const input=httpScopeAcceptInputSchema.parse(value);
@@ -142,6 +171,8 @@ export class AccountEgress {
     await this.kv.set('account-egress-v1',next);this.state=next;
   });}
   async acquire(accountId:string,sessionKey?:string|null):Promise<AccountRoute>{
+    if(sessionKey&&(this.state.pins[sessionKey]||this.state.unassigned[sessionKey]))this.lastSeen.set(sessionKey,this.now());
+    await this.cleanup();
     const old=sessionKey?this.sessions.get(sessionKey):undefined;
     if(old?.accountId===accountId){if( old.route.profile && !old.route.profile.hostIds.includes(await this.hostId()))throw new EgressUnavailable();return old.route;}
     const pin=sessionKey?this.state.pins[sessionKey]:undefined;
