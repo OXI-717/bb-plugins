@@ -135,7 +135,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   // ---------- row status ----------
   function currentRowStatus(peer) {
     const label=peer.label;
-    if (peer.state === "open") return { icon: "Network", label, tone: "default" };
+    if (peer.state === "open") return null;
     return { icon: "Network", label: `${label}: ${peer.state === "offline" ? "offline" : "connecting"}`, tone: peer.state === "offline" ? "error" : "default" };
   }
   function applyRowStatus(id) {
@@ -440,6 +440,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   const coreUrl = `${wsProto}//${win.location.host}/ws`;
   const remoteUrl = `${wsProto}//${win.location.host}${BRIDGE}/remote-ws`;
   function acceptRemote(m,peer){
+    if(m?.type==="thread-timeline")return m.target?.kind==="thread-timeline"&&owners.get(m.target.threadId)===peer&&!conflicts.has(m.target.threadId);
     return m?.type==="changed" && ["thread","project","environment","host"].includes(m.entity) && owners.get(m.id)===peer && !conflicts.has(m.id);
   }
   class FederatedSocket extends win.EventTarget {
@@ -478,20 +479,31 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     _refreshHost(id){this._emitJson({type:'changed',entity:'host',id,changes:['host-connected']});}
     _refreshThread(id){this._emitJson({type:"changed",entity:"thread",id,changes:["events-appended","interactions-changed","status-changed","queue-changed"]});}
     _restorePrimaryId(id){
-      for(const [key,raw]of this._allSubs){const t=JSON.parse(raw).target;if((t.threadId??t.projectId??t.environmentId??t.hostId)!==id)continue;
+      for(const [key,raw]of this._allSubs){const t=JSON.parse(raw).target??{};if((t.threadId??t.projectId??t.environmentId??t.hostId)!==id)continue;
         for(const c of this._channels.values())if(c.subs.delete(key)&&c.ws?.readyState===1)c.ws.send(JSON.stringify({type:"unsubscribe",target:t}));
         if(this._primary.readyState===1)this._primary.send(raw);
       }
     }
     _adoptRemoteId(id,peer,notify){
       const c=this._channels.get(peer);if(!c)return;
-      for(const [key,raw]of this._allSubs){const target=JSON.parse(raw).target;if((target.threadId??target.projectId??target.environmentId??target.hostId)!==id||c.subs.has(key))continue;c.subs.set(key,raw);if(this._primary.readyState===1)this._primary.send(JSON.stringify({type:"unsubscribe",target}));if(c.ws?.readyState===1)c.ws.send(raw);}
+      for(const [key,raw]of this._allSubs){const target=JSON.parse(raw).target??{};if((target.threadId??target.projectId??target.environmentId??target.hostId)!==id||c.subs.has(key))continue;c.subs.set(key,raw);if(this._primary.readyState===1)this._primary.send(JSON.stringify({type:"unsubscribe",target}));if(c.ws?.readyState===1)c.ws.send(raw);}
       if(notify&&c.ready&&id.startsWith("thr_"))this._refreshThread(id);
       if(notify&&c.ready&&id.startsWith('host_'))this._refreshHost(id);
     }
     send(data){
       let m;try{m=JSON.parse(data);}catch{this._primary.send(data);return;}
+      if((m?.type==="subscribe"||m?.type==="unsubscribe")&&Array.isArray(m.targets)){
+        for(const target of m.targets){
+          if(!target||typeof target!=="object"||typeof target.kind!=="string")continue;
+          const {targets,timelineTags,...single}=m;
+          // Timeline tags belong only to their matching subscription, not other peers.
+          const tags=timelineTags&&Object.fromEntries(Object.entries(timelineTags).filter(([key])=>key===`thread-timeline:${target.threadId}:${target.segmentLimit??"default"}:${target.deferContent?"deferred":"inline"}`));
+          this.send(JSON.stringify({...single,target,...(tags&&Object.keys(tags).length?{timelineTags:tags}:{})}));
+        }
+        return;
+      }
       if(m?.type==="subscribe"||m?.type==="unsubscribe"){
+        if(!m.target||typeof m.target!=="object"||typeof m.target.kind!=="string")return;
         const t=m.target??{},key=JSON.stringify(t),id=t.threadId??t.projectId??t.environmentId??t.hostId;
         if(m.type==="subscribe")this._allSubs.set(key,data);else this._allSubs.delete(key);
         if(conflicts.has(id))return;

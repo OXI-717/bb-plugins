@@ -32,7 +32,7 @@ test('one failed list/channel leaves other remote and primary alive; retries and
  socket.send(JSON.stringify({type:'subscribe',target:{kind:'thread-list'}}));
  socket.send(JSON.stringify({type:'subscribe',target:{kind:'thread-detail',threadId:'thr_beta'}}));
  assert.equal(a.sent.length,1);assert.equal(b.sent.length,2);assert.equal(primary.sent.length,1);
- a.close(4001);assert.equal(rows.get('thr_alpha').tone,'error');assert.equal(rows.get('thr_beta').tone,'default');assert.equal(primary.readyState,1);assert.equal(b.readyState,1);
+ a.close(4001);assert.equal(rows.get('thr_alpha').tone,'error');assert.equal(rows.has('thr_beta'),false);assert.equal(primary.readyState,1);assert.equal(b.readyState,1);
  remotes.alpha['GET /api/v1/sidebar-bootstrap']=()=>{throw Error('offline')};const result=await(await e.win.fetch('/api/v1/sidebar-bootstrap')).json();assert.equal(result.projects.length,3);
  f.dispose();assert.equal(e.timers.size,0);assert.ok(e.FakeWS.all.every(s=>s.readyState===3));
 });

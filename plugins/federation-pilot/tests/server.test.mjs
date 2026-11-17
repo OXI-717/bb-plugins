@@ -129,3 +129,20 @@ test('actual upstream blocks config changed during the awaited probe',async()=>{
   assert.equal(h.calls.filter(c=>c.method==='imageUpload'||c.method==='handoffUpload').length,0);
  }finally{await h.dispose();}}
 });
+
+test('timeline subscriptions forward only verified subscribed thread frames',async()=>{
+ const h=harness();try{
+  const ws={readyState:1,sent:[],send(s){this.sent.push(JSON.parse(s))},close(){this.readyState=3}};
+  const handlers=h.sockets.get('/remote-ws')({url:new URL('http://primary.invalid/remote-ws?serverId=alpha')});await handlers.onOpen(ws);
+  const target={kind:'thread-timeline',threadId:'thr_alpha',segmentLimit:null,deferContent:true};
+  const conn=h.calls.find(c=>c.method==='connect');
+  const emit=t=>h.signals.get('frame')({hostId:'host_bridge',payload:{id:conn.id,data:JSON.stringify({type:'thread-timeline',target:t,timeline:{tag:'test',rows:[]}})}});
+  const before=ws.sent.length;emit(target);assert.equal(ws.sent.length,before,'unsolicited timeline rejected');
+  await handlers.onMessage(ws,JSON.stringify({type:'subscribe',target}));
+  assert.ok(h.calls.some(c=>c.method==='send'&&JSON.parse(c.data).target?.kind==='thread-timeline'));
+  emit({...target,threadId:'thr_beta'});assert.equal(ws.sent.length,before,'neighbor rejected');
+  emit({deferContent:true,segmentLimit:null,threadId:'thr_alpha',kind:'thread-timeline'});assert.equal(ws.sent.length,before+1,'wire property order is immaterial');
+  await handlers.onMessage(ws,JSON.stringify({type:'unsubscribe',target}));emit(target);assert.equal(ws.sent.length,before+1,'unsubscribed rejected');
+  await handlers.onClose();
+ }finally{await h.dispose();}
+});
