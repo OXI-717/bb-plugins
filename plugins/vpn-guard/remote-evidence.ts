@@ -1,5 +1,6 @@
 import {z} from 'zod';
-import type {VpnEvidence,VpnState} from './vpn-evidence.js';
+import type {VpnState} from './vpn-evidence.js';
+import type {VpnEvidence} from './passive-state.js';
 const VPN_FILE_TTL_MS=90_000;
 const VPN_PROBE_TTL_MS=390_000;
 
@@ -25,6 +26,10 @@ export async function readRemoteEvidence(call:(timeoutMs:number)=>Promise<HostSt
   const now=Date.now();
   const fresh=(at:number|null,ttl:number)=>at!==null&&Number.isSafeInteger(at)&&now-at>=0&&now-at<=ttl;
   let reason:string|null=null;
+  if(evidence?.assurance==='system_ipv4') {
+    if(result.state!=='connected'||evidence.state!=='connected'||evidence.reason!=='ok'||!['incy','tailscale'].includes(evidence.source??'')||evidence.probeAt!==null)reason='invalid_evidence';
+    else if(!fresh(evidence.updatedAt,10_000))reason='file_stale_or_schema';
+  }
   if(evidence&&evidence.assurance==='verified_ipv4') {
     if(result.state!==evidence.state||evidence.state!=='connected'||evidence.reason!=='ok')reason='invalid_evidence';
     else if(!fresh(evidence.updatedAt,VPN_FILE_TTL_MS))reason='file_stale_or_schema';

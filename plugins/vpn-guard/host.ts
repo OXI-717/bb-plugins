@@ -1,4 +1,5 @@
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
+import {selectVpnEvidence} from './passive-state.js';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import {automationCommand} from './automation-host.js';
@@ -9,7 +10,8 @@ export default experimental_defineHostEntry({
   handlers: {
     automation:automationCommand,
     async readState() {
-      const evidence=await readVpnEvidence(path.join(homedir(),'.local','state','vpnks','vpn-state.json'));
+      const file=path.join(homedir(),'.local','state','vpnks','vpn-state.json');
+      const evidence=await selectVpnEvidence(file,await readVpnEvidence(file));
       return {state:evidence.state,evidence};
     },
   },

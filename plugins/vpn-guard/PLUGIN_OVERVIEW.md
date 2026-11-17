@@ -2,7 +2,7 @@
 
 ## Русский
 
-Плагин BB 0.46+ управляет запуском Codex, Claude, Cursor и Devin на выбранных машинах. Начинает с наблюдения. В режиме защиты недоступный VPN удерживает новые сообщения в очереди и останавливает защищённые треды. Кнопка **«Заблокировать»** включает постоянный ручной блок даже при подключённом VPN и в режиме наблюдения. **«Снять блок»** возвращает выбранный режим. Kimi и Z.ai остаются доступны.
+Плагин BB 0.46+ управляет запуском Codex, Claude, Cursor и Devin на выбранных машинах. Начинает с наблюдения. В режиме защиты недоступный VPN удерживает новые сообщения в очереди и останавливает защищённые треды. Кнопка **«Заблокировать»** включает постоянный ручной блок даже при подключённом VPN и в режиме наблюдения. **«Снять блок»** возвращает выбранный режим. Kimi и Z.ai остаются доступны. Если машину просто не удалось прочитать, работающие треды останавливаются только после 90 секунд непрерывной ненаблюдаемости; новые ходы ждут сразу, явное «VPN не подключён» и ручной блок действуют сразу.
 
 В панели можно выбрать RU/EN. Настройка «Приостанавливать встроенные Codex и Claude без VPN» включается отдельно и действует на все машины BB. Guard автоматически возвращает свои подтверждённые отключения после снятия ручного блока и восстановления VPN на всех выбранных машинах. Это управление BB: Send-now обходит очередь, завершение открытых соединений и bridge-процессов не гарантируется. [Управление и ограничения](docs/operations.md). [Общий стандарт интерфейсов](../../docs/plugin-ui-standard.md).
 
@@ -10,7 +10,7 @@ Guard работает самостоятельно и вместе с Pooler б
 
 ## English
 
-BB 0.46+ selected-machine admission control for Codex, Claude, Cursor and Devin. Starts in Observe. Enforce holds new protected messages and stops running protected threads on unavailable VPN. **Block** persists a manual override even with connected VPN and in Observe. **Unblock** returns to the selected mode. Kimi and Z.ai remain available. The panel provides RU/EN.
+BB 0.46+ selected-machine admission control for Codex, Claude, Cursor and Devin. Starts in Observe. Enforce holds new protected messages and stops running protected threads on unavailable VPN. **Block** persists a manual override even with connected VPN and in Observe. **Unblock** returns to the selected mode. Kimi and Z.ai remain available. A machine that merely cannot be read stops running threads only after 90 seconds of continuous unobservability; new turns wait at once, and explicit not-connected evidence and manual blocks act immediately. The panel provides RU/EN.
 
 Optional global native Codex/Claude suspension requires separate opt-in and automatically restores only confirmed Guard-owned disables after VPN recovery on all selected machines. Send-now bypasses admission; active connections and bridges are not proven stopped. See [operations and limits](docs/operations.md). Built from the public BB Plugin SDK; state reading follows Account Pooler policy (MIT).
 
