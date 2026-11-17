@@ -1,4 +1,4 @@
-import { inClientScope, clientRouteAllowed, type ClientAccountScope } from "./client-scope.js";
+import { inClientScope, clientRouteAllowed, requiresClientVpn, type ClientAccountScope } from "./client-scope.js";
 import {PoolMaintenanceError, type PoolMaintenance} from './maintenance.js';
 import {GuardRequiredError} from './network-errors.js';
 import {CURSOR_RPC_PATH_HEADER} from './cursor-rpc.js';
@@ -685,7 +685,7 @@ export class AccountPoolHub {
         const assertScope=()=>{
           if(!clientRouteAllowed(acquired,accountScope,selected.account.id,this.options.now()))throw new EgressUnavailable();
         };
-        if(accountScope)await acquired.prepareScope?.();
+        if(requiresClientVpn(accountScope))await acquired.prepareScope?.();
         assertScope();
         // Root observation and host validation can both yield. Reacquire current
         // metadata after each boundary; the final callback starts transport without
@@ -704,10 +704,10 @@ export class AccountPoolHub {
           });
           return started.value.response;
         };
-        const route:AccountRoute=accountScope?{...acquired,assertScope,fetch:(ipv4,beforeSend)=>{
+        const route:AccountRoute=accountScope?{...acquired,prepareScope:requiresClientVpn(accountScope)?acquired.prepareScope:undefined,assertScope,fetch:(ipv4,beforeSend)=>{
           const send=acquired.fetch(ipv4,beforeSend??admitScoped);
           return send===undefined?undefined:async(...args)=>{
-            await acquired.prepareScope?.();
+            if(requiresClientVpn(accountScope))await acquired.prepareScope?.();
             return send(...args);
           };
         }}:acquired;
