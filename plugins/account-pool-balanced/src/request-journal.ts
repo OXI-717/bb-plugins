@@ -106,8 +106,11 @@ export class RequestJournal {
  }
  historySnapshot(offset = 0, limit = 100){return this.history.snapshot(offset,limit);}
  private prune():void{
-  const now=this.now(),retained=this.rows.filter(r=>r.at>=now-TTL_MS&&r.at<=now);
-  if(retained.length!==this.rows.length){this.evicted+=this.rows.length-retained.length;this.rows=retained;this.dirty=true;}
+  const now=this.now();
+  // Compact in place: record() runs for every event, including when all rows survive.
+  let retained=0;
+  for(const row of this.rows)if(row.at>=now-TTL_MS&&row.at<=now)this.rows[retained++]=row;
+  if(retained!==this.rows.length){this.evicted+=this.rows.length-retained;this.rows.length=retained;this.dirty=true;}
  }
  private schedule():void{
   if(this.timer!==null||this.closed)return;

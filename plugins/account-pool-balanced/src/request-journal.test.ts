@@ -136,3 +136,14 @@ it('summarizes Guard separately from upstream errors across all retained rows',a
  const result=f.journal.snapshot(1);expect(result.guardChecks.find(r=>r.provider==='codex')).toMatchObject({checks:1,timeouts:1,durationMs:4000,lastTimeoutAt:f.now});
  expect(result.rows).toHaveLength(1);expect(JSON.stringify(result)).not.toContain('private token');
 });
+
+it('compacts expired and future observations while preserving surviving order',async()=>{
+ const f=await fixture();
+ f.journal.record(f.event({at:f.now-TTL_MS-1}));
+ f.journal.record(f.event({at:f.now-2}));
+ f.journal.record(f.event({at:f.now+10}));
+ f.journal.record(f.event({at:f.now-1}));
+ expect(f.journal.snapshot().rows.map(r=>r.at)).toEqual([f.now-2,f.now-1]);
+ await f.journal.flush();
+ expect(JSON.parse(await fs.readFile(f.file,'utf8')).rows.map((r:{at:number})=>r.at)).toEqual([f.now-2,f.now-1]);
+});
