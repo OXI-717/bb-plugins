@@ -39,7 +39,7 @@ it('keeps credentials in private immutable files, pins versions across restart, 
  expect(()=>e.validateNativeProfile(ref,'server-one')).toThrow(EgressUnavailable);
  const missing=new AccountEgress(kv,async()=>'server-one',async()=>true);cleanup.push(()=>missing.close());await missing.initialize();
  await expect(missing.acquire(a)).rejects.toThrow(EgressUnavailable);
- await expect(restarted.acquire(b,'old')).rejects.toThrow(EgressUnavailable);
+ expect((await restarted.acquire(b,'old')).assigned).toBe(false);
 });
 it('uses authenticated CONNECT on a real socket despite inherited bypasses and never contacts origin on proxy failure',async()=>{
  const {e}=await fixture();let connections=0,direct=0;let authorization:string|undefined;

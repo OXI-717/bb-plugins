@@ -48,6 +48,11 @@ export const threadAccountStatusSchema = z.object({
 });
 export type ThreadAccountStatus = z.infer<typeof threadAccountStatusSchema>;
 
+export const threadAccountChoicesSchema=z.object({
+ currentAccountId:z.string().uuid().nullable(),mode:z.enum(['auto','manual']),pinned:z.boolean(),
+ accounts:z.array(z.object({id:z.string().uuid(),label:z.string(),state:z.enum(['ready','exhausted','held','disabled','error']),until:z.number().int().nonnegative().nullable(),selectable:z.boolean(),assigned:z.boolean()}))
+});
+export type ThreadAccountChoices=z.infer<typeof threadAccountChoicesSchema>;
 const browserOpenInputSchema = z.object({
   accountId: z.string().uuid(),
   url: z.string().max(8192).url().refine(value => {
@@ -75,6 +80,8 @@ export const accountPoolRpcContract = defineRpcContract({
   "egress.scopeRevoke":{input:httpScopeRevokeInputSchema,output:z.null()},
   "readiness.get": {input: z.object({projectId:z.string().min(1).max(200).nullable()}).strict(), output:z.array(providerReadinessSchema).length(providerSchema.options.length)},
   "browser.open": { input: browserOpenInputSchema, output: z.object({ opened: z.literal(true) }).strict() },
+  "thread.accountChoices": {input:z.object({threadId:z.string().min(1)}).strict(),output:threadAccountChoicesSchema},
+  "thread.switchAccount": {input:z.object({threadId:z.string().min(1),accountId:z.string().uuid().nullable()}).strict(),output:threadAccountChoicesSchema},
   "thread.account": { input: z.object({ threadId: z.string().min(1) }).strict(), output: threadAccountStatusSchema },
   "account.add": {
     input: accountAddInputSchema,
@@ -215,6 +222,7 @@ export function createRpcHandlers(
   update?: Pick<PoolUpdate,'status'|'start'>,
   nativeUpdateAccount:(input:NativeAccountUpdate)=>Promise<null> = async()=>{throw Error('Native settings unavailable');},
   nativeProbe:(input:NativeProbeInput)=>Promise<NativeProbeResult> = async input=>({...input,status:'runtime-unavailable',verified:false,observedAt:Date.now(),catalog:[]}),
+  selection?: {choices:(threadId:string)=>Promise<ThreadAccountChoices>;switch:(threadId:string,accountId:string|null)=>Promise<ThreadAccountChoices>},
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
     "maintenance.status":()=>{if(!maintenance)throw Error('Maintenance unavailable');return maintenance.status();},
@@ -236,6 +244,8 @@ export function createRpcHandlers(
     "projects.list": () => projectsList(),
     "account.setProjects": async ({ accountId, projects, expectedProjects }) => ({ account: await operations.setProjects(accountId, projects, expectedProjects) }),
     "thread.account": ({ threadId }) => threadAccount(threadId),
+    "thread.accountChoices": ({threadId})=>{if(!selection)throw Error("Выбор аккаунта недоступен");return selection.choices(threadId);},
+    "thread.switchAccount": ({threadId,accountId})=>{if(!selection)throw Error("Выбор аккаунта недоступен");return selection.switch(threadId,accountId);},
     "account.add": (input) => operations.add(input),
     "account.list": () => operations.list(),
     "account.remove": async ({ id }) => ({

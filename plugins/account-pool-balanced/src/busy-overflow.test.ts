@@ -39,7 +39,7 @@ async function fixture(config:Partial<AccountPoolConfig>,options:{routeCompatibl
   return account;
  };
  const internal=hub as unknown as {forward:Function;options:{adapters:Map<string,unknown>}};
- const send=(body='{}')=>internal.forward(new Request('http://localhost/v1/messages',{method:'POST',body}),
+ const send=(body='{}',path='/v1/messages')=>internal.forward(new Request('http://localhost'+path,{method:'POST',body}),
   new TextEncoder().encode(body),internal.options.adapters.get('claude'),'host','project') as Promise<Response>;
  // Resolves once `count` upstream requests have started, or fails after a bounded wait.
  const started=async(count:number)=>{for(let i=0;i<200&&used.length<count;i++)await new Promise(resolve=>setTimeout(resolve,5));
@@ -186,4 +186,26 @@ it('applies the recovery cap to requests that took their slots before the hold a
  // Each finished response lets exactly one more start.
  f.closeAll();await f.started(4);f.closeAll();
  await Promise.all(reserved.map(async response=>(await response).text()));
+});
+
+it('keeps token counting off the inference lane and outside start pacing',async()=>{
+ const f=await fixture({maxConcurrentRequestsPerAccount:1,claudeRequestStartIntervalMs:60_000});await f.add('key-one');
+ // One response holds the only inference slot and arms a minute of start pacing.
+ const inference=f.send();await f.started(1);
+ // Token counting starts regardless, bounded by its own lane of the same size.
+ const counts=[f.send('{}','/v1/messages/count_tokens'),f.send('{}','/v1/messages/count_tokens')];
+ await f.started(2);await f.settle();expect(f.used).toHaveLength(2);
+ await f.finish(1,counts[0]!);await f.started(3);await f.finish(2,counts[1]!);
+ // Counting neither consumed pacing credit nor the inference slot: once the response
+ // ends, the lane is free, while the next inference start still honours the interval.
+ await f.finish(0,inference);
+ const next=f.send();await f.settle();expect(f.used).toHaveLength(3);
+ void next.then(response=>response.body?.cancel()).catch(()=>undefined);
+});
+
+it('still makes token counting wait for a provider hold',async()=>{
+ const f=await fixture({});const account=await f.add('key-one');
+ f.quotas.put({...f.quotas.get(account.id),heldUntil:Date.now()+200});
+ const count=f.send('{}','/v1/messages/count_tokens');await f.settle();expect(f.used).toHaveLength(0);
+ await f.started(1);await f.finish(0,count);
 });

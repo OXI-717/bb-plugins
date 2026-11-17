@@ -142,6 +142,7 @@ function status(
 
 function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
   return {
+    pinnedFailover:false,
     anthropicUpstreamBaseUrl: "https://api.anthropic.com",
     codexUpstreamBaseUrl: "https://chatgpt.com/backend-api/codex",
     kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
@@ -1464,4 +1465,23 @@ it('keeps a saved account awaiting login with a dedicated sign-in action',async(
  fireEvent.click(await slot.findByRole('button',{name:'Войти в аккаунт'}));
  await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'login.reauthorize',input:{accountId:a.id}}));
  expect(slot.rpcCalls.some(c=>c.method==='account.enable')).toBe(false);
+});
+
+it.each([false,true])('switches subscription inside the existing dialog; RPC error=%s',async fails=>{
+ const id='11111111-1111-4111-8111-111111111111';
+ const choices={currentAccountId:null,mode:'auto',pinned:false,accounts:[{id,label:'person@example.test',state:'ready',until:null,selectable:true,assigned:true}]};
+ const ui=renderSlot(app.threadHeaderActions[0]!,{threadId:'thr-test',projectId:'project',isCompactViewport:true},{
+  rpc:{'thread.account':()=>({state:'unobserved',account:null,lastUsedAt:null}),
+   'thread.accountChoices':()=>choices,
+   'thread.switchAccount':(input:any)=>{if(fails)throw Error('synthetic');return {...choices,currentAccountId:input.accountId,mode:input.accountId?'manual':'auto',pinned:!!input.accountId};}}
+ });
+ fireEvent.click(await ui.findByRole('button',{name:/Подписка треда/}));
+ fireEvent.click(await ui.findByRole('button',{name:/person@example.test/}));
+ if(fails){expect(await ui.findByRole('alert')).toBeTruthy();expect(ui.getByRole('button',{name:'Автоматически (по умолчанию)'}).getAttribute('aria-pressed')).toBe('true');}
+ else{
+  await waitFor(()=>expect(ui.getByRole('button',{name:/person@example.test/}).getAttribute('aria-pressed')).toBe('true'));
+  expect(ui.rpcCalls).toContainEqual({method:'thread.switchAccount',input:{threadId:'thr-test',accountId:id}});
+  fireEvent.click(ui.getByRole('button',{name:'Автоматически (по умолчанию)'}));
+  await waitFor(()=>expect(ui.getByRole('button',{name:'Автоматически (по умолчанию)'}).getAttribute('aria-pressed')).toBe('true'));
+ }
 });

@@ -123,8 +123,9 @@ const DROPPED_RESPONSE_HEADERS = new Set([
 interface HubOptions {
   maintenance?: PoolMaintenance;
   accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  manualRouteAccount?: (sessionKey:string)=>Promise<string|null>;
   pinnedRouteAccount?: (sessionKey:string)=>string|null;
-  /** False when the account would serve this conversation outside its recorded route decision. */
+  /** Placement preference only: load must not move an eligible home account. */
   routeCompatible?: (accountId:string,sessionKey:string|null)=>boolean;
   nativeAgyManaged?:()=>boolean;
   journal?: RequestJournal;
@@ -695,6 +696,16 @@ export class AccountPoolHub {
 
   maintenanceActivity():number { return this.networkFlights.size + this.refreshes.size + this.usageRefreshes.size; }
 
+  /**
+   * Accounts of this provider that a request from this project could use now, by the same
+   * project-scoped predicates as routing (project role, purpose, schedule, shared quota,
+   * reserve gate). Family-specific quota is not applied: the caller's model is unknown here.
+   */
+  async projectAvailability(provider: PoolProvider, projectId: string | null): Promise<Set<string>> {
+    const accounts = await this.options.accounts.list();
+    return new Set(this.eligibleEntries(provider, projectId, accounts, "other", this.options.now()).available.map(({ account }) => account.id));
+  }
+
   private modelAdmissionOpen(): boolean { return this.accepting && !this.options.maintenance?.status().lease; }
 
   interruptForMaintenance(owner: string): void {
@@ -756,8 +767,10 @@ export class AccountPoolHub {
         : JSON.stringify([adapter.provider, affinityHost, parsed.parentAffinityId]);
     const routeSessionKey=threadId===null?affinityKey:JSON.stringify([accountScope?affinityHost:hostId,projectId,threadId,adapter.provider]);
     try {
-      const pinnedRouteAccountId=routeSessionKey===null?null:this.options.pinnedRouteAccount?.(routeSessionKey)??null;
-      if(pinnedRouteAccountId!==null && !candidateIds.has(pinnedRouteAccountId))throw new EgressUnavailable();
+      // A manual choice of an account this caller can no longer use (removed, other scope) is ignored.
+      const manualAccountId=routeSessionKey===null?null:(await this.options.manualRouteAccount?.(routeSessionKey))??null;
+      const pinnedRouteAccountId=routeSessionKey===null?null:(manualAccountId!==null&&candidateIds.has(manualAccountId)?manualAccountId:null)??this.options.pinnedRouteAccount?.(routeSessionKey)??null;
+      if(pinnedRouteAccountId && !this.options.getSettings().pinnedFailover && !candidateIds.has(pinnedRouteAccountId))return result(this.noEligibleResponse(accounts.filter(a=>a.id===pinnedRouteAccountId),family,adapter,projectId,request,purpose));
       while (attempted.size < candidateIds.size) {
         signal.throwIfAborted();
         this.options.maintenance?.assertAllowed();
@@ -1049,7 +1062,7 @@ export class AccountPoolHub {
       }
       signal.throwIfAborted();
       return result(failure === null
-        ? this.noEligibleResponse(accounts, family, adapter, projectId, request, purpose)
+        ? this.noEligibleResponse(!this.options.getSettings().pinnedFailover && pinnedRouteAccountId ? accounts.filter(a=>a.id===pinnedRouteAccountId) : accounts, family, adapter, projectId, request, purpose)
         : this.errorResponse(adapter, request,
             failure.status,
             failure.message,
@@ -1316,12 +1329,11 @@ export class AccountPoolHub {
     const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose, freeTier);
     const unattempted = eligible.filter(
       ({ account }) =>
-        candidateIds.has(account.id) && !attempted.has(account.id),
+        candidateIds.has(account.id) && !attempted.has(account.id) && (settings.pinnedFailover || pinnedRouteAccountId===null || account.id===pinnedRouteAccountId),
     );
     // The persisted route pin outlives ordinary affinity. Reuse the same policy
     // predicate, never an arbitrary account lookup or a different candidate.
     const pinned=pinnedRouteAccountId===null?undefined:unattempted.find(({account})=>account.id===pinnedRouteAccountId);
-    if(pinnedRouteAccountId!==null && pinned===undefined)throw new EgressUnavailable();
     const requestHold = (accountId: string) => freeTier ? null : unattempted.find(e => e.account.id === accountId)?.quota.heldUntil ?? null;
     const ready = unattempted.filter(({ account }) => { const hold = requestHold(account.id); return hold === null || hold <= now; });
     const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (requestHold(a.account.id) ?? 0) - (requestHold(b.account.id) ?? 0)).slice(0,1);
@@ -1373,7 +1385,7 @@ export class AccountPoolHub {
     // Load-aware placement (balanced strategy). A request should not wait behind a full
     // account while another account this caller may already use can start it now. Only
     // accounts the existing project, purpose, quota and schedule policy already admits
-    // are considered, and never one that would leave the conversation's recorded route.
+    // are considered; placement preferences keep eligible home accounts in place.
     const overflow = balanced && settings.busyOverflow;
     const startsNow = (entry: (typeof eligible)[number]) =>
       this.accountLoad(entry.account.id) < this.accountLimit(entry.account.id);
@@ -1689,10 +1701,10 @@ export class AccountPoolHub {
       const hold = admission.freeTier
         ? null
         : this.options.quotas.get(account.id).heldUntil;
-      const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id, hold) : null;
+      const spaced = account.provider === "claude" && !counting ? this.claudeStarts.readyAt(account.id, hold) : null;
       const ready = hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
       // Woken by the release of a running request or by the end of the recovery window.
-      const full = admission.freeTier ? null : this.recoveryFullUntil(account.id);
+      const full = admission.freeTier || auxiliary ? null : this.recoveryFullUntil(account.id);
       return full === null ? ready : Math.max(ready ?? 0, full);
     };
     // Cursor streams depend on append and startup RPCs. Sharing their capacity
@@ -1704,7 +1716,14 @@ export class AccountPoolHub {
     const control = account.provider === 'cursor' && rpc !== undefined && rpc !== null
       && CURSOR_PROXIED_PATHS.includes(rpc)
       && !['agent.v1.AgentService/Run','agent.v1.AgentService/RunSSE','agent.v1.AgentService/RunPoll'].includes(rpc);
-    const gate = control ? this.cursorControlAdmission : this.admission;
+    // Token counting produces no inference. Claude clients send it in bursts of dozens when
+    // a session starts; on the inference lane those bursts delayed real requests, were
+    // paced like inference starts and timed out on the client. They share the auxiliary
+    // lane with Cursor control calls: bounded by the same per-account limit, still subject
+    // to provider holds and network policy, but outside start pacing and inference slots.
+    const counting = /\/v1\/messages\/count_tokens$/u.test(new URL(request.url).pathname);
+    const auxiliary = control || counting;
+    const gate = auxiliary ? this.cursorControlAdmission : this.admission;
     const queuedAt = this.options.now();
     const waiting = gate.waiting(account.id)>0 || gate.reserved(account.id)>=this.accountLimit(account.id) || (cooldown() ?? 0)>queuedAt;
     this.options.maintenance?.assertAllowed();
@@ -1728,7 +1747,7 @@ export class AccountPoolHub {
       controller.signal.removeEventListener("abort", abortRelease);
       this.activeControllers.delete(controller);
       this.decrement(account.id);
-      if (upstreamStarted) {
+      if (upstreamStarted && !auxiliary) {
         const running = (this.dispatchedByAccount.get(account.id) ?? 1) - 1;
         if (running <= 0) this.dispatchedByAccount.delete(account.id); else this.dispatchedByAccount.set(account.id, running);
       }
@@ -1776,9 +1795,9 @@ export class AccountPoolHub {
               this.stopped.signal.throwIfAborted();
               this.options.maintenance?.assertAllowed();
               admission.onDispatch?.();
-              if (!upstreamStarted) { upstreamStarted = true; this.dispatchedByAccount.set(account.id, (this.dispatchedByAccount.get(account.id) ?? 0) + 1); }
+              if (!upstreamStarted) { upstreamStarted = true; if (!auxiliary) this.dispatchedByAccount.set(account.id, (this.dispatchedByAccount.get(account.id) ?? 0) + 1); }
               this.observe(trace,{event:'attempt',attempt,accountId:account.id});
-              if (account.provider === 'claude') this.claudeStarts.dispatched(account.id, admission.freeTier ? null : this.options.quotas.get(account.id).heldUntil);
+              if (account.provider === 'claude' && !counting) this.claudeStarts.dispatched(account.id, admission.freeTier ? null : this.options.quotas.get(account.id).heldUntil);
               phase='after-headers';return {response: send()};
             });
             if (started.value !== null) return started.value.response;
@@ -2010,6 +2029,7 @@ export class AccountPoolHub {
 export function createHub(options: {
   maintenance?: PoolMaintenance;
   accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  manualRouteAccount?: (sessionKey:string)=>Promise<string|null>;
   pinnedRouteAccount?: (sessionKey:string)=>string|null;
   routeCompatible?: (accountId:string,sessionKey:string|null)=>boolean;
   nativeAgyManaged?:()=>boolean;
@@ -2137,7 +2157,7 @@ export function createHub(options: {
     vpnPayload: options.vpnPayload,
     guardCheck: options.guardCheck,
     adapters,
-    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,pinnedRouteAccount:options.pinnedRouteAccount,routeCompatible:options.routeCompatible,
+    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,manualRouteAccount:options.manualRouteAccount,pinnedRouteAccount:options.pinnedRouteAccount,routeCompatible:options.routeCompatible,
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),

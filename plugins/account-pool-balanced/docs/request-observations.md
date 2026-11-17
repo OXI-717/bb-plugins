@@ -76,8 +76,12 @@ With the `balanced` strategy the pool no longer queues a request behind a full a
 - Among accounts of the preferred tier a free one is chosen first; the existing quota balance decides between free accounts. When none is free the request waits on the shortest line of the preferred tier.
 - When every preferred account is busy, the nearest less preferred tier that can start the request now is used (for example a reserve account of the same project). Project access, purpose opt-in, schedules, quota thresholds and reserve caps are evaluated exactly as before: only accounts that were already eligible for this request are considered.
 - A warm conversation keeps its account. It is moved for a single request only when that account is full and another one can start now; the binding is kept, so later requests return to it. A detour costs the prompt cache of that request on the other account.
-- A conversation is never moved onto an account that would leave its recorded egress decision: a pinned conversation stays on its pinned account, and a conversation recorded without a profile is not moved onto an account that has one.
+- Load alone never moves a pinned conversation away from its eligible home account. When home is ineligible, ordinary selection may use another eligible account with that account's own route. Unassigned conversations retain load-aware placement and always use the selected account's current binding.
 - A waiting request is not re-placed when another account frees up later. A provider hold on the home account still waits in place: a held account is never treated as busy, however many requests are already waiting behind that hold.
+
+### Token counting lane (0.4.90)
+
+`POST /v1/messages/count_tokens` produces no inference, and Claude clients send it in bursts of dozens when a session starts or resumes. On the inference lane those bursts occupied request slots, were spaced like inference starts and delayed the first real request; many were cancelled by the client before they were sent. They now use the auxiliary admission lane that Cursor control calls already use: bounded by the same per-account limit, still subject to provider holds and network policy, but outside start pacing, the inference slots and the load used for placement. Journal and history rows are unchanged, so request counts still include them.
 
 `busyOverflow` (default `true`) turns this off: `bb pool config set busyOverflow false` restores the former placement without a reload. The `sequential` strategy is unchanged.
 

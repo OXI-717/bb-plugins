@@ -8,7 +8,7 @@ import { managementRpcContract, managementUnlockSchema, type ManagementScope } f
 type Handlers = PluginRpcHandlers<typeof accountPoolRpcContract>;
 const readMethods = new Set([
   'maintenance.status', 'update.status', 'native.accounts', 'egress.status', 'readiness.get',
-  'thread.account', 'account.list', 'projects.list', 'config.get', 'status.get', 'status.routedThreads',
+  'thread.accountChoices', 'thread.account', 'account.list', 'projects.list', 'config.get', 'status.get', 'status.routedThreads',
 ]);
 const rpcScope = (method: string): ManagementScope => readMethods.has(method) ? 'read' : 'manage';
 // Read-only methods another installed plugin may call without a grant. Everything else

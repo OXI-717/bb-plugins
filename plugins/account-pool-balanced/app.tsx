@@ -102,9 +102,10 @@ type DialogState =
   | { kind: "api-key"; provider: PoolProvider }
   | null;
 
+const THREAD_ACCOUNT_STATE={ready:'готов',exhausted:'лимит исчерпан',held:'придержан провайдером',disabled:'выключен',error:'ошибка'} as const;
 type ConfigField = Exclude<
   keyof AccountPoolConfig,
-  "claudeRequestStartIntervalMs" | "busyOverflow" | "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "browserHostId" | "vpnGuardEnabled" | "vpnPolicyVersion"
+  "pinnedFailover" | "claudeRequestStartIntervalMs" | "busyOverflow" | "routingStrategy" | "reserveDrainHours" | "restDays" | "vpnOnlyProviders" | "vpnStatusFile" | "browserHostId" | "vpnGuardEnabled" | "vpnPolicyVersion"
 >;
 
 const PROVIDERS: Array<{
@@ -2744,6 +2745,10 @@ export function ThreadAccountIndicator({ threadId, isCompactViewport }: { thread
 function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
   const rpc = useRpc<typeof accountPoolRpcContract>();
   const [status, setStatus] = useState<ThreadAccountStatus | null>(null);
+  const [choices,setChoices]=useState<import('./src/rpc.js').ThreadAccountChoices|null>(null);
+  const [selectionError,setSelectionError]=useState<string|null>(null);
+  const [switching,setSwitching]=useState(false);
+
   const [open, setOpen] = useState(false);
   const [error, setError] = useState(false);
   useEffect(() => {
@@ -2764,18 +2769,42 @@ function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threa
     const timer = setInterval(() => void refresh(), 15000);
     return () => { disposed = true; clearInterval(timer); };
   }, [rpc, threadId]);
+  useEffect(()=>{
+    setChoices(null);setSelectionError(null);
+    if(!open || status?.state==='bypassed' || status?.state==='unsupported')return;
+    let disposed=false;
+    rpc.call('thread.accountChoices',{threadId}).then(value=>{if(!disposed)setChoices(value);}).catch(()=>{if(!disposed)setSelectionError('Не удалось загрузить аккаунты');});
+    return ()=>{disposed=true;};
+  },[open,rpc,threadId,status?.state]);
+  const switchAccount=async(accountId:string|null)=>{
+    setSwitching(true);setSelectionError(null);
+    try{setChoices(await rpc.call('thread.switchAccount',{threadId,accountId}));}
+    catch{setSelectionError('Не удалось переключить аккаунт. Попробуйте ещё раз.');}
+    finally{setSwitching(false);}
+  };
   if (status?.state === "unsupported") return null;
   const account = status?.account;
   const availability = account === null || account === undefined ? "" : !account.enabled ? "выключен" : account.eligible ? "доступен" : "сейчас недоступен";
   const label = error ? "Пул: ошибка проверки" : status === null ? "Пул: проверка…" : status.state === "bypassed" ? "Вне пула" : status.state === "unobserved" ? "Пул: ещё нет данных" : `${(account ? accountFullName(account) : "Удалённый аккаунт")} · ${availability}`;
   const details = status?.state === "observed"
-    ? `Последний подтверждённый запрос: ${label}. ${status.lastUsedAt === null ? "" : new Date(status.lastUsedAt).toLocaleString("ru-RU")}. Следующий запрос может выбрать другой аккаунт. Активных запросов аккаунта: ${account?.inFlight ?? 0}.`
+    ? `Последний подтверждённый запрос: ${label}. ${status.lastUsedAt === null ? "" : new Date(status.lastUsedAt).toLocaleString("ru-RU")}. ${choices?.pinned ? 'Тред закреплён за аккаунтом ('+(choices.mode==='manual'?'вручную':'автоматически')+').' : 'Аккаунт выбирается по правилам пула.'} Активных запросов аккаунта: ${account?.inFlight ?? 0}.`
     : "Аккаунт выбирается при запросе. Здесь отображаются только подтверждённые данные пула.";
   return <>
     <button type="button" className="max-w-64 truncate text-xs text-muted-foreground" title={details} aria-label={`Подписка треда: ${label}`} onClick={() => setOpen(true)}>{isCompactViewport ? "Пул" : label}</button>
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogFrame title="Подписка треда" footer={<Button onClick={() => setOpen(false)}>Закрыть</Button>}>
         <p>{label}</p><p className="text-sm text-muted-foreground">{details}</p>
+        {status?.state!=='bypassed' && <section aria-label="Выбор аккаунта" className="min-w-0 space-y-2">
+          <p className="text-sm">Аккаунт треда{choices ? ' · '+(choices.mode==='manual'?'выбран вручную':'автоматически') : ''}</p>
+          {selectionError && <p role="alert" className="text-sm text-destructive">{selectionError}</p>}
+          {choices && <div className="max-h-[35dvh] overflow-y-auto space-y-1" role="group" aria-label="Аккаунты треда">
+            <button type="button" className="w-full min-h-11 rounded-md border p-3 text-left text-sm aria-pressed:bg-accent aria-pressed:font-medium" aria-pressed={choices.mode==='auto'} disabled={switching} onClick={()=>void switchAccount(null)}>Автоматически (по умолчанию)</button>
+            {choices.accounts.map(item=><button type="button" key={item.id} className="w-full min-h-11 rounded-md border p-3 text-left text-sm aria-pressed:bg-accent aria-pressed:font-medium break-words disabled:opacity-50" aria-pressed={choices.mode==='manual'&&choices.currentAccountId===item.id} disabled={switching||!item.selectable} onClick={()=>void switchAccount(item.id)}>
+              {item.label} · {THREAD_ACCOUNT_STATE[item.state]}{item.until===null?'':' до '+new Date(item.until).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}{item.assigned?' · назначенный выход':''}
+            </button>)}
+          </div>}
+        </section>}
+
         {account ? <p className="text-sm">{account.role === "reserve" ? "Резерв" : "Основной"} · {account.provider} · квоты обновлены {account.observedAt === null ? "никогда" : new Date(account.observedAt).toLocaleString("ru-RU")}</p> : null}
       </DialogFrame>
     </Dialog>
