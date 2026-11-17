@@ -236,10 +236,12 @@ class UpgradeTests(unittest.TestCase):
                 self.assertEqual(copied.execute('SELECT value FROM sample').fetchone()[0],42)
             self.assertEqual((target/'secrets'/'synthetic.txt').stat().st_mode & 0o777,0o600)
 
-    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False, wrong_drain=False):
+    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False, wrong_drain=False, routing_after=None, routing_before=None, routing_failure=False):
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         data = Path(temp.name); db=sqlite3.connect(data/'data.db'); db.close()
         state = {'accepting':True,'inFlight':0,'accounts':[{'id':'synthetic','enabled':True,'policy':{'enabled':False}, 'drainOnce':True, 'drainGeneration':'synthetic-generation'}], 'routing':{'codex':True},'enabledAccountCount':1}
+        if routing_before is not None:
+            state['routing'] = routing_before
         source = {'history':[{'version':'b'*40}], 'range':'^0.4.1'}
         updated_source = {**source,'history':[{'version':('c' if wrong_sha else 'a')*40}]}
         infos = [{'version':'0.4.6'}, {'version':'0.4.7'}]
@@ -250,6 +252,8 @@ class UpgradeTests(unittest.TestCase):
             nonlocal status_reads
             if args[:2] == ('pool','status'):
                 status_reads += 1
+                if routing_after is not None and status_reads == 3:
+                    return {**state, 'routing': routing_after}
                 if wrong_drain and status_reads == 3:
                     return {**state, 'accounts': [{**state['accounts'][0], 'drainOnce': False, 'drainGeneration': None}]}
                 return {**state, 'accounts': []} if wrong_accounts and status_reads == 3 else state
@@ -258,10 +262,11 @@ class UpgradeTests(unittest.TestCase):
             raise AssertionError(args)
         args=argparse.Namespace(check=check, version=None, interrupt_now=False)
         with patch.object(u,'installed',side_effect=infos), patch.object(u,'source_info',side_effect=sources), patch.object(u,'release_target',side_effect=targets), patch.object(u,'wait_idle',return_value=False) as idle, patch.object(u,'bb',side_effect=command), patch.object(u,'run',side_effect=u.UpgradeError('simulated update failure') if fail else None) as run:
-            if changed or fail or wrong_sha or wrong_accounts or wrong_drain:
-                with self.assertRaises(u.UpgradeError): u.perform(args,data,data,lambda _:None)
+            output = []
+            if changed or fail or wrong_sha or wrong_accounts or wrong_drain or routing_failure:
+                with self.assertRaises(u.UpgradeError): u.perform(args,data,data,output.append)
             else:
-                self.assertEqual(u.perform(args,data,data,lambda _:None),'PREFLIGHT_PASS' if check else 'PASS')
+                self.assertEqual(u.perform(args,data,data,output.append),'PREFLIGHT_PASS' if check else 'PASS')
             if check:
                 idle.assert_not_called(); run.assert_not_called(); self.assertFalse((data/'backup').exists())
             elif changed:
@@ -269,6 +274,24 @@ class UpgradeTests(unittest.TestCase):
             else:
                 run.assert_called_once_with('bb','plugin','update',u.PLUGIN,'--yes',timeout=600)
                 self.assertTrue((data/'backup'/'RECOVERY.txt').exists())
+
+            return output
+
+    def test_post_update_new_provider_key_is_reported(self):
+        output = self.workflow(routing_after={'codex': True, 'grok': True})
+        self.assertIn('Added routing keys: grok', output)
+
+    def test_post_update_old_provider_modified_fails(self):
+        self.workflow(routing_after={'codex': False, 'grok': True}, routing_failure=True)
+
+    def test_post_update_old_provider_deleted_fails(self):
+        self.workflow(routing_after={'grok': True}, routing_failure=True)
+
+    def test_post_update_null_provider_deleted_fails(self):
+        self.workflow(routing_before={'codex': None}, routing_after={}, routing_failure=True)
+
+    def test_post_update_null_provider_modified_fails(self):
+        self.workflow(routing_before={'codex': None}, routing_after={'codex': True}, routing_failure=True)
 
     def test_post_update_drain_state_loss_fails(self): self.workflow(wrong_drain=True)
     def test_post_update_sha_mismatch_fails(self): self.workflow(wrong_sha=True)

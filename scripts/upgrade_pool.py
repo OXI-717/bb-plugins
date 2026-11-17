@@ -176,11 +176,12 @@ def release_target(source, expected=None):
     return target, sha
 
 
-def inventory(pool):
+def inventory(pool, routing_keys=None):
+    # Restrict only post-update verification; pre-update races remain strict.
     fields = ('id', 'provider', 'kind', 'enabled', 'priority', 'role', 'cap', 'policy', 'projects', 'drainOnce', 'drainGeneration')
     return {
         'accounts': sorted(({k: a.get(k) for k in fields} for a in pool['accounts']), key=lambda a: a['id']),
-        'routing': pool['routing'],
+        'routing': {k: v for k, v in pool['routing'].items() if routing_keys is None or k in routing_keys},
         'enabledAccountCount': pool['enabledAccountCount'],
     }
 
@@ -350,7 +351,7 @@ def perform(args, data, output, say):
     if (after_info['version'] != target or not after_source.get('history')
             or after_source['history'][0]['version'] != sha):
         raise UpgradeError('Updated version or commit differs from verified release; inspect backup/RECOVERY.txt')
-    if not after['accepting'] or inventory(after) != inventory(before):
+    if not after['accepting'] or inventory(after, routing_keys=before['routing']) != inventory(before):
         raise UpgradeError('Post-update account or routing verification failed; inspect backup/RECOVERY.txt')
     after_config = bb('plugin', 'config', PLUGIN)['values']
     if any(after_config.get(key) != value for key, value in config.items()):
@@ -358,6 +359,9 @@ def perform(args, data, output, say):
     with contextlib.closing(sqlite3.connect((data / 'data.db').as_uri() + '?mode=ro', uri=True)) as db:
         if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise UpgradeError('Post-update database integrity check failed')
+    added_routing = sorted(after['routing'].keys() - before['routing'].keys())
+    if added_routing:
+        say('Added routing keys: ' + ', '.join(added_routing))
     say('PASS: version, commit, accounts, routing, configuration and database verified.')
     return 'PASS'
 
