@@ -1,7 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { definePluginApp, useRpc, type PluginPendingInteractionProps } from '@get-bb/plugin-sdk/app';
 import type {deliveryContract} from './server.js';
-export function CredentialForm({interaction,submit,cancel,reportDelivery}: PluginPendingInteractionProps & {reportDelivery?:(visible:boolean)=>void}) {
+export function queueSubmission(queue:{current:Promise<void>},send:()=>Promise<void>) {
+    queue.current=queue.current.then(send).catch(()=>{});
+    return queue.current;
+}
+export async function submitCredential(submit:PluginPendingInteractionProps['submit'],value:Parameters<PluginPendingInteractionProps['submit']>[0],report?:(phase:'submit-started'|'submit-failed')=>void) {
+    try {report?.('submit-started');} catch { /* Diagnostics never block submission. */ }
+    try {await submit(value);}
+    catch(error) {try {report?.('submit-failed');} catch {} throw error;}
+}
+export function CredentialForm({interaction,submit,cancel,reportDelivery,reportSubmission}: PluginPendingInteractionProps & {reportDelivery?:(visible:boolean)=>void;reportSubmission?:(phase:'submit-started'|'submit-failed')=>void}) {
             const [password, setPassword] = useState('');
             const [busy, setBusy] = useState(false);
             const [failed, setFailed] = useState(false);
@@ -36,7 +45,7 @@ export function CredentialForm({interaction,submit,cancel,reportDelivery}: Plugi
             };
             const storing = payload.mode === 'store';
             return <form ref={formRef} onSubmit={async (e) => { e.preventDefault(); setBusy(true); setFailed(false); try {
-                await submit(storing ? { password } : { approved: true });
+                await submitCredential(submit,storing ? { password } : { approved: true },reportSubmission);
                 setPassword('');
             }
             catch {
@@ -72,7 +81,9 @@ export function CredentialForm({interaction,submit,cancel,reportDelivery}: Plugi
 export default definePluginApp(app=>{
  app.slots.pendingInteraction({id:'credential',component:function Credential(props){
   const rpc=useRpc<typeof deliveryContract>();
-  const report=useCallback((visible:boolean)=>{void rpc.call('formReceipt',{threadId:props.interaction.threadId,interactionId:props.interaction.id,visible,...(typeof (props.interaction.payload as {formRequestId?:unknown}).formRequestId==='string'?{formRequestId:(props.interaction.payload as {formRequestId:string}).formRequestId}:{})}).catch(()=>{});},[rpc,props.interaction.id,props.interaction.threadId]);
-  return <CredentialForm {...props} reportDelivery={report}/>;
+  const submissionQueue=useRef(Promise.resolve());
+  const report=useCallback((visible:boolean,phase?:'submit-started'|'submit-failed')=>rpc.call('formReceipt',{threadId:props.interaction.threadId,interactionId:props.interaction.id,visible,...(phase?{phase}:{}),...(typeof (props.interaction.payload as {formRequestId?:unknown}).formRequestId==='string'?{formRequestId:(props.interaction.payload as {formRequestId:string}).formRequestId}:{})}).then(()=>{}).catch(()=>{}),[rpc,props.interaction.id,props.interaction.threadId]);
+  const submission=useCallback((phase:'submit-started'|'submit-failed')=>{void queueSubmission(submissionQueue,()=>report(document.visibilityState==='visible',phase));},[report]);
+  return <CredentialForm {...props} reportDelivery={report} reportSubmission={submission}/>;
  }});
 });

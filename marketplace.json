@@ -220,7 +220,7 @@
         "git": {
           "url": "https://github.com/OXI-717/bb-plugins.git",
           "subdir": "plugins/oxi-op",
-          "range": "^0.1.17",
+          "range": "^0.1.18",
           "tagPrefix": "oxi-op/"
         }
       }
