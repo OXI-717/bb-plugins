@@ -3,10 +3,10 @@ import {z} from 'zod';
 import {CodedError, errorCode} from './errors.js';
 
 type Storage = {get<T>(key: string): Promise<T | undefined>; set(key: string, value: unknown): Promise<void>; list(prefix?: string): Promise<string[]>};
-type Context = {projectId: string; threadId: string};
+type Context = {projectId: string; threadId: string; signal?: AbortSignal; notifyCompletion?: boolean};
 type Kind = 'automate' | 'exec' | 'overview' | 'tidy' | 'migrate' | 'connect-many' | 'connect' | 'store' | 'run' | 'inventory' | 'check' | 'verify';
 type State = 'preparing' | 'awaiting-approval' | 'running' | 'completed' | 'cancelled' | 'failed' | 'needs-review' | 'interrupted';
-type Record = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; failureCode?: string; result?: unknown};
+export type ActionRecord = {id: string; instance: string; kind: Kind; label: string; profile: string; state: State; startedAt: string; updatedAt: string; approvedAt?: string; cancelReason?: string; failureCode?: string; result?: unknown; notification?: {projectId:string;threadId:string;state:'pending'|'delivered'|'suppressed'}};
 export type Progress = (state: 'awaiting-approval' | 'running', approved?: boolean) => Promise<void>;
 
 // Persist only these metadata shapes; never persist form input or raw errors.
@@ -35,28 +35,64 @@ export class OperationFailure extends Error {
         super(code === 'session_host_not_allowed' ? 'This session runs on a machine that is not allowed for this access profile. No key was read.' : code === 'credential_host_offline' ? 'No owner machine for 1Password approval is online. No credential request was sent.' : code === 'execution_host_offline' ? 'The execution host is offline. No operation was started.' : 'Host availability could not be verified. No credential request was sent.');
     }
 }
-export function createJournal(storage: Storage) {
+export function completionText(row: ActionRecord): string {
+    let status: string = row.state;
+    const result = row.result as {exitCode?:number;timedOut?:boolean;escapedProcess?:boolean;verified?:boolean;cleaned?:boolean;authorized?:boolean;complete?:boolean;projects?:{state:string}[];results?:{state?:string;ok?:boolean}[]} | undefined;
+    if (row.state === 'completed') {
+        const uncertain = result?.escapedProcess || result?.complete === false || result?.projects?.some(x=>x.state==='needs-review') || result?.results?.some(x=>x.ok===false || (x.state!==undefined&&!['imported','already-imported','referenced','moved','empty'].includes(x.state)));
+        status = result?.timedOut || (result?.exitCode!==undefined&&result.exitCode!==0) ? 'failed' : uncertain ? 'needs-review' : 'success';
+    }
+    const details = [row.cancelReason && 'reason='+row.cancelReason, row.failureCode && 'code='+row.failureCode,
+        result?.exitCode!==undefined&&'exitCode='+result.exitCode, result?.verified!==undefined&&'verified='+result.verified,
+        result?.cleaned!==undefined&&'cleaned='+result.cleaned, result?.authorized!==undefined&&'authorized='+result.authorized].filter(Boolean).join(', ');
+    return 'Oxi Op: '+status+'. Операция: '+row.id+' ('+row.kind+'). '+(row.approvedAt?'Карточка подтверждена. ':'Карточка не подтверждена. ')+(details?details+'. ':'')+'Подтверждение карточки само по себе не означает успех операции. Результат сохранён в oxi_op_history. Не повторяйте операцию автоматически. Это сообщение с результатом, а не новое поручение. Секретов и вывода команды здесь нет.';
+}
+export function createJournal(storage: Storage, deliver?: (row: ActionRecord) => Promise<boolean>) {
     const instance = randomUUID();
     const prefix = (ctx: Context) => 'action:' + encodeURIComponent(ctx.projectId) + ':' + encodeURIComponent(ctx.threadId) + ':';
+    let flushing: Promise<void> | undefined;
+    const flush = () => {
+        if (flushing) return flushing;
+        flushing = (async () => {
+            for (const key of await storage.list('action:')) {
+                const row = await storage.get<ActionRecord>(key);
+                if (!row || row.notification?.state !== 'pending' || !deliver) continue;
+                try {
+                    const sent = await deliver(row);
+                    row.notification.state = sent ? 'delivered' : 'suppressed';
+                    await storage.set(key, row);
+                } catch { /* Keep only the safe durable result; retry delivery, never the operation. */ }
+            }
+        })().finally(()=>{flushing=undefined;});
+        return flushing;
+    };
     return {
+        flush,
         async list(ctx: Context) {
             const keys = (await storage.list(prefix(ctx))).sort().slice(-30);
-            const rows = await Promise.all(keys.map(key => storage.get<Record>(key)));
-            return rows.filter((row): row is Record => !!row).map(row => {
-                const {instance: origin, ...metadata} = row;
+            const rows = await Promise.all(keys.map(key => storage.get<ActionRecord>(key)));
+            return rows.filter((row): row is ActionRecord => !!row).map(row => {
+                const {instance: origin, notification, ...metadata} = row;
                 return origin !== instance && ['preparing', 'awaiting-approval', 'running'].includes(row.state)
                     ? {...metadata, state: 'interrupted' as const} : metadata;
             }).sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id));
         },
         async run(kind: Kind, profile: string, ctx: Context, work: (progress: Progress) => Promise<string>, label: string = kind) {
             const now = new Date().toISOString();
-            const row: Record = {id: randomUUID(), instance, kind, label, profile, state: 'preparing', startedAt: now, updatedAt: now};
+            const row: ActionRecord = {id: randomUUID(), instance, kind, label, profile, state: 'preparing', startedAt: now, updatedAt: now};
             const key = prefix(ctx) + now + ':' + row.id;
+            let interactive = ctx.notifyCompletion === true;
+            const finish = async () => {
+                if (deliver && interactive) row.notification = {projectId:ctx.projectId,threadId:ctx.threadId,state:ctx.signal?.aborted || ['thread-stopped','thread-deleted','request-aborted','plugin-disposed'].includes(row.cancelReason ?? '')?'suppressed':'pending'};
+                await save();
+                if (deliver) await flush().catch(()=>{});
+            };
             const save = async () => {row.updatedAt = new Date().toISOString(); await storage.set(key, row);};
             await save();
             try {
                 const value = await work(async (state, approved) => {
                     row.state = state;
+                    if (state === 'awaiting-approval') interactive = true;
                     if (approved) row.approvedAt = new Date().toISOString();
                     await save();
                 });
@@ -66,13 +102,13 @@ export function createJournal(storage: Storage) {
                     if (reason.success) row.cancelReason = reason.data;
                 }
                 else {row.result = results[kind].parse(JSON.parse(value)); row.state = 'completed';}
-                await save();
+                await finish();
                 return value;
             } catch (error) {
                 const code = error instanceof OperationFailure ? error.code : errorCode(error);
                 if (code) row.failureCode = code;
                 row.state = row.state === 'running' ? 'needs-review' : 'failed';
-                await save();
+                await finish();
                 if (error instanceof OperationFailure) throw error;
                 if (code) throw new CodedError(code, '1Password operation did not complete (' + code + '). Inspect oxi-op history before retrying.');
                 throw new Error('1Password operation did not complete. Inspect oxi-op history before retrying; an interrupted write may need recovery.');
