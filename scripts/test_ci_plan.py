@@ -2,10 +2,15 @@ import unittest
 from ci_plan import OP_POOL_MODULES, PLUGINS, plan
 
 
+def active_rows(result):
+    return [{k: row[k] for k in ('os', 'plugin')}
+            for row in result['matrix']['include'] if row['run']]
+
+
 class PlanTests(unittest.TestCase):
     def test_cosmetic_pool_change_keeps_linux_security_and_upgrade(self):
         p = plan(['plugins/account-pool-balanced/app.tsx'])
-        self.assertEqual(p['matrix']['include'], [{'os': 'ubuntu-latest', 'plugin': 'account-pool-balanced'}])
+        self.assertEqual(active_rows(p), [{'os': 'ubuntu-latest', 'plugin': 'account-pool-balanced'}])
         self.assertTrue(p['upgrade'])
         self.assertFalse(p['upgrade_mac'])
         self.assertFalse(p['op'])
@@ -14,13 +19,13 @@ class PlanTests(unittest.TestCase):
         for name in ['browser-host.ts', 'host.ts', 'devin-launcher.ts', 'new-platform.ts']:
             with self.subTest(name=name):
                 p = plan(['plugins/account-pool-balanced/src/' + name])
-                self.assertEqual(len(p['matrix']['include']), 2)
+                self.assertEqual(len(active_rows(p)), 2)
                 self.assertTrue(p['upgrade_mac'])
 
     def test_portable_routing_and_its_tests_keep_critical_linux(self):
         for name in ['balancer.ts', 'balancer.test.ts']:
             p = plan(['plugins/account-pool-balanced/src/' + name])
-            self.assertEqual(len(p['matrix']['include']), 1)
+            self.assertEqual(len(active_rows(p)), 1)
 
     def test_op_pool_dependencies_require_cross_plugin_integration(self):
         import ast
@@ -36,7 +41,7 @@ class PlanTests(unittest.TestCase):
             with self.subTest(module=module):
                 p = plan(['plugins/account-pool-balanced/src/' + module + '.ts'])
                 self.assertTrue(p['op'], 'Pooler dependency must run OP integration tests')
-                self.assertEqual(len(p['matrix']['include']), 1 if module == 'project-policy' else 2)
+                self.assertEqual(len(active_rows(p)), 1 if module == 'project-policy' else 2)
                 self.assertEqual(p['upgrade_mac'], module != 'project-policy')
         self.assertFalse(plan(['plugins/account-pool-balanced/src/balancer.ts'])['op'])
 
@@ -45,17 +50,52 @@ class PlanTests(unittest.TestCase):
                      'scripts/upgrade_pool.py', 'plugins/new-plugin/file.ts']:
             with self.subTest(path=path):
                 p = plan([path])
-                self.assertEqual(len(p['matrix']['include']), len(PLUGINS) * 2)
+                self.assertEqual(len(active_rows(p)), len(PLUGINS) * 2)
                 self.assertTrue(p['upgrade_mac'])
                 self.assertTrue(p['op'])
 
     def test_deleted_old_path_and_renamed_new_path_are_both_considered(self):
         p = plan(['plugins/account-pool-balanced/src/host.ts', 'docs/moved.md'])
-        self.assertEqual(len(p['matrix']['include']), 2)
+        self.assertEqual(len(active_rows(p)), 2)
 
     def test_docs_and_full_mode(self):
-        self.assertFalse(plan(['README.md'])['check'])
+        self.assertEqual(active_rows(plan(['README.md'])), [])
         self.assertEqual(len(plan([], full=True)['matrix']['include']), 14)
+
+class RequiredContextTests(unittest.TestCase):
+    def test_required_contexts_exist_without_running_unaffected_plugins(self):
+        required = {(os, plugin) for os in ['ubuntu-latest', 'macos-latest']
+                    for plugin in ['account-pool-balanced', 'automation-catalog']}
+        for paths, active in [
+            (['plugins/account-pool-balanced/src/browser-host.ts'],
+             {pair for pair in required if pair[1] == 'account-pool-balanced'}),
+            (['plugins/automation-catalog/src/server.ts'],
+             {pair for pair in required if pair[1] == 'automation-catalog'}),
+            (['README.md'], set()),
+        ]:
+            with self.subTest(paths=paths):
+                result = plan(paths)
+                rows = result['matrix']['include']
+                self.assertTrue(result['check'])
+                self.assertEqual({(r['os'], r['plugin']) for r in rows}, required)
+                self.assertEqual({(r['os'], r['plugin']) for r in rows if r['run']}, active)
+                self.assertEqual(len(rows), 4)
+
+    def test_full_runs_every_row(self):
+        rows = plan([], full=True)['matrix']['include']
+        self.assertEqual(len(rows), len(PLUGINS) * 2)
+        self.assertTrue(all(row['run'] for row in rows))
+
+    def test_workflow_names_and_step_gates(self):
+        from pathlib import Path
+        workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/ci.yml').read_text()
+        job = workflow.split('\n  check:\n')[1].split('\n  session-tree:')[0]
+        self.assertIn('name: check (${{ matrix.os }}, ${{ matrix.plugin }})', job)
+        self.assertNotIn('    if:', job.split('    strategy:')[0])
+        # Every expensive step, including checkout/setup, must be conditional.
+        for step in job.split('      - ')[1:]:
+            self.assertIn('if: matrix.run', step)
+
 
 class ReleaseGateTests(unittest.TestCase):
     def test_selected_skips_fail_and_unselected_skips_pass(self):
@@ -133,7 +173,8 @@ class CliTests(unittest.TestCase):
                                 'DIFF_BASE': base, 'DIFF_HEAD': 'HEAD', 'GITHUB_OUTPUT': str(output)})
             fields = dict(line.split('=', 1) for line in output.read_text().splitlines())
             self.assertTrue(json.loads(fields['upgrade_mac']))
-            self.assertEqual(len(json.loads(fields['matrix'])['include']), 2)
+            self.assertEqual(len(active_rows({'matrix': json.loads(fields['matrix'])})), 2)
+            self.assertEqual(len(json.loads(fields['matrix'])['include']), 4)
             git('tag', 'account-pool-balanced/v0.0.1', base)
             git('tag', 'account-pool-balanced/v0.0.2')
             output.write_text('')
@@ -142,7 +183,8 @@ class CliTests(unittest.TestCase):
                                 'GIT_REF': 'refs/tags/account-pool-balanced/v0.0.2',
                                 'DIFF_HEAD': 'HEAD', 'GITHUB_OUTPUT': str(output)})
             fields = dict(line.split('=', 1) for line in output.read_text().splitlines())
-            self.assertEqual(len(json.loads(fields['matrix'])['include']), 2)
+            self.assertEqual(len(active_rows({'matrix': json.loads(fields['matrix'])})), 2)
+            self.assertEqual(len(json.loads(fields['matrix'])['include']), 4)
 
             output.write_text('')
             subprocess.run(['python3', str(script)], cwd=root, check=True, timeout=10,
@@ -150,7 +192,7 @@ class CliTests(unittest.TestCase):
                                 'GIT_REF': 'refs/heads/main', 'DIFF_HEAD': 'HEAD',
                                 'GITHUB_OUTPUT': str(output)})
             fields = dict(line.split('=', 1) for line in output.read_text().splitlines())
-            self.assertEqual(len(json.loads(fields['matrix'])['include']), 14)
+            self.assertEqual(len(active_rows({'matrix': json.loads(fields['matrix'])})), 14)
 
 
 class CoverageTests(unittest.TestCase):
