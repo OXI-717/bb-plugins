@@ -3,7 +3,8 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
-import guardPlugin from '../../vpn-guard/server.js';
+import ts from 'typescript';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createAccountPoolPlugin } from './server.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -57,8 +58,29 @@ it('links the real Guard to the registered narrow policy RPC while preserving co
     } },
   } });
   cleanups.push(() => guard.harness.lifecycle.dispose());
-  // The plugins pin different SDK versions; this fixture supplies the shared runtime API.
-  await guardPlugin(guard.bb as unknown as Parameters<typeof guardPlugin>[0]);
+  // Load the real Guard source using this test project's dependencies, as in the
+  // existing cross-plugin native task fixture. No sibling installation is needed.
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  await fs.mkdir(path.join(root, 'dist'), { recursive: true });
+  const modules = await fs.mkdtemp(path.join(root, 'dist', 'guard-link-'));
+  cleanups.push(() => fs.rm(modules, { recursive: true, force: true }));
+  const sourceRoot = path.resolve(root, '../vpn-guard');
+  const copied = new Set<string>();
+  const compile = async (name: string): Promise<void> => {
+    if (copied.has(name)) return;
+    copied.add(name);
+    const source = await fs.readFile(path.join(sourceRoot, name + '.ts'), 'utf8');
+    for (const imported of ts.preProcessFile(source).importedFiles) {
+      if (imported.fileName.startsWith('./')) await compile(imported.fileName.slice(2).replace(/\.js$/, ''));
+    }
+    const output = ts.transpileModule(source, { compilerOptions: {
+      target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
+    } }).outputText;
+    await fs.writeFile(path.join(modules, name + '.js'), output);
+  };
+  await compile('server');
+  const { default: guardPlugin } = await import(/* @vite-ignore */ pathToFileURL(path.join(modules, 'server.js')).href);
+  await guardPlugin(guard.bb);
   const status = await guard.harness.behavior.callRpc('status', null) as { pool: unknown };
   expect(status.pool).toEqual({ linked: true, vpnPolicyVersion: 2, error: null });
   expect(calls).toContain('vpnPolicy.get');
