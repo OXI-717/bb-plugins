@@ -99,3 +99,13 @@ all attempts in their own response; injected delays are never installed in the
 live Guard policy or used by other clients. This rehearses admission, not model
 availability. An aborted host lookup cannot proceed to a later SDK call even if
 its underlying operation returns late.
+
+## An unanswered Guard read and running responses (0.4.89)
+
+A Guard read that gets no answer (a timeout after both attempts, or a failed call) is not a refusal: nothing indicates that the network changed. From 0.4.89 it is handled by what it protects:
+
+- **New requests** are refused locally from the first unanswered read, exactly as before. Nothing is sent.
+- **Responses that were already admitted** by a successful read keep running for at most 30 seconds while the Guard stays unreadable. The repeat read after response headers and the periodic one-second check both follow this rule. If the Guard is still unreadable after 30 seconds they are cancelled with `VPN_GUARD_UNAVAILABLE`; one successful read restarts the allowance.
+- **An explicit refusal** (manual block, VPN unavailable, restore required), an invalid decision and missing or unverified local VPN evidence cancel running responses at the next check, with no allowance.
+
+Before this change one slow control call on a busy server cancelled healthy responses. The allowance narrows the fail-closed guarantee for running responses by at most 30 seconds of Guard silence; it never applies to a decision the Guard actually returned. A heartbeat remains not a packet-level firewall.

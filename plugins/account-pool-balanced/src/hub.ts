@@ -229,7 +229,7 @@ export class AccountPoolHub {
             elapsedMs, transport: ipv4 ? "ipv4" : "default", stage: "fetch_headers",
             operation: drainable ? "model" : "auxiliary",
           }));
-      },options.maintenance);
+      },options.maintenance,options.now);
   }
 
   private requiresIpv4(provider:PoolProvider):boolean {const settings=this.options.getSettings();return settings.vpnOnlyProviders.some(value=>value===provider)||(settings.vpnGuardEnabled&&provider!=="kimi"&&provider!=="zai");}
