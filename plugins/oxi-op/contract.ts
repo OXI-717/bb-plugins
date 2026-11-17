@@ -43,6 +43,8 @@ export const routeSchema = z.object({
     : (!!x.tokenEnvironment !== !!x.tokenSetting) && !x.accountId && !x.credentialHostId && !x.desktopHosts && !x.opBroker && (!x.allowAgentCommands || !x.requireApproval),
     'Configure one explicit op authentication mode');
 export type Route = z.infer<typeof routeSchema>;
+// Store failures travel as validated data: host transports may replace thrown errors.
+export const storeFailureCode = z.enum(['op-item-list','op-item-template','op-item-create','op-item-get','duplicate-items','template-fields','item-differs','store-invalid-response','store-in-progress','store-cancelled','store-host-failed']);
 export function resolveRoute(routes: unknown, projectId: string, profile = 'default') {
     const matches = z.array(routeSchema).parse(routes).filter(x => x.projectId === projectId && x.profile === profile);
     if (matches.length !== 1) {
@@ -71,6 +73,6 @@ export const contract = defineRpcContract({
     inventory: { input: z.object({route: routeSchema, registryTitle: z.string().min(1)}).strict(), output: z.object({vaults: z.array(z.object({id: z.string(), name: z.string()}))}) },
     verify: { input: z.object({ route: routeSchema, serviceAccountToken: z.string().optional() }).strict(), output: z.object({ verified: z.literal(true), cleaned: z.literal(true) }) },
     check: { input: z.object({ route: routeSchema, serviceAccountToken: z.string().optional() }).strict(), output: z.object({ authorized: z.literal(true) }) },
-    store: { input: z.object({ route: routeSchema, serviceAccountToken: z.string().optional(), title: z.string().min(1).max(160), username: z.string().max(200), password: z.string().min(1).max(16000) }).strict(), output: z.object({ itemId: z.string(), verified: z.literal(true) }) },
+    store: { input: z.object({ route: routeSchema, serviceAccountToken: z.string().optional(), title: z.string().min(1).max(160), username: z.string().max(200), password: z.string().min(1).max(16000) }).strict(), output: z.union([z.object({ itemId: z.string(), verified: z.literal(true) }).strict(), z.object({failed:z.literal(true),code:storeFailureCode}).strict()]) },
     run: { input: z.object({ route: routeSchema, serviceAccountToken: z.string().optional(), operation: z.string() }).strict(), output: z.object({ completed: z.literal(true) }) },
 });

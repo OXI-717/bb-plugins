@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import {provisionProjectVault,storeCredential,serviceEnvironment,runProcess,readOperationBindings,executeOperationBindings,issueServiceAccounts,probeServiceScope,listVaultKeys,execWithKeys,keyReader,runCommand,withTemplateFile,concealOutput,overviewVaults,runOwnedProcess,execResolved,runTidy,brokerRunner,commandPath,programAvailable,parseEnv,importFiles,replaceWithReferences,archiveTarget,moveNoClobber} from './dist/test/core.js';
 import {resolveRoute} from './dist/test/contract.js';
 import {readFileSync} from 'node:fs';
+import {mkdtemp, writeFile, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {experimental_createHostEntryHarness} from '@get-bb/plugin-sdk/testing/host';
+import hostEntry from './dist/test/host.js';
 // Item templates arrive on stdin on macOS and through a private file on Linux.
 const templateOf=(args,input)=>{const path=args[args.indexOf('--template')+1];return JSON.parse(path==='/dev/stdin'?input:readFileSync(path,'utf8'));};
 const route={projectId:'example-project',hostId:'example-host',vaultId:'example-vault',tokenEnvironment:'EXAMPLE_TOKEN'};
@@ -30,6 +35,30 @@ test('retry recovers matching item without duplicate write',async()=>{
 });
 test('CLI errors cannot disclose sensitive output',async()=>{
  await assert.rejects(storeCredential(async()=>{throw Error('synthetic-sensitive-output');},{},'v','t','u','p'),e=>!e.message.includes('synthetic-sensitive-output'));
+});
+test('host store transports known failure stages as safe data and verifies successful read-back',async t=>{
+ const directory=await mkdtemp(join(tmpdir(),'example-store-'));
+ t.after(()=>rm(directory,{recursive:true,force:true}));
+ const binary=join(directory,'example-op');
+ await writeFile(binary,'#!'+process.execPath+'\n'+`
+ (async()=>{
+ const args=process.argv.slice(2), title=args[args.indexOf('--vault')+1];
+ let input='';for await(const chunk of process.stdin)input+=chunk;
+ if(args[1]==='list') console.log('[]');
+ else if(args[1]==='template') console.log(JSON.stringify({fields:[{id:'username',label:'username'},{id:'password',label:'password'}]}));
+ else if(args[1]==='create') {
+   if(title==='fail-create'){console.error('synthetic-sensitive-output');process.exit(1);}
+   console.log(JSON.stringify({id:'example-item'}));
+ } else console.log(JSON.stringify({fields:[{label:'username',value:'example'},{label:'password',value:title==='wrong-value'?'different':'synthetic-value'}]}));
+ })().catch(()=>process.exit(2));
+ `,{mode:0o700});
+ const h=experimental_createHostEntryHarness(hostEntry);t.after(()=>h.experimental_dispose());
+ for(const vaultId of ['fail-create','wrong-value','success']) {
+  const result=await h.experimental_call('store',{route:{...route,vaultId,opBinary:binary,tokenEnvironment:undefined,tokenSetting:'projectServiceAccounts'},serviceAccountToken:'synthetic-service-token',title:'Example',username:'example',password:'synthetic-value'});
+  assert.deepEqual(result,vaultId==='success'?{itemId:'example-item',verified:true}:{failed:true,code:vaultId==='fail-create'?'op-item-create':'item-differs'});
+  assert(!JSON.stringify(result).includes('synthetic-sensitive-output'));
+  assert(!JSON.stringify(result).includes('synthetic-value'));
+ }
 });
 test('missing token cannot fall back to personal account',()=>{
  assert.throws(()=>serviceEnvironment(''));assert.equal(serviceEnvironment('synthetic').OP_BIOMETRIC_UNLOCK_ENABLED,'false');

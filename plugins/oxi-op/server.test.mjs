@@ -55,7 +55,7 @@ test('native intake keeps the password out of interaction metadata and tool resu
   const pending = h.behavior.callAgentTool('oxi_op_store', {title: 'Example', username: 'example'}, context);
   await setImmediate();
   const interaction = h.inspection.pendingInteractions[0];
-  assert.equal(interaction.timeoutMs, 60_000);
+  assert.equal(interaction.timeoutMs, 600_000);
   assert.equal(interaction.threadId, context.threadId);
   assert.equal(interaction.payload.vaultId, route.vaultId);
   assert.equal(interaction.payload.secrets[0].item, 'Example');
@@ -72,6 +72,62 @@ test('native intake keeps the password out of interaction metadata and tool resu
   assert.equal(call.hostId, route.hostId);
   assert.equal(call.input.password, 'synthetic-sensitive-value');
   assert(!JSON.stringify(result).includes('synthetic-sensitive-value'));
+});
+
+test('store preserves a safe host failure through the RPC result and receipt', async t => {
+  const notices=[];
+  const h=setup(t,{},()=>({failed:true,code:'op-item-create'}),async input=>{notices.push(input);return {delivery:'sent'};});
+  const pending=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);
+  await setImmediate();
+  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{password:'synthetic-sensitive-value'});
+  const outcome=JSON.parse(await pending);
+  const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
+  assert.equal(outcome.code,'op-item-create');
+  assert.equal(row.failureCode,'op-item-create');
+  assert.equal(row.state,'needs-review');
+  assert(row.approvedAt);
+  assert(notices[0].input[0].text.includes('code=op-item-create'));
+  assert(!JSON.stringify([outcome,row,notices]).includes('synthetic-sensitive-value'));
+});
+
+test('store transport failures and invalid submissions keep confirmation without raw errors', async t => {
+  for(const password of ['synthetic-sensitive-value','']) {
+    const h=setup(t,{},()=>{throw new Error('synthetic-sensitive-value');});
+    const pending=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);
+    await setImmediate();
+    h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{password});
+    const outcome=JSON.parse(await pending);
+    const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
+    assert.equal(outcome.code,password?'store-host-failed':'store-invalid-submission');
+    assert.equal(row.failureCode,outcome.code);
+    assert(row.approvedAt);
+    assert(!JSON.stringify([outcome,row]).includes('synthetic-sensitive-value'));
+    assert.equal(h.inspection.experimental_hostRpcCalls.length,password?1:0);
+  }
+});
+
+test('store distinguishes unobserved, mounted and visible forms and stays live after one minute', async t => {
+  t.mock.timers.enable({apis:['setTimeout']});
+  for(const visible of [undefined,false,true]) {
+    let h;
+    h=setup(t,{},undefined,undefined,async()=>h.inspection.pendingInteractions.map(x=>({id:x.id,origin:{kind:'plugin',pluginId:'oxi-op'}})));
+    const pending=h.behavior.callAgentTool('oxi_op_store',{title:'Example'},context);
+    await setImmediate();
+    const form=h.inspection.pendingInteractions[0];
+    if(visible!==undefined)await h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:form.id,formRequestId:form.payload.formRequestId,visible});
+    if(visible===true)await h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:form.id,formRequestId:form.payload.formRequestId,visible:false});
+    await assert.rejects(h.behavior.callRpc('formReceipt',{threadId:context.threadId,interactionId:form.id,formRequestId:'00000000-0000-4000-8000-000000000000',visible:true}));
+    t.mock.timers.tick(60_000);await setImmediate();
+    assert.equal(h.inspection.pendingInteractions.length,1);
+    t.mock.timers.tick(540_000);await pending;
+    const row=JSON.parse((await h.behavior.runCli(['history'],context)).stdout)[0];
+    assert.equal(row.formState,visible===undefined?'not-observed':visible?'visible':'mounted');
+    assert.equal(row.cancelReason,'timeout');
+    const text=completionText(row);
+    assert(text.includes(visible===undefined?'Показ формы не зарегистрирован':visible?'Показ формы зарегистрирован':'Форма загружена'));
+    assert(!text.includes('Карточка не подтверждена'));
+    assert.equal(h.inspection.experimental_hostRpcCalls.length,0);
+  }
 });
 
 test('intake shows its BB form before any op authentication and cancellation does not contact op', async t => {
@@ -690,7 +746,7 @@ test('every approval card is announced to the owner without names or secrets, an
  assert.equal(h.inspection.pendingInteractions.length,1);
  assert.equal(notices.length,1);
  assert.equal(notices[0].pluginId,'push-notifications');assert.equal(notices[0].method,'notifications.send');
- assert.equal(notices[0].input.threadId,context.threadId);assert(notices[0].input.body.includes('60 секунд'));
+ assert.equal(notices[0].input.threadId,context.threadId);assert(notices[0].input.body.includes('600 секунд'));
  assert(!JSON.stringify(notices).includes('Example client database')&&!JSON.stringify(notices).includes('Example workspace'));
  h.behavior.submitInteraction(h.inspection.pendingInteractions[0].id,{password:'synthetic-sensitive-value'});await work;
  assert(!JSON.stringify(notices).includes('synthetic-sensitive-value'));

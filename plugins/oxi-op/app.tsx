@@ -72,7 +72,7 @@ export function CredentialForm({interaction,submit,cancel,reportDelivery}: Plugi
 export default definePluginApp(app=>{
  app.slots.pendingInteraction({id:'credential',component:function Credential(props){
   const rpc=useRpc<typeof deliveryContract>();
-  const report=useCallback((visible:boolean)=>{void rpc.call('formReceipt',{threadId:props.interaction.threadId,interactionId:props.interaction.id,visible}).catch(()=>{});},[rpc,props.interaction.id,props.interaction.threadId]);
+  const report=useCallback((visible:boolean)=>{void rpc.call('formReceipt',{threadId:props.interaction.threadId,interactionId:props.interaction.id,visible,...(typeof (props.interaction.payload as {formRequestId?:unknown}).formRequestId==='string'?{formRequestId:(props.interaction.payload as {formRequestId:string}).formRequestId}:{})}).catch(()=>{});},[rpc,props.interaction.id,props.interaction.threadId]);
   return <CredentialForm {...props} reportDelivery={report}/>;
  }});
 });

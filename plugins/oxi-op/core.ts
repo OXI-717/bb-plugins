@@ -114,7 +114,7 @@ export async function storeCredential(run: Runner, env: NodeJS.ProcessEnv, vault
     } };
     const items = await op(['item', 'list', '--vault', vault, '--format=json']);
     if (!Array.isArray(items))
-        throw new Error('Invalid item list');
+        throw new CodedError('store-invalid-response','Invalid item list');
     const matches = items.filter((x: {
         title: string;
     }) => x.title === title);
@@ -133,10 +133,10 @@ export async function storeCredential(run: Runner, env: NodeJS.ProcessEnv, vault
         itemId = item.id;
     }
     if (typeof itemId !== 'string' || !itemId)
-        throw new Error('No item identifier returned');
+        throw new CodedError('store-invalid-response','No item identifier returned');
     const stored = await op(['item', 'get', itemId, '--vault', vault, '--reveal', '--format=json']);
     if (!Array.isArray(stored.fields))
-        throw new Error('Invalid read-back response');
+        throw new CodedError('store-invalid-response','Invalid read-back response');
     const fields = new Map(stored.fields.map((x: {
         label: string;
         value: string;
