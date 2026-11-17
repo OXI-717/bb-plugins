@@ -1,3 +1,4 @@
+import { summarizeDiagnostics } from './diagnostics.js';
 import type {AgyAuthorization} from "./agy-oauth-login.js";
 import { createHash } from 'node:crypto';
 import type {
@@ -36,6 +37,7 @@ interface PoolProviderState {
 const ROUTED_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 export class PoolOperations {
+  routeTracking?:()=>Promise<NonNullable<PoolStatus["routeTracking"]>>;
   constructor(
     private readonly accounts: AccountStore,
     private readonly quotas: QuotaStore,
@@ -338,6 +340,33 @@ export class PoolOperations {
     return this.routing.isProviderEnabled(provider);
   }
 
+  async diagnostics(from:number,to:number) {
+    const first=this.hub.trafficDiagnostics(from,to);
+    const observations=this.hub.observations(2048);
+    const status=await this.hub.status();
+    return {
+      schema:'bb-account-pool/diagnostics/1',period:{from,to},
+      collectedAt:Date.now(),
+      historyCoverage:'history' in first?{
+        observedAt:first.observedAt,startedAt:first.startedAt,extendedCountersStartedAt:first.extendedCountersStartedAt,
+        retentionMs:first.retentionMs,maxRows:first.maxRows,maxBytes:first.maxBytes,totalRows:first.totalRows,
+        rowsRead:first.totalRows,truncated:first.truncated,capacityDroppedEvents:first.capacityDroppedEvents,
+        capacityEvictedBuckets:first.capacityEvictedBuckets,storageFailuresSinceStart:first.storageFailuresSinceStart,
+      }:{unavailable:true},
+      freshCoverage:'rows' in observations?{
+        observedAt:observations.observedAt,oldestAt:observations.oldestAt,
+        newestAt:observations.rows.at(-1)?.at??null,rowsRead:observations.rows.length,
+        totalRetainedRows:observations.totalRetainedRows,rowsTruncated:observations.rowsTruncated,
+        truncated:observations.truncated,evictedSinceStart:observations.evictedSinceStart,
+        retentionMs:observations.retentionMs,storageFailuresSinceStart:observations.storageFailuresSinceStart,
+      }:{unavailable:true},
+      accounts:status.accounts.map(a=>({id:a.id,provider:a.provider,enabled:a.enabled,status:a.status,
+        eligible:a.eligible,inFlight:a.inFlight,queuedRequests:a.queuedRequests,concurrencyLimit:a.concurrencyLimit})),
+      ...summarizeDiagnostics({from,to},[],'rows' in observations?observations.rows:[]),
+      history:'history' in first?first.history:[],
+    };
+  }
+
   observations() { return this.hub.observations(); }
   async trafficHistory(offset = 0, limit = 100) {
     const history = this.hub.trafficHistory(offset,limit);
@@ -361,6 +390,8 @@ export class PoolOperations {
     const hosts = await this.listHosts();
     await this.hubTokens.prune(hosts.map((host) => host.id));
     const status = await this.hub.status();
+    const routeTracking=await this.routeTracking?.();
+    const history=this.hub.trafficHistory(0,1);
     const hostNames = new Map(hosts.map((host) => [host.id, host.name]));
     const [claude, codex, kimi, zai, opencodeGo, neuraldeep, agy, cursor, devin, grok] = await Promise.all([
       this.routing.isProviderEnabled("claude"),
@@ -376,6 +407,8 @@ export class PoolOperations {
     ]);
     return {
       ...status,
+      routeTracking,
+      historyCapacity:"totalRows" in history?{rows:history.totalRows,maxRows:history.maxRows,maxBytes:history.maxBytes}:undefined,
       hosts: status.hosts.map((token) => ({
         ...token,
         hostName: hostNames.get(token.hostId) ?? null,

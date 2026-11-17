@@ -51,3 +51,17 @@ it('accepts newly persisted decisions with the 0.4.88 schema',async()=>{
  expect(egressStateSchema.parse(records.get('account-egress-v1'))).toEqual(records.get('account-egress-v1'));
  await e.close();
 });
+
+it('old strict reader accepts state after cleanup and restart',async()=>{
+ const records=new Map<string,unknown>();
+ const kv={get:async(k:string)=>records.get(k),set:async(k:string,v:unknown)=>{records.set(k,structuredClone(v));},delete:async(k:string)=>{records.delete(k);},list:async()=>[...records.keys()]};
+ const account='11111111-1111-4111-8111-111111111111';
+ await kv.set('account-egress-v1',{schema:1,profiles:[],bindings:{},pins:{},unassigned:{stale:[account],warm:[account]},assignmentBlocked:true});
+ const e=new AccountEgress(kv,async()=>'fixture-host',async()=>true,undefined,()=>40*86400000,undefined,key=>key==='stale'?1:40*86400000);
+ await e.initialize();
+ const saved=records.get('account-egress-v1');
+ expect(egressStateSchema.parse(saved)).toEqual(saved);
+ expect(egressStateSchema.parse(saved).unassigned).toEqual({warm:[account]});
+ const restarted=new AccountEgress(kv,async()=>'fixture-host',async()=>true);await restarted.initialize();
+ expect(restarted.snapshot()).toEqual(saved);await restarted.close();await e.close();
+});

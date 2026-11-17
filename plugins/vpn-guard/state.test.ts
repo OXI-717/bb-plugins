@@ -23,4 +23,4 @@ it('protects pool aliases without changing Chinese providers',()=>{
   for(const id of ['acp-opencode-zai','acp-opencode-kimi']) expect(protectedProvider(id)).toBe(false);
 });
 
-it.each(['acp-opencode','opencode-go','acp-opencode-go','acp-grok','acp-agy','acp-opencode-neuraldeep','new-provider','acp-opencode-kimi-custom',''])('protects non-exempt provider %s',id=>expect(protectedProvider(id)).toBe(true));
+it.each(['acp-opencode','opencode-go','acp-opencode-go','grok','acp-grok','acp-agy','acp-opencode-neuraldeep','new-provider','acp-opencode-kimi-custom',''])('protects non-exempt provider %s',id=>expect(protectedProvider(id)).toBe(true));

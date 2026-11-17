@@ -109,14 +109,16 @@ fourteen days. The existing `observations` output includes a compact `history` s
 short event ring remains unchanged. Both commands are local authorized inspection,
 not new public endpoints. No provider, quota or model calls are made.
 
-Each aggregate groups provider, selected account UUID (or null before selection),
-authenticated client hash and project. There are no prompts, response bodies,
-raw headers, credentials, request IDs, thread IDs, model strings or diagnostic
-quota tuples in long-term storage. Machine labels are resolved on inspection
-from the current trusted host directory, never recorded from request payloads or
-persisted in history. External clients without a trusted machine mapping remain
-hashes; they must not be presented as guessed machine names. Lookup failure sets
-`identitiesAvailable=false` and preserves counters without guessing labels.
+Each aggregate groups hour, provider and selected account UUID (or null before
+selection). Client and project fields remain null in the existing file format;
+loading older snapshots merges these dimensions, summing counters and retaining
+maximum pressure timestamps and concurrency. The short event ring retains its
+existing detail. No prompts, response bodies, credentials or conversation IDs
+are persisted in history. The bounds are 65,536 rows and 64 MiB: 128 account
+series plus ten provider request series for 336 hours use 46,368 rows, leaving
+more than 25% spare capacity. Higher account/provider cardinality remains bounded
+and reports dropped events and evicted buckets. Pool status reports retained rows
+and limits. This is a service limit, not a routing setting.
 
 `requests` counts logical starts and therefore belongs to the null-account row.
 `firstDispatches` counts the first actual upstream dispatch assigned to an account;
@@ -131,14 +133,14 @@ include concurrent streams or ones begun earlier: they are not wall-clock busy
 percentages. The account peak is an observed dispatch/header count, not a provider
 limit. Missing ended streams after a process crash cannot be reconstructed.
 
-The file cap is 8 MiB / 8,192 aggregate buckets, in addition to the existing raw
+The file cap is 64 MiB / 65,536 aggregate buckets, in addition to the existing raw
 2 MiB / 2,048-event ring. At cardinality capacity the oldest hour is evicted as a
 group for new hours; within a full single hour new keys are omitted while existing
 keys continue counting. `capacityEvictedBuckets`, `capacityDroppedEvents` and
 `truncated` disclose these limits. Hour buckets expire entirely after fourteen
 days (the boundary may shorten coverage by less than an hour). There is no
 append-only log or per-request file. One temporary atomic replacement adds at most
-another 8 MiB. The containing directory is 0700 and files are 0600. Temporary files
+another 64 MiB. The containing directory is 0700 and files are 0600. Temporary files
 are removed at startup or failed writes. Expiry runs on the journal's existing
 background tick even with no traffic. Filesystem refusal may prevent replacement
 or deletion; it increments the isolated history failure counter, never blocks or
@@ -158,7 +160,7 @@ not authorization to disable, reroute or rotate an account automatically.
 
 History transport is paginated independently from storage. `bb pool history
 --offset 0 --limit 100 --json` returns at most 100 detail rows by default; `limit`
-is a strict integer 1–200 and `offset` is 0–8,192. `totalRows`, `offset`, `limit`,
+is a strict integer 1–200 and `offset` is 0–65,536. `totalRows`, `offset`, `limit`,
 `nextOffset` and `rowsTruncated` describe the page, separately from the persistent
 capacity-omission flag `truncated`. Follow `nextOffset` until null. Rows sort by
 hour then full aggregate key. Pages are live, not an immutable export: each has

@@ -8077,10 +8077,11 @@ describe('bounded request metadata observations',()=>{
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockImplementation(async()=>Response.json({}))}});
     const now=Date.now(), trace=newTrace('codex','host-synthetic','proj_abcdef1234',null,null,'other');
     const event={...trace,at:now,event:'request',attempt:0,accountId:null,status:null,durationMs:null,inFlight:0,accountInFlight:0,retryAfterMs:null,retryAfterSupplied:null,quotaEvidence:null,holdSource:null,heldUntil:null,outcome:null,failover:null,errorClass:null};
-    for(let i=0;i<HISTORY_MAX_ROWS-1;i++)journal.record({...event,clientHash:i.toString(16).padStart(24,'0')});
-    journal.record({...event,clientHash:'f'.repeat(24),event:'upstream',status:429});
+    const accountId=(i:number)=>`00000000-0000-4000-8000-${i.toString().padStart(12,'0')}`;
+    for(let i=0;i<HISTORY_MAX_ROWS-1;i++)journal.record({...event,accountId:accountId(i)});
+    journal.record({...event,accountId:accountId(HISTORY_MAX_ROWS-1),event:'upstream',status:429});
     // Evict even this last raw failure, while retaining its long-term bucket outside the first detail page.
-    for(let i=0;i<2049;i++)journal.record({...event,clientHash:'0'.repeat(24),event:'hold'});
+    for(let i=0;i<2049;i++)journal.record({...event,accountId:accountId(0),event:'hold'});
     const maxCliBytes:Record<string,number>={};
     const read=async(args:string[])=>{
       const reply=await fixture.host.harness.behavior.runCli(args);
@@ -8100,15 +8101,18 @@ describe('bounded request metadata observations',()=>{
     const seen=new Set<string>();let offset:number|null=0;
     while(offset!==null){
       const page=await read(['history','--offset',String(offset),'--limit','200','--json']);
-      for(const row of page.rows)seen.add(row.clientHash);
+      for(const row of page.rows){
+        expect(row.clientHash).toBeNull();expect(row.projectId).toBeNull();
+        expect(seen.has(row.accountId)).toBe(false);seen.add(row.accountId);
+      }
       offset=page.nextOffset;
     }
-    expect(seen.size).toBe(HISTORY_MAX_ROWS);expect(seen.has('f'.repeat(24))).toBe(true);
+    expect(seen.size).toBe(HISTORY_MAX_ROWS);expect(seen.has(accountId(HISTORY_MAX_ROWS-1))).toBe(true);
     console.info(JSON.stringify({trafficHistoryCapacity:HISTORY_MAX_ROWS,maxCliBytes,BB_MAX_BYTES:1048576}));
-    for(const args of [['--limit','201'],['--limit','0'],['--limit','1.5'],['--offset','-1'],['--offset','8193']])
+    for(const args of [['--limit','201'],['--limit','0'],['--limit','1.5'],['--offset','-1'],['--offset',String(HISTORY_MAX_ROWS+1)]])
       expect((await fixture.host.harness.behavior.runCli(['history',...args,'--json'])).exitCode).not.toBe(0);
-  });
-  it('inspects persisted hourly traffic through the authorized CLI and resolves only trusted machine identities',async()=>{
+  },120000);
+  it('keeps historical totals unattributed while recent diagnostics retain only token-bound machine identity',async()=>{
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockImplementation(async()=>Response.json({}))}});
     const env=await fixture.host.harness.behavior.resolveProviderEnv('claude-code',{hostId:'host-one',projectId:'proj_abcdef1234',threadId:'thr_abcdef1234'});
     const key=env.find(e=>e.name==='ANTHROPIC_AUTH_TOKEN')!.value as string;
@@ -8117,7 +8121,14 @@ describe('bounded request metadata observations',()=>{
     const reply=await fixture.host.harness.behavior.runCli(['history','--json']);expect(reply.exitCode).toBe(0);
     const result=JSON.parse(reply.stdout);
     expect(result).toMatchObject({schema:'bb-account-pool/traffic-history/1',identitiesAvailable:true,truncated:false});
-    expect(result.clients).toEqual([{clientHash:expect.any(String),hostId:'host-one',hostName:'One'}]);
+    expect(result.clients).toEqual([]);
+    expect(result.rows.every((row:{clientHash:string|null;projectId:string|null})=>row.clientHash===null&&row.projectId===null)).toBe(true);
+    const {newTrace}=await import('./request-journal.js');
+    const trustedHash=newTrace('claude','host-one',null,null,null,'other').clientHash;
+    const recent=await records(fixture);
+    expect(recent.rows.length).toBeGreaterThan(0);
+    expect(recent.rows.every(row=>row.clientHash===trustedHash&&row.projectId==='proj_abcdef1234'&&row.threadId==='thr_abcdef1234')).toBe(true);
+    expect(JSON.stringify(recent)).not.toMatch(/synthetic private prompt|forged-machine|ANTHROPIC_AUTH_TOKEN/);
     expect(result.rows).toEqual(expect.arrayContaining([expect.objectContaining({accountId:null,requests:1,attempts:0}),expect.objectContaining({accountId:fixture.account.id,requests:0,firstDispatches:1,attempts:1,upstreamResponses:1,streamEnds:1,peakAccountInFlight:1})]));
     expect(JSON.stringify(result)).not.toMatch(/synthetic|forged-machine|ANTHROPIC|threadId|requestId/);
     fixture.host.harness.sdk.stub('hosts.list',async()=>{throw Error('synthetic private failure');});
@@ -9026,4 +9037,11 @@ describe('account HTTP proxy operator wiring',()=>{
    expect(JSON.stringify(env)).not.toContain('proxy.example');
   }
  });
+});
+
+it('exposes route and history capacity through pool status',async()=>{
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example'});
+ const status=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));
+ expect(status.routeTracking).toMatchObject({decisions:0,maxDecisions:4096,maxBytes:240*1024,retentionMs:30*86400000});
+ expect(status.historyCapacity).toEqual({rows:0,maxRows:65536,maxBytes:64*1024*1024});
 });

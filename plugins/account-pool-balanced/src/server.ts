@@ -203,7 +203,10 @@ export function createAccountPoolPlugin(
     const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
     await journal.initialize();
     bb.onDispose(()=>journal.close());
-    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';},new ProxySecrets(path.join(secretDir,'account-proxies')),now,options.httpScopeEnforcement??createManagedConnectSource(now));
+    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';},new ProxySecrets(path.join(secretDir,'account-proxies')),now,options.httpScopeEnforcement??createManagedConnectSource(now),key=>{
+      let observationKey=key;try{const value=JSON.parse(key);if(Array.isArray(value)&&value.length===4)observationKey=JSON.stringify(["thread",value[3],value[0],value[1],value[2]]);}catch{}
+      return new PoolAffinityStore(db).observation(observationKey)?.lastUsedAt??null;
+    });
     await egress.initialize();
     bb.onDispose(()=>egress.close());
     const transport =
@@ -442,7 +445,8 @@ export function createAccountPoolPlugin(
         return { opened: true };
       }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update,input=>nativeSessions.updateAccount(input),input=>nativeSessions.probe(input,async()=>{try{return (await browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})).protocol===1;}catch{return false;}},request=>browserHost.call('nativeProbe',request,{hostId:input.hostId,timeoutMs:125000})),selection),
     );
-    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})));
+    operations.routeTracking=async()=>{await egress.cleanup();return egress.capacity();};
+    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})),()=>update.status());
     registerUsageSource(bb, hub, false);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);

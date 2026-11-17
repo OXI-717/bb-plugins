@@ -1,3 +1,4 @@
+import { summarizeDiagnostics } from './diagnostics.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
@@ -6,8 +7,8 @@ import type { Observation } from './request-journal.js';
 
 export const HOUR_MS = 3600000;
 export const HISTORY_TTL_MS = 14 * 24 * HOUR_MS;
-export const HISTORY_MAX_ROWS = 8192;
-export const HISTORY_MAX_BYTES = 8 * 1024 * 1024;
+export const HISTORY_MAX_ROWS = 65536;
+export const HISTORY_MAX_BYTES = 64 * 1024 * 1024;
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const counters = z.object({
   requests: count, firstDispatches: count, attempts: count, upstreamResponses: count, upstream429: count,
@@ -33,7 +34,7 @@ const snapshotSchema = z.object({
 });
 const empty = (): Counters => Object.fromEntries(Object.keys(counters.shape).map(k => [k, 0])) as Counters;
 const add = (a: number, b: number) => Math.min(Number.MAX_SAFE_INTEGER, a + b);
-const key = (r: Pick<Row, 'hour' | 'provider' | 'accountId' | 'clientHash' | 'projectId'>) => JSON.stringify([r.hour, r.provider, r.accountId, r.clientHash, r.projectId]);
+const key = (r: Pick<Row, 'hour' | 'provider' | 'accountId'>) => JSON.stringify([r.hour, r.provider, r.accountId]);
 
 /** Called only with validated journal events. No request/attempt IDs or free text survive. */
 export class TrafficHistory {
@@ -63,10 +64,17 @@ export class TrafficHistory {
         if (this.extendedCountersStartedAt > this.now()) throw Error("future extended coverage");
         this.capacityDroppedEvents = data.capacityDroppedEvents;
         this.capacityEvictedBuckets = data.capacityEvictedBuckets;
+        const originalKeys=new Set<string>();
         for (const row of data.rows) {
+          const originalKey=JSON.stringify([row.hour,row.provider,row.accountId,row.clientHash,row.projectId]);
+          if(originalKeys.has(originalKey))throw Error("duplicate aggregate");
+          originalKeys.add(originalKey);
           const id = key(row);
-          if (this.rows.has(id)) throw Error('duplicate aggregate');
-          this.rows.set(id, row);
+          const prior=this.rows.get(id);
+          if(prior){
+            for(const k of Object.keys(counters.shape) as Array<keyof Counters>)prior[k]=k==='peakAccountInFlight'||k.startsWith('last')?Math.max(prior[k],row[k]):add(prior[k],row[k]);
+          }else this.rows.set(id,{...row,clientHash:null,projectId:null});
+          if(row.clientHash!==null||row.projectId!==null)this.dirty=true;
         }
       }
     } catch { this.rows.clear(); this.startedAt = this.now(); this.extendedCountersStartedAt = this.now(); this.storageFailures++; }
@@ -78,7 +86,7 @@ export class TrafficHistory {
     const hour = Math.floor(r.at / HOUR_MS) * HOUR_MS;
     if (r.at > this.now() || hour < this.cutoff()) return;
     this.prune();
-    const identity = { hour, provider: r.provider, accountId: r.accountId, clientHash: r.clientHash, projectId: r.projectId };
+    const identity = { hour, provider: r.provider, accountId: r.accountId, clientHash: null, projectId: null };
     const id = key(identity);
     let row = this.rows.get(id);
     if (!row) {
@@ -160,9 +168,13 @@ export class TrafficHistory {
         lastAuthErrorAt:total.lastAuthErrorAt,lastQueueFailureAt:total.lastQueueFailureAt,
         lastUpstream503At:total.lastUpstream503At,lastAuthRefreshFailureAt:total.lastAuthRefreshFailureAt}))};
   }
+  periodSummary(from:number,to:number) {
+    const metadata=this.metadata();
+    return {...metadata,history:summarizeDiagnostics({from,to},this.rows.values(),[]).history};
+  }
   snapshot(offset = 0, limit = 100) {
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > HISTORY_MAX_ROWS || !Number.isSafeInteger(limit) || limit < 1 || limit > 200)
-      throw Error('History requires offset 0..8192 and limit 1..200');
+      throw Error(`History requires offset 0..${HISTORY_MAX_ROWS} and limit 1..200`);
     const metadata = this.metadata();
     const rows = [...this.rows.values()].sort((a,b)=>a.hour-b.hour || key(a).localeCompare(key(b))).slice(offset,offset+limit).map(r=>({...r}));
     return {...metadata,offset,limit,rowsTruncated:rows.length<metadata.totalRows,

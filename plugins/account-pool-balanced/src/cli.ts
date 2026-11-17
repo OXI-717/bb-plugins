@@ -84,9 +84,10 @@ const HELP = [
   '  bb pool native mode <managed|off>',
   '  bb pool native attest-stopped <lease-id> --confirmed',
   "  bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]",
+  "  bb pool diagnostics --from <UTC-hour> --to <UTC-hour> [--compare-previous] [--json]",
   "  bb pool observations [--json]",
   "  bb pool guard-probe --provider cursor [--delay-stage guard-rpc] [--delay-ms 4100] [--delay-attempts first|all] [--json]",
-  "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
+  "  bb pool history [--offset <0..65536>] [--limit <1..200>] [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin|grok> [--off]",
   "  bb pool config",
   "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|pinnedFailover|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
@@ -228,6 +229,8 @@ function formatStatus(status: PoolStatusReport): string {
     `Accepting: ${status.accepting}`,
     `Enabled accounts: ${status.enabledAccountCount}`,
     `In flight: ${status.inFlight}`,
+    ...(status.routeTracking?[`Route tracking: ${status.routeTracking.decisions}/${status.routeTracking.maxDecisions} decisions; ${status.routeTracking.bytes}/${status.routeTracking.maxBytes} bytes`]:[]),
+    ...(status.historyCapacity?[`History: ${status.historyCapacity.rows}/${status.historyCapacity.maxRows} rows; byte limit ${status.historyCapacity.maxBytes}`]:[]),
     "",
     "Machine tokens:",
     ...(status.hosts.length === 0
@@ -385,6 +388,7 @@ export function registerPoolCli(
   streamProbe?:(threadId:string,requestId?:string)=>{streams:CursorStream[];interrupted?:boolean},
   maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & Partial<Pick<PoolMaintenance,'acquireGraceful'>> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
   nativePreflight?:(input:import('./native-probe-wire.js').NativeProbeInput)=>Promise<object>,
+  updateStatus?:()=>Promise<import("zod").z.infer<typeof import("./pool-update.js").updateStatusSchema>>,
 ): void {
   bb.cli.register({
     name: "pool",
@@ -453,8 +457,9 @@ export function registerPoolCli(
       { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json]" },
       {name:"stream-probe",summary:"Inspect one thread or interrupt one exact observed Cursor body",usage:"bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]"},
       { name:"guard-probe", summary:"Rehearse read-only Guard admission, optionally delaying only this probe", usage:"bb pool guard-probe --provider cursor [--delay-stage server-host|guard-rpc|server-host-recheck] [--delay-ms 0..4500] [--delay-attempts first|all] [--json]" },
+      { name:"diagnostics", summary:"Read bounded before/after queue and account diagnostics", usage:"bb pool diagnostics --from <UTC-hour> --to <UTC-hour> [--compare-previous] [--json]" },
       { name:"observations", summary:"Inspect bounded request metadata and retained-event minute counts", usage:"bb pool observations [--json]" },
-      { name:"history", summary:"Inspect bounded fourteen-day hourly account and client counters", usage:"bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]" },
+      { name:"history", summary:"Inspect bounded fourteen-day hourly provider and account counters", usage:"bb pool history [--offset <0..65536>] [--limit <1..200>] [--json]" },
       {
         name: "status",
         summary: "Show hub, machine token, routing, and account status",
@@ -888,6 +893,31 @@ export function registerPoolCli(
             delayMs:rawDelay===undefined?undefined:Number(rawDelay),delayAttempts:flags.values.get('delay-attempts')});
           return {exitCode:0,stdout:json(await guardProbe(input))};
         }
+        if(argv[0]==='diagnostics'){
+          const flags=parseFlags(argv.slice(1),['json','compare-previous'],['from','to']);
+          const parseHour=(name:string)=>{
+            const raw=flags.values.get(name);
+            if(!raw||!/^\d{4}-\d{2}-\d{2}T\d{2}:00:00Z$/.test(raw))throw Error(`--${name} requires a UTC hour (YYYY-MM-DDTHH:00:00Z)`);
+            const value=Date.parse(raw);
+            if(!Number.isFinite(value)||new Date(value).toISOString()!==raw.replace('Z','.000Z'))throw Error('Invalid UTC hour');
+            return value;
+          };
+          const from=parseHour('from'),to=parseHour('to');
+          if(from<0||from>=to||to-from>14*86400000||(flags.booleans.has('compare-previous')&&from-(to-from)<0))throw Error('Period must be positive and at most fourteen days');
+          const report=await operations.diagnostics(from,to);
+          const before=flags.booleans.has('compare-previous')?await operations.diagnostics(from-(to-from),from):null;
+          const comparison=before?{
+            before,after:report,
+            delta:report.history.map(after=>{
+              const prior=before.history.find(row=>row.provider===after.provider);
+              return {provider:after.provider,queueWaits:prior?after.queueWaits-prior.queueWaits:null,
+                queueFailures:prior?after.queueFailures-prior.queueFailures:null,
+                meanQueueWaitMs:prior?.meanQueueWaitMs!=null&&after.meanQueueWaitMs!=null?after.meanQueueWaitMs-prior.meanQueueWaitMs:null};
+            }),
+          }:undefined;
+          const update=await updateStatus?.();
+          return {exitCode:0,stdout:json({...report,comparison,update:update?{operationId:update.operationId,startedAt:update.startedAt,state:update.state}:null})};
+        }
         if (argv[0] === "observations") {
           parseFlags(argv.slice(1), ['json'], []);
           return {exitCode:0,stdout:json(operations.observations())};
@@ -901,7 +931,7 @@ export function registerPoolCli(
               throw Error(`--${name} requires an integer ${min}..${max}.`);
             return Number(raw);
           };
-          return {exitCode:0,stdout:json(await operations.trafficHistory(integer('offset',0,0,8192),integer('limit',100,1,200)))};
+          return {exitCode:0,stdout:json(await operations.trafficHistory(integer('offset',0,0,65536),integer('limit',100,1,200)))};
         }
         if (argv[0] === "status") {
           const flags = parseFlags(argv.slice(1), ["json"], []);
