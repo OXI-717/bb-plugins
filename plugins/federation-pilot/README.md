@@ -59,7 +59,7 @@ The legacy single-server fields remain readable for existing pilot installations
 
 ## Working in the native client
 
-Remote project names include their configured label. Thread rows show the standard Network icon, neutral while connected and red while offline. Open and send messages in the ordinary chat. Permission responses use the original remote interaction API.
+Remote project names include their configured label. Healthy connections leave native BB thread indicators unchanged: running, pending interaction and unread attention remain visible. A connection override appears only while connecting or offline; idle alone does not mean the task is complete. Open and send messages in the ordinary chat. Permission responses use the original remote interaction API.
 
 Remote machine names carry a globe and their remote server label/ID in native selectors. Machine settings show separate **Machines on remote BB servers** groups, without local machine management controls. **Permissions on remote server: Full Access** describes execution permissions on that remote machine, not a grant to primary. Remote machine detail links return to these read-only groups. No machine records, provider IDs or host types are fabricated. Host mutations are refused by both the client transport and backend policy.
 
@@ -172,3 +172,18 @@ Diagnostics expose categories, never raw SSH stderr.
 Synthetic tests cover outage/recovery, single-flight backoff, safe-read retry
 bounds, once-only mutation attempts, notification deduplication, pinned tunnels,
 and timer disposal. Live bridge failure injection is deliberately excluded.
+
+### BB realtime compatibility
+
+Both single-target and batched subscriptions are routed per verified owner, including
+reconnects before sidebar bootstrap. Timeline resume tags stay with their target.
+The bridge supports current BB thread-timeline subscriptions and only forwards frames
+for a subscribed thread in the configured project. Opening a thread retains native
+read/unread behavior; the bridge does not manufacture completion or mark rows read.
+
+Acceptance covers cold load, reconnect, late ownership discovery, native attention
+fields, and remote timeline updates. No status overlay is mounted.
+
+Server and host share the request-path guard, including the bounded stop-boundary
+metadata read used by BB. Encoded event-name separators are permitted only for that
+read; encoded route separators and unrelated query values remain rejected.

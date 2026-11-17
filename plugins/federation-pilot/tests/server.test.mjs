@@ -129,3 +129,30 @@ test('actual upstream blocks config changed during the awaited probe',async()=>{
   assert.equal(h.calls.filter(c=>c.method==='imageUpload'||c.method==='handoffUpload').length,0);
  }finally{await h.dispose();}}
 });
+
+test('timeline subscriptions forward only verified subscribed thread frames',async()=>{
+ const h=harness();try{
+  const ws={readyState:1,sent:[],send(s){this.sent.push(JSON.parse(s))},close(){this.readyState=3}};
+  const handlers=h.sockets.get('/remote-ws')({url:new URL('http://primary.invalid/remote-ws?serverId=alpha')});await handlers.onOpen(ws);
+  const target={kind:'thread-timeline',threadId:'thr_alpha',segmentLimit:null,deferContent:true};
+  const conn=h.calls.find(c=>c.method==='connect');
+  const emit=t=>h.signals.get('frame')({hostId:'host_bridge',payload:{id:conn.id,data:JSON.stringify({type:'thread-timeline',target:t,timeline:{tag:'test',rows:[]}})}});
+  const before=ws.sent.length;emit(target);assert.equal(ws.sent.length,before,'unsolicited timeline rejected');
+  await handlers.onMessage(ws,JSON.stringify({type:'subscribe',target}));
+  assert.ok(h.calls.some(c=>c.method==='send'&&JSON.parse(c.data).target?.kind==='thread-timeline'));
+  emit({...target,threadId:'thr_beta'});assert.equal(ws.sent.length,before,'neighbor rejected');
+  emit({deferContent:true,segmentLimit:null,threadId:'thr_alpha',kind:'thread-timeline'});assert.equal(ws.sent.length,before+1,'wire property order is immaterial');
+  await handlers.onMessage(ws,JSON.stringify({type:'unsubscribe',target}));emit(target);assert.equal(ws.sent.length,before+1,'unsubscribed rejected');
+  await handlers.onClose();
+ }finally{await h.dispose();}
+});
+
+test('host and server share the bounded stop metadata path contract',async()=>{
+ const {validRequestPath}=await import('../policy.ts');
+ const {readFileSync}=await import('node:fs');
+ const host=readFileSync(new URL('../host.ts',import.meta.url),'utf8');
+ assert.match(host,/validRequestPath\(input.method,input.path\)/,'host must use the same guard as server');
+ const path='/api/v1/threads/thr_alpha/events?limit=1&order=desc&types=turn%2Fstarted%2Csystem%2Fthread%2Finterrupted';
+ assert.equal(validRequestPath('GET',path),true);
+ for(const [method,value]of [['POST',path],['GET',path.replace('limit=1','limit=2')],['GET',path+'&other=%2Fsecret'],['GET',path.replace('/events','/%2eevents')]])assert.equal(validRequestPath(method,value),false);
+});

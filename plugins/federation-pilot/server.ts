@@ -27,7 +27,7 @@ export default function plugin(bb:BbPluginApi){
  });
  const host=bb.hosts.experimental_client({contract:hostContract,experimental_signals:hostSignals});
  type Snapshot={key:string,at:number,inventory:Inventory,project:any};
- type Client={socket:ExperimentalPluginWebSocket,config:RemoteConfig,ready:boolean,closed:boolean,queue:string[],lastSeen:number};
+ type Client={socket:ExperimentalPluginWebSocket,config:RemoteConfig,ready:boolean,closed:boolean,queue:string[],lastSeen:number,timelineSubscriptions:Set<string>};
  const caches=new Map<string,Snapshot>(),loading=new Map<string,Promise<Snapshot>>(),clients=new Map<string,Client>();
  const verifiedOwners=new Map<string,string>();let verifiedTopology='';
  const absentPrimary=new Set<string>();
@@ -178,7 +178,13 @@ export default function plugin(bb:BbPluginApi){
  });
  host.experimental_onSignal('frame',({hostId,payload})=>{
   const client=clients.get(payload.id);if(!client||client.config.bridgeHostId!==hostId||client.closed)return;
-  let m:any;try{m=JSON.parse(payload.data);}catch{return;}client.lastSeen=Date.now();if(m.type!=='changed')return;
+  let m:any;try{m=JSON.parse(payload.data);}catch{return;}client.lastSeen=Date.now();
+  if(m.type==='thread-timeline'){
+   const t=m.target,i=caches.get(client.config.serverId)?.inventory;
+   if(t?.kind==='thread-timeline'&&i?.threads.has(t.threadId)&&client.timelineSubscriptions.has(JSON.stringify([t.threadId,t.segmentLimit,t.deferContent]))&&client.socket.readyState===1)client.socket.send(payload.data);
+   return;
+  }
+  if(m.type!=='changed')return;
   const cached=caches.get(client.config.serverId),i=cached?.inventory;if(!i)return;
   // Unknown IDs never gain ownership from a signal. Refresh the verified project list instead.
   if(m.entity==='thread'&&!i.threads.has(m.id)){
@@ -200,14 +206,18 @@ export default function plugin(bb:BbPluginApi){
    if(!['subscribe','unsubscribe','ping'].includes(m.type))return;
    if(m.type!=='ping'){
     const t=m.target,i=caches.get(serverId)?.inventory;if(!i||!t)return;
-    if(t.kind==='thread-detail'&&!i.threads.has(t.threadId)){if(!/^thr_[a-z0-9]+$/.test(t.threadId??''))return;await verifyUnknown(c.config,i,[t.threadId]);}
-    const valid=['thread-list','project-list','host-list','environment-list'].includes(t.kind)||t.kind==='thread-detail'&&i.threads.has(t.threadId)||t.kind==='project-detail'&&t.projectId===i.projectId||t.kind==='environment-detail'&&i.environments.has(t.environmentId)||t.kind==='host-detail'&&i.hosts.has(t.hostId);if(!valid)return;
+    if(['thread-detail','thread-timeline'].includes(t.kind)&&!i.threads.has(t.threadId)){if(!/^thr_[a-z0-9]+$/.test(t.threadId??''))return;await verifyUnknown(c.config,i,[t.threadId]);}
+    const valid=['thread-list','project-list','host-list','environment-list'].includes(t.kind)||['thread-detail','thread-timeline'].includes(t.kind)&&i.threads.has(t.threadId)||t.kind==='project-detail'&&t.projectId===i.projectId||t.kind==='environment-detail'&&i.environments.has(t.environmentId)||t.kind==='host-detail'&&i.hosts.has(t.hostId);if(!valid)return;
+    if(t.kind==='thread-timeline'){
+     if(!(t.segmentLimit===null||Number.isInteger(t.segmentLimit)&&t.segmentLimit>0)||typeof t.deferContent!=='boolean')return;
+     if(m.type==='subscribe')c.timelineSubscriptions.add(JSON.stringify([t.threadId,t.segmentLimit,t.deferContent]));else c.timelineSubscriptions.delete(JSON.stringify([t.threadId,t.segmentLimit,t.deferContent]));
+    }
    }
    if(!c.ready){if(c.queue.length<128)c.queue.push(data);return;}
    const result=await host.call('send',{id,data},{hostId:c.config.bridgeHostId});if(!result.ok)throw Error('Remote disconnected');
   }
   return {
-   async onOpen(socket){try{const config=await selected(serverId);await inventory(config);if(ended||socket.readyState!==1)return;const c:Client={socket,config,ready:false,closed:false,queue:[],lastSeen:Date.now()};clients.set(id,c);
+   async onOpen(socket){try{const config=await selected(serverId);await inventory(config);if(ended||socket.readyState!==1)return;const c:Client={socket,config,ready:false,closed:false,queue:[],lastSeen:Date.now(),timelineSubscriptions:new Set()};clients.set(id,c);
     for(const data of early.splice(0))await forward(data);await host.call('connect',{id,sshTarget:config.sshTarget,port:config.remotePort},{hostId:config.bridgeHostId});
     if(c.closed||ended||socket.readyState!==1){await host.call('disconnect',{id},{hostId:config.bridgeHostId});await closeClient(id);return;}
     c.ready=true;socket.send('{"type":"fedprobe-remote-ready"}');for(const data of c.queue.splice(0))await forward(data);
