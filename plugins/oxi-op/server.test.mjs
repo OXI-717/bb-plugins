@@ -221,6 +221,7 @@ test('desktop check and verification require contextual approval before contacti
     await setImmediate();
     assert.equal(h.inspection.experimental_hostRpcCalls.length, 0);
     assert.equal(h.inspection.pendingInteractions.length, 1);
+    assert.equal(h.inspection.pendingInteractions[0].timeoutMs, command === 'verify' ? 600_000 : 60_000);
     h.behavior.cancelInteraction(h.inspection.pendingInteractions[0].id);
     await pending;
   }
