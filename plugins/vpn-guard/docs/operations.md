@@ -112,3 +112,12 @@ The response is checked again on arrival: the status file must remain at most 90
 Each selected machine has its own Block / Unblock control. A machine block holds protected dispatch on that execution host and stops its protected running turns; other selected hosts continue according to their existing VPN policies. No machine name is hardcoded. Existing exact Kimi and Z.ai exemptions remain. VPN reconnect and Observe mode do not release manual machine blocks. State survives reload; all-selected and per-machine blocks compose with OR.
 
 The separate global block button is labelled explicitly. Machine blocks never request global native plugin suspension. Automation holds follow only the configured controller host. Pooler checks its own egress host, so a laptop block does not disable server-side work. This does not provide a packet firewall, stop standalone model clients, or close the documented Send-now bypass. Unblock a machine before deselecting it.
+## Passive macOS state
+
+The host reader can observe INCY and the macOS Tailscale app without installing a service. It only executes route, ps, ifconfig and Tailscale status --json. It never changes VPN, routes, firewall, files or Guard settings, and makes no network probes.
+
+Tailscale requires a running backend, a selected online exit node, an IPv4 default and external route on the same utun, and a Tailscale self address on that interface. A mesh connection alone is insufficient. INCY requires utun244 and a running INCY process or application xray core. Two matching observations are required. Command failures, ambiguous routes and changes during observation fail closed.
+
+This evidence has assurance system_ipv4 and expires after 10 seconds on receipt. It confirms local OS state, not upstream traffic or IPv6. The panel therefore retains Traffic unverified for this evidence. Existing root-owned INCY proof, including stale or failed proof, remains authoritative for INCY. Only a missing proof file permits passive INCY fallback; an active Tailscale exit route is evaluated independently. Protection scope and mode never change during reading.
+
+Background macOS reads force `TAILSCALE_BE_CLI=1` for the Tailscale app binary, as [documented by Tailscale](https://tailscale.com/docs/reference/tailscale-cli?tab=macos). This avoids GUI startup detection when terminal environment variables are absent; only `status --json` is requested.

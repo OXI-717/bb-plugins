@@ -4,7 +4,7 @@ import { z } from 'zod';
 import {automationInputSchema,automationStatusSchema} from './automation-contract.js';
 import {guardEventSchema} from './event-journal.js';
 
-export const evidenceSchema=z.object({state:z.enum(['connected','disconnected','unknown']),assurance:z.enum(['verified_ipv4','unverified','invalid']),reason:z.string(),updatedAt:z.number().nullable(),probeAt:z.number().nullable()});
+export const evidenceSchema=z.object({state:z.enum(['connected','disconnected','unknown']),assurance:z.enum(['verified_ipv4','system_ipv4','unverified','invalid']),source:z.enum(['incy','tailscale']).optional(),reason:z.string(),updatedAt:z.number().nullable(),probeAt:z.number().nullable()});
 export const hostContract = defineRpcContract({
   automation: {input:automationInputSchema,output:automationStatusSchema},
   readState: { input: z.null(), output: z.object({ state: z.enum(['connected','disconnected','unknown']),evidence:evidenceSchema.optional() }) },

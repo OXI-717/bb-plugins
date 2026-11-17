@@ -6,7 +6,7 @@ import plugin from './server.js';
 import {statusSchema} from './contract.js';
 
 type PluginList = Awaited<ReturnType<BbPluginApi['sdk']['plugins']['list']>>;
-async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;failHostRpc?:boolean;evidenceAgeMs?:number}={}) {
+async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;failHostRpc?:boolean;evidenceAgeMs?:number;passive?:boolean}={}) {
   const states=new Map([['host-a','disconnected'],['host-b','connected']]);
   const available=new Set(['host-a','host-b']);
   const enabled=new Map([['provider-codex',true],['provider-claude-code',false],['provider-acp',true]]);
@@ -41,7 +41,7 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;fai
         stop:async({threadId})=>{stopped.push(threadId);stoppedTimes.set(threadId,Date.now());return {} as never;},
       },
     },
-    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(options.failHostRpc)throw Error('sensitive-synthetic-payload');if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}const result=verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');if(options.evidenceAgeMs!==undefined)result.evidence.updatedAt-=options.evidenceAgeMs;return result;},
+    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(options.failHostRpc)throw Error('sensitive-synthetic-payload');if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}const result=verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');if(options.evidenceAgeMs!==undefined)result.evidence.updatedAt-=options.evidenceAgeMs;if(options.passive&&result.state==='connected')return {state:'connected' as const,evidence:{state:'connected' as const,assurance:'system_ipv4' as const,source:'tailscale' as const,reason:'ok',updatedAt:Date.now(),probeAt:null}};return result;},
   });
   await plugin(fake.bb);
   const hook=fake.harness.registrations.hooks['message.dispatch'];
@@ -777,4 +777,30 @@ it('rejects saved blocks outside the selected scope',async()=>{
  await fake.bb.storage.kv.set('configuration-v2',{mode:'enforce',manualBlock:false,manualBlockHostIds:['host-b'],hostIds:['host-a'],suspendNativePluginsGlobally:false});
  try {await expect(plugin(fake.bb)).rejects.toThrow('outside protected scope');}
  finally {await fake.harness.lifecycle.dispose();}
+});
+
+it('accepts passive VPN state without releasing a manual machine block',async()=>{
+ const {fake,dispatch}=await setup({passive:true});
+ try{
+  await select(fake,['host-b']);await mode(fake,'enforce');
+  expect(await dispatch('codex','host-b')).toEqual({action:'proceed'});
+  expect(await fake.harness.behavior.callRpc('status',null)).toMatchObject({hosts:expect.arrayContaining([expect.objectContaining({id:'host-b',vpn:'connected',evidence:expect.objectContaining({assurance:'system_ipv4'})})])});
+  await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'host-b',blocked:true});
+  expect(await dispatch('codex','host-b')).toMatchObject({action:'wait'});
+ }finally{await fake.harness.lifecycle.dispose();}
+});
+
+it('checks an unselected enrolled machine without changing protection or running enforcement',async()=>{
+ const {fake,stopped,mutations,hostCalls}=await setup({passive:true});
+ try {
+  const before=await fake.harness.behavior.callRpc('status',null);
+  const result=await fake.harness.behavior.runCli(['check','host-b','--json']);
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout!)).toMatchObject({hostId:'host-b',selected:false,state:'connected',evidence:{assurance:'system_ipv4',source:'tailscale'},rpc:{category:'ok'}});
+  expect(await fake.harness.behavior.callRpc('status',null)).toEqual(before);
+  expect(stopped).toEqual([]);expect(mutations).toEqual([]);
+  const calls=hostCalls.length;
+  expect((await fake.harness.behavior.runCli(['check','unregistered'])).exitCode).toBe(1);
+  expect(hostCalls).toHaveLength(calls);
+ } finally {await fake.harness.lifecycle.dispose();}
 });

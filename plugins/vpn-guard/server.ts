@@ -137,7 +137,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const readHost=(hostId:string)=>readRemoteEvidence(timeoutMs=>host.call('readState',null,{hostId,timeoutMs,signal:lifetime.signal}),rpc=>{if(!disposed)bb.log.warn(`VPN Guard host status RPC failed: ${rpc.category} (${rpc.elapsedMs}ms)`);});
   async function vpn(hostId:string):Promise<VpnState> {
-    const result=await readHost(hostId);return result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state;
+    const result=await readHost(hostId);return !['verified_ipv4','system_ipv4'].includes(result.evidence?.assurance??'')?'unknown':result.state;
   }
   const manuallyBlocked = (hostId:string) => config.manualBlock || config.manualBlockHostIds.includes(hostId);
   const directHost = (hostId:string) => config.hostIds.includes(hostId) && config.directHostIds.includes(hostId);
@@ -161,7 +161,7 @@ export default async function plugin(bb: BbPluginApi) {
       let result:Awaited<ReturnType<typeof readHost>>|undefined;
       if(selected.has(h.id)&&!directHost(h.id))result=await readHost(h.id);
       return {id:h.id,name:h.name,selected:selected.has(h.id),available:!directHost(h.id)||h.status==='connected',networkMode:directHost(h.id)?'direct' as const:'vpn-required' as const,evidence:result?.evidence??null,rpc:result?.rpc??null,
-        vpn:selected.has(h.id)&&!directHost(h.id)?(!result?'unknown':result.evidence?.assurance!=='verified_ipv4'?'unknown':result.state):null};
+        vpn:selected.has(h.id)&&!directHost(h.id)?(!result?'unknown':!['verified_ipv4','system_ipv4'].includes(result.evidence?.assurance??'')?'unknown':result.state):null};
     }));
     for (const id of selected) if(!listed.some(h=>h.id===id)) hosts.push({id,name:id,selected:true,available:false,networkMode:directHost(id)?'direct' as const:'vpn-required' as const,vpn:'unknown',evidence:null,rpc:null});
     let pool:{linked:boolean|null,vpnPolicyVersion:2|null,error:string|null}={linked:null,vpnPolicyVersion:null,error:null};
@@ -631,6 +631,7 @@ export default async function plugin(bb: BbPluginApi) {
       {name:'block',summary:'Block one machine or all selected machines',usage:'bb vpn-guard block [--host <host-id>]'},
       {name:'unblock',summary:'Release manual block and retain current mode',usage:'bb vpn-guard unblock [--host <host-id>]'},
       {name:'status',summary:'Show scope, VPN decisions and actions',usage:'bb vpn-guard status [--json]'},
+      {name:'check',summary:'Read VPN state on an enrolled machine without changing protection',usage:'bb vpn-guard check <host-id> [--json]'},
       {name:'hosts',summary:'Select protected machines',usage:'bb vpn-guard hosts <host-id>... | none'},
       {name:'automation-host',summary:'Pin the automation controller to a selected enrolled host',usage:'bb vpn-guard automation-host <host-id> | server'},
       {name:'direct-hosts',summary:'Explicitly allow direct egress on selected enrolled hosts',usage:'bb vpn-guard direct-hosts <host-id>... | none'},
@@ -645,6 +646,12 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         let result;
         if(command==='status' && args.length===0) result=await status();
+        else if(command==='check' && args.length===1) {
+          const hostId=args[0]!;
+          if(!(await bb.sdk.hosts.list()).some(h=>h.id===hostId))throw Error('Unknown enrolled machine');
+          const observed=await readHost(hostId);
+          result={hostId,selected:config.hostIds.includes(hostId),...observed};
+        }
         else if((command==='block'||command==='unblock') && args.length===2 && args[0]==='--host') result=await serial(()=>setHostManualBlock(args[1]!,command==='block'));
         else if((command==='block'||command==='unblock') && args.length===0) result=await serial(()=>update({...config,manualBlock:command==='block'}));
         else if(command==='enforce' && args.length===0) result=await serial(()=>update({...config,mode:'enforce'}));
@@ -660,7 +667,7 @@ export default async function plugin(bb: BbPluginApi) {
           result=await serial(()=>update({...config,suspendNativePluginsGlobally:args[0]==='on'}));
         } else if(command==='restore-owned' && args.length===0) result=await serial(async()=>{await restoreOwned();await bb.experimental_hooks.recheck('message.dispatch');recheckDirty=false;return status();});
         else if(command==='acknowledge-ambiguous' && args.length===2 && args[1]==='--reviewed') result=await serial(()=>acknowledgeAmbiguous(args[0],true));
-        else return {exitCode:1,stderr:'Usage: bb vpn-guard status|hosts|direct-hosts|automation-host|block|unblock|enforce|observe|global-suspend|restore-owned|acknowledge-ambiguous'};
+        else return {exitCode:1,stderr:'Usage: bb vpn-guard status|check|hosts|direct-hosts|automation-host|block|unblock|enforce|observe|global-suspend|restore-owned|acknowledge-ambiguous'};
         return {exitCode:0,stdout:JSON.stringify(result)};
       } catch(error) {return {exitCode:1,stderr:String(error)};}
     },
