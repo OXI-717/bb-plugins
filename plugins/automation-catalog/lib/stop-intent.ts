@@ -6,6 +6,7 @@ export function externalStopIntent(detail: CatalogDetail) {
   if (task.missing) return null;
   let identity: unknown = { host: task.host, scheduler: task.scheduler, id: task.id, scope: task.scope };
   if (task.scheduler === "inventory-audit") {
+    if (!/^OXI · (unregistered|noncompliant) · /.test(task.name)) return null;
     const match = task.description.match(/\. Identity: (\[[^\n]+\])\. No automatic stop\./);
     if (!match) return null;
     try {

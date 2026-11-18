@@ -1,7 +1,6 @@
 """Registry comparison for the existing catalog publisher; no scheduler mutations."""
 import hashlib
 import json
-import time
 
 REQUIRED = ('name', 'owner', 'project', 'purpose', 'source', 'limits', 'stop', 'rollback')
 
@@ -10,37 +9,68 @@ def identity(host, scheduler, scope, unit):
     return json.dumps([host, scheduler, scope, unit], separators=(',', ':'), ensure_ascii=True)
 
 
-def evaluate(config, inventories, sources, now):
+def fresh_source(source, now):
+    return (source is not None and not source.get('error') and source.get('lastSuccessAt') is not None
+            and 0 <= now - source['lastSuccessAt'] <= source['staleAfterMs'])
+
+
+def evaluate(config, inventories, sources, now, *, catalog_tasks=None):
     """All expected hosts/sources are explicit. Failed coverage is never empty success."""
     findings = {}
-    def add(kind, ident, summary):
+    def add(kind, ident, summary, **evidence):
         key = hashlib.sha256((kind + ':' + ident).encode()).hexdigest()[:32]
         try:
             parsed = json.loads(ident)
             host = parsed[0] if isinstance(parsed, list) else config['host']
         except ValueError:
             host = ident if ident in config['hosts'] else config['host']
-        findings[key] = dict(kind=kind, identity=ident, summary=summary, host=host)
+        findings[key] = dict(kind=kind, identity=ident, summary=summary, host=host, **evidence)
     registry = {identity(r['host'], r['scheduler'], r['scope'], r['unit']): r for r in config['registry']}
+    required = [row for row in registry.values() if row.get('expectedPresent') is True]
+    required_bb = [row for row in required if row['scheduler'] == 'bb']
+    if required_bb:
+        source_id = config['bbInventorySource']
+        if catalog_tasks is None or not fresh_source(sources.get(source_id), now):
+            add('coverage', source_id, 'Catalog source unavailable or stale')
+        else:
+            # Native IDs belong to the BB instance/project. Target-host metadata
+            # can disappear or change while the schedule itself remains present.
+            present = {(task.get('projectId'), task['id']) for task in catalog_tasks
+                       if task.get('sourceId') == source_id and task.get('scheduler') == 'bb'
+                       and task.get('missing') is False}
+            for row in required_bb:
+                if (row['scope'], row['unit']) not in present:
+                    add('missing-required', identity(row['host'], 'bb', row['scope'], row['unit']),
+                        'Required automation absent from fresh BB inventory', inventorySource=source_id)
     for host in config['hosts']:
         inv = inventories.get(host)
-        if inv is None or now - inv.get('observedAt', 0) > config['staleAfterMs']:
+        if inv is None or not 0 <= now - inv.get('observedAt', 0) <= config['staleAfterMs']:
             add('coverage', host, 'Host inventory missing or stale')
             continue
         coverage = inv.get('coverage')
-        expected = config.get('coverageRequirements', {}).get(host, [])
         if not isinstance(coverage, list) or not coverage or not isinstance(inv.get('observations'), list):
             add('coverage', host, 'Host inventory structure or coverage incomplete')
             continue
         if any(not isinstance(c, dict) or not isinstance(c.get('scheduler'), str) or not isinstance(c.get('scope'), str) or not isinstance(c.get('ok'), bool) for c in coverage):
             add('coverage', host, 'Host coverage malformed')
             continue
-        for required in expected:
-            if not any(c['scheduler'] == required['scheduler'] and c['scope'] == required['scope'] for c in coverage):
-                add('coverage', identity(host, required['scheduler'], required['scope'], '*'), 'Expected scheduler scope not observed')
-        for c in coverage:
-            if not c['ok']:
-                add('coverage', identity(host, c['scheduler'], c['scope'], '*'), 'Scheduler inventory unavailable')
+        required_here = [row for row in required if row['host'] == host and row['scheduler'] != 'bb']
+        scopes = {(item['scheduler'], item['scope']) for item in coverage}
+        failed_scopes = {(item['scheduler'], item['scope']) for item in coverage if not item['ok']}
+        expected_scopes = {(item['scheduler'], item['scope']) for item in [
+            *config.get('coverageRequirements', {}).get(host, []), *required_here]}
+        for scheduler, scope in sorted(expected_scopes - scopes):
+            add('coverage', identity(host, scheduler, scope, '*'), 'Expected scheduler scope not observed')
+        for scheduler, scope in sorted(failed_scopes):
+            add('coverage', identity(host, scheduler, scope, '*'), 'Scheduler inventory unavailable')
+        observed = {(row['scheduler'], row['scope'], row['unit']) for row in inv['observations']}
+        complete_scopes = scopes - failed_scopes
+        for row in required_here:
+            pair = row['scheduler'], row['scope']
+            unit = row['unit']
+            if pair in complete_scopes and (*pair, unit) not in observed:
+                add('missing-required', identity(host, *pair, unit),
+                    'Required job absent from fresh scheduler inventory')
         for row in inv['observations']:
             ident = identity(host, row['scheduler'], row['scope'], row['unit'])
             if ident in registry:
@@ -56,7 +86,7 @@ def evaluate(config, inventories, sources, now):
                 add('unregistered', ident, 'Observed scheduler entry has no registry record')
     for expected in config.get('sources', []):
         source = sources.get(expected)
-        if not source or source.get('error') or source.get('lastSuccessAt') is None or now - source['lastSuccessAt'] > source['staleAfterMs']:
+        if not fresh_source(source, now):
             add('coverage', expected, 'Catalog source unavailable or stale')
     return findings
 
@@ -80,6 +110,8 @@ def explicitly_classified(config, finding):
 def coverage_blocks(old, failed):
     if failed['kind'] != 'coverage':
         return False
+    if old.get('inventorySource') is not None:
+        return failed['identity'] == old['inventorySource']
     try:
         origin = json.loads(old['identity'])
     except ValueError:

@@ -37,7 +37,6 @@ class ComplianceTests(unittest.TestCase):
         self.sources['native']['error']='unavailable'
         self.assertEqual({f['kind'] for f in evaluate(self.cfg,self.inv,self.sources,1000).values()}, {'coverage','noncompliant'})
 
-if __name__=='__main__':unittest.main()
 
 class RegressionTests(ComplianceTests):
     def test_recovered_not_reopened_by_lost_coverage(self):
@@ -87,3 +86,90 @@ class ExplicitRegistrationDuringOutageTests(unittest.TestCase):
         result,state=snapshot(config,failure,old,100)
         self.assertFalse(state['old']['active'])
         self.assertTrue(any(t['state']=='blocked' for t in result['tasks']))
+
+
+class RequiredPresenceTests(unittest.TestCase):
+    def setUp(self):
+        self.config = dict(host='test-host', hosts=['test-host'], sourceId='audit',
+                           name='Inventory', owner='Operator', staleAfterMs=60000)
+        self.row = dict(host='test-host', scheduler='systemd', scope='user', unit='example.timer',
+                        expectedPresent=True)
+        self.config['registry'] = [self.row]
+        self.host = dict(observedAt=1000, observations=[],
+                         coverage=[dict(scheduler='systemd', scope='user', ok=True)])
+        self.inventory = {'test-host': self.host}
+
+    def findings(self, sources=None, **kwargs):
+        return evaluate(self.config, self.inventory, sources or {}, 1001, **kwargs)
+
+    def kinds(self, sources=None, **kwargs):
+        return {f['kind'] for f in self.findings(sources, **kwargs).values()}
+
+    def test_required_presence_is_opt_in_and_independent_of_enablement(self):
+        self.assertEqual(self.kinds(), {'missing-required'})
+        self.row.pop('expectedPresent')
+        self.assertEqual(self.kinds(), set())
+        self.row['expectedPresent'] = True
+        self.row.update({field: 'registered' for field in
+                         ('name', 'owner', 'project', 'purpose', 'source', 'limits', 'stop', 'rollback')})
+        self.host['observations'] = [dict(scheduler='systemd', scope='user',
+                                          unit='example.timer', enabled=False)]
+        self.assertEqual(self.kinds(), set())
+
+    def test_unavailable_or_omitted_scope_does_not_infer_absence(self):
+        for coverage in [
+            [dict(scheduler='systemd', scope='user', ok=False)],
+            [dict(scheduler='systemd', scope='system', ok=True)],
+            [dict(scheduler='systemd', scope='user', ok=True),
+             dict(scheduler='systemd', scope='user', ok=False)],
+        ]:
+            with self.subTest(coverage=coverage):
+                self.host['coverage'] = coverage
+                self.assertEqual(self.kinds(), {'coverage'})
+        self.host['observedAt'] = -60000
+        self.assertEqual(self.kinds(), {'coverage'})
+
+    def test_coverage_loss_holds_finding_until_confirmed_return(self):
+        first, state = snapshot(self.config, self.findings(), {}, 1001)
+        self.assertEqual([(t['state'], r['status']) for t, r in zip(first['tasks'], first['runs'])],
+                         [('blocked', 'failed')])
+        finding_id = first['tasks'][0]['id']
+        self.host['coverage'] = [dict(scheduler='systemd', scope='system', ok=True)]
+        lost, state = snapshot(self.config, self.findings(), state, 1002)
+        self.assertTrue(state[finding_id]['active'])
+        self.assertFalse(any(r['taskId'] == finding_id for r in lost['runs']))
+        self.host['coverage'] = [dict(scheduler='systemd', scope='user', ok=True)]
+        self.host['observations'] = [dict(scheduler='systemd', scope='user', unit='example.timer')]
+        returned, state = snapshot(self.config, self.findings(), state, 1003)
+        self.assertFalse(state[finding_id]['active'])
+        self.assertTrue(any(r['taskId'] == finding_id and r['status'] == 'succeeded'
+                            for r in returned['runs']))
+
+    def test_bb_presence_uses_only_fresh_authoritative_source(self):
+        self.row.update(scheduler='bb', scope='project-example', unit='auto_example')
+        self.config['bbInventorySource'] = 'local-bb'
+        source = dict(lastSuccessAt=1000, staleAfterMs=60000, error=None)
+        native = {'local-bb': source}
+        self.inventory.clear()  # Target machine can be offline while the native schedule still exists.
+        present = dict(scheduler='bb', sourceId='local-bb', id='auto_example',
+                       projectId='project-example', host='unknown', state='paused', missing=False)
+        self.assertEqual(self.kinds(native, catalog_tasks=[present]), {'coverage'})
+        for row in [dict(present, missing=True), dict(present, sourceId='other-bb'),
+                    dict(present, projectId='other-project')]:
+            self.assertEqual(self.kinds(native, catalog_tasks=[row]), {'coverage', 'missing-required'})
+        findings = self.findings(native, catalog_tasks=[])
+        _, state = snapshot(self.config, findings, {}, 1001)
+        finding_id = next(key for key, row in findings.items() if row['kind'] == 'missing-required')
+        self.host['observedAt'] = 1001
+        self.inventory['test-host'] = self.host
+        for unavailable in ({}, {'local-bb':dict(source, error='unreachable')},
+                            {'local-bb':dict(source, lastSuccessAt=-60000)}):
+            problems = self.findings(unavailable, catalog_tasks=[])
+            self.assertEqual({row['kind'] for row in problems.values()}, {'coverage'})
+            _, after = snapshot(self.config, problems, state, 1002)
+            self.assertTrue(after[finding_id]['active'])
+        self.assertEqual(self.kinds(native), {'coverage'})  # No authoritative task payload provided.
+
+
+if __name__ == '__main__':
+    unittest.main()
