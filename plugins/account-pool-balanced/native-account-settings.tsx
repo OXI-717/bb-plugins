@@ -3,7 +3,7 @@ import {useEffect, useState} from 'react';
 import {Button} from './ui/components/ui/button';
 import {AccountProjectsForm} from './account-projects-form';
 import type {NativeAccounts, NativeAccountUpdate} from './src/native-accounts.js';
-import {NATIVE_MAX_CONCURRENT_SESSIONS} from './src/native-concurrency.js';
+import {NATIVE_MAX_CONCURRENT_SESSIONS} from './src/contracts.js';
 type Account=NativeAccounts['accounts'][number];
 type Projects=Array<{id:string;name:string}>;
 type Patch=Omit<NativeAccountUpdate,'accountId'|'expectedRevision'>;

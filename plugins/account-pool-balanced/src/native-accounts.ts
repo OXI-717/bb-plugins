@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
-import { accountProjectsSchema, type AccountProjects } from "./contracts.js";
+import { accountProjectsSchema, NATIVE_MAX_CONCURRENT_SESSIONS, type AccountProjects } from "./contracts.js";
 import { z } from "zod";
-import { NATIVE_MAX_CONCURRENT_SESSIONS } from "./native-concurrency.js";
 
 export const nativeProjectsSchema = accountProjectsSchema.refine(value => value.rules.length <= 32 && value.rules.every(rule => /^[A-Za-z0-9_-]{1,80}$/.test(rule.projectId)), 'Native project lists allow at most 32 project IDs');
 

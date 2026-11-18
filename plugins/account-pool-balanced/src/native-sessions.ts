@@ -1,10 +1,9 @@
 import {type NativeProbeInput,type NativeProbeLaunch,type NativeProbeResult,nativeProbeResultSchema} from './native-probe-wire.js';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { z } from 'zod';
-import {accountProjectsSchema, type AccountProjects} from './contracts.js';
+import {accountProjectsSchema, NATIVE_MAX_CONCURRENT_SESSIONS, type AccountProjects} from './contracts.js';
 import {projectTier} from './project-policy.js';
 import {nativeAccountRoutingSchema, nativeAccountUpdateSchema, type NativeAccountUpdate, nativeProjectsSchema, summarizeNativeAccounts} from './native-accounts.js';
-import {NATIVE_MAX_CONCURRENT_SESSIONS} from './native-concurrency.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const nativeExecutionSchema=z.object({
