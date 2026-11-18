@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+import { version } from "./package.json";
 import type {
   AccountPoolConfig,
   AccountSummary,
@@ -12,7 +13,13 @@ vi.mock('./management-ui', async () => {
   const { useRpc } = await import('@get-bb/plugin-sdk/app');
   return {
     ManagementGate: ({ children }: { children: unknown }) => children,
-    usePoolRpc: () => useRpc(),
+    usePoolRpc: () => {
+      const rpc = useRpc();
+      return { call: async (method: string, input: unknown) => {
+        if (method.startsWith('update.')) throw new Error('Management access is locked.');
+        return rpc.call(method, input);
+      } };
+    },
     useManagementGrant: () => ({ scope: 'manage', expiresAt: Date.now() + 60_000 }),
   };
 });
@@ -192,6 +199,24 @@ function render(
 }
 
 describe("Account Pool settings", () => {
+  it("shows the Pooler version beside the update controls", async () => {
+    const slot = render();
+    const panel = slot.getByRole("region", { name: "Обновление Pooler" });
+    expect(within(panel).getByText(`Версия Pooler ${version}`)).toBeTruthy();
+    expect(await within(panel).findByRole("button", { name: "Обновить Pooler" })).toBeTruthy();
+  });
+
+  it("puts hub status at the bottom inside collapsed technical details", async () => {
+    const slot = render();
+    const hubStatus = await slot.findByText("Хаб принимает · 2 в работе · используют bee");
+    const details = hubStatus.closest("details");
+    expect(details?.open).toBe(false);
+    const content = Array.from(details?.parentElement?.children ?? []).filter((element) => element.tagName !== "STYLE");
+    expect(content.at(-1)).toBe(details);
+    fireEvent.click(slot.getByText("Технические детали"));
+    expect(details?.open).toBe(true);
+  });
+
   it('starts the server updater from the pool interface and blocks repeated clicks',async()=>{
     const operation={operationId:'11111111-1111-4111-8111-111111111111',hostId:'host-one',terminalId:'terminal-one',startedAt:1,state:'running'};
     const start=vi.fn(async()=>operation);
@@ -208,11 +233,20 @@ describe("Account Pool settings", () => {
     await slot.findByText('Подготовка и обновление выполняются. Работа возобновится автоматически.');
     expect(slot.getByRole('button',{name:'Проверяю обновление…'}).hasAttribute('disabled')).toBe(true);
   });
+  it('shows status errors and disables starting until the server confirms the update state',async()=>{
+    const start=vi.fn(async()=>null);
+    const read=vi.fn(async()=>{throw new Error('Connection unavailable');});
+    const slot=render([],{"update.status":read,"update.start":start});
+    const message=await slot.findByText('Не удалось проверить состояние обновления. Запуск пока недоступен.');
+    expect(message.getAttribute('role')).toBe('alert');
+    expect(slot.getByRole('button',{name:'Обновить Pooler'}).hasAttribute('disabled')).toBe(true);
+    expect(start).not.toHaveBeenCalled();
+  });
 
   it('opens the native card and saves the existing all-projects control',async()=>{
     const projects={onlySelected:true,rules:[{projectId:'project-one',role:'inherit' as const}]};
     const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[{accountId:'subscription-one',projects,projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.updateAccount":()=>null});
-    fireEvent.click(await slot.findByRole('button',{name:'Google · Antigravity'}));
+    fireEvent.click(await slot.findByRole('button',{name:'Открыть Аккаунт Google'}));
     const control=await slot.findByLabelText('Где использовать');
     expect(control.closest('.pool-settings')).not.toBeNull();
     expect((control as HTMLSelectElement).value).toBe('selected');
@@ -226,9 +260,10 @@ describe("Account Pool settings", () => {
       accountId:'subscription-two',label:'Second Google',projects:{onlySelected:false,rules:[]},projectsRevision:'a'.repeat(64),mixedProjects:false,
       executors:[{id:'second-host',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0,
     }]}),"native.updateAccount":()=>null});
-    expect(await slot.findByRole('button',{name:'Google · Second Google'})).toBeTruthy();
+    expect(await slot.findByRole('button',{name:'Открыть Second Google'})).toBeTruthy();
     expect(slot.queryByRole('button',{name:'Использовать'})).toBeNull();
-    fireEvent.click(await slot.findByRole('button',{name:'Настройки Google · Second Google'}));
+    fireEvent.pointerDown(slot.getByRole('button',{name:'Действия: Second Google'}));
+    fireEvent.click(await slot.findByText('Настроить'));
     const priority=await slot.findByLabelText('Приоритет аккаунта');
     fireEvent.change(priority,{target:{value:'2'}});fireEvent.blur(priority);
     await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',priority:2,expectedRevision:'b'.repeat(64)}}));
@@ -242,7 +277,7 @@ describe("Account Pool settings", () => {
   it('saves native role, project role and automation switches in the same account settings without legacy preference calls',async()=>{
     const item={accountId:'subscription-two',label:'Second Google',role:'primary',priority:1,projects:{onlySelected:false,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[{id:'second-host',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0};
     const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[item]}),"native.updateAccount":()=>null});
-    fireEvent.click(await slot.findByRole('button',{name:'Настройки Google · Second Google'}));
+    fireEvent.click(await slot.findByRole('button',{name:'Открыть карточку: Second Google'}));
     fireEvent.change(await slot.findByLabelText('Роль по умолчанию'),{target:{value:'reserve'}});
     await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',expectedRevision:'b'.repeat(64),role:'reserve'}}));
     await waitFor(()=>expect(slot.getByLabelText('Разрешить автопилоту second-host').closest('fieldset')?.disabled).toBe(false));
@@ -255,7 +290,7 @@ describe("Account Pool settings", () => {
   });
   it('shows a useful error when native settings conflict instead of claiming a saved priority',async()=>{
     const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[{accountId:'subscription-two',label:'Second Google',role:'primary',priority:1,projects:{onlySelected:false,rules:[]},projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[],active:0,queued:0,uncertain:0}]}),"native.updateAccount":()=>{throw Error('native-selection-changed');}});
-    fireEvent.click(await slot.findByRole('button',{name:'Настройки Google · Second Google'}));
+    fireEvent.click(await slot.findByRole('button',{name:'Открыть Second Google'}));
     fireEvent.change(slot.getByLabelText('Роль по умолчанию'),{target:{value:'reserve'}});
     await slot.findByText('Настройки изменились в другой сессии. Обновите данные и повторите.');
   });
@@ -264,14 +299,15 @@ describe("Account Pool settings", () => {
     const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
       {id: "official-desktop", enabled: true, autopilotAllowed: false},
       {id: "official-worker", enabled: true, autopilotAllowed: true},
-    ], active: 1, queued: 2, uncertain: 0}]})});
-    expect(await slot.findAllByText("Google · Antigravity")).toHaveLength(1);
-    await slot.findByText("Автопилот: разрешён.");
+    ], active: 1, queued: 2, uncertain: 0, maxConcurrentSessions: 2}]})});
+    const row = await slot.findByRole("button", { name: "Открыть Аккаунт Google" });
+    expect(within(row).getByText("Включён")).toBeTruthy();
+    expect(within(row).getByText("В очереди: 2")).toBeTruthy();
+    expect(within(within(row).getByTitle("Сеансы в работе / предел")).getByText("1 / 2")).toBeTruthy();
+    expect(within(row).queryByText("5Ч")).toBeNull();
     expect(slot.queryByText("В пуле нет аккаунтов")).toBeNull();
     expect(slot.getByRole("switch", {name: "Направлять треды Antigravity"})).toBeTruthy();
     expect(slot.queryByRole("button", {name: "Добавить аккаунт Antigravity"})).toBeNull();
-    await slot.findByText("В работе: 1; в очереди: 2; остановка не подтверждена: 0.");
-    await slot.findByText("Лимит здесь не измеряется. Состояние входа проверяет официальный клиент на машине исполнителя.");
     expect(slot.rpcCalls.some(call => call.method.startsWith("agyLogin."))).toBe(false);
   });
   it("keeps managed routing available when the route was previously disabled", async () => {
@@ -296,7 +332,9 @@ describe("Account Pool settings", () => {
     const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
       {id: "official-desktop", enabled: true, autopilotAllowed: false},
     ], active: 0, queued: 0, uncertain: 1}]})});
-    await slot.findByText(/Требуется проверка остановки/);
+    const row = await slot.findByRole("button", {name: "Открыть Аккаунт Google"});
+    expect(within(row).getByText("Остановка не подтверждена: 1")).toBeTruthy();
+    expect(within(row).queryByText("Включён")).toBeNull();
   });
 
   it("saves the explicit account permission with compare-and-set and reports conflicts", async () => {
@@ -492,9 +530,6 @@ describe("Account Pool settings", () => {
     expect(slot.getByText("7Д")).toBeTruthy();
     expect(slot.getByText("FABLE")).toBeTruthy();
     expect(slot.getAllByText("—")).toHaveLength(2);
-    expect(
-      slot.getByText("Хаб принимает · 2 в работе · используют bee"),
-    ).toBeTruthy();
   });
 
   it("keeps the quota slots visible at mobile widths", async () => {
