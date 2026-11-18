@@ -48,7 +48,15 @@ def main():
                                         '--config', config['auditConfig'], '--publish'],
                                        env=dict(os.environ, BB_SERVER_URL=config['serverUrl']),
                                        capture_output=True, text=True, timeout=220)
-                state['results'].append(dict(source='inventory-audit', exitCode=audit.returncode))
+                record = dict(source='inventory-audit', exitCode=audit.returncode)
+                if audit.returncode == 0:
+                    try:
+                        report = json.loads(audit.stdout)
+                        if isinstance(report, dict) and 'notification' in report:
+                            record['notification'] = report['notification']
+                    except ValueError:
+                        pass
+                state['results'].append(record)
             except (OSError, subprocess.TimeoutExpired) as error:
                 state['results'].append(dict(source='inventory-audit', error=type(error).__name__))
         state['finishedAt'] = time.time()
