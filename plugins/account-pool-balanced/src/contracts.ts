@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const NATIVE_MAX_CONCURRENT_SESSIONS = 4;
+
 export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   anthropicUpstreamBaseUrl: "https://api.anthropic.com",
   codexUpstreamBaseUrl: "https://chatgpt.com/backend-api/codex",

@@ -88,13 +88,20 @@ POST `/native/agy` uses the existing project/purpose bearer. Actions:
 - `release`: leaseId and exactly one of stopped=true or completed=true.
   Completion acknowledges an ACP response; stopped acknowledges process cleanup.
 
-One subscription lane covers interactive ACP prompts and native headless tasks.
-This one-at-a-time starting policy is an operational choice, not a Google limit.
-ACP initialization is admitted separately, then releases its slot. The official
-process stays warm while idle, and each prompt reacquires a slot. A queued prompt
-is never forwarded; cancellation never replays it. Headless holds its lease until
-the owned process group has stopped. The wrapper must stop on failed/changed
-admission and never choose another account or native executable.
+An account has one shared queue across machines, catalog reads, interactive
+sessions and headless tasks. In the account settings, **Одновременных сеансов**
+sets the number of available slots (1–4, default 1). It is a Pooler setting;
+Google still applies its own account limits. Change it only while the account
+has no sessions or waiters. A host that retains its lease for a warm ACP process
+uses a slot until the process stops, even between prompts. With more than one
+slot configured, a second process for the same BB thread and account is refused.
+Diagnostics remain exclusive, and an unconfirmed stop blocks new admission for
+that account. A queued prompt is never forwarded; cancellation never replays it.
+Headless holds its lease until the owned process group has stopped. Failed or
+changed admission still stops the wrapper without switching accounts.
+
+Before downgrading to a release without this setting, drain the affected
+accounts and reset their slot counts to 1. This removes the persisted override.
 
 Expiry or a plugin restart quarantines ACTIVE leases; it never proves process
 termination. Queued leases expire normally. A disconnected active process keeps

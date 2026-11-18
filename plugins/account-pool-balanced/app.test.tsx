@@ -232,6 +232,11 @@ describe("Account Pool settings", () => {
     const priority=await slot.findByLabelText('Приоритет аккаунта');
     fireEvent.change(priority,{target:{value:'2'}});fireEvent.blur(priority);
     await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',priority:2,expectedRevision:'b'.repeat(64)}}));
+    const concurrency=await slot.findByLabelText('Одновременных сеансов') as HTMLSelectElement;
+    await waitFor(()=>expect(concurrency.disabled).toBe(false));
+    expect(concurrency.value).toBe('1');
+    fireEvent.change(concurrency,{target:{value:'2'}});
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',maxConcurrentSessions:2,expectedRevision:'b'.repeat(64)}}));
   });
 
   it('saves native role, project role and automation switches in the same account settings without legacy preference calls',async()=>{
