@@ -53,3 +53,29 @@ without the necessary metadata remain visible compliance findings.
 Selected systemd sources also accept standalone `.service` identities. An active
 long-running service has no invented schedule or next run. A selected timer and
 its companion service form one card; selecting both separately is rejected.
+
+## Required entries
+
+Set `expectedPresent: true` for a registry entry whose definition must continue to
+exist. Existing records are unchanged unless opted in. Disabled definitions
+still count as present. Use stable definitions, and remove the opt-in when
+retiring one intentionally.
+
+For OS jobs the exact host/scheduler/scope must have a fresh successful
+inventory. For launchd, persistent definitions in the configured inventory
+directories are the expected entries. For native BB records, set
+`bbInventorySource` to the ID of the authoritative BB inventory, include it in
+`sources`, and use the native project ID as the registry scope. Presence is
+matched in that source by project and automation ID, regardless of whether
+the target execution host is currently known.
+
+Missing required entries and failures to read the inventory are separate
+findings. Loss of coverage holds an existing missing finding open. A missing
+finding cannot open a stop draft for the absent job.
+
+If enabled explicitly with `notifyMissingRequired: true`, the publisher sends
+one summary through BB Push Notifications for the missing-required events that
+were durably published in a cycle. The same event and reminder limits apply.
+The cycle log records gateway acceptance, no channel, or an unconfirmed
+attempt. There is no immediate retry after an ambiguous result. A gateway
+acknowledgement does not prove the banner was shown on a device.

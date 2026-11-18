@@ -12,6 +12,31 @@ from catalog_inventory import discover
 from catalog_remote_inventory import remote
 
 
+def notify_required_findings(bb, findings, runs):
+    missing = {key for key, finding in findings.items() if finding['kind'] == 'missing-required'}
+    count = sum(run['status'] == 'failed' and run['taskId'] in missing for run in runs)
+    if not count:
+        return None
+    try:
+        result = subprocess.run([bb, 'push-notifications', 'send', '--json',
+                                 '--title', 'Automation Catalog: required jobs missing',
+                                 '--body', f'{count} finding(s) to review in Automation Catalog.'],
+                                capture_output=True, text=True, timeout=15)
+        reply = json.loads(result.stdout)
+        if result.returncode == 0 and reply.get('ok') is True:
+            channels = reply.get('channels')
+            if isinstance(channels, list):
+                channels = [c for c in ('web', 'desktop', 'mobile') if c in channels]
+                if channels:
+                    return dict(status='accepted', channels=channels)
+        if isinstance(reply.get('error'), dict) and reply['error'].get('code') == 'not_delivered':
+            return dict(status='no-channel')
+    except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+        pass
+    # No immediate retry: a timeout can happen after delivery was initiated.
+    return dict(status='unconfirmed')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True, type=Path)
@@ -24,8 +49,13 @@ def main():
         raise ValueError('Invalid freshness or reminder bound')
     if not 1 <= config.get('maxEventsPerCycle', 20) <= 100:
         raise ValueError('Invalid event rate bound')
-    now = int(time.time()*1000)
-    inventories = {config['host']: dict(discover(), observedAt=now)}
+    if any('expectedPresent' in row and type(row['expectedPresent']) is not bool
+           for row in config['registry']):
+        raise ValueError('expectedPresent must be boolean')
+    if any(row.get('expectedPresent') is True and row['scheduler'] == 'bb' for row in config['registry']):
+        if not config.get('bbInventorySource') or config['bbInventorySource'] not in config.get('sources', []):
+            raise ValueError('Required BB records need an authoritative bbInventorySource')
+    inventories = {config['host']: dict(discover(), observedAt=int(time.time()*1000))}
     for host, path in config.get('inventoryFiles', {}).items():
         if host == config['host']:
             raise ValueError('Remote inventory must not override local discovery')
@@ -44,6 +74,7 @@ def main():
     if result.returncode or len(result.stdout)>4_000_000:
         raise RuntimeError('Catalog unavailable; no recovery snapshot published')
     catalog = json.loads(result.stdout)
+    now = int(time.time()*1000)
     sources = {s['id']:s for s in catalog['sources']}
     for task in catalog['tasks']:
         if task['scheduler'] != 'bb' or task.get('missing'):
@@ -53,7 +84,7 @@ def main():
             continue
         inv = inventories.setdefault(host, dict(observedAt=now, coverage=[dict(scheduler='host', scope='all', ok=False)], observations=[]))
         inv['observations'].append(dict(scheduler='bb', scope=task.get('projectId') or 'unknown', unit=task['id']))
-    findings = evaluate(config,inventories,sources,now)
+    findings = evaluate(config, inventories, sources, now, catalog_tasks=catalog['tasks'])
     state_path = args.config.with_name('audit-state.json')
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     payload, new_state = snapshot(config,findings,state,now)
@@ -74,7 +105,12 @@ def main():
     temporary=state_path.with_suffix('.tmp')
     temporary.write_text(json.dumps(new_state));temporary.chmod(0o600)
     os.replace(temporary,state_path)
-    print(json.dumps(dict(findings=len(findings),events=len(payload['runs']),published=True)))
+    report = dict(findings=len(findings), events=len(payload['runs']), published=True)
+    if config.get('notifyMissingRequired') is True:
+        notification = notify_required_findings(bb, findings, payload['runs'])
+        if notification is not None:
+            report['notification'] = notification
+    print(json.dumps(report))
     return 0
 
 

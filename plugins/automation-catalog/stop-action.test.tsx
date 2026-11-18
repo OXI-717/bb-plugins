@@ -31,7 +31,7 @@ it("opens an editable parent-bound draft without submitting a model or changing 
   expect(externalStopIntent(detail)?.prompt).toContain("catalog_audit_append");
 });
 it("uses the underlying identity for unregistered findings rather than stopping the inventory auditor", () => {
-  const finding = { ...detail, task: { ...detail.task, id: "finding-example", scheduler: "inventory-audit", description: 'Observed scheduler entry has no registry record. Identity: ["host-example","systemd","user","example.service"]. No automatic stop. Inspect original scheduler before disabling.' } };
+  const finding = { ...detail, task: { ...detail.task, id: "finding-example", name: "OXI · unregistered · host-example", scheduler: "inventory-audit", description: 'Observed scheduler entry has no registry record. Identity: ["host-example","systemd","user","example.service"]. No automatic stop. Inspect original scheduler before disabling.' } };
   const intent = externalStopIntent(finding)!;
   expect(intent.prompt).toContain('"identity":{"host":"host-example","scheduler":"systemd","scope":"user","id":"example.service"}');
   expect(intent.taskKey).toBe(detail.task.key);
@@ -42,4 +42,11 @@ it.each(["Host inventory missing or stale. Identity: host-example. No automatic 
   });
 it("does not prepare a stop for a task missing from its source", () => {
   expect(externalStopIntent({ ...detail, task: { ...detail.task, missing: true } })).toBeNull();
+});
+
+it("does not prepare a stop for an absent required job", () => {
+  const finding = { ...detail, task: { ...detail.task, scheduler: "inventory-audit",
+    name: "OXI · missing-required · host-example",
+    description: 'Required job absent from fresh scheduler inventory. Identity: ["host-example","systemd","user","example.service"]. No automatic stop.' } };
+  expect(externalStopIntent(finding)).toBeNull();
 });
