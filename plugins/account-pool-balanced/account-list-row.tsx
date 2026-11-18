@@ -1,0 +1,77 @@
+import type { ReactNode } from "react";
+import { ResourceRowDetailChevron } from "./ui/components/ui/resource/row";
+import { cn } from "./ui/lib/utils";
+
+export function SettingsBadge({ children }: { children: ReactNode }) {
+  return (
+    <span className="shrink-0 rounded-sm border border-border bg-muted/40 px-1.5 py-0.5 text-2xs leading-none text-subtle-foreground">
+      {children}
+    </span>
+  );
+}
+
+export function AccountListRow({
+  name,
+  enabled,
+  leading,
+  badges,
+  description,
+  status,
+  metrics,
+  actions,
+  onOpen,
+}: {
+  name: string;
+  enabled: boolean;
+  leading?: ReactNode;
+  badges: ReactNode;
+  description?: ReactNode;
+  status: ReactNode;
+  metrics: ReactNode;
+  actions: ReactNode;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      {leading ?? <span aria-hidden="true" className="w-8 shrink-0" />}
+      <div className={cn(
+        "group -mx-2 flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2.5 transition-colors hover:bg-state-hover focus-within:bg-state-hover",
+        !enabled && "opacity-55",
+      )}>
+        <button
+          type="button"
+          className="grid min-w-0 flex-1 grid-cols-1 items-center gap-y-1.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-y-0"
+          aria-label={`Открыть ${name}`}
+          onClick={onOpen}
+        >
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="truncate text-sm font-medium text-foreground">{name}</span>
+              {badges}
+            </div>
+            {description}
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-subtle-foreground/75">
+              {status}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 sm:flex-nowrap sm:gap-1">
+            {metrics}
+          </div>
+        </button>
+        {actions}
+        <button type="button" aria-label={`Открыть карточку: ${name}`} onClick={onOpen}>
+          <ResourceRowDetailChevron />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function AccountRowStatus({ label, dot }: { label: string; dot: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span aria-hidden="true" className={cn("size-1.5 shrink-0 rounded-full", dot)} />
+      {label}
+    </span>
+  );
+}

@@ -1,29 +1,70 @@
 import type {NativeProbeInput,NativeProbeResult} from './src/native-probe-wire';
 import {useEffect, useState} from 'react';
 import {Button} from './ui/components/ui/button';
+import {ResourceOverflowMenu} from './ui/components/ui/resource/row';
+import {AccountListRow, AccountRowStatus, SettingsBadge} from './account-list-row';
 import {AccountProjectsForm} from './account-projects-form';
 import type {NativeAccounts, NativeAccountUpdate} from './src/native-accounts.js';
 import {NATIVE_MAX_CONCURRENT_SESSIONS} from './src/contracts.js';
 type Account=NativeAccounts['accounts'][number];
 type Projects=Array<{id:string;name:string}>;
 type Patch=Omit<NativeAccountUpdate,'accountId'|'expectedRevision'>;
-export function NativeAccountCard({account,open,loadProjects,managed=true}:{managed?:boolean;account:Account;open:()=>void;loadProjects:()=>Promise<Projects>}) {
-  const [projects,setProjects]=useState<Projects>([]);
-  useEffect(()=>{let live=true;void loadProjects().then(value=>{if(live)setProjects(value);}).catch(()=>{});return()=>{live=false;};},[]);
-  const names=new Map(projects.map(p=>[p.id,p.name]));
-  const selected=account.projects?.onlySelected&&account.projects.rules.length>0;
-  return <div className="space-y-2 border-b border-border py-3 last:border-b-0">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <button type="button" className="min-w-0 break-all text-left text-sm font-medium text-foreground hover:underline" onClick={open}>Google · {account.label??'Antigravity'}</button>
-      <Button size="sm" variant="outline" aria-label={`Настройки Google · ${account.label??'Antigravity'}`} onClick={open}>Настроить</Button>
-    </div>
-    <p className="text-xs text-muted-foreground">{!managed?'Управляемый режим выключен':account.uncertain>0?'Требуется проверка остановки':account.executors.some(e=>e.enabled)?'Включён · доступ к моделям проверяется при запросе':'Выключен'} · {account.role==='reserve'?'Резервный':'Основной'}{account.priority!==undefined?` · приоритет ${account.priority}`:account.executors.some(e=>e.preferred)?' · первый для новых сессий':''}</p>
-    <p className="text-xs text-muted-foreground">{selected?'Только выбранные проекты':'Во всех проектах'}{account.projects?.rules.length?`: ${account.projects.rules.map(r=>`${names.get(r.projectId)??r.projectId}${r.role==='primary'?' — основной':r.role==='reserve'?' — резервный':''}`).join('; ')}`:''}</p>
-    <p className="text-xs text-muted-foreground">Автопилот: {account.executors.some(e=>e.enabled&&e.autopilotAllowed)?'разрешён':'выключен'}.</p>
-    <p className="text-xs text-muted-foreground">В работе: {account.active}; в очереди: {account.queued}; остановка не подтверждена: {account.uncertain}.</p>
-    <p className="text-xs text-muted-foreground">Одновременных сеансов: до {account.maxConcurrentSessions??1}.</p>
-    <p className="text-xs text-muted-foreground">Лимит здесь не измеряется. Состояние входа проверяет официальный клиент на машине исполнителя.</p>
-  </div>;
+export function NativeAccountRow({
+  account,
+  open,
+  managed = true,
+}: {
+  account: Account;
+  open: () => void;
+  managed?: boolean;
+}) {
+  const name = account.label ?? 'Аккаунт Google';
+  const enabled = managed && account.executors.some((executor) => executor.enabled);
+  const status = !managed
+    ? {label: 'Управляемый режим выключен', dot: 'bg-muted-foreground'}
+    : account.uncertain > 0
+      ? {label: `Остановка не подтверждена: ${account.uncertain}`, dot: 'bg-warning'}
+      : enabled
+        ? {label: 'Включён', dot: 'bg-success'}
+        : {label: 'Выключен', dot: 'bg-muted-foreground'};
+  const projects = account.projects;
+  const maxSessions = account.maxConcurrentSessions ?? 1;
+
+  return (
+    <AccountListRow
+      name={name}
+      enabled={enabled}
+      badges={
+        <>
+          {projects?.rules.length ? (
+            <SettingsBadge>
+              {projects.onlySelected ? 'Только проекты' : 'Роли проектов'} · {projects.rules.length}
+            </SettingsBadge>
+          ) : null}
+          {account.role === 'reserve' ? <SettingsBadge>Резерв</SettingsBadge> : null}
+        </>
+      }
+      status={
+        <>
+          <AccountRowStatus {...status} />
+          {account.queued > 0 ? <span>В очереди: {account.queued}</span> : null}
+        </>
+      }
+      metrics={
+        <div className="w-16 text-left tabular-nums sm:text-right" title="Сеансы в работе / предел">
+          <div className="text-2xs uppercase tracking-wide text-subtle-foreground/75">Сеансы</div>
+          <div className="text-xs font-semibold text-foreground">{account.active} / {maxSessions}</div>
+        </div>
+      }
+      actions={
+        <ResourceOverflowMenu
+          label={`Действия: ${name}`}
+          items={[{label: 'Настроить', onSelect: open}]}
+        />
+      }
+      onOpen={open}
+    />
+  );
 }
 export function NativeAccountSettings({account,revision,save,loadProjects,probe}:{probe?:(input:NativeProbeInput)=>Promise<NativeProbeResult>;account:Account;revision:string;save:(input:NativeAccountUpdate)=>Promise<void>;loadProjects:()=>Promise<Projects>}) {
   const priority=account.priority??(account.executors.some(e=>e.preferred)?0:10);

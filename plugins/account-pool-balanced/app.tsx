@@ -1,6 +1,7 @@
 import {AccountDraftForm} from './account-draft-form';
-import {NativeAccountCard,NativeAccountSettings} from './native-account-settings';
-import {PoolUpdatePanel} from './pool-update-panel';
+import {NativeAccountRow, NativeAccountSettings} from './native-account-settings';
+import {AccountListRow, AccountRowStatus, SettingsBadge} from './account-list-row';
+import {PoolTechnicalDetails, PoolUpdatePanel} from './pool-update-panel';
 import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
 import {AccountEmailForm} from './account-email-form';
@@ -65,7 +66,6 @@ import {
 import { Icon } from "./ui/components/ui/icon";
 import { Input } from "./ui/components/ui/input";
 import { cn } from "./ui/lib/utils";
-import { ResourceRowDetailChevron } from "./ui/components/ui/resource/row";
 import { Switch } from "./ui/components/ui/switch";
 import type {
   AccountSummary,
@@ -377,14 +377,6 @@ function tier(account: AccountSummary): string {
     (account.kind === "api-key" ? "API-ключ" : "OAuth")
   );
 }
-function SettingsBadge({ children }: { children: ReactNode }) {
-  return (
-    <span className="shrink-0 rounded-sm border border-border bg-muted/40 px-1.5 py-0.5 text-2xs leading-none text-subtle-foreground">
-      {children}
-    </span>
-  );
-}
-
 function SettingsSection({
   title,
   description,
@@ -567,149 +559,124 @@ function AccountRow({
     transform,
     transition,
   } = useSortable({ id: account.id, disabled: pending || reorderDisabled });
+  const name = accountFullName(account);
   return (
     <div
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform), transition }}
-      className={cn(
-        "flex items-center gap-3 text-sm",
-        isDragging && "relative z-10 rounded-md bg-card opacity-90 shadow-lift",
-      )}
+      className={cn(isDragging && "relative z-10 rounded-md bg-card opacity-90 shadow-lift")}
     >
-      <Button
-        ref={setActivatorNodeRef}
-        type="button"
-        variant="ghost"
-        size="icon"
-        className="size-8 shrink-0 touch-none text-muted-foreground enabled:cursor-grab enabled:active:cursor-grabbing"
-        disabled={pending || reorderDisabled}
-        aria-label={`Переместить ${accountFullName(account)}`}
-        {...attributes}
-        {...listeners}
-      >
-        <Icon name="DragDropVertical" aria-hidden="true" />
-      </Button>
-      <div
-        className={cn(
-          "group -mx-2 flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2.5 transition-colors hover:bg-state-hover focus-within:bg-state-hover",
-          !account.enabled && "opacity-55",
+      <AccountListRow
+        name={name}
+        enabled={account.enabled}
+        onOpen={onOpen}
+        leading={
+          <Button
+            ref={setActivatorNodeRef}
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8 shrink-0 touch-none text-muted-foreground enabled:cursor-grab enabled:active:cursor-grabbing"
+            disabled={pending || reorderDisabled}
+            aria-label={`Переместить ${name}`}
+            {...attributes}
+            {...listeners}
+          >
+            <Icon name="DragDropVertical" aria-hidden="true" />
+          </Button>
+        }
+        badges={
+          <>
+            <SettingsBadge>{tier(account)}</SettingsBadge>
+            {account.drainOnce ? <SettingsBadge>До исчерпания</SettingsBadge> : null}
+            {account.policy?.enabled ? <SettingsBadge>Свои настройки</SettingsBadge> : null}
+            {account.projects?.rules.length ? <SettingsBadge>{account.projects.onlySelected ? "Только проекты" : "Роли проектов"} · {account.projects.rules.length}</SettingsBadge> : null}
+            {account.role === "reserve" ? <SettingsBadge>Резерв</SettingsBadge> : null}
+            {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
+          </>
+        }
+        description={account.policy?.enabled && (
+          <p className="text-xs text-muted-foreground">{policySummary(account.policy)}</p>
         )}
-      >
-        <button
-          type="button"
-          className="grid min-w-0 flex-1 grid-cols-1 items-center gap-y-1.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-y-0"
-          aria-label={`Открыть ${accountFullName(account)}`}
-          onClick={onOpen}
-        >
-          <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <span className="truncate text-sm font-medium text-foreground">
-                {accountFullName(account)}
-              </span>
-              <SettingsBadge>{tier(account)}</SettingsBadge>
-              {account.drainOnce ? <SettingsBadge>До исчерпания</SettingsBadge> : null}
-              {account.policy?.enabled ? <SettingsBadge>Свои настройки</SettingsBadge> : null}
-              {account.projects?.rules.length ? <SettingsBadge>{account.projects.onlySelected ? "Только проекты" : "Роли проектов"} · {account.projects.rules.length}</SettingsBadge> : null}
-              {account.role === "reserve" ? (
-                <SettingsBadge>Резерв</SettingsBadge>
-              ) : null}
-              {current ? <SettingsBadge>Текущий</SettingsBadge> : null}
-            </div>
-            {account.policy?.enabled && <p className="text-xs text-muted-foreground">{policySummary(account.policy)}</p>}
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-subtle-foreground/75">
-              <span className="inline-flex shrink-0 items-center gap-1.5">
-                <span className={cn("size-1.5 rounded-full", status.dot)} />
-                {status.label}
-              </span>
-              {account.lastUsedAt === null ? null : (
-                <span>использован {relative(account.lastUsedAt)}</span>
-              )}
-              {cap === null ? null : <span>{cap}</span>}
-              {refreshing ? <span>обновляю квоты…</span> : null}
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 sm:flex-nowrap sm:gap-1">
-            {slots.map((slot) => (
-              <QuotaValue
-                key={slot.key}
-                slot={slot}
-                threshold={threshold}
-                refreshing={refreshing}
-              />
-            ))}
-          </div>
-        </button>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 shrink-0 data-[state=open]:bg-state-active"
-              aria-label={`Действия: ${accountFullName(account)}`}
-            >
-              <Icon name="MoreHorizontal" className="size-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-52">
-            <DropdownMenuItem disabled={pending} onSelect={() => onAction("browser")}>
-              <Icon name="ExternalLink" />
-              Открыть в браузере
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              disabled={pending || !!account.draft}
-              onSelect={() => onAction("toggle")}
-            >
-              <Icon name={account.enabled ? "Circle" : "CircleCheck"} />
-              {account.enabled ? "Выключить" : "Включить"}
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={pending}
-              onSelect={() => onAction("priority")}
-            >
-              <Icon name="ListView" />
-              Задать приоритет…
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={pending}
-              onSelect={() => onAction("role")}
-            >
-              <Icon name="ListView" />
-              Задать роль…
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={pending}
-              onSelect={() => onAction("cap")}
-            >
-              <Icon name="ListView" />
-              Задать недельный потолок…
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={pending}
-              onSelect={() => onAction("refresh")}
-            >
-              <Icon name="RotateCcw" />
-              Обновить квоты
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              variant="destructive"
-              disabled={pending}
-              onSelect={() => onAction("remove")}
-            >
-              <Icon name="Trash2" />
-              Удалить
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <button
-          type="button"
-          aria-label={`Открыть карточку: ${accountFullName(account)}`}
-          onClick={onOpen}
-        >
-          <ResourceRowDetailChevron />
-        </button>
-      </div>
+        status={
+          <>
+            <AccountRowStatus {...status} />
+            {account.lastUsedAt === null ? null : (
+              <span>использован {relative(account.lastUsedAt)}</span>
+            )}
+            {cap === null ? null : <span>{cap}</span>}
+            {refreshing ? <span>обновляю квоты…</span> : null}
+          </>
+        }
+        metrics={slots.map((slot) => (
+          <QuotaValue key={slot.key} slot={slot} threshold={threshold} refreshing={refreshing} />
+        ))}
+        actions={
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 data-[state=open]:bg-state-active"
+                aria-label={`Действия: ${name}`}
+              >
+                <Icon name="MoreHorizontal" className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-52">
+              <DropdownMenuItem disabled={pending} onSelect={() => onAction("browser")}>
+                <Icon name="ExternalLink" />
+                Открыть в браузере
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                disabled={pending || !!account.draft}
+                onSelect={() => onAction("toggle")}
+              >
+                <Icon name={account.enabled ? "Circle" : "CircleCheck"} />
+                {account.enabled ? "Выключить" : "Включить"}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={pending}
+                onSelect={() => onAction("priority")}
+              >
+                <Icon name="ListView" />
+                Задать приоритет…
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={pending}
+                onSelect={() => onAction("role")}
+              >
+                <Icon name="ListView" />
+                Задать роль…
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={pending}
+                onSelect={() => onAction("cap")}
+              >
+                <Icon name="ListView" />
+                Задать недельный потолок…
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={pending}
+                onSelect={() => onAction("refresh")}
+              >
+                <Icon name="RotateCcw" />
+                Обновить квоты
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                disabled={pending}
+                onSelect={() => onAction("remove")}
+              >
+                <Icon name="Trash2" />
+                Удалить
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        }
+      />
     </div>
   );
 }
@@ -1520,12 +1487,6 @@ function UnlockedAccountPoolSettings() {
   return (
     <div className="w-full space-y-6">
       <PoolUpdatePanel />
-      <p className="text-xs text-subtle-foreground/75">
-        Хаб {status?.accepting ? "принимает" : "не принимает"} ·{" "}
-        {status?.inFlight ?? 0} в работе · используют {hubHosts}
-        {statusIsCached ? " · обновляю…" : null}
-        {status?.vpn?.blockedProviders.length ? " · защищённые провайдеры заблокированы политикой сети" : null}
-      </p>
       <div className="space-y-2">
       <label className="flex min-h-9 items-center gap-2 text-sm">
         <input type="checkbox" className="h-4 w-4 shrink-0" checked={config?.vpnGuardEnabled??false} disabled={config===null||pending!==null} onChange={e=>void saveRouting({vpnGuardEnabled:e.target.checked})}/>
@@ -1615,7 +1576,7 @@ function UnlockedAccountPoolSettings() {
           <SettingsSection
             key={provider.id}
             title={provider.title}
-            description={provider.id === "agy" && nativeAccounts?.managed !== false ? "Официальный клиент. Вход Google хранится на машинах исполнителей; одна подписка объединяет их общий лимит." : `${provider.description} В работе: ${providerAccounts.reduce((n,a)=>n+a.inFlight,0)}; в очереди: ${providerAccounts.reduce((n,a)=>n+a.queuedRequests,0)}. Предел на аккаунт: ${config?.maxConcurrentRequestsPerAccount ?? 2}.`}
+            description={provider.id === "agy" && nativeAccounts?.managed !== false ? "Вход Google на машинах. Предел сеансов общий для каждой подписки." : `${provider.description} В работе: ${providerAccounts.reduce((n,a)=>n+a.inFlight,0)}; в очереди: ${providerAccounts.reduce((n,a)=>n+a.queuedRequests,0)}. Предел на аккаунт: ${config?.maxConcurrentRequestsPerAccount ?? 2}.`}
             action={
               <div className="flex flex-wrap items-center gap-2">
                 <Switch
@@ -1645,9 +1606,18 @@ function UnlockedAccountPoolSettings() {
             }
           >
             {provider.id === "agy" && nativeError !== null ? <p role="alert" className="py-2.5 text-sm text-destructive-text">Не удалось загрузить исполнителей: {nativeError}</p> : null}
-            {provider.id === "agy" ? nativeAccounts?.accounts.map(account => (
-              <NativeAccountCard key={account.accountId} managed={nativeAccounts.managed} account={account} open={()=>setNativeSettings(account.accountId)} loadProjects={()=>rpc.call('projects.list',null)}/>
-            )) : null}
+            {provider.id === "agy" && nativeAccounts?.accounts.length ? (
+              <div className="divide-y divide-border">
+                {nativeAccounts.accounts.map((account) => (
+                  <NativeAccountRow
+                    key={account.accountId}
+                    managed={nativeAccounts.managed}
+                    account={account}
+                    open={() => setNativeSettings(account.accountId)}
+                  />
+                ))}
+              </div>
+            ) : null}
             {status === null ? (
               <p className="py-2.5 text-sm text-muted-foreground">Загрузка…</p>
             ) : providerAccounts.length === 0 ? (
@@ -1970,6 +1940,12 @@ function UnlockedAccountPoolSettings() {
           </div>
         </CollapsibleContent>
       </Collapsible>
+      <PoolTechnicalDetails>
+        Хаб {status?.accepting ? "принимает" : "не принимает"} ·{" "}
+        {status?.inFlight ?? 0} в работе · используют {hubHosts}
+        {statusIsCached ? " · обновляю…" : null}
+        {status?.vpn?.blockedProviders.length ? " · защищённые провайдеры заблокированы политикой сети" : null}
+      </PoolTechnicalDetails>
       <Dialog
         open={dialog !== null}
         onOpenChange={(open) => {
