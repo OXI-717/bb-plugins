@@ -4,6 +4,7 @@ import { z } from 'zod';
 import {accountProjectsSchema, type AccountProjects} from './contracts.js';
 import {projectTier} from './project-policy.js';
 import {nativeAccountRoutingSchema, nativeAccountUpdateSchema, type NativeAccountUpdate, nativeProjectsSchema, summarizeNativeAccounts} from './native-accounts.js';
+import {NATIVE_MAX_CONCURRENT_SESSIONS} from './native-concurrency.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const nativeExecutionSchema=z.object({
@@ -46,6 +47,7 @@ const stateSchema = z.object({
   managed:z.boolean(), executors:z.array(nativeExecutorSchema).max(32),
   preferredExecutors:z.record(id,id).refine(value=>Object.keys(value).length<=32).default({}),
   accountRouting:z.record(id,nativeAccountRoutingSchema).refine(value=>Object.keys(value).length<=32).default({}),
+  accountConcurrency:z.record(id,z.number().int().min(2).max(NATIVE_MAX_CONCURRENT_SESSIONS)).refine(value=>Object.keys(value).length<=32).optional(),
   leases:z.array(leaseSchema).max(128), events:z.array(eventSchema).max(256),
 }).strict();
 type State = z.infer<typeof stateSchema>;
@@ -136,7 +138,7 @@ export class NativeSessions {
     const preferred=matches.filter(e=>this.state.preferredExecutors[e.hostId]===e.id);
     return preferred.length===1?preferred[0].id:null;
   }
-  private selectionRevision(){return createHash('sha256').update(JSON.stringify([this.state.executors,this.state.preferredExecutors,this.state.accountRouting])).digest('hex');}
+  private selectionRevision(){return createHash('sha256').update(JSON.stringify([this.state.executors,this.state.preferredExecutors,this.state.accountRouting,this.state.accountConcurrency??{}])).digest('hex');}
   async prefer(executorId:string,expectedRevision:string){return this.serial(()=>{
     if(this.selectionRevision()!==expectedRevision)throw new NativeSessionError(409,'native-selection-changed');
     const executor=this.state.executors.find(e=>e.id===executorId&&e.enabled);
@@ -157,6 +159,7 @@ export class NativeSessions {
     if(this.state.leases.some(l=>l.executor.id===executor.id))throw new NativeSessionError(409,'native-executor-busy');
     if(existing<0){if(this.state.executors.length>=32)throw new NativeSessionError(409,'native-executor-limit');this.state.executors.push(executor);}
     else this.state.executors[existing]=executor;
+    this.storeConcurrency(Object.fromEntries(Object.entries(this.state.accountConcurrency??{}).filter(([accountId])=>this.state.executors.some(e=>e.accountId===accountId))));
     return executor;
   });}
   async setManaged(managed:boolean){return this.serial(()=>{this.state.managed=managed;return {managed};});}
@@ -196,7 +199,7 @@ export class NativeSessions {
       const group=this.state.executors.filter(e=>e.accountId===input.accountId);
       if(!group.length)throw new NativeSessionError(404,'native-account-not-found');
       if(input.executor&&!group.some(e=>e.id===input.executor!.id))throw new NativeSessionError(403,'native-executor-denied');
-      if((input.projects||input.executor)&&this.state.leases.some(l=>l.executor.accountId===input.accountId))throw new NativeSessionError(409,'native-executor-busy');
+      if((input.projects||input.executor||input.maxConcurrentSessions!==undefined)&&this.state.leases.some(l=>l.executor.accountId===input.accountId))throw new NativeSessionError(409,'native-executor-busy');
       const previous=this.routing(group.find(e=>this.state.preferredExecutors[e.hostId]===e.id)??group[0]);
       const routing={...previous,role:input.role??previous.role,priority:input.priority??previous.priority,...(input.label?{label:input.label}:{})};
       const next=this.state.executors.map(e=>e.accountId!==input.accountId?e:{...e,
@@ -206,13 +209,29 @@ export class NativeSessions {
           ...(input.executor.autopilotAllowed!==undefined?{autopilotAllowed:input.executor.autopilotAllowed}:{}),
         }:{}),
       });
-      this.state.accountRouting={...this.state.accountRouting,[input.accountId]:routing};
+      if(input.maxConcurrentSessions===undefined||input.role!==undefined||input.priority!==undefined||input.label!==undefined||input.projects||input.executor){
+        this.state.accountRouting={...this.state.accountRouting,[input.accountId]:routing};
+      }
+      if(input.maxConcurrentSessions!==undefined){
+        const concurrency={...this.state.accountConcurrency,[input.accountId]:input.maxConcurrentSessions};
+        if(input.maxConcurrentSessions===1)delete concurrency[input.accountId];
+        this.storeConcurrency(concurrency);
+      }
       this.state.executors=next;
       return null;
     });
   }
+  private storeConcurrency(value:Record<string,number>){
+    if(Object.keys(value).length)this.state.accountConcurrency=value;
+    else delete this.state.accountConcurrency;
+  }
+  private accountCapacity(accountId:string){
+    const concurrency=this.state.accountConcurrency;
+    return concurrency&&Object.hasOwn(concurrency,accountId)?concurrency[accountId]!:1;
+  }
   async accounts(){return this.serial(()=>({...summarizeNativeAccounts(this.state),selectionRevision:this.selectionRevision()}));}
   async snapshot(){return this.serial(()=>({managed:this.state.managed,preferredExecutors:this.state.preferredExecutors,executors:this.state.executors,
+    ...(this.state.accountConcurrency?{accountConcurrency:this.state.accountConcurrency}:{}),
     leases:this.state.leases.map(({id,executor,caller,kind,state,deadline,createdAt})=>({id,executorId:executor.id,accountId:executor.accountId,hostId:executor.hostId,projectId:caller.projectId,kind,state,deadline,createdAt})),
     events:this.state.events,budget:'unknown' as const}));}
   async attestStopped(leaseId:string){return this.serial(()=>{
@@ -270,6 +289,10 @@ export class NativeSessions {
       if(existing&&(existing.executor.id!==executor.id||existing.kind!==input.kind))throw new NativeSessionError(409,'native-session-bound');
       if(existing)lease=existing;
       else{
+        if(input.kind==='task'&&caller.threadId!==undefined&&this.accountCapacity(executor.accountId)>1&&
+            this.state.leases.some(l=>l.kind==='task'&&l.executor.accountId===executor.accountId&&l.caller.threadId===caller.threadId)){
+          throw new NativeSessionError(409,'native-thread-already-bound');
+        }
         if(this.state.leases.length>=128)throw new NativeSessionError(429,'native-queue-full');
         const now=this.now();
         lease={id:randomUUID(),sessionId:input.sessionId,executor:structuredClone(executor),caller:structuredClone(caller),kind:input.kind,state:'queued',createdAt:now,deadline:now+NATIVE_LEASE_MS};
@@ -283,8 +306,11 @@ export class NativeSessions {
     this.validateExecution(lease.executor);
     if(JSON.stringify(executor)!==JSON.stringify(lease.executor))throw new NativeSessionError(409,'native-executor-changed');
     const same=this.state.leases.filter(l=>l.executor.accountId===lease.executor.accountId);
-    // One common account lane across all machines and purposes. Never preempt.
-    if(lease.state==='queued'&&!same.some(l=>l.state!=='queued')&&same.find(l=>l.state==='queued')===lease){lease.state='active';this.event(lease,'active');}
+    const capacity=this.accountCapacity(executor.accountId);
+    const exclusive=same.some(l=>l.state==='uncertain'||(l.kind==='diagnostic'&&l.state==='active'));
+    if(lease.state==='queued'&&!exclusive&&same.filter(l=>l.state==='active').length<capacity&&same.find(l=>l.state==='queued')===lease){
+      lease.state='active';this.event(lease,'active');
+    }
     lease.deadline=this.now()+NATIVE_LEASE_MS;
     return {...(lease.kind==='diagnostic'?{diagnostic:{...reservation!.input,reservationId:reservation!.reservationId,sessionId:lease.sessionId}}:{}),leaseId:lease.id,state:lease.state,ttlMs:NATIVE_LEASE_MS,heartbeatMs:5000,accountId:lease.executor.accountId,hostId:lease.executor.hostId,
       ...(lease.executor.unlock?{unlock:{mode:'automatic' as const,state:lease.unlock?.state??'idle',...(lease.unlock?{requestId:lease.unlock.requestId,deadline:lease.unlock.deadline}:{})}}:{}),

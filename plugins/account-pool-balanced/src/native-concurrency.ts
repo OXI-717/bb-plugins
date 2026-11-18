@@ -1,0 +1,1 @@
+export const NATIVE_MAX_CONCURRENT_SESSIONS = 4;

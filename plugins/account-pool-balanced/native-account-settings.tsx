@@ -3,6 +3,7 @@ import {useEffect, useState} from 'react';
 import {Button} from './ui/components/ui/button';
 import {AccountProjectsForm} from './account-projects-form';
 import type {NativeAccounts, NativeAccountUpdate} from './src/native-accounts.js';
+import {NATIVE_MAX_CONCURRENT_SESSIONS} from './src/native-concurrency.js';
 type Account=NativeAccounts['accounts'][number];
 type Projects=Array<{id:string;name:string}>;
 type Patch=Omit<NativeAccountUpdate,'accountId'|'expectedRevision'>;
@@ -20,11 +21,13 @@ export function NativeAccountCard({account,open,loadProjects,managed=true}:{mana
     <p className="text-xs text-muted-foreground">{selected?'Только выбранные проекты':'Во всех проектах'}{account.projects?.rules.length?`: ${account.projects.rules.map(r=>`${names.get(r.projectId)??r.projectId}${r.role==='primary'?' — основной':r.role==='reserve'?' — резервный':''}`).join('; ')}`:''}</p>
     <p className="text-xs text-muted-foreground">Автопилот: {account.executors.some(e=>e.enabled&&e.autopilotAllowed)?'разрешён':'выключен'}.</p>
     <p className="text-xs text-muted-foreground">В работе: {account.active}; в очереди: {account.queued}; остановка не подтверждена: {account.uncertain}.</p>
+    <p className="text-xs text-muted-foreground">Одновременных сеансов: до {account.maxConcurrentSessions??1}.</p>
     <p className="text-xs text-muted-foreground">Лимит здесь не измеряется. Состояние входа проверяет официальный клиент на машине исполнителя.</p>
   </div>;
 }
 export function NativeAccountSettings({account,revision,save,loadProjects,probe}:{probe?:(input:NativeProbeInput)=>Promise<NativeProbeResult>;account:Account;revision:string;save:(input:NativeAccountUpdate)=>Promise<void>;loadProjects:()=>Promise<Projects>}) {
   const priority=account.priority??(account.executors.some(e=>e.preferred)?0:10);
+  const busy=account.active+account.queued+account.uncertain>0;
   const [draft,setDraft]=useState(String(priority));
   const [label,setLabel]=useState(account.label??'');
   useEffect(()=>setLabel(account.label??''),[account.label]);
@@ -51,7 +54,7 @@ export function NativeAccountSettings({account,revision,save,loadProjects,probe}
     try{await save({accountId:account.accountId,expectedRevision:revision,...patch});}
     catch(reason){
       const text=reason instanceof Error?reason.message:'';
-      setError(text.includes('native-executor-busy')?'Проекты и места запуска нельзя менять, пока у аккаунта есть сессии. Роль и приоритет можно изменить сейчас.':text.includes('native-selection-changed')?'Настройки изменились в другой сессии. Обновите данные и повторите.':'Не удалось сохранить настройки. Обновите данные и повторите.');
+      setError(text.includes('native-executor-busy')?'Проекты, места запуска и число сеансов можно изменить, когда аккаунт освободится.':text.includes('native-selection-changed')?'Настройки изменились в другой сессии. Обновите данные и повторите.':'Не удалось сохранить настройки. Обновите данные и повторите.');
       throw reason;
     }finally{setPending(false);}
   };
@@ -70,6 +73,12 @@ export function NativeAccountSettings({account,revision,save,loadProjects,probe}
         }}/></label>
       </fieldset>
       <p className="pool-settings-help">Меньшее число выбирается раньше среди аккаунтов с одинаковой ролью и привязкой к проекту. Изменения действуют на новые сессии; текущие продолжаются на прежнем аккаунте.</p>
+      <label className="pool-settings-field pool-settings-inline">Одновременных сеансов
+        <select className="pool-settings-control" disabled={pending||busy} value={account.maxConcurrentSessions??1} onChange={event=>apply({maxConcurrentSessions:Number(event.target.value)})}>
+          {Array.from({length:NATIVE_MAX_CONCURRENT_SESSIONS},(_,index)=><option key={index+1} value={index+1}>{index+1}</option>)}
+        </select>
+      </label>
+      <p className="pool-settings-help">Общий предел для этого аккаунта на всех машинах, включая автопилот. Изменяется, когда очередь пуста и сеансы остановлены.</p>
     </section>
     <section className="pool-settings-section" aria-label="Доступ Google и модель">
       <h3 className="pool-settings-heading">Доступ Google и модель</h3>
