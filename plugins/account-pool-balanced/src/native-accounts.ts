@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import { accountProjectsSchema, type AccountProjects } from "./contracts.js";
+import { accountProjectsSchema, NATIVE_MAX_CONCURRENT_SESSIONS, type AccountProjects } from "./contracts.js";
 import { z } from "zod";
 
 export const nativeProjectsSchema = accountProjectsSchema.refine(value => value.rules.length <= 32 && value.rules.every(rule => /^[A-Za-z0-9_-]{1,80}$/.test(rule.projectId)), 'Native project lists allow at most 32 project IDs');
+
+const nativeConcurrencySchema = z.number().int().min(1).max(NATIVE_MAX_CONCURRENT_SESSIONS).optional();
 
 export const nativeAccountRoutingSchema = z.object({
   role: z.enum(['primary', 'reserve']),
@@ -15,6 +17,7 @@ export const nativeAccountUpdateSchema = z.object({
   label: nativeAccountRoutingSchema.shape.label,
   role: nativeAccountRoutingSchema.shape.role.optional(),
   priority: nativeAccountRoutingSchema.shape.priority.optional(),
+  maxConcurrentSessions: nativeConcurrencySchema,
   projects: nativeProjectsSchema.optional(),
   executor: z.object({id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/), enabled: z.boolean().optional(), autopilotAllowed: z.boolean().optional()}).strict().optional(),
 }).strict();
@@ -28,6 +31,7 @@ export const nativeAccountsSchema = z.object({
     label:z.string().optional(),
     role: nativeAccountRoutingSchema.shape.role.optional(),
     priority: nativeAccountRoutingSchema.shape.priority.optional(),
+    maxConcurrentSessions: nativeConcurrencySchema,
     projects: accountProjectsSchema,
     projectsRevision: z.string(),
     mixedProjects: z.boolean(),
@@ -47,6 +51,7 @@ export function summarizeNativeAccounts(state: {
   managed: boolean;
   preferredExecutors?:Record<string,string>;
   accountRouting?:Record<string,z.infer<typeof nativeAccountRoutingSchema>>;
+  accountConcurrency?:Record<string,number>;
   executors: Array<{id: string; accountId: string; hostId?:string; label?:string; enabled: boolean; autopilotAllowed: boolean; projectIds: string[]; projects?: AccountProjects}>;
   leases: Array<{executor: {accountId: string}; state: "active" | "queued" | "uncertain"}>;
 }): NativeAccounts {
@@ -60,6 +65,8 @@ export function summarizeNativeAccounts(state: {
       account = {accountId: executor.accountId, projects:structuredClone(projects), mixedProjects:policies.some(p=>JSON.stringify(p)!==JSON.stringify(projects)), projectsRevision: createHash('sha256').update(JSON.stringify(group.map(e => [e.id,e.projectIds,e.projects]))).digest('hex'), executors: [], active: 0, queued: 0, uncertain: 0};
       const routing = state.accountRouting&&Object.hasOwn(state.accountRouting,executor.accountId)?state.accountRouting[executor.accountId]:undefined;
       if (routing) { account.role = routing.role; account.priority = routing.priority; if(routing.label)account.label=routing.label; }
+      const capacity=state.accountConcurrency?.[executor.accountId];
+      if (typeof capacity==='number') account.maxConcurrentSessions=capacity;
       accounts.push(account);
     }
     if(executor.label&&!account.label)account.label=executor.label;
