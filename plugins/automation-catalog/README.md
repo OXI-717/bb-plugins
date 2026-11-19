@@ -250,3 +250,25 @@ one invocation survives later incomplete observations. The outbox holds at most
 Exhaustion is a persistent visible blocked/overflow state requiring reconciliation,
 never a successful or complete history. Publication still obeys the shared event
 budget, and advances the outbox only after the existing publication acknowledgement.
+
+Remote inventory transport requires publisher scripts from 0.1.23 or newer.
+`catalog_remote_inventory.py` compresses the exact bytes of its sibling inventory
+module, includes their SHA-256, and checks the complete shell command against
+both 10,000 characters and 10,000 UTF-8 bytes before creating a terminal. Source
+size is bounded to 64 KiB. The isolated remote Python process uses only stdlib,
+bounded decompression and digest verification before compiling those same bytes;
+there is no separate Mac collector body or persistent remote file installation.
+Oversized or invalid payloads fail before terminal creation; failed remote reads
+remain unavailable coverage. Each read owns one short-lived terminal and closes
+it through the existing BB transport. Service commands/environment are not read
+or exported.
+
+Release and deliver the immutable `automation-catalog/v0.1.23` tag. Update the
+plugin normally, then deploy `catalog_remote_inventory.py`, `catalog_inventory.py`
+and `catalog_compliance.py` together from that same accepted tag under the existing
+publisher maintenance/lock path. Preserve configuration, timer, current state,
+pre-update backup, post-update execution outbox and published history. This
+transport change does not alter the execution-aware state format. Reapplying a
+saved execution-aware state requires the matching execution-aware reader; any
+rollback to pre-0.1.22 scripts still requires the compatible pre-update backup
+and separate preservation of post-update evidence described above.

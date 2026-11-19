@@ -1,10 +1,40 @@
 """Bounded official BB-terminal transport for read-only inventory code."""
 import base64
+import hashlib
 import json
 from pathlib import Path
 import shlex
 import subprocess
 import time
+import zlib
+
+
+MAX_COMMAND_BYTES = 10000
+MAX_SOURCE_BYTES = 65536
+
+
+def validate_command(command):
+    # BB checks characters; a byte bound also protects non-ASCII CLI transports.
+    if len(command) > MAX_COMMAND_BYTES or len(command.encode('utf-8')) > MAX_COMMAND_BYTES:
+        raise ValueError('Remote inventory payload exceeds terminal command limit')
+    return command
+
+
+def inventory_command(source):
+    if not isinstance(source, bytes) or not 0 < len(source) <= MAX_SOURCE_BYTES:
+        raise ValueError('Remote inventory source exceeds payload bound')
+    encoded = base64.b64encode(zlib.compress(source, 9)).decode('ascii')
+    digest = hashlib.sha256(source).hexdigest()
+    # Only stdlib is required remotely. Verify the exact source bytes before
+    # compile/exec; do not strip the entrypoint or maintain a second Mac body.
+    code = f'''import base64,hashlib,zlib
+d=zlib.decompressobj()
+s=d.decompress(base64.b64decode({encoded!r},validate=True),{MAX_SOURCE_BYTES + 1})
+if len(s)>{MAX_SOURCE_BYTES} or not d.eof or d.unused_data or d.unconsumed_tail or hashlib.sha256(s).hexdigest()!={digest!r}:
+ raise ValueError('Inventory payload integrity failed')
+exec(compile(s,'<catalog_inventory.py>','exec'),{{'__name__':'__main__'}})
+'''
+    return validate_command('python3 -I -c ' + shlex.quote(code))
 
 
 def remote(host, bb='bb'):
@@ -16,10 +46,9 @@ def remote(host, bb='bb'):
         if p.get('ok') is False:
             raise RuntimeError('Remote inventory refused')
         return p
-    source=Path(__file__).with_name('catalog_inventory.py').read_text()
-    code=source.rsplit("if __name__ == '__main__':",1)[0]+'\nimport time\nprint(json.dumps(dict(discover(),observedAt=int(time.time()*1000))))\n'
+    command=inventory_command(Path(__file__).with_name('catalog_inventory.py').read_bytes())
     terminal=cli(['terminal','create','--machine',host,'--cwd','/','--title','Read-only inventory',
-                  '--command','python3 -c '+shlex.quote(code),'--json'])
+                  '--command',command,'--json'])
     identifier=terminal['id']
     try:
         if terminal.get('hostId')!=host:
