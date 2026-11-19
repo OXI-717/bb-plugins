@@ -407,7 +407,7 @@ export function CatalogDetailView({
             <AuditPanel taskKey={taskKey} />
             {detail.source.managedHere && detail.task.scheduler === "bb" && !detail.task.missing && <AutomationDefinition taskKey={taskKey} schedulerHost={present(detail.task).host ?? "Не определена"} />}
           </CatalogDetailContent>
-          {(!present(detail.task).finding || externalStopIntent(detail)) && <section className="space-y-2 rounded-md border p-3" aria-label="Управление автоматизацией">
+          {(detail.task.missing || !present(detail.task).finding || externalStopIntent(detail)) && <section className="space-y-2 rounded-md border p-3" aria-label="Управление автоматизацией">
             <h3 className="text-sm font-semibold">Управление автоматизацией</h3>
             {detail.task.missing ? (
               <Button size="sm" variant="outline" disabled={actionPending} onClick={() => setConfirmAction("forget")}>Удалить устаревшую запись из каталога</Button>
