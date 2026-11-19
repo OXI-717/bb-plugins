@@ -102,6 +102,7 @@ export const catalogEntrySchema = catalogTaskSchema.extend({
 });
 export const catalogSourceStatusSchema = catalogSourceSchema.omit({ bbServerUrl: true }).extend({
   managedHere: z.boolean().optional(),
+  archivedAt: time.optional(),
   checkedAt: time,
   lastSuccessAt: time.nullable(),
   error: text.nullable(),
