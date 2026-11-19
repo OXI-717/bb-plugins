@@ -1,7 +1,7 @@
 import {AccountDraftForm} from './account-draft-form';
 import {NativeAccountRow, NativeAccountSettings} from './native-account-settings';
 import {AccountListRow, AccountRowStatus, SettingsBadge} from './account-list-row';
-import {PoolTechnicalDetails, PoolUpdatePanel} from './pool-update-panel';
+import {PoolSelectedAccounts, PoolTechnicalDetails, PoolUpdatePanel} from './pool-update-panel';
 import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
 import {AccountEmailForm} from './account-email-form';
@@ -1471,6 +1471,11 @@ function UnlockedAccountPoolSettings() {
     status?.hosts.map((host) => host.hostName ?? host.hostId).join(", ") ||
     "машин нет";
   const currentLabel = (provider: PoolProvider): string => {
+    if (provider === "agy") {
+      if (nativeAccounts === null) return nativeError === null ? "Загрузка…" : "Данные недоступны";
+      if (nativeAccounts.managed) return "Выбирается для сеанса";
+    }
+    if (status === null) return "Загрузка…";
     const id = status?.activeAccounts[provider] ?? null;
     const selected = accounts.find((account) => account.id === id);
     return selected ? accountFullName(selected) : "Не выбран";
@@ -1492,21 +1497,8 @@ function UnlockedAccountPoolSettings() {
         <input type="checkbox" className="h-4 w-4 shrink-0" checked={config?.vpnGuardEnabled??false} disabled={config===null||pending!==null} onChange={e=>void saveRouting({vpnGuardEnabled:e.target.checked})}/>
         Подчиняться VPN Guard
       </label>
-      <p className="text-xs text-subtle-foreground">Блокирует сетевые вызовы пула к Codex, Claude, Cursor и Devin по решению Guard. Если Guard недоступен — отказ до отправки. Kimi и Z.ai не затрагиваются.</p>
-      <p className="text-xs text-muted-foreground">Включать после обновления VPN-гарда. Старый /1 будет отклонён. Защищённые запросы пула используют IPv4; китайские провайдеры сохраняют обычный транспорт.</p>
+      <p className="text-xs text-subtle-foreground">VPN Guard определяет, какие запросы Pooler может отправить. Проверка действует для всех провайдеров, кроме Kimi и Z.ai.</p>
       </div>
-      <section aria-label="Выбранные аккаунты" className="space-y-3">
-        <h2 className="text-sm font-medium">Выбранные аккаунты</h2>
-        <p className="text-xs text-subtle-foreground">Последний выбор пула для каждого провайдера. В разных проектах и сессиях аккаунты могут отличаться.</p>
-        <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {PROVIDERS.map((provider) => (
-            <div key={provider.id} className="min-w-0 rounded-md border border-border px-3 py-2">
-              <dt className="text-xs text-subtle-foreground">{provider.title}</dt>
-              <dd className="break-all text-sm font-medium">{currentLabel(provider.id)}</dd>
-            </div>
-          ))}
-        </dl>
-      </section>
       <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-subtle-foreground/75">
         {[
           { dot: "bg-success", label: "берёт трафик" },
@@ -1539,8 +1531,7 @@ function UnlockedAccountPoolSettings() {
             В пуле нет аккаунтов
           </h2>
           <p className="mx-auto mt-1 max-w-lg text-xs leading-relaxed text-muted-foreground">
-            Добавьте аккаунт Claude или Codex — и треды на всех машинах route
-            through it. Your machine&apos;s own login keeps working until then.
+            Добавьте аккаунт, чтобы Pooler мог направлять через него запросы.
           </p>
           <div className="mt-4 flex flex-wrap justify-center gap-2">
             <Button size="sm" onClick={() => void startClaude()}>
@@ -1670,7 +1661,7 @@ function UnlockedAccountPoolSettings() {
         <div className="divide-y divide-border border-t border-border">
           <ConfigFieldRow
             label="Балансировка"
-            description="Новые разговоры уходят на аккаунт с наибольшим остатком недельной квоты до сброса. Выключено — идём по приоритету."
+            description="Учитывает загрузку и остаток квоты доступных аккаунтов. При выключенной балансировке Pooler выбирает по приоритету."
             error={null}
           >
             <Switch
@@ -1713,7 +1704,7 @@ function UnlockedAccountPoolSettings() {
                         <tr>
                           <th className="py-1 pr-3 font-normal">Аккаунт</th>
                           <th className="py-1 pr-3 font-normal">
-                            Открытьs (UTC+3)
+                            Откроется (UTC+3)
                           </th>
                           <th className="py-1 pr-3 font-normal">
                             Недельный сброс (UTC+3)
@@ -1878,7 +1869,7 @@ function UnlockedAccountPoolSettings() {
               />
             </ConfigFieldRow>
             <ConfigFieldRow label="Одновременных запросов на аккаунт"
-              description="Общий предел для всех машин и клиентов. Остальные запросы ждут в очереди; паузы провайдера обязательны."
+              description="Предел запросов Pooler на аккаунт для всех машин и клиентов. Число сеансов Antigravity задаётся в настройках его аккаунта."
               error={configErrors.maxConcurrentRequestsPerAccount}>
               <Input type="number" min="1" max="32" step="1" aria-label="Одновременных запросов на аккаунт"
                 disabled={config === null || pending !== null} value={drafts.maxConcurrentRequestsPerAccount}
@@ -1940,6 +1931,9 @@ function UnlockedAccountPoolSettings() {
           </div>
         </CollapsibleContent>
       </Collapsible>
+      <PoolSelectedAccounts accounts={PROVIDERS.map(provider => ({
+        provider: provider.title, account: currentLabel(provider.id),
+      }))} />
       <PoolTechnicalDetails>
         Хаб {status?.accepting ? "принимает" : "не принимает"} ·{" "}
         {status?.inFlight ?? 0} в работе · используют {hubHosts}

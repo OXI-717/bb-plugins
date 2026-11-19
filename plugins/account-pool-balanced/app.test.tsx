@@ -317,6 +317,9 @@ describe("Account Pool settings", () => {
     expect(within(row).getByText("В очереди: 2")).toBeTruthy();
     expect(within(within(row).getByTitle("Сеансы в работе / предел")).getByText("1 / 2")).toBeTruthy();
     expect(within(row).queryByText("5Ч")).toBeNull();
+    fireEvent.click(slot.getByText("Выбранные аккаунты", { selector: "summary" }));
+    const overview = await slot.findByRole("region", { name: "Выбранные аккаунты" });
+    expect(within(overview).getByText("Выбирается для сеанса")).toBeTruthy();
     expect(slot.queryByText("В пуле нет аккаунтов")).toBeNull();
     expect(slot.getByRole("switch", {name: "Направлять треды Antigravity"})).toBeTruthy();
     expect(slot.queryByRole("button", {name: "Добавить аккаунт Antigravity"})).toBeNull();
@@ -516,7 +519,8 @@ describe("Account Pool settings", () => {
     window.localStorage.setItem(STATUS_CACHE_KEY, '{"accounts":"nope"}');
     const live = deferred<PoolStatus>();
     const slot = render([], { "status.get": () => live.promise });
-    expect(slot.getAllByText("Загрузка…")).toHaveLength(10);
+    const providerLoaders = slot.getAllByText("Загрузка…").filter(element => !element.closest("details"));
+    expect(providerLoaders).toHaveLength(10);
     live.resolve(status());
     expect(await slot.findByText("person@example.com")).toBeTruthy();
   });
@@ -791,9 +795,13 @@ describe("Account Pool settings", () => {
           grok: null,
         }),
     });
-    expect(
-      await slot.findByRole("region", { name: "Выбранные аккаунты" }),
-    ).toBeTruthy();
+    const overviewTrigger = await slot.findByText("Выбранные аккаунты", { selector: "summary" });
+    const details = overviewTrigger.closest("details");
+    expect(details?.open).toBe(false);
+    const advancedTrigger = slot.getByRole("button", { name: "Дополнительно" });
+    expect(advancedTrigger.compareDocumentPosition(overviewTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(overviewTrigger);
+    expect(details?.open).toBe(true);
     expect(within(slot.getByRole("region", { name: "Выбранные аккаунты" })).getAllByText("Не выбран")).toHaveLength(9);
     expect(slot.getAllByText("Текущий")).toHaveLength(1);
     expect(slot.getAllByText("Резерв")).toHaveLength(1);
@@ -806,6 +814,7 @@ describe("Account Pool settings", () => {
       "status.get": () => status([named], { claude: named.id, codex: null, kimi: null, zai: null, "opencode-go": null,
     neuraldeep: null, agy: null, cursor: null, devin: null, grok: null }),
     });
+    fireEvent.click(await slot.findByText("Выбранные аккаунты", { selector: "summary" }));
     const overview = await slot.findByRole("region", { name: "Выбранные аккаунты" });
     expect(within(overview).getByText("identity@example.com")).toBeTruthy();
     expect(slot.queryByText("Synthetic Display Name")).toBeNull();
@@ -1560,6 +1569,7 @@ it('does not label an armed draining account as outside its closed schedule',asy
 it('enables fail-closed VPN Guard linkage through the existing autosave config RPC',async()=>{
   const slot=render([],{'config.set':()=>config({vpnGuardEnabled:true})});
   const checkbox=await slot.findByRole('checkbox',{name:'Подчиняться VPN Guard'});
+  expect(slot.queryByText(/Старый \/1/)).toBeNull();
   fireEvent.click(checkbox);
   await waitFor(()=>expect(slot.rpcCalls).toContainEqual(expect.objectContaining({method:'config.set',input:{vpnGuardEnabled:true}})));
   slot.unmount();
