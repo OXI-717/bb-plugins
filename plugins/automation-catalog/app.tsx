@@ -143,7 +143,10 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
   );
   const discoveredMatches = discovered?.query === filters.query ? discovered.matches : [];
   const discoveredKeys = new Set(discoveredMatches.map(m => m.key));
-  const filteredTasks = tasks.filter((task) => matchesFilters(task, { ...filters, state: "" }, discoveredKeys, display.get(task.key)));
+  const archivedSourceIds = new Set(data?.sources.filter(source => source.archivedAt !== undefined).map(source => source.id));
+  const matchingTasks = tasks.filter((task) => matchesFilters(task, { ...filters, state: "" }, discoveredKeys, display.get(task.key)));
+  const archiveTasks = matchingTasks.filter(task => archivedSourceIds.has(task.sourceId));
+  const filteredTasks = matchingTasks.filter(task => !archivedSourceIds.has(task.sourceId));
   const views = [
     { id: "current", label: "Текущие", count: filteredTasks.filter(t => category(t) === "current").length },
     { id: "registry", label: "Реестр", count: filteredTasks.filter(t => category(t) === "registry" && t.state === "blocked").length },
@@ -176,12 +179,13 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
     },
     { id: "completed", label: "Завершённые", count: filteredTasks.filter(t => category(t) === "completed").length },
     { id: "reviewed", label: "Разобраны", count: filteredTasks.filter(t => ["Разобрано", "Устранено"].includes(states.get(t.key)!.label)).length },
-    { id: "", label: "Все записи", count: filteredTasks.length },
+    { id: "archive", label: "Архив источников", count: archiveTasks.length },
+    { id: "", label: "Все записи", count: matchingTasks.length },
   ];
-  const matched = filteredTasks
+  const matched = (filters.state === "archive" ? archiveTasks : filters.state === "" ? matchingTasks : filteredTasks)
     .filter(
       (t) =>
-        !filters.state ||
+        !filters.state || filters.state === "archive" ||
         (["current", "completed", "registry"].includes(filters.state)
           ? category(t) === filters.state && (filters.state !== "registry" || t.state === "blocked")
           : filters.state === "reviewed"
@@ -206,7 +210,8 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
         display.get(a.key)!.title.localeCompare(display.get(b.key)!.title),
     );
   const triage = data ? triageCandidates(data, filters, now, discoveredKeys, present) : [];
-  const unavailableSources = data?.sources.filter(s => s.error || s.lastSuccessAt === null || now - s.lastSuccessAt > s.staleAfterMs) ?? [];
+  const unavailableSources = data?.sources.filter(s => s.archivedAt === undefined &&
+    (s.error || s.lastSuccessAt === null || now - s.lastSuccessAt > s.staleAfterMs)) ?? [];
   const lastPage = Math.max(0, Math.ceil(matched.length / 50) - 1);
   const currentPage = Math.min(page, lastPage);
   return (
@@ -244,7 +249,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
           <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Как читать состояния</summary>
             <p className="mt-2">Предупреждения в разделе «Реестр» относятся к учёту задач. Отдельно есть результаты запусков. Содержимое результатов автоматически не проверяется. Записи без подтверждения состояния показаны отдельно и не считаются сбоями. Новый сбой снова требует внимания, даже если предыдущий отмечен разобранным. Завершённые, отключённые и удалённые задачи доступны в отдельных разделах.</p>
           </details>
-          {data.sources.filter(s => s.error || !s.lastSuccessAt || now - s.lastSuccessAt > s.staleAfterMs).map(s => <p className="text-sm text-destructive" key={s.id}>Проверьте подключение: {sourceLabel(s.name)}. Свежие сведения не получены; статусы ниже могут устареть.</p>)}
+          {unavailableSources.map(s => <p className="text-sm text-destructive" key={s.id}>Проверьте подключение: {sourceLabel(s.name)}. Свежие сведения не получены; статусы ниже могут устареть.</p>)}
         </section>}
         <p className="text-sm text-muted-foreground">{filters.state === "current" ? "Текущие задачи. Откройте название, чтобы посмотреть результаты или выбрать действие." : filters.state === "unmonitored" ? "Источник не подтвердил текущее состояние этих задач. Сохранённая история доступна в карточке; отсутствие живого состояния само по себе не означает сбой." : filters.state === "completed" ? "Одноразовые задачи уже выполнены; новые запуски не ожидаются." : filters.state === "registry" ? "Записи, которые нужно добавить или обновить, и источники без свежих данных." : filters.state === "missing" ? "Задачи отсутствуют в последнем списке планировщика. Сохранена только их история." : "Выберите задачу, чтобы посмотреть результаты и доступные действия."}</p>
         {refreshMessage && <p role="status" className="text-xs text-muted-foreground">{refreshMessage}</p>}
@@ -568,7 +573,9 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
             {data?.sources.map((s) => (
               <p key={s.id}>
                 {sourceLabel(s.name)} · Обновлено {timestamp(s.lastSuccessAt)}
-                {s.error
+                {s.archivedAt !== undefined
+                  ? " · В архиве"
+                  : s.error
                   ? " · Ошибка соединения"
                   : s.lastSuccessAt === null ||
                       now - s.lastSuccessAt > s.staleAfterMs
