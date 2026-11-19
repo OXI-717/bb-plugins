@@ -1,8 +1,9 @@
-import { modelLabel, projectLabel, unlinkedProject } from "./lib/execution";
+import { modelLabel, unlinkedProject } from "./lib/execution";
 import { AutomationComposer, type ComposeIntent } from "./compose";
 import { triageCandidates, triageIntent } from "./lib/triage";
 import { category } from "./lib/overview";
-import { useCallback, useEffect, useState } from "react";
+import { createPresentation, type DisplayNames } from "./lib/presentation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { definePluginApp, useRealtime, useRpc, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import type { catalogRpcContract } from "./src/catalog";
 import type { CatalogList } from "./src/catalog-types";
@@ -12,7 +13,6 @@ import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import { catalogSchedule } from "./lib/catalog-schedule";
 import {
-  hostName,
   emptyFilters,
   readFilters,
   matchesFilters,
@@ -33,6 +33,13 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
   const navigate = useBbNavigate();
   const [compose, setCompose] = useState<ComposeIntent | null>(null);
   const [data, setData] = useState<CatalogList | null>(null);
+  const [names, setNames] = useState<DisplayNames | null>(null);
+  useEffect(() => {
+    let active = true;
+    void rpc.call("catalog_display_names").then(value => { if (active) setNames(value); }, () => {});
+    return () => { active = false; };
+  }, [rpc]);
+  const present = useMemo(() => createPresentation(data, names), [data, names]);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
@@ -101,7 +108,10 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
     setPage(0);
   }, [filters]);
   const auditRoute = /^\/?audits(?:\/(ext_[a-zA-Z0-9_-]+))?\/?$/.exec(subPath);
-  if (auditRoute) return <AuditPage taskKey={auditRoute[1]} />;
+  if (auditRoute) return <AuditPage taskKey={auditRoute[1]} taskTitle={key => {
+    const task = data?.tasks.find(t => t.key === key);
+    return task ? present(task).title : undefined;
+  }} />;
   if (compose)
     return (
       <AutomationComposer intent={compose} onBack={() => setCompose(null)} />
@@ -112,11 +122,15 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
         <CatalogDetailView
           key={selected}
           taskKey={selected}
+          present={present}
           onBack={() => { setSelected(null); navigate.toPluginPanel("catalog", { replace: true }); void refresh(); }}
         />
       </div>
     );
   const tasks = data?.tasks ?? [];
+  const display = new Map(tasks.map(task => [task.key, present(task)]));
+  const restoredHost = tasks.find(task => task.host === filters.host || task.hostLabel === filters.host);
+  const selectedHost = (restoredHost ? display.get(restoredHost.key)?.host : null) ?? filters.host;
   const states = new Map(
     tasks.map((t) => [
       t.key,
@@ -129,9 +143,10 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
   );
   const discoveredMatches = discovered?.query === filters.query ? discovered.matches : [];
   const discoveredKeys = new Set(discoveredMatches.map(m => m.key));
-  const filteredTasks = tasks.filter((task) => matchesFilters(task, { ...filters, state: "" }, discoveredKeys));
+  const filteredTasks = tasks.filter((task) => matchesFilters(task, { ...filters, state: "" }, discoveredKeys, display.get(task.key)));
   const views = [
     { id: "current", label: "Текущие", count: filteredTasks.filter(t => category(t) === "current").length },
+    { id: "registry", label: "Реестр", count: filteredTasks.filter(t => category(t) === "registry" && t.state === "blocked").length },
     {
       id: "attention",
       label: "Требуют внимания",
@@ -160,17 +175,17 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
       count: filteredTasks.filter((t) => t.missing).length,
     },
     { id: "completed", label: "Завершённые", count: filteredTasks.filter(t => category(t) === "completed").length },
-    { id: "reviewed", label: "Разобраны", count: filteredTasks.filter(t => states.get(t.key)?.label === "Разобрано").length },
+    { id: "reviewed", label: "Разобраны", count: filteredTasks.filter(t => ["Разобрано", "Устранено"].includes(states.get(t.key)!.label)).length },
     { id: "", label: "Все записи", count: filteredTasks.length },
   ];
   const matched = filteredTasks
     .filter(
       (t) =>
         !filters.state ||
-        (["current", "completed"].includes(filters.state)
-          ? category(t) === filters.state
+        (["current", "completed", "registry"].includes(filters.state)
+          ? category(t) === filters.state && (filters.state !== "registry" || t.state === "blocked")
           : filters.state === "reviewed"
-          ? states.get(t.key)!.label === "Разобрано"
+          ? ["Разобрано", "Устранено"].includes(states.get(t.key)!.label)
           : filters.state === "attention"
           ? states.get(t.key)!.attention
           : filters.state === "paused"
@@ -188,21 +203,18 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
         Number(states.get(b.key)!.attention) -
           Number(states.get(a.key)!.attention) ||
         states.get(a.key)!.rank - states.get(b.key)!.rank ||
-        a.name.localeCompare(b.name),
+        display.get(a.key)!.title.localeCompare(display.get(b.key)!.title),
     );
-  const triage = data ? triageCandidates(data, filters, now, discoveredKeys) : [];
+  const triage = data ? triageCandidates(data, filters, now, discoveredKeys, present) : [];
   const unavailableSources = data?.sources.filter(s => s.error || s.lastSuccessAt === null || now - s.lastSuccessAt > s.staleAfterMs) ?? [];
   const lastPage = Math.max(0, Math.ceil(matched.length / 50) - 1);
   const currentPage = Math.min(page, lastPage);
   return (
     <div className="h-full min-h-0 overflow-y-auto">
-      <main className="mx-auto max-w-7xl space-y-4 p-4">
+      <main className="mx-auto max-w-7xl space-y-4 p-3 sm:p-4">
         <header className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h1 className="text-xl font-semibold">OXI Automation Catalog</h1>
-            <p className="text-xs text-muted-foreground">
-              Что выполняется, что проверить и где посмотреть результат
-            </p>
+            <h1 className="text-xl font-semibold">Автоматизации</h1>
           </div>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="outline" onClick={() => navigate.toPluginPanel("catalog/audits")}>Журнал аудитов</Button>
@@ -218,22 +230,23 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
               size="sm"
               onClick={() => setCreating(!creating)}
               aria-expanded={creating}
+              aria-label="Создать автоматизацию"
             >
-              Создать автоматизацию
+              <span className="sm:hidden">Создать</span><span className="hidden sm:inline">Создать автоматизацию</span>
             </Button>
           </div>
         </header>
         {data && <section className="rounded-md border bg-card p-3 space-y-1" aria-label="Сводка автоматизаций">
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm font-medium">
+          <div className="hidden flex-wrap gap-x-4 gap-y-1 text-sm font-medium sm:flex">
             <button className="hover:underline" onClick={() => setFilters(f => ({ ...f, state: "current" }))}>Текущие задачи: {filteredTasks.filter(t => category(t) === "current").length}</button>
             <button className="hover:underline" onClick={() => setFilters(f => ({ ...f, state: "attention" }))}>Требуют проверки: {filteredTasks.filter(t => states.get(t.key)?.attention).length}</button>
           </div>
-          <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Счётчики учитывают выбранные фильтры · Как читать состояния</summary>
-            <p className="mt-2">Проверка учитывает состояние и коды завершения планировщиков. Содержимое результатов автоматически не проверяется. Записи без подтверждения состояния показаны отдельно и не считаются сбоями. Новый сбой снова требует внимания, даже если предыдущий отмечен разобранным. Завершённые, отключённые и удалённые задачи доступны в отдельных разделах.</p>
+          <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Как читать состояния</summary>
+            <p className="mt-2">Предупреждения в разделе «Реестр» относятся к учёту задач. Отдельно есть результаты запусков. Содержимое результатов автоматически не проверяется. Записи без подтверждения состояния показаны отдельно и не считаются сбоями. Новый сбой снова требует внимания, даже если предыдущий отмечен разобранным. Завершённые, отключённые и удалённые задачи доступны в отдельных разделах.</p>
           </details>
           {data.sources.filter(s => s.error || !s.lastSuccessAt || now - s.lastSuccessAt > s.staleAfterMs).map(s => <p className="text-sm text-destructive" key={s.id}>Проверьте подключение: {sourceLabel(s.name)}. Свежие сведения не получены; статусы ниже могут устареть.</p>)}
         </section>}
-        <p className="text-sm text-muted-foreground">{filters.state === "current" ? "Текущие задачи. Откройте название, чтобы посмотреть результаты или выбрать действие." : filters.state === "unmonitored" ? "Источник не подтвердил текущее состояние этих задач. Сохранённая история доступна в карточке; отсутствие живого состояния само по себе не означает сбой." : filters.state === "completed" ? "Одноразовые задачи уже выполнены; новые запуски не ожидаются." : filters.state === "missing" ? "Задачи отсутствуют в последнем списке планировщика. Сохранена только их история." : "Выберите задачу, чтобы посмотреть результаты и доступные действия."}</p>
+        <p className="text-sm text-muted-foreground">{filters.state === "current" ? "Текущие задачи. Откройте название, чтобы посмотреть результаты или выбрать действие." : filters.state === "unmonitored" ? "Источник не подтвердил текущее состояние этих задач. Сохранённая история доступна в карточке; отсутствие живого состояния само по себе не означает сбой." : filters.state === "completed" ? "Одноразовые задачи уже выполнены; новые запуски не ожидаются." : filters.state === "registry" ? "Записи, которые нужно добавить или обновить, и источники без свежих данных." : filters.state === "missing" ? "Задачи отсутствуют в последнем списке планировщика. Сохранена только их история." : "Выберите задачу, чтобы посмотреть результаты и доступные действия."}</p>
         {refreshMessage && <p role="status" className="text-xs text-muted-foreground">{refreshMessage}</p>}
         {creating && (
           <section
@@ -280,16 +293,22 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
             </p>
           </section>
         )}
+        <select aria-label="Раздел автоматизаций"
+          className="h-11 w-full rounded-md border bg-background px-3 text-sm md:hidden"
+          value={filters.state}
+          onChange={e => setFilters({ ...filters, state: e.target.value })}>
+          {views.map(view => <option key={view.id} value={view.id}>{view.label} ({view.count})</option>)}
+        </select>
         <nav
           aria-label="Разделы автоматизаций"
-          className="flex gap-1 overflow-x-auto border-b pb-2 sm:flex-wrap"
+          className="hidden flex-wrap gap-1 border-b pb-2 md:flex"
         >
           {views.map((view) => (
             <Button
               size="sm"
               key={view.id}
               className="shrink-0"
-              variant="ghost"
+              variant={filters.state === view.id ? "outline" : "ghost"}
               aria-pressed={filters.state === view.id}
               onClick={() => setFilters({ ...filters, state: view.id })}
             >
@@ -308,9 +327,9 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
         </nav>
         <div className="flex flex-wrap gap-2">
           <Input
-            className="h-8 w-full sm:w-64"
+            className="h-11 w-full text-base sm:w-64"
             aria-label="Поиск автоматизаций"
-            placeholder="Название, задание или ссылка на тред…"
+            placeholder="Название, проект или машина…"
             maxLength={2000}
             value={filters.query}
             onChange={(e) => setFilters({ ...filters, query: e.target.value, state: "" })}
@@ -325,8 +344,8 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
                     field === "source"
                       ? t.sourceId
                       : field === "project"
-                        ? (t.projectId || unlinkedProject)
-                        : field === "host" ? hostName(t)
+                        ? (display.get(t.key)!.projectId || unlinkedProject)
+                        : field === "host" ? display.get(t.key)!.host
                         : t[field],
                   )
                   .filter((v): v is string => !!v),
@@ -335,9 +354,9 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
             return (
               <select
                 key={field}
-                aria-label={{ source: "Источник", scope: "Тип", host: "Хост", project: "Проект" }[field]}
-                className="h-8 min-w-0 max-w-full rounded-md border bg-background px-2 text-xs"
-                value={filters[field]}
+                aria-label={{ source: "Источник", scope: "Тип", host: "Машина", project: "Проект" }[field]}
+                className="h-11 min-w-0 max-w-full rounded-md border bg-background px-2 text-xs"
+                value={field === "host" ? selectedHost : filters[field]}
                 onChange={(e) =>
                   setFilters({ ...filters, [field]: e.target.value })
                 }
@@ -347,7 +366,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
                     {
                       source: "Все источники",
                       scope: "Любой тип",
-                      host: "Все хосты",
+                      host: "Все машины",
                       project: "Все проекты",
                     }[field]
                   }
@@ -362,7 +381,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
                       : field === "scope"
                         ? scopeLabel(v)
                         : field === "project"
-                          ? (v === unlinkedProject ? "Без привязки к проекту" : projectLabel(tasks.find((t) => t.projectId === v)!))
+                          ? (v === unlinkedProject ? "Без привязки к проекту" : [...display.values()].find(t => t.projectId === v)?.project ?? "Название проекта недоступно")
                           : v}
                   </option>
                 ))}
@@ -422,8 +441,8 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
         )}
         {matched.length > 0 && (
           <div className="overflow-x-auto rounded-md border">
-            <table className="w-full text-left text-sm">
-              <thead className="border-b bg-muted/40 text-xs text-muted-foreground">
+            <table className="block w-full text-left text-sm md:table" aria-label="Список автоматизаций">
+              <thead className="hidden border-b bg-muted/40 text-xs text-muted-foreground md:table-header-group">
                 <tr>
                   <th className="px-3 py-2 font-medium">Автоматизация / источник</th>
                   <th className="px-3 py-2 font-medium">Состояние</th>
@@ -431,64 +450,57 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
                     Расписание
                   </th>
                   <th className="hidden px-3 py-2 font-medium lg:table-cell">
-                    Последний запуск
+                    {filters.state === "registry" ? "Обнаружено" : "Последний запуск"}
                   </th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="block md:table-row-group">
                 {matched
                   .slice(currentPage * 50, currentPage * 50 + 50)
                   .map((t) => {
                     const state = states.get(t.key)!;
+                    const { title, project, projectId, host, finding } = display.get(t.key)!;
+                    const status = <span className={`inline-flex rounded border px-2 py-0.5 text-xs font-medium ${state.tone === "danger" ? "border-destructive/40 text-destructive" : state.attention ? "border-foreground/40" : "border-border text-muted-foreground"}`}>{state.label}</span>;
+                    const runTime = t.lastRun?.startedAt ?? t.lastRun?.finishedAt;
                     return (
                       <tr
                         key={t.key}
-                        className="border-b last:border-0 hover:bg-muted/40"
+                        className="block border-b last:border-0 hover:bg-muted/40 md:table-row"
                       >
-                        <td className="max-w-64 px-3 py-3 align-top">
+                        <td className="block min-w-0 px-3 py-2 align-top md:table-cell md:max-w-72 md:py-3">
                           <button
-                            className="text-left font-medium hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                            className="min-h-11 w-full break-words text-left font-semibold hover:underline focus-visible:ring-2 focus-visible:ring-ring md:min-h-0"
                             onClick={() => { setSelected(t.key); navigate.toPluginPanel("catalog", { subPath: t.key }); }}
                           >
-                            {t.name}
+                            {title}
                           </button>
                           {discoveredMatches.find(m => m.key === t.key) && <p className="mt-1 text-xs text-muted-foreground">{discoveredMatches.find(m => m.key === t.key)!.excerpt}</p>}
-                          <p className="mt-1 break-words text-xs text-muted-foreground">
-                            {sourceLabel(data?.sources.find((s) => s.id === t.sourceId)
-                              ?.name ?? t.sourceId)}{" "}
-                            {t.scope !== "unknown" && <>· {scopeLabel(t.scope)}</>}
-                            <> · Проект: {projectLabel(t)}</>
-                            {hostName(t) && <> · Хост: {hostName(t)}</>}
+                          <p className="mb-2 break-words text-xs text-muted-foreground">
+                            {projectId || t.projectName ? project + " · " : ""}
+                            {host ?? "Машина не указана"}
+                            {!finding && !projectId && !t.projectName ? ` · ${sourceLabel(data?.sources.find(s => s.id === t.sourceId)?.name ?? "Каталог")}` : ""}
                           </p>
-                          <p className="mt-1 break-words text-xs font-medium">{modelLabel(t)}</p>
-                          <p className="mt-1 text-xs text-muted-foreground md:hidden">
-                            {catalogSchedule(t.schedule)}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground lg:hidden">
-                            {t.lastRun
-                              ? `${runLabel(t.lastRun.status)} · ${t.lastRun.startedAt === null && t.lastRun.finishedAt === null ? "время не сохранено" : timestamp(t.lastRun.startedAt ?? t.lastRun.finishedAt)}`
-                              : t.history === "not-connected" ? "История не подключена" : "Данных о запусках нет"}
-                          </p>
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 md:hidden">
+                            {status}
+                            {runTime != null && <span className="text-xs text-muted-foreground">{finding ? "Обнаружено" : runLabel(t.lastRun!.status)} · {timestamp(runTime)}</span>}
+                          </div>
+                          {!finding && t.agent && <p className="mt-1 hidden text-xs text-muted-foreground lg:block">{modelLabel(t)}</p>}
+                          {!finding && t.schedule && <p className="mt-2 text-xs text-muted-foreground md:hidden">{catalogSchedule(t.schedule)}</p>}
                         </td>
-                        <td className="max-w-48 px-3 py-3 align-top">
-                          <span
-                            className={`inline-flex rounded border px-2 py-0.5 text-xs font-medium ${state.tone === "danger" ? "border-destructive/40 text-destructive" : state.attention ? "border-foreground/40" : "border-border text-muted-foreground"}`}
-                          >
-                            {state.attention ? "! " : ""}
-                            {state.label}
-                          </span>
-                          {state.reason !== "Расписание включено" && <p className="mt-1 text-xs text-muted-foreground">{state.reason}</p>}
+                        <td className="hidden max-w-48 px-3 py-3 align-top md:table-cell">
+                          {status}
+                          {!finding && state.reason !== "Расписание включено" && <p className="mt-1 text-xs text-muted-foreground">{state.reason}</p>}
                         </td>
                         <td className="hidden max-w-64 px-3 py-3 align-top text-xs md:table-cell">
-                          {catalogSchedule(t.schedule)}
-                          {!t.missing && t.nextRunAt != null && (
+                          {finding ? "—" : catalogSchedule(t.schedule)}
+                          {!finding && !t.missing && t.nextRunAt != null && (
                             <p className="mt-1 text-muted-foreground">
                               Следующий запуск: {timestamp(t.nextRunAt)}
                             </p>
                           )}
                         </td>
                         <td className="hidden px-3 py-3 align-top text-xs lg:table-cell">
-                          {t.lastRun ? (
+                          {finding ? (runTime == null ? "—" : "Обнаружено · " + timestamp(runTime)) : t.lastRun ? (
                             <>
                               <span
                                 className={
