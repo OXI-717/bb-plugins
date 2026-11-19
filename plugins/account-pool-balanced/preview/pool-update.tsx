@@ -9,6 +9,7 @@ const content=<main data-bb-plugin="account-pool-balanced" className="space-y-6"
   <PoolUpdateView operation={null} busy={false} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={{...base,state:'running'}} busy={true} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={{...base,state:'succeeded'}} busy={false} error={null} onStart={()=>{}}/>
+  <PoolUpdateView operation={{...base,state:'succeeded',alreadyCurrent:true}} busy={false} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={{...base,state:'unknown'}} busy={true} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={null} busy={true} statusUnavailable error="Не удалось проверить состояние обновления. Запуск пока недоступен." onStart={()=>{}}/>
   <PoolTechnicalDetails>

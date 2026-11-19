@@ -22,13 +22,14 @@ async function fixture() {
   await writeFile(path.join(checkout,'scripts','pool_session_pause.py'),'# synthetic updater\nresult = "MODULES_OK"\n');
   let terminal={id:'terminal-one',status:'running',exitCode:null as number|null};
   const create=vi.fn(async(_input:unknown)=>terminal);
+  const output=vi.fn(async()=>({chunks:[] as Array<{dataBase64:string;seq:number}>,nextSeq:0,truncated:false}));
   const host=createFakePluginHost({pluginId:'account-pool',dataDir,sdk:{
     system:{config:async()=>({primaryHostId:'host-one'})},
     plugins:{list:async()=>({plugins:[{id:'account-pool',enabled:true,rootDir:pluginRoot},{id:'pool-maintenance',enabled:true}]})},
-    terminals:{create,get:async()=>terminal,list:async()=>({sessions:[]})},
+    terminals:{create,get:async()=>terminal,list:async()=>({sessions:[]}),output},
   }});
   cleanup.push(()=>host.harness.lifecycle.dispose());
-  return {host,create,pluginRoot,checkout,dataDir,controller:new PoolUpdate(host.bb),exit:(exitCode:number)=>{terminal={...terminal,status:'exited',exitCode};}};
+  return {host,create,output,pluginRoot,checkout,dataDir,controller:new PoolUpdate(host.bb),exit:(exitCode:number)=>{terminal={...terminal,status:'exited',exitCode};}};
 }
 it('starts exactly one BB-owned machine terminal and follows it across plugin reload',async()=>{
   const f=await fixture();
@@ -50,6 +51,23 @@ it('retains an ambiguous creation receipt and never dispatches another updater',
 it('does not report a failed updater as success',async()=>{
   const f=await fixture();await f.controller.start();f.exit(1);
   expect(await f.controller.status()).toMatchObject({state:'failed'});
+  expect(f.output).not.toHaveBeenCalled();
+});
+
+it('reports and retains an already-current result even when the updater line spans chunks', async () => {
+  const f = await fixture();
+  f.output.mockImplementationOnce(async () => ({
+    chunks: ['Installed 0.4.96\r\nAlready up', ' to date.\r\n'].map((part, seq) => ({
+      dataBase64: Buffer.from(part).toString('base64'), seq,
+    })),
+    nextSeq: 2,
+    truncated: false,
+  }));
+  await f.controller.start();
+  f.exit(0);
+  expect(await f.controller.status()).toMatchObject({state: 'succeeded', alreadyCurrent: true});
+  expect(await new PoolUpdate(f.host.bb).status()).toMatchObject({state: 'succeeded', alreadyCurrent: true});
+  expect(f.output).toHaveBeenCalledTimes(1);
 });
 
 it('retains executable inputs and a usable cwd after BB removes the old source checkout',async()=>{

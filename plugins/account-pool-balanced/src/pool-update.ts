@@ -9,6 +9,7 @@ export const updateStateSchema = z.object({
   operationId: z.uuid(), startedAt: z.number().int().nonnegative(),
   hostId: z.string().min(1), terminalId: z.string().nullable(),
   state: z.enum(['starting', 'running', 'succeeded', 'failed', 'unknown']),
+  alreadyCurrent: z.literal(true).optional(),
 }).strict();
 export const updateStatusSchema = updateStateSchema.nullable();
 type UpdateState = z.infer<typeof updateStateSchema>;
@@ -42,6 +43,16 @@ export class PoolUpdate {
         ? terminal.exitCode === 0 ? 'succeeded' : 'failed'
         : terminal.status === 'disconnected' ? 'unknown' : 'running';
       const next = {...value!, state} as UpdateState;
+      if (state === 'succeeded') {
+        const output = await this.bb.sdk.terminals.output({
+          terminalId: value!.terminalId, tailBytes: 4096, signal: AbortSignal.timeout(3000),
+        }).catch(() => null);
+        // The updater prints this exact line after verifying the installed release and commit.
+        if (output) {
+          const text = Buffer.concat(output.chunks.map(chunk => Buffer.from(chunk.dataBase64, 'base64'))).toString('utf8');
+          if (text.split(/\r?\n/u).includes('Already up to date.')) next.alreadyCurrent = true;
+        }
+      }
       await this.bb.storage.kv.set(KEY, next);
       return next;
     } catch { return {...value!, state: 'unknown'}; }

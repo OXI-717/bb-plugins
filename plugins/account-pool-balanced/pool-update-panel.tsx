@@ -64,7 +64,9 @@ export function PoolUpdateView({operation,busy,error,statusUnavailable=false,onS
       <Button size="sm" disabled={busy} onClick={onStart}>{busy&&!statusUnavailable?'Проверяю обновление…':'Обновить Pooler'}</Button>
     </div>
     <p className="text-xs text-muted-foreground">Приостановит сессии и запросы автопилота на всех машинах, сохранит резервную копию, установит новую версию и возобновит работу. Текущие ответы могут быть прерваны.</p>
-    {operation?<p role="status" className="text-xs text-muted-foreground">{labels[operation.state]}</p>:null}
+    {operation?<p role="status" className="text-xs text-muted-foreground">
+      {operation.alreadyCurrent ? 'Уже установлена последняя версия.' : labels[operation.state]}
+    </p>:null}
     {error?<p role="alert" className="text-xs text-destructive-text">{error}</p>:null}
   </section>;
 }

@@ -10,8 +10,9 @@ import type {NativeAccounts} from '../src/native-accounts';
 (globalThis as typeof globalThis & {React: typeof React}).React = React;
 
 const account: NativeAccounts['accounts'][number] = {
-  accountId: 'example-subscription', label: 'person@example.com', role: 'primary', priority: 1,
-  projects: {onlySelected: false, rules: []}, projectsRevision: 'a'.repeat(64), mixedProjects: false,
+  accountId: 'example-subscription', label: 'long-antigravity-account@example.com', role: 'primary', priority: 1,
+  projects: {onlySelected: true, rules: [{projectId: 'example-project', role: 'primary'}]},
+  projectsRevision: 'a'.repeat(64), mixedProjects: false,
   executors: [{id: 'example-server', hostId: 'example-host', enabled: true, autopilotAllowed: true}],
   active: 2, queued: 1, uncertain: 0, maxConcurrentSessions: 2,
 };
@@ -20,6 +21,7 @@ const disabledAccount: typeof account = {
   accountId: 'reserve-subscription',
   label: 'reserve@example.com',
   role: 'reserve',
+  projects: {onlySelected: false, rules: []},
   executors: [],
   active: 0,
   queued: 0,
@@ -40,9 +42,16 @@ const content = (
       <h2 className="mb-2 text-sm font-semibold">NeuralDeep</h2>
       <div className="border-t border-border">
         <AccountListRow
-          name="api@example.com"
+          name="long-api-account-name@example.com"
           enabled
-          badges={<SettingsBadge>API-ключ</SettingsBadge>}
+          badges={
+            <>
+              <SettingsBadge>API-ключ</SettingsBadge>
+              <SettingsBadge>Свои настройки</SettingsBadge>
+              <SettingsBadge>Роли проектов · 3</SettingsBadge>
+              <SettingsBadge>Резерв</SettingsBadge>
+            </>
+          }
           status={<AccountRowStatus label="В работе" dot="bg-success" />}
           metrics={<span className="text-xs">5Ч —</span>}
           actions={null}
