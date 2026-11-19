@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 import sys
 import unittest
-from ci_plan import CURSOR_ENTRYPOINTS, CURSOR_TEST, CURSOR_WRAPPER, OP_POOL_MODULES, PLUGINS, plan
+from ci_plan import CURSOR_TEST, CURSOR_WRAPPER, OP_POOL_MODULES, PLUGINS, POOL, plan
 
 
 def active_rows(result):
@@ -31,10 +31,9 @@ class PlanTests(unittest.TestCase):
                                for target in node.targets))
         self.assertIsInstance(wrapper.op, ast.Div)
         self.assertEqual(wrapper.right.value, CURSOR_WRAPPER)
-        for path in (*CURSOR_ENTRYPOINTS, CURSOR_TEST, CURSOR_WRAPPER,
+        for path in (CURSOR_TEST, CURSOR_WRAPPER,
                      'plugins/account-pool-balanced/scripts/cursor-helper.py',
-                     'plugins/account-pool-balanced/scripts/new-local-helper.py',
-                     'plugins/account-pool-balanced/src/cursor-new-input.ts'):
+                     'plugins/account-pool-balanced/scripts/new-local-helper.py'):
             self.assertTrue(plan([path])['cursor'], path)
         for path in (CURSOR_TEST, CURSOR_WRAPPER):
             # The gateway subprocess and its harness currently use only stdlib
@@ -48,18 +47,58 @@ class PlanTests(unittest.TestCase):
                     self.assertEqual(node.level, 0, path)
                     self.assertIn(node.module.split('.')[0], sys.stdlib_module_names, path)
 
+    def test_pool_typescript_uses_the_package_suite_for_cursor_wire_coverage(self):
+        for path in ('src/server.ts', 'src/standalone/runtime.ts', 'src/cursor-adapter.ts'):
+            with self.subTest(path=path):
+                result = plan([POOL + path])
+                self.assertFalse(result['cursor'])
+                self.assertEqual(active_rows(result), [
+                    {'os': 'ubuntu-latest', 'plugin': 'account-pool-balanced'},
+                    {'os': 'macos-latest', 'plugin': 'account-pool-balanced'},
+                ])
+
+    def test_quota_pr_does_not_run_the_python_gateway_or_session_tree(self):
+        paths = ['app.tsx', 'app.test.tsx', 'src/server.ts', 'src/balancer.ts', 'src/quota.ts',
+                 'src/account-policy.ts', 'src/contracts.ts', 'src/hub.ts']
+        result = plan([POOL + path for path in paths])
+        self.assertFalse(result['cursor'])
+        self.assertFalse(result['session_tree'])
+        self.assertTrue(result['op'])  # The native-task fixture imports contracts.ts.
+        self.assertTrue(result['upgrade'])
+        self.assertEqual(len(active_rows(result)), 2)
+
+    def test_session_tree_depends_on_its_plugin_or_unknown_shared_inputs(self):
+        for path in ('plugins/oxi-thread-list/app.tsx', 'shared/new-helper.ts', '.github/workflows/ci.yml'):
+            with self.subTest(path=path):
+                self.assertTrue(plan([path])['session_tree'])
+        for path in ('README.md', POOL + 'src/server.ts', POOL + 'app.tsx'):
+            with self.subTest(path=path):
+                self.assertFalse(plan([path])['session_tree'])
+        self.assertEqual(active_rows(plan(['plugins/oxi-thread-list/app.tsx'])), [])
+        self.assertTrue(plan([], full=True)['session_tree'])
+
     def test_cursor_does_not_follow_independent_jobs(self):
         for path in ['scripts/upgrade_pool.py', 'plugins/automation-catalog/app.tsx',
-                     'plugins/oxi-op/server.ts', 'plugins/oxi-thread-list/app.tsx']:
+                     'plugins/oxi-op/server.ts', 'plugins/oxi-thread-list/app.tsx',
+                     POOL + 'scripts/claude-host-doctor.py', POOL + 'scripts/test_claude_host_doctor.py']:
             with self.subTest(path=path):
                 self.assertFalse(plan([path])['cursor'])
 
-    def test_cosmetic_pool_change_keeps_linux_security_and_upgrade(self):
+    def test_cosmetic_pool_change_keeps_package_check_without_upgrade_rehearsal(self):
         p = plan(['plugins/account-pool-balanced/app.tsx'])
         self.assertEqual(active_rows(p), [{'os': 'ubuntu-latest', 'plugin': 'account-pool-balanced'}])
-        self.assertTrue(p['upgrade'])
+        self.assertFalse(p['upgrade'])
         self.assertFalse(p['upgrade_mac'])
         self.assertFalse(p['op'])
+
+    def test_upgrade_rehearsal_keeps_installer_backend_and_release_inputs(self):
+        for path in (POOL + 'pool-update-panel.tsx', POOL + 'package.json',
+                     POOL + 'src/cli.ts', 'scripts/upgrade_pool.py'):
+            with self.subTest(path=path):
+                self.assertTrue(plan([path])['upgrade'])
+        release = plan([POOL + 'package.json'], version_plugin='account-pool-balanced',
+                       version_paths={POOL + 'package.json'})
+        self.assertTrue(release['upgrade'])
 
     def test_pool_settings_regression_tests_run_on_macos(self):
         p = plan(['plugins/account-pool-balanced/app.test.tsx'])
@@ -201,6 +240,36 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('release-gate:\n    if: always()', critical)
         self.assertIn('session-tree, cursor-gateway]', critical)
         self.assertNotIn('    if:', extended.split('\n  cursor-gateway:\n')[1].split('\n  secrets:')[0])
+
+    def test_projects_suite_and_repository_checks_run_once_per_scope(self):
+        root = Path(__file__).resolve().parent.parent
+        for workflow_path in ('.github/workflows/ci.yml', '.github/workflows/ci-extended.yml'):
+            workflow = (root / workflow_path).read_text()
+            with self.subTest(workflow=workflow_path):
+                self.assertEqual(workflow.count('node scripts/check-manifests.mjs'), 1)
+                self.assertEqual(workflow.count('node scripts/check-vpn-contract.mjs'), 1)
+                matrix = re.split(r'\n  (?:session-tree|upgrade-script):', workflow.split('\n  check:\n')[1], maxsplit=1)[0]
+                self.assertEqual(matrix.count('run: npx vitest run'), 1)
+                self.assertEqual(matrix.count('run: npm test'), 1)
+                hygiene = workflow.split('\n  public-hygiene:\n')[1].split('\n  check:')[0]
+                self.assertIn('node scripts/check-manifests.mjs', hygiene)
+                self.assertIn('node scripts/check-vpn-contract.mjs', hygiene)
+                projects = json.loads((root / 'plugins/oxi-projects/package.json').read_text())
+                self.assertIn('test/*.test.ts', projects['scripts']['test'])
+                self.assertIn("'test/**'", (root / 'plugins/oxi-projects/vitest.config.ts').read_text())
+
+    def test_session_tree_keeps_its_context_and_gates_expensive_steps(self):
+        root = Path(__file__).resolve().parent.parent
+        workflow = (root / '.github/workflows/ci.yml').read_text()
+        job = workflow.split('\n  session-tree:\n')[1].split('\n  upgrade-script:')[0]
+        before_steps, steps = job.split('    steps:\n')
+        self.assertIn('needs: plan', before_steps)
+        self.assertNotIn('    if:', before_steps)
+        active, placeholder = steps.split('      - name: Report unchanged Session Tree')
+        for step in active.split('      - ')[1:]:
+            self.assertIn("if: needs.plan.outputs.session_tree == 'true'", step)
+        self.assertIn("if: needs.plan.outputs.session_tree != 'true'", placeholder)
+        self.assertIn('run: test "$SELECTED" = false', placeholder)
 
     def test_documented_ownership_matches_inventory_and_jobs(self):
         root = Path(__file__).resolve().parent.parent
