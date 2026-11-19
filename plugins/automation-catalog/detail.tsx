@@ -206,7 +206,9 @@ export function CatalogDetailContent({ detail, children, present = createPresent
           {events.map((run) => (
             <p className="border-b py-2" key={run.id}>
               {timestamp(run.finishedAt ?? run.observedAt)} ·{" "}
-              {finding ? run.status === "succeeded" ? "Предупреждение закрыто" : finding.label : run.summary ?? "Состояние изменилось"}
+              {run.summary ? resultText(run.summary) : finding
+                ? (run.status === "succeeded" ? "Предупреждение закрыто" : "Предупреждение обнаружено")
+                : "Состояние изменилось"}
             </p>
           ))}
         </details>

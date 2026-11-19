@@ -123,3 +123,17 @@ describe("detail failure states", () => {
     expect(html).not.toContain("Started:");
   });
 });
+
+it("keeps the recorded reason on historical warnings after recovery", () => {
+  const task = { ...fixture.task, scheduler: "inventory-audit", state: "paused" as const,
+    name: "OXI · resolved · example", description: 'Previous inventory finding recovered. ["example","cron","user","daily"]' };
+  const observed = { id: "notice", taskId: task.id, host: task.host, startedAt: 100,
+    finishedAt: 100, observedAt: null, evidence: "execution" as const, status: "failed" as const,
+    summary: "Observed scheduler entry has no registry record", exitCode: 1 };
+  const recovery = { ...observed, id: "recovered", startedAt: 200, finishedAt: 200,
+    status: "succeeded" as const, summary: "Inventory finding no longer observed", exitCode: 0 };
+  const html = renderToStaticMarkup(<CatalogDetailContent detail={{ ...fixture, task, runs: [recovery, observed], total: 2 }} />);
+  expect(html).toContain("История предупреждения");
+  expect(html).toContain("Предупреждение закрыто");
+  expect(html).toContain("Задача не была найдена в реестре");
+});
