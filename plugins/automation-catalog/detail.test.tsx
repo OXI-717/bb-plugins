@@ -54,7 +54,7 @@ describe("detail failure states", () => {
   it("separates the project and BB executor from the unknown machine", () => {
     const html = renderToStaticMarkup(<CatalogDetailContent detail={{ ...fixture, task: { ...fixture.task, host: "BB-managed agent", scheduler: "bb", executor: "agent", projectName: "Alpha" } }} />);
     expect(html).toContain("Проект: Alpha");
-    expect(html).toContain("Хост: не указан источником");
+    expect(html).toContain("Машина: не указана");
     expect(html).toContain("Выполнение: агент BB");
     expect(html).not.toContain("BB-managed agent");
   });
@@ -122,4 +122,18 @@ describe("detail failure states", () => {
     expect(html).not.toContain("run-secret");
     expect(html).not.toContain("Started:");
   });
+});
+
+it("keeps the recorded reason on historical warnings after recovery", () => {
+  const task = { ...fixture.task, scheduler: "inventory-audit", state: "paused" as const,
+    name: "OXI · resolved · example", description: 'Previous inventory finding recovered. ["example","cron","user","daily"]' };
+  const observed = { id: "notice", taskId: task.id, host: task.host, startedAt: 100,
+    finishedAt: 100, observedAt: null, evidence: "execution" as const, status: "failed" as const,
+    summary: "Observed scheduler entry has no registry record", exitCode: 1 };
+  const recovery = { ...observed, id: "recovered", startedAt: 200, finishedAt: 200,
+    status: "succeeded" as const, summary: "Inventory finding no longer observed", exitCode: 0 };
+  const html = renderToStaticMarkup(<CatalogDetailContent detail={{ ...fixture, task, runs: [recovery, observed], total: 2 }} />);
+  expect(html).toContain("История предупреждения");
+  expect(html).toContain("Предупреждение закрыто");
+  expect(html).toContain("Задача не была найдена в реестре");
 });

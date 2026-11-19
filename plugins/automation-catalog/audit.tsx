@@ -14,11 +14,11 @@ function evidenceUrl(value: string) {
     return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url.href : null;
   } catch { return null; }
 }
-export function AuditCard({ record, presentInCatalog = true, onSelect }: { record: AuditRecord; presentInCatalog?: boolean; onSelect?: () => void }) {
+export function AuditCard({ record, presentInCatalog = true, taskTitle, onSelect }: { record: AuditRecord; presentInCatalog?: boolean; taskTitle?: string; onSelect?: () => void }) {
   const navigate = useBbNavigate();
   return <article className="rounded-md border p-3 space-y-2 text-sm">
     <header className="flex flex-wrap justify-between gap-2">
-      {onSelect ? <button className="font-semibold text-left underline" onClick={onSelect}>{record.task.name}</button> : <h4 className="font-semibold">{record.summary}</h4>}
+      {onSelect ? <button className="font-semibold text-left underline" onClick={onSelect}>{taskTitle ?? (/^OXI · \w[\w-]* · host_/.test(record.task.name) ? "Предупреждение реестра" : record.task.name)}</button> : <h4 className="font-semibold">{record.summary}</h4>}
       <span className="text-xs text-muted-foreground">{record.kind === "action" ? "Изменение настройки" : "Аудит"} · {timestamp(record.checkedAt)}</span>
     </header>
     {onSelect && <p>{record.summary}</p>}
@@ -40,7 +40,7 @@ export function AuditCard({ record, presentInCatalog = true, onSelect }: { recor
   </article>;
 }
 
-export function AuditPanel({ taskKey, archive = false }: { taskKey?: string; archive?: boolean }) {
+export function AuditPanel({ taskKey, archive = false, taskTitle }: { taskKey?: string; archive?: boolean; taskTitle?: (key: string) => string | undefined }) {
   const rpc = useRpc<typeof catalogRpcContract>();
   const navigate = useBbNavigate();
   const [data, setData] = useState<AuditList | null>(null);
@@ -93,7 +93,7 @@ export function AuditPanel({ taskKey, archive = false }: { taskKey?: string; arc
       <Button type="submit" size="sm" disabled={pending}>{pending ? "Сохраняем…" : "Сохранить запись"}</Button>
     </fieldset></form>}
     {data && !data.total && <p className="text-sm text-muted-foreground">Записей аудита пока нет. Это не подтверждение работоспособности.</p>}
-    {data?.records.map(record => <AuditCard key={record.id} record={record} presentInCatalog={record.presentInCatalog} onSelect={!taskKey ? () => navigate.toPluginPanel(`catalog/audits/${record.key}`) : undefined} />)}
+    {data?.records.map(record => <AuditCard key={record.id} record={record} taskTitle={taskTitle?.(record.key)} presentInCatalog={record.presentInCatalog} onSelect={!taskKey ? () => navigate.toPluginPanel(`catalog/audits/${record.key}`) : undefined} />)}
     {data && data.total > pageSize && <div className="flex flex-wrap items-center gap-2">
       <Button size="sm" variant="outline" disabled={!offset} onClick={() => setOffset(v => Math.max(0, v - pageSize))}>Назад</Button>
       <span className="text-xs">{offset + 1}–{Math.min(offset + pageSize, data.total)} из {data.total}</span>
@@ -102,11 +102,11 @@ export function AuditPanel({ taskKey, archive = false }: { taskKey?: string; arc
   </section>;
 }
 
-export function AuditPage({ taskKey }: { taskKey?: string }) {
+export function AuditPage({ taskKey, taskTitle }: { taskKey?: string; taskTitle?: (key: string) => string | undefined }) {
   const navigate = useBbNavigate();
   return <main className="mx-auto max-w-5xl space-y-4 p-4 h-full overflow-y-auto">
     <header className="flex flex-wrap justify-between gap-2"><h1 className="text-xl font-semibold">Журнал аудитов</h1><Button size="sm" variant="outline" onClick={() => navigate.toPluginPanel("catalog")}>К каталогу</Button></header>
     <p className="text-sm text-muted-foreground">Проверки, изменения и решения по автоматизациям. История остаётся доступной после удаления задачи.</p>
-    <AuditPanel key={taskKey ?? "all"} taskKey={taskKey} archive />
+    <AuditPanel key={taskKey ?? "all"} taskKey={taskKey} taskTitle={taskTitle} archive />
   </main>;
 }

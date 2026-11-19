@@ -50,3 +50,20 @@ it("does not prepare a stop for an absent required job", () => {
     description: 'Required job absent from fresh scheduler inventory. Identity: ["host-example","systemd","user","example.service"]. No automatic stop.' } };
   expect(externalStopIntent(finding)).toBeNull();
 });
+
+it("preserves catalog-only removal for a missing registry finding", async () => {
+  const missing = { ...detail, task: { ...detail.task, scheduler: "inventory-audit",
+    name: "OXI · unregistered · host-example", missing: true } };
+  call.mockImplementation(async (method: string) => {
+    if (method === "catalog_detail") return missing;
+    if (method === "catalog_audit_list") return { records: [], total: 0 };
+    if (method === "catalog_forget_missing") return { ok: true };
+    throw new Error(`Unexpected mutation: ${method}`);
+  });
+  render(<CatalogDetailView taskKey={missing.task.key} onBack={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Удалить устаревшую запись из каталога" }));
+  fireEvent.click(screen.getByRole("button", { name: "Удалить из каталога" }));
+  expect(call).toHaveBeenCalledWith("catalog_forget_missing", { key: missing.task.key });
+  expect(call.mock.calls.every(([method]) =>
+    ["catalog_detail", "catalog_audit_list", "catalog_forget_missing"].includes(method))).toBe(true);
+});

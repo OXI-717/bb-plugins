@@ -152,8 +152,8 @@ describe("automation workflows", () => {
     const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: { catalog_list: () => ({ tasks, sources: [source] }) } });
     await slot.findByRole("button", { name: "Daily report" });
     expect(slot.getByRole("button", { name: "Other report" })).toBeTruthy();
-    expect(slot.getByText(/Проект: Alpha/)).toBeTruthy();
-    expect(slot.getByText(/Проект: Beta/)).toBeTruthy();
+    expect(slot.getByText(/Alpha · Машина/)).toBeTruthy();
+    expect(slot.getByText(/Beta · Машина/)).toBeTruthy();
     expect(slot.queryByRole("option", { name: "BB-managed agent" })).toBeNull();
     fireEvent.change(slot.getByRole("combobox", { name: "Проект" }), { target: { value: "alpha" } });
     expect(slot.queryByRole("button", { name: "Other report" })).toBeNull();
@@ -221,7 +221,7 @@ describe("automation workflows", () => {
   it("shows the failed result, keeps filters on return and provides compact history", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");
-    expect(slot.getByText(/Последний запуск завершился ошибкой/)).toBeTruthy();
+    expect(slot.getAllByText(/Последний запуск завершился ошибкой/)[0]).toBeTruthy();
     expect(slot.getAllByText("Каждые 15 минут · UTC")[0]).toBeTruthy();
     fireEvent.click(slot.getByRole("button", { name: /Требуют внимания/ }));
     fireEvent.click(slot.getByRole("button", { name: "Daily report" }));
@@ -250,7 +250,7 @@ describe("automation workflows", () => {
     ).toContain("личную автоматизацию");
     expect(
       slot.inspection.rpcCalls.every((call) =>
-        ["catalog_list", "catalog_detail", "catalog_compose_context"].includes(call.method),
+        ["catalog_list", "catalog_detail", "catalog_compose_context", "catalog_display_names"].includes(call.method),
       ),
     ).toBe(true);
     slot.lifecycle.unmount();
@@ -283,4 +283,35 @@ describe("automation workflows", () => {
     ).toBe(false);
     slot.lifecycle.unmount();
   });
+});
+
+
+it("labels inventory findings with the affected automation, project and machine", async () => {
+  const app = await loadPluginApp(() => import("./app"));
+  const native = { ...task, id: "auto_example", key: "ext_native", host: "host_example",
+    projectId: "proj_example", projectName: null, lastRun: null };
+  const finding = { ...task, key: "ext_finding", name: "OXI · unregistered · host_example",
+    scheduler: "inventory-audit", sourceId: "inventory", host: "host_example", state: "blocked",
+    description: 'Observed scheduler entry has no registry record. Identity: ["host_example","bb","proj_example","auto_example"]. No automatic stop.' };
+  const inventory = { ...source, id: "inventory", name: "Registry comparison" };
+  const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+    catalog_display_names: () => ({ hosts: [{ id: "host_example", name: "Office Mac" }],
+      projects: [{ id: "proj_example", name: "Example project" }] }),
+    catalog_list: () => ({ tasks: [native, finding, { ...finding, key: "ext_resolved",
+      name: "OXI · resolved · host_example", state: "paused", lastRun: null }], sources: [{ ...source, managedHere: true }, inventory] }),
+    catalog_detail: () => ({ task: finding, source: inventory, runs: [finding.lastRun], total: 1 }),
+    catalog_audit_list: () => ({ records: [], total: 0 }),
+  } });
+  await slot.findByText(/Example project · Office Mac/);
+  expect(slot.getByRole("option", { name: "Отключены (0)" })).toBeTruthy();
+  fireEvent.change(slot.getByRole("combobox", { name: "Раздел автоматизаций" }), { target: { value: "registry" } });
+  expect(slot.getAllByText("Нет в реестре").length).toBeGreaterThan(0);
+  expect(slot.queryByText(/Заблокирована|host_example/)).toBeNull();
+  fireEvent.change(slot.getByRole("combobox", { name: "Проект" }), { target: { value: "proj_example" } });
+  fireEvent.click(slot.getByRole("button", { name: "Daily report" }));
+  expect(await slot.findByRole("heading", { name: "Daily report" })).toBeTruthy();
+  expect(slot.getByText(/Машина: Office Mac/)).toBeTruthy();
+  expect(slot.queryByText("История запусков")).toBeNull();
+  expect(slot.getByText(/История предупреждения/)).toBeTruthy();
+  slot.lifecycle.unmount();
 });

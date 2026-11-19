@@ -1,4 +1,5 @@
 import type { CatalogTask, CatalogList } from "../src/catalog-types";
+import { registryFinding } from "./presentation";
 export type Source = CatalogList["sources"][number];
 export type Health = {
   label: string;
@@ -14,7 +15,8 @@ function rawHealth(
   now = Date.now(),
 ): Health {
   const completedOnce = task.scheduleKind === "once" && task.state === "paused" && task.lastRun?.status === "succeeded";
-  const paused = task.state === "paused" && !completedOnce && !task.missing;
+  const finding = registryFinding(task);
+  const paused = task.state === "paused" && !completedOnce && !task.missing && !finding;
   const result = (
     label: string,
     reason: string,
@@ -46,6 +48,10 @@ function rawHealth(
       false,
       "danger",
     );
+  if (finding)
+    return task.state === "blocked"
+      ? result(finding.label, finding.hint, 1, true, finding.kind === "missing-required" ? "danger" : "neutral")
+      : result(finding.label, finding.hint, 7, false);
   if (task.state === "blocked")
     return result(
       "Заблокирована",
