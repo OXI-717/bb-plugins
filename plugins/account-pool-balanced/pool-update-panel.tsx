@@ -71,13 +71,41 @@ export function PoolUpdateView({operation,busy,error,statusUnavailable=false,onS
   </section>;
 }
 
-export function PoolTechnicalDetails({children}: {children: ReactNode}) {
+function PoolDisclosure({title, children}: {title: string; children: ReactNode}) {
   return (
     <details className="rounded-lg border border-border px-4">
       <summary className="cursor-pointer py-2.5 text-sm font-medium">
-        Технические детали
+        {title}
       </summary>
-      <p className="break-words pb-3 text-xs text-muted-foreground">{children}</p>
+      {children}
     </details>
+  );
+}
+
+export function PoolSelectedAccounts({accounts}: {
+  accounts: ReadonlyArray<{ provider: string; account: string }>;
+}) {
+  return (
+    <PoolDisclosure title="Выбранные аккаунты">
+      <section aria-label="Выбранные аккаунты" className="space-y-3 border-t border-border py-3">
+        <p className="text-xs text-subtle-foreground">Pooler показывает последний выбор. У проектов и тредов могут быть свои аккаунты.</p>
+        <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {accounts.map(({provider, account}) => (
+            <div key={provider} className="min-w-0 rounded-md border border-border px-3 py-2">
+              <dt className="text-xs text-subtle-foreground">{provider}</dt>
+              <dd className="m-0 break-words text-sm font-medium">{account}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+    </PoolDisclosure>
+  );
+}
+
+export function PoolTechnicalDetails({children}: {children: ReactNode}) {
+  return (
+    <PoolDisclosure title="Технические детали">
+      <p className="break-words pb-3 text-xs text-muted-foreground">{children}</p>
+    </PoolDisclosure>
   );
 }
