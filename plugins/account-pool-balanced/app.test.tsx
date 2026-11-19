@@ -1328,25 +1328,51 @@ describe("Account Pool settings", () => {
   });
 
   it("offers a fresh Codex login after device-code polling fails", async () => {
-    let starts = 0;
-    const slot = render([], {
-      "codexLogin.start": () => {
-        starts += 1;
-        return {
-          sessionId: "33333333-3333-4333-8333-333333333333",
-          verificationUri: "https://auth.openai.com/codex/device",
-          userCode: "ABCD-1234",
-          expiresAt: Date.now() + 600_000,
-          intervalMs: 1,
-        };
-      },
-      "codexLogin.poll": () => ({ status: "error", message: "Code expired." }),
-    });
-    fireEvent.click(await slot.findByRole("button", { name: "Войти в Codex" }));
-    fireEvent.click(
-      await slot.findByRole("button", { name: "Попробовать снова" }),
-    );
-    await waitFor(() => expect(starts).toBe(2));
+    vi.useFakeTimers();
+    try {
+      const first = codexLoginStart();
+      const second = {
+        ...first,
+        sessionId: "44444444-4444-4444-8444-444444444444",
+        userCode: "EFGH-5678",
+      };
+      const start = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+      const poll = vi.fn(() => ({ status: "error", message: "Code expired." }));
+      let slot!: ReturnType<typeof render>;
+      await act(async () => {
+        slot = render([], {
+          "codexLogin.start": start,
+          "codexLogin.poll": poll,
+        });
+      });
+
+      await act(async () => {
+        fireEvent.click(slot.getByRole("button", { name: "Войти в Codex" }));
+      });
+      const dialog = within(slot.getByRole("dialog", { name: "Вход в Codex" }));
+      expect(dialog.getByLabelText("Код устройства Codex").textContent).toContain(first.userCode);
+      expect(poll).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(first.intervalMs);
+      });
+      expect(poll).toHaveBeenCalledTimes(1);
+      expect(slot.rpcCalls).toContainEqual({
+        method: "codexLogin.poll",
+        input: { sessionId: first.sessionId },
+      });
+      expect(dialog.getByText("Code expired.")).toBeTruthy();
+
+      await act(async () => {
+        fireEvent.click(dialog.getByRole("button", { name: "Попробовать снова" }));
+      });
+      expect(start).toHaveBeenCalledTimes(2);
+      expect(dialog.getByLabelText("Код устройства Codex").textContent).toContain(second.userCode);
+      expect(dialog.queryByText("Code expired.")).toBeNull();
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
   });
   it.each(["claude", "codex"] as const)(
     "reorders %s accounts with the keyboard and persists the displayed order",

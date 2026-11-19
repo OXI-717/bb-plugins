@@ -16,6 +16,9 @@ OP_POOL_MODULES = {'native-sessions', 'native-probe-wire', 'native-accounts',
 
 
 def mac_required(path):
+    # The settings suite covers a macOS timing regression in Codex device login.
+    if path == 'plugins/account-pool-balanced/app.test.tsx':
+        return True
     name = Path(path).name
     if any(word in name for word in ('browser', 'host', 'launcher', 'native', 'device')):
         return True

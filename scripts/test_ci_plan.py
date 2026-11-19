@@ -15,6 +15,13 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(p['upgrade_mac'])
         self.assertFalse(p['op'])
 
+    def test_pool_settings_regression_tests_run_on_macos(self):
+        p = plan(['plugins/account-pool-balanced/app.test.tsx'])
+        self.assertEqual(active_rows(p), [
+            {'os': 'ubuntu-latest', 'plugin': 'account-pool-balanced'},
+            {'os': 'macos-latest', 'plugin': 'account-pool-balanced'},
+        ])
+
     def test_os_bound_changes_require_mac(self):
         for name in ['browser-host.ts', 'host.ts', 'devin-launcher.ts', 'new-platform.ts']:
             with self.subTest(name=name):
