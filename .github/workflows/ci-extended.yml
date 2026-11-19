@@ -3,8 +3,6 @@ name: Extended compatibility
 on:
   push:
     branches: [release/account-pool-0.4.x]
-  schedule:
-    - cron: '17 4 * * 1'
   workflow_dispatch:
 
 permissions:
