@@ -50,7 +50,7 @@ export function AccountPolicyForm({ account, threshold, drainHours, save, onUnsa
     {!account.policy && <p className="pool-settings-help">Поля заполнены текущими общими значениями. При включении они сохранятся как индивидуальные.</p>}
     <fieldset disabled={!draft.enabled || pending} className="pool-settings-fields">
       {hasFiveHour && numberField('fiveHourKeep', 'Оставлять квоту 5 часов, %', inheritedKeep)}
-      {numberField('weeklyKeep', 'Оставлять недельную квоту, %', inheritedKeep)}
+      {numberField('weeklyKeep', account.weeklyBudget ? 'Оставлять квоту моделей, %' : 'Оставлять недельную квоту, %', inheritedKeep)}
       {account.role === 'reserve' && numberField('reserveDrainHours', 'Подключать резерв за рабочих часов до сброса', drainHours)}
       <label className="pool-settings-toggle"><input type="checkbox" checked={draft.schedule !== null} onChange={e => change({ schedule: e.target.checked ? { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, intervals: [{ days: [1,2,3,4,5], start: '09:00', end: '18:00' }] } : null })} />Личное расписание</label>
       {draft.schedule && <div className="pool-settings-fields pool-settings-schedule-fields">

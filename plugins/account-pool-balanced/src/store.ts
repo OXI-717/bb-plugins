@@ -6,7 +6,8 @@ import type Database from "better-sqlite3";
 import { z } from "zod";
 import type { PoolKvStorage } from "./core-storage.js";
 import {
-  accountSchema,
+  accountMetadataSchema,
+  weeklyBudgetSchema,
   accountSecretSchema,
   EMPTY_FAMILY_WEEKLY,
   hubTokenSummarySchema,
@@ -23,7 +24,10 @@ import {
 
 const ACCOUNTS_KEY = "accounts:v1";
 const ACCOUNT_LAST_USED_PERSIST_MS = 60 * 1_000;
-const accountsSchema = z.array(accountSchema);
+const accountsSchema = z.array(accountMetadataSchema);
+// Keep weekly rules out of the strict v1 account array so older builds can read it after rollback.
+const WEEKLY_BUDGETS_KEY = "weekly-budgets:v1";
+const weeklyBudgetsSchema = z.record(z.string().uuid(), weeklyBudgetSchema);
 const HUB_TOKEN_PREFIX = "hub-token-";
 const THREAD_TOKEN_PREFIX = "hub-thread-token-";
 const HUB_TOKEN_GRACE_MS = 10 * 60 * 1_000;
@@ -77,10 +81,17 @@ export class AccountStore {
     await fs.chmod(this.secretsDir, 0o700);
   }
 
+  private async listMetadata() {
+    return accountsSchema.parse(await this.kv.get(ACCOUNTS_KEY) ?? []);
+  }
+
+  private async weeklyBudgets() {
+    return weeklyBudgetsSchema.parse(await this.kv.get(WEEKLY_BUDGETS_KEY) ?? {});
+  }
+
   async list(): Promise<Account[]> {
-    const value = await this.kv.get(ACCOUNTS_KEY);
-    if (value === undefined) return [];
-    return accountsSchema.parse(value);
+    const [accounts, budgets] = await Promise.all([this.listMetadata(), this.weeklyBudgets()]);
+    return accounts.map(account => budgets[account.id] === undefined ? account : { ...account, weeklyBudget: budgets[account.id] });
   }
 
   async get(id: string): Promise<Account | null> {
@@ -90,12 +101,12 @@ export class AccountStore {
   async add(
     input: Omit<
       Account,
-      "id" | "createdAt" | "lastUsedAt" | "lastUsedHostId" | "role" | "cap" | "autopilotAllowed"
+      "id" | "createdAt" | "lastUsedAt" | "lastUsedHostId" | "role" | "cap" | "autopilotAllowed" | "weeklyBudget"
     > & {autopilotAllowed?: boolean},
     secret: AccountSecret,
   ): Promise<Account> {
     return this.serialized(async () => {
-      const account = accountSchema.parse({
+      const account = accountMetadataSchema.parse({
         ...input,
         id: randomUUID(),
         createdAt: Date.now(),
@@ -104,7 +115,7 @@ export class AccountStore {
       });
       await this.writeSecret(account.id, secret);
       try {
-        const accounts = await this.list();
+        const accounts = await this.listMetadata();
         accounts.push(account);
         await this.kv.set(ACCOUNTS_KEY, accounts);
       } catch (error) {
@@ -117,9 +128,9 @@ export class AccountStore {
 
   async addDraft(input: {label:string;email:string;priority:number}):Promise<Account> {
     return this.serialized(async()=>{
-      const accounts=await this.list();
+      const accounts=await this.listMetadata();
       if(accounts.some(a=>a.provider==='claude'&&a.email?.toLowerCase()===input.email.toLowerCase()))throw Error('Этот аккаунт Claude уже добавлен.');
-      const account=accountSchema.parse({...input,id:randomUUID(),provider:'claude',kind:'oauth',draft:true,
+      const account=accountMetadataSchema.parse({...input,id:randomUUID(),provider:'claude',kind:'oauth',draft:true,
         accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:false,createdAt:Date.now()});
       accounts.push(account);await this.kv.set(ACCOUNTS_KEY,accounts);return account;
     });
@@ -127,11 +138,16 @@ export class AccountStore {
 
   async remove(id: string): Promise<boolean> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const next = accounts.filter((account) => account.id !== id);
       if (next.length === accounts.length) return false;
       await this.kv.set(ACCOUNTS_KEY, next);
       await fs.rm(this.accountSecretPath(id), { force: true });
+      const budgets = await this.weeklyBudgets();
+      if (budgets[id] !== undefined) {
+        delete budgets[id];
+        await this.kv.set(WEEKLY_BUDGETS_KEY, budgets);
+      }
       return true;
     });
   }
@@ -151,6 +167,20 @@ export class AccountStore {
 
   async setPolicy(id: string, policy: Account["policy"]): Promise<Account | null> {
     return this.update(id, account => ({ ...account, policy }));
+  }
+
+  async updateWeeklyBudget(id: string, change: (account: Account) => Account["weeklyBudget"]): Promise<Account | null> {
+    return this.serialized(async () => {
+      const accounts = await this.listMetadata();
+      const account = accounts.find(candidate => candidate.id === id);
+      if (!account) return null;
+      const budgets = await this.weeklyBudgets();
+      const weeklyBudget = change({ ...account, weeklyBudget: budgets[id] });
+      if (weeklyBudget === undefined) delete budgets[id];
+      else budgets[id] = weeklyBudget;
+      await this.kv.set(WEEKLY_BUDGETS_KEY, budgets);
+      return weeklyBudget === undefined ? account : { ...account, weeklyBudget };
+    });
   }
 
   async setPriority(id: string, priority: number): Promise<Account | null> {
@@ -206,7 +236,7 @@ export class AccountStore {
 
   async reorder(provider: PoolProvider, accountIds: string[]): Promise<void> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const current = accounts.filter(
         (account) => account.provider === provider,
       );
@@ -238,7 +268,7 @@ export class AccountStore {
     lastUsedHostId: string,
   ): Promise<boolean> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const index = accounts.findIndex((account) => account.id === id);
       const current = accounts[index];
       if (index < 0 || current === undefined) return false;
@@ -249,7 +279,7 @@ export class AccountStore {
       ) {
         return false;
       }
-      accounts[index] = accountSchema.parse({
+      accounts[index] = accountMetadataSchema.parse({
         ...current,
         lastUsedAt,
         lastUsedHostId,
@@ -271,14 +301,15 @@ export class AccountStore {
     change: (account: Account) => Account,
   ): Promise<Account | null> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const index = accounts.findIndex((account) => account.id === id);
       const current = accounts[index];
       if (index < 0 || current === undefined) return null;
-      const updated = accountSchema.parse(change(current));
+      const weeklyBudget = (await this.weeklyBudgets())[id];
+      const updated = accountMetadataSchema.parse(change(current));
       accounts[index] = updated;
       await this.kv.set(ACCOUNTS_KEY, accounts);
-      return updated;
+      return weeklyBudget === undefined ? updated : { ...updated, weeklyBudget };
     });
   }
 
@@ -295,7 +326,7 @@ export class AccountStore {
     secret: AccountSecret,
   ): Promise<Account> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const index = accounts.findIndex(account => account.id === id);
       const account = accounts[index];
       if (!account || account.provider !== "claude" || account.kind !== "oauth")
@@ -306,7 +337,7 @@ export class AccountStore {
       if (!matches)
         throw new Error("Вы вошли в другой аккаунт. Авторизуйтесь под выбранной подпиской / Signed in to a different account.");
       const {draft:_draft,...authorizedAccount}=account;
-      const updated = accountSchema.parse({
+      const updated = accountMetadataSchema.parse({
         ...authorizedAccount,
         email: identity.email,
         accountUuid: identity.accountUuid,

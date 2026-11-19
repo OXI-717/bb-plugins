@@ -9,6 +9,7 @@ import { defineRpcContract, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   accountPolicySchema,
+  weeklyBudgetChangeSchema,
   accountProjectsSchema,
   accountAddInputSchema,
   accountCapInputSchema,
@@ -115,6 +116,10 @@ export const accountPoolRpcContract = defineRpcContract({
   },
   "account.setPolicy": {
     input: z.object({ accountId: z.string().uuid(), policy: accountPolicySchema }).strict(),
+    output: z.object({ account: accountSchema.nullable() }).strict(),
+  },
+  "account.setWeeklyBudget": {
+    input: weeklyBudgetChangeSchema,
     output: z.object({ account: accountSchema.nullable() }).strict(),
   },
   "account.setEmail": {
@@ -279,6 +284,7 @@ export function createRpcHandlers(
     "account.setPolicy": async ({ accountId, policy }) => ({
       account: await operations.setPolicy(accountId, policy),
     }),
+    "account.setWeeklyBudget": async input => ({ account: await operations.setWeeklyBudget(input) }),
     "account.setEmail":async({accountId,email,expectedEmail})=>({account:await operations.setEmail(accountId,email,expectedEmail)}),
     "account.setPriority": async ({ accountId, priority }) => ({
       account: await operations.setPriority(accountId, priority),

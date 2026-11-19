@@ -17,6 +17,7 @@ import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
 import { createVpnPolicy, VpnRequiredError } from "./vpn-policy.js";
 import { isRecoverableAccessError } from "./recoverable-access.js";
 import { projectTier, projectRole } from "./project-policy.js";
+import { currentWeeklyBudget, observedWeek } from "./weekly-budget.js";
 import { policyThresholds, reserveHours, scheduleAllows } from "./account-policy.js";
 import type {
   Account,
@@ -646,7 +647,7 @@ export class AccountPoolHub {
         .filter(({ quota }) => quota.error === null)
         .filter(
           ({ account, quota }) =>
-            !isSharedQuotaExhausted(quota, policyThresholds(account, settings.switchThreshold), now),
+            !isSharedQuotaExhausted(quota, policyThresholds(account, settings.switchThreshold, quota, now), now),
         );
       for (const entry of gateMembership(entries, now, drainMs, workWeek))
         eligibleIds.add(entry.account.id);
@@ -676,7 +677,11 @@ export class AccountPoolHub {
       accounts: accounts.map((account) => {
         const quota = this.options.quotas.get(account.id);
         const { accountId: _accountId, ...quotaFields } = quota;
+        const budget = currentWeeklyBudget(account, quota, now);
+        const limits = policyThresholds(account, settings.switchThreshold, quota, now);
         const limit = capLimit(account, quota, now, workWeek);
+        const weekly = observedWeek(quota, now);
+        const ceiling = budget?.ceiling ?? Math.min(limits.weekly, limit ?? 1);
         return {
           ...account,
           lastUsedHostName: null,
@@ -687,11 +692,18 @@ export class AccountPoolHub {
           queuedRequests: this.admission.waiting(account.id) + this.cursorControlAdmission.waiting(account.id) + Math.max(0, this.admission.reserved(account.id) + this.cursorControlAdmission.reserved(account.id) - (this.inFlightByAccount.get(account.id) ?? 0)),
           concurrencyLimit: settings.maxConcurrentRequestsPerAccount,
           capLimit: limit,
+          weeklySpending: {
+            mode: account.drainOnce ? "drain" : budget?.mode ?? (account.policy?.enabled && account.policy.weeklyKeep != null && (limit === null || limits.weekly <= limit) ? "fixed" : "pool"),
+            ceiling,
+            utilization: weekly?.utilization ?? null,
+            resetAt: weekly?.resetAt ?? null,
+            nextChangeAt: budget?.nextChangeAt ?? null,
+          },
           eligible: eligibleIds.has(account.id),
           drainOpensAt: drainOpensAt(quota, now, reserveHours(account, settings.reserveDrainHours) * 3600000, workWeek),
           capReached:
-            limit !== null && (weeklyUtilization(quota, now) ?? 0) >= limit,
-          status: accountStatus(account, quota, policyThresholds(account, settings.switchThreshold), now),
+            limit !== null && (weeklyUtilization(quota, now, account) ?? 0) >= limit,
+          status: accountStatus(account, quota, limits, now),
         };
       }),
     };
@@ -1211,13 +1223,13 @@ export class AccountPoolHub {
           quota: this.options.quotas.get(account.id),
         }))
         .filter(({ quota }) => quota.error === null)
-        .filter(({ account, quota }) => freeTier || !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
+        .filter(({ account, quota }) => freeTier || !isSharedQuotaExhausted(quota, policyThresholds(account, threshold, quota, now), now))
     );
     const available = scopedEntries.flatMap(entry => gateMembership(
       [entry], now, settings.reserveDrainHours * 3600000, workWeek,
     ));
     const eligible = available.filter(
-      ({ account, quota }) => freeTier || !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
+      ({ account, quota }) => freeTier || !isQuotaExhausted(quota, family, policyThresholds(account, threshold, quota, now), now),
     );
     return { available, eligible };
   }
@@ -1949,7 +1961,7 @@ export class AccountPoolHub {
       .flatMap((account) => {
         const quota = this.options.quotas.get(account.id);
         if (quota.error !== null) return [];
-        const effectiveThreshold = policyThresholds(account, threshold);
+        const effectiveThreshold = policyThresholds(account, threshold, quota, now);
         const quotaResetAt = blockingResetAt(quota, family, effectiveThreshold, now);
         if (
           quotaResetAt === null &&
@@ -1966,7 +1978,10 @@ export class AccountPoolHub {
     // silence, and an exhausted weekly quota looked like a hang with no error at all.
     const resetAt = next === undefined ? null : new Date(next).toISOString();
     const usable = accounts.filter(account => this.options.quotas.get(account.id).error === null);
-    const quotaBlocked = usable.every(account => isQuotaExhausted(this.options.quotas.get(account.id), family, policyThresholds(account, threshold), now));
+    const quotaBlocked = usable.every(account => {
+      const quota = this.options.quotas.get(account.id);
+      return isQuotaExhausted(quota, family, policyThresholds(account, threshold, quota, now), now);
+    });
     const providerSpent = quotaBlocked && usable.every(account => isQuotaExhausted(this.options.quotas.get(account.id), family, 1, now));
     const upstreamHeld = !quotaBlocked && usable.length>0 && usable.every(account => (this.options.quotas.get(account.id).heldUntil??0)>now);
     const reason = providerSpent ? "POOL_QUOTA_EXHAUSTED" : quotaBlocked ? "POOL_QUOTA_THRESHOLD" : upstreamHeld ? "POOL_ACCOUNT_HELD" : "POOL_ACCOUNT_POLICY";
@@ -1980,11 +1995,11 @@ export class AccountPoolHub {
       const account = usable.find(account => !isQuotaExhausted(this.options.quotas.get(account.id), family, 1, now));
       if (account) {
         const q = this.options.quotas.get(account.id);
-        const limits = policyThresholds(account, threshold);
+        const limits = policyThresholds(account, threshold, q, now);
         const windows = [
           {used:q.fiveHourUtilization,reset:q.fiveHourResetAt,limit:limits.fiveHour},
           {used:q.sevenDayUtilization,reset:q.sevenDayResetAt,limit:limits.weekly},
-          {used:q.familyWeekly[family]?.utilization??null,reset:q.familyWeekly[family]?.resetAt??null,limit:limits.weekly},
+          {used:q.familyWeekly[family]?.utilization??null,reset:q.familyWeekly[family]?.resetAt??null,limit:limits.familyWeekly??limits.weekly},
           ...q.limitWindows.map(w=>({used:w.utilization,reset:w.resetAt,limit:w.windowMinutes===300?limits.fiveHour:w.windowMinutes===10080?limits.weekly:limits.other})),
         ];
         const window = windows.find(w=>w.used!==null&&w.used>=w.limit&&(w.reset===null||w.reset>now));

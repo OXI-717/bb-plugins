@@ -35,6 +35,12 @@ export const accountSettingsCss = `
 .pool-settings footer, .pool-settings .pool-settings-footer { display:flex; flex-wrap:wrap; justify-content:flex-start; gap:8px; }
 .pool-settings button.pool-settings-link { border-color:transparent; background:transparent; padding-inline:4px; color:var(--muted-foreground,#666); }
 .pool-settings button.pool-settings-link:hover { color:var(--foreground,#222); text-decoration:underline; }
+.pool-account-card { border:1px solid var(--border,#ddd); border-radius:8px; padding:12px; min-width:0; background:var(--card,var(--background,white)); }
+.pool-account-card details { border-top:1px solid var(--border,#ddd); }
+.pool-account-card summary { cursor:pointer; padding:10px 0; }
+.pool-account-card summary span { display:inline-block; margin-inline-start:8px; font-size:12px; color:var(--muted-foreground,#666); overflow-wrap:anywhere; }
+.pool-weekly-step { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; align-items:end; gap:8px; max-width:420px; }
+.pool-weekly-step .pool-settings-control { width:100%; }
 .pool-browser-section { display:grid; gap:8px; min-width:0; }
 .pool-browser-actions { display:flex; flex-wrap:wrap; align-items:center; gap:4px 12px; }
 .pool-browser-link { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:8px; }

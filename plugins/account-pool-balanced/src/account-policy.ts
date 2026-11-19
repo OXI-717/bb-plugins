@@ -1,12 +1,22 @@
-import type { AccountPolicy } from './contracts.js';
-export interface QuotaThresholds { other: number; fiveHour: number; weekly: number }
-export function policyThresholds(account: { policy?: AccountPolicy; drainOnce?: boolean }, fallback: number): QuotaThresholds {
+import type { Account, AccountQuota, AccountPolicy } from './contracts.js';
+import { currentWeeklyBudget } from './weekly-budget.js';
+
+export interface QuotaThresholds { other: number; fiveHour: number; weekly: number; familyWeekly?: number }
+export function policyThresholds(
+  account: Pick<Account, "policy" | "drainOnce" | "weeklyBudget">,
+  fallback: number,
+  quota?: Pick<AccountQuota, "sevenDayUtilization" | "sevenDayResetAt" | "sevenDayStatus" | "limitWindows">,
+  now = Date.now(),
+): QuotaThresholds {
   if (account.drainOnce) return { other: 1, fiveHour: 1, weekly: 1 };
   const p = account.policy?.enabled ? account.policy : undefined;
+  const weekly = p?.weeklyKeep == null ? fallback : (100 - p.weeklyKeep) / 100;
+  const budget = quota && currentWeeklyBudget(account, quota, now);
   return {
     other: fallback,
-    fiveHour: p?.fiveHourKeep == null ? fallback : 1 - p.fiveHourKeep / 100,
-    weekly: p?.weeklyKeep == null ? fallback : 1 - p.weeklyKeep / 100,
+    fiveHour: p?.fiveHourKeep == null ? fallback : (100 - p.fiveHourKeep) / 100,
+    weekly: budget?.ceiling ?? weekly,
+    ...(budget ? { familyWeekly: weekly } : {}),
   };
 }
 export function scheduleAllows(policy: AccountPolicy | undefined, now: number): boolean {

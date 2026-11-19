@@ -271,6 +271,42 @@ export const accountPolicySchema = z.object({
 }).strict();
 export type AccountPolicy = z.infer<typeof accountPolicySchema>;
 
+const spendPercent = z.number().min(0).max(100);
+const weeklyStep = z.object({
+  hoursBeforeReset: z.number().int().min(1).max(167),
+  ceiling: spendPercent,
+}).strict();
+export const weeklyRuleSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("fixed"), ceiling: spendPercent }).strict(),
+  z.object({ mode: z.literal("scheduled"), ceiling: spendPercent, steps: z.array(weeklyStep).min(1).max(14) })
+    .strict().refine(({ ceiling, steps }) => steps.every((step, index) => {
+      const previous = steps[index - 1];
+      return step.ceiling >= (previous?.ceiling ?? ceiling) &&
+        (previous === undefined || step.hoursBeforeReset < previous.hoursBeforeReset);
+    }), "Steps must be ordered by decreasing hours and nondecreasing ceilings"),
+]);
+export type WeeklyRule = z.infer<typeof weeklyRuleSchema>;
+
+export const weeklyBudgetSchema = z.object({
+  rule: weeklyRuleSchema,
+  override: z.object({
+    ceiling: spendPercent,
+    until: z.number().int().positive(),
+    resetAt: z.number().int().positive(),
+  }).strict().refine(value => value.until <= value.resetAt).nullable(),
+}).strict();
+
+export const weeklyBudgetChangeSchema = z.object({
+  accountId: z.string().uuid(),
+  expected: weeklyBudgetSchema.nullable(),
+  change: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("rule"), rule: weeklyRuleSchema.nullable() }).strict(),
+    z.object({ kind: z.literal("override"), ceiling: spendPercent, until: z.enum(["next-step", "reset"]) }).strict(),
+    z.object({ kind: z.literal("clear-override") }).strict(),
+  ]),
+}).strict();
+export type WeeklyBudgetChange = z.infer<typeof weeklyBudgetChangeSchema>;
+
 export const accountProjectsSchema = z.object({
   onlySelected: z.boolean(),
   rules: z.array(z.object({
@@ -281,7 +317,7 @@ export const accountProjectsSchema = z.object({
   "Include each project only once");
 export type AccountProjects = z.infer<typeof accountProjectsSchema>;
 
-export const accountSchema = z
+export const accountMetadataSchema = z
   .object({
     id: z.string().uuid(),
     provider: providerSchema,
@@ -308,6 +344,7 @@ export const accountSchema = z
   })
   .strict();
 
+export const accountSchema = accountMetadataSchema.extend({ weeklyBudget: weeklyBudgetSchema.optional() });
 export type Account = z.infer<typeof accountSchema>;
 
 export const oauthSecretSchema = z
@@ -400,6 +437,13 @@ export const accountSummarySchema = accountSchema.extend({
   queuedRequests: z.number().int().nonnegative().default(0),
   concurrencyLimit: z.number().int().positive().default(2),
   capLimit: z.number().nullable(),
+  weeklySpending: z.object({
+    mode: z.enum(["pool", "fixed", "scheduled", "override", "drain"]),
+    ceiling: z.number(),
+    utilization: z.number().nullable(),
+    resetAt: z.number().int().nullable(),
+    nextChangeAt: z.number().int().nullable(),
+  }).strict().optional(),
   eligible: z.boolean(),
   capReached: z.boolean(),
   drainOpensAt: z.number().int().nullable(),

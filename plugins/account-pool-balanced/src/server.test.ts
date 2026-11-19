@@ -7321,6 +7321,82 @@ describe("sequential pool recovery", () => {
     await expect(rpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: "yes" })).rejects.toThrow();
   });
 
+  it("uses weekly steps and temporary overrides for dispatch while preserving independent limits", async () => {
+    const hour = 3_600_000;
+    let now = Date.now();
+    let reset = Math.floor(now / 1_000) * 1_000 + 72 * hour;
+    let usage = 0.6;
+    let fiveHour = 0.2;
+    let modelCalls = 0;
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      options: { now: () => now, fetch: async () => {
+        modelCalls++;
+        return Response.json({}, { headers: {
+          "anthropic-ratelimit-unified-7d-utilization": String(usage),
+          "anthropic-ratelimit-unified-7d-reset": String(reset / 1000),
+          "anthropic-ratelimit-unified-5h-utilization": String(fiveHour),
+          ...(modelCalls === 1 ? {
+            "anthropic-ratelimit-unified-7d_fable-utilization": "0.6",
+            "anthropic-ratelimit-unified-7d_fable-reset": String(reset / 1000),
+          } : {}),
+        } });
+      } },
+    });
+    const rpc = fixture.host.harness.behavior.callRpc;
+    const accountId = fixture.account.id;
+    const current = async () => statusSchema.parse(await rpc("status.get", null)).accounts[0]!;
+    const send = async (model = "claude-sonnet") => {
+      const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/messages", {
+        headers: authHeaders(fixture.key), body: JSON.stringify({ model }),
+      });
+      const detail = await response.text();
+      return { status: response.status, detail };
+    };
+    expect(await send("claude-fable")).toMatchObject({ status: 200 });
+    await rpc("account.setPolicy", { accountId, policy: { enabled: true, weeklyKeep: 50, fiveHourKeep: 50 } });
+    await rpc("account.setCap", { accountId, cap: { early: 0.1, late: 0.3 } });
+    const rule = { mode: "scheduled", ceiling: 50, steps: [
+      { hoursBeforeReset: 48, ceiling: 65 }, { hoursBeforeReset: 24, ceiling: 80 },
+    ] };
+    const change = async (change: unknown) => rpc("account.setWeeklyBudget", {
+      accountId, expected: (await current()).weeklyBudget ?? null, change,
+    });
+    await change({ kind: "rule", rule });
+    expect(await current()).toMatchObject({ eligible: false, weeklySpending: { mode: "scheduled", ceiling: .5, resetAt: reset } });
+    expect(await send()).toMatchObject({ status: 403 });
+    expect(modelCalls).toBe(1);
+    await change({ kind: "override", ceiling: 68, until: "next-step" });
+    expect(await current()).toMatchObject({
+      eligible: true, weeklyBudget: { rule, override: { ceiling: 68, until: reset - 48 * hour, resetAt: reset } },
+      weeklySpending: { mode: "override", ceiling: .68 },
+    });
+    expect(await send()).toMatchObject({ status: 200 });
+    expect(await send("claude-fable")).toMatchObject({ status: 403 });
+    now = reset - 48 * hour;
+    expect(await current()).toMatchObject({ eligible: true, weeklySpending: { mode: "scheduled", ceiling: .65 } });
+    fiveHour = 0.5;
+    expect(await send()).toMatchObject({ status: 200 });
+    expect(await send()).toMatchObject({ status: 403 });
+    expect(modelCalls).toBe(3);
+    const oldReset = reset;
+    now = oldReset + 1000;
+    reset += 7 * 24 * hour;
+    usage = 0.05;
+    // Seed the next week without changing the persistent rule.
+    await rpc("account.setDrainOnce", { accountId, enabled: true });
+    fiveHour = .2;
+    expect(await send()).toMatchObject({ status: 200 });
+    await rpc("account.setDrainOnce", { accountId, enabled: false });
+    expect(await current()).toMatchObject({ eligible: true, weeklyBudget: { rule }, weeklySpending: { mode: "scheduled", ceiling: .5, resetAt: reset } });
+    const raw = await fixture.host.bb.storage.kv.get("accounts:v1");
+    expect(raw).not.toEqual(expect.arrayContaining([expect.objectContaining({ weeklyBudget: expect.anything() })]));
+    await expect(rpc("account.setWeeklyBudget", { accountId, expected: null, change: { kind: "rule", rule: null } })).rejects.toThrow(/изменилось/);
+    await change({ kind: "rule", rule: null });
+    expect(await current()).toMatchObject({ cap: { early: .1, late: .3 }, policy: { weeklyKeep: 50 } });
+    expect((await current()).weeklyBudget).toBeUndefined();
+  });
+
   it("applies account policy to sticky sessions and overrides schedule during drain", async () => {
     const attempts: Array<string | null> = [];
     const fixture = await createFixture({ upstreamUrl: "https://upstream.example", apiKey: "sk-work", priority: 0,

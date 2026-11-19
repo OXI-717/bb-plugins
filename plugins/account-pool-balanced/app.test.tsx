@@ -355,6 +355,7 @@ describe("Account Pool settings", () => {
   it("saves the explicit account permission with compare-and-set and reports conflicts", async () => {
     const slot=render([account()], {"account.setAutopilotAllowed":()=>{throw Error("permission changed");}});
     fireEvent.click(await slot.findByRole("button", {name:"Открыть карточку: person@example.com"}));
+    fireEvent.click(slot.getByText(/Доступ и маршрут/, { selector: "summary" }));
     const checkbox=slot.getByRole("checkbox",{name:"Разрешить автопилоту"}) as HTMLInputElement;
     expect(checkbox.checked).toBe(false);
     fireEvent.click(checkbox);
@@ -377,7 +378,8 @@ describe("Account Pool settings", () => {
     const response = deferred<object>();
     const slot = render([selected], { "browser.open": () => response.promise });
     fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
-    const dialog = within(slot.getByRole("dialog"));
+    fireEvent.click(slot.getByText("Аккаунт и действия", { selector: "summary" }));
+    const dialog = within(slot.getByRole("region", { name: "person@example.com" }));
     expect(dialog.queryByRole("textbox", { name: "Ссылка для открытия" })).toBeNull();
     fireEvent.click(dialog.getByRole("button", { name: "Открыть другую ссылку" }));
     fireEvent.change(dialog.getByRole("textbox", { name: "Ссылка для открытия" }), { target: { value: "https://login.example/authorize?state=synthetic" } });
@@ -393,7 +395,8 @@ describe("Account Pool settings", () => {
     let attempts = 0;
     const slot = render([account()], { "browser.open": () => { if (++attempts === 1) throw new Error("VPN confirmation unavailable"); return { opened: true }; } });
     fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
-    const dialog = within(slot.getByRole("dialog"));
+    fireEvent.click(slot.getByText("Аккаунт и действия", { selector: "summary" }));
+    const dialog = within(slot.getByRole("region", { name: "person@example.com" }));
     expect(dialog.queryByRole("textbox", { name: "Ссылка для открытия" })).toBeNull();
     fireEvent.click(dialog.getByRole("button", { name: "Открыть другую ссылку" }));
     fireEvent.change(dialog.getByRole("textbox", { name: "Ссылка для открытия" }), { target: { value: "https://login.example/" } });
@@ -410,12 +413,13 @@ describe("Account Pool settings", () => {
       "login.reauthorize": () => { throw new Error("Synthetic OAuth failure"); },
     });
     fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
-    fireEvent.click(within(slot.getByRole("dialog")).getByRole("button", { name: "Открыть в браузере" }));
-    await within(slot.getByRole("dialog")).findByText("Synthetic browser VPN failure");
+    fireEvent.click(slot.getByText("Аккаунт и действия", { selector: "summary" }));
+    fireEvent.click(within(slot.getByRole("region", { name: "person@example.com" })).getByRole("button", { name: "Открыть в браузере" }));
+    await within(slot.getByRole("region", { name: "person@example.com" })).findByText("Synthetic browser VPN failure");
     fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
     fireEvent.click(await slot.findByRole("menuitem", { name: "Авторизоваться заново" }));
     await within(slot.getByRole("dialog")).findByText("Synthetic OAuth failure");
-    expect(within(slot.getByRole("dialog")).queryByText("Synthetic browser VPN failure")).toBeNull();
+    expect(slot.queryByText("Synthetic browser VPN failure")).toBeNull();
   });
 
   it("opens the existing reauthorization URL in that account profile", async () => {
@@ -425,6 +429,7 @@ describe("Account Pool settings", () => {
       "browser.open": () => ({ opened: true }),
     });
     fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.click(slot.getByText("Аккаунт и действия", { selector: "summary" }));
     fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
     fireEvent.click(await slot.findByRole("menuitem", { name: "Авторизоваться заново" }));
     fireEvent.click(await slot.findByRole("button", { name: "Открыть в профиле аккаунта" }));
@@ -438,6 +443,7 @@ describe("Account Pool settings", () => {
       'login.complete':()=>{throw new Error(failure);},
     });
     fireEvent.click(await slot.findByRole('button',{name:'Открыть person@example.com'}));
+    fireEvent.click(slot.getByText("Аккаунт и действия", { selector: "summary" }));
     fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
     fireEvent.click(await slot.findByRole("menuitem", { name: "Авторизоваться заново" }));
     if(stage==='complete'){
@@ -451,6 +457,7 @@ describe("Account Pool settings", () => {
     const selected=account({enabled:false,status:'disabled',error:'[OAUTH_REAUTH_REQUIRED] OAuth refresh failed with HTTP 400.'});
     const slot=render([selected],{'login.reauthorize':()=>({sessionId:'fixture-session',authorizeUrl:'https://login.example/authorize',expiresAt:Date.now()+600000})});
     fireEvent.click(await slot.findByRole('button',{name:'Открыть person@example.com'}));
+    fireEvent.click(slot.getByText("Аккаунт и действия", { selector: "summary" }));
     fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
     fireEvent.click(await slot.findByRole("menuitem", { name: "Авторизоваться заново" }));
     await slot.findByText('Повторная авторизация Claude');
@@ -463,18 +470,19 @@ describe("Account Pool settings", () => {
     const response = deferred<object>();
     const slot = render([selected], { "account.setPolicy": () => response.promise });
     fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.click(slot.getByText(/Доступ и маршрут/, { selector: "summary" }));
     fireEvent.click(slot.getByRole("checkbox", { name: "Индивидуальные настройки" }));
-    fireEvent.click(slot.getByRole("button", { name: "Закрыть" }));
-    expect(slot.getByRole("dialog")).toBeTruthy();
-    fireEvent.keyDown(slot.getByRole("dialog"), { key: "Escape" });
-    expect(slot.getByRole("dialog")).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Свернуть" }));
+    expect(slot.getByRole("region", { name: "person@example.com" })).toBeTruthy();
+    fireEvent.keyDown(slot.getByRole("region", { name: "person@example.com" }), { key: "Escape" });
+    expect(slot.getByRole("region", { name: "person@example.com" })).toBeTruthy();
     await waitFor(() => expect(slot.rpcCalls.some(call => call.method === "account.setPolicy")).toBe(true));
-    fireEvent.click(slot.getByRole("button", { name: "Закрыть" }));
-    expect(slot.getByRole("dialog")).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Свернуть" }));
+    expect(slot.getByRole("region", { name: "person@example.com" })).toBeTruthy();
     await act(async () => { response.resolve({ account: selected }); });
     await slot.findByText("Настройки сохранены");
-    fireEvent.click(slot.getByRole("button", { name: "Закрыть" }));
-    await waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());
+    fireEvent.click(slot.getByRole("button", { name: "Свернуть" }));
+    await waitFor(() => expect(slot.queryByRole("region", { name: "person@example.com" })).toBeNull());
   });
 
   it("toggles one-shot draining in the account card", async () => {
@@ -539,13 +547,13 @@ describe("Account Pool settings", () => {
     await waitFor(() => expect(slot.queryByText("обновляю квоты…")).toBeNull());
   });
 
-  it("renders fixed quota slots with missing buckets as em dashes", async () => {
+  it("shows an unknown shared quota and omits unreported family windows", async () => {
     const slot = render();
     expect(await slot.findByText("person@example.com")).toBeTruthy();
     expect(slot.getByText("5Ч")).toBeTruthy();
     expect(slot.getByText("7Д")).toBeTruthy();
-    expect(slot.getByText("FABLE")).toBeTruthy();
-    expect(slot.getAllByText("—")).toHaveLength(2);
+    expect(slot.queryByText("FABLE")).toBeNull();
+    expect(slot.getByText("—")).toBeTruthy();
   });
 
   it("keeps the quota slots visible at mobile widths", async () => {
@@ -583,12 +591,12 @@ describe("Account Pool settings", () => {
     expect(await slot.findByText("pro@example.com")).toBeTruthy();
     expect(slot.getByText("7Д")).toBeTruthy();
     expect(slot.getByText("100%")).toBeTruthy();
-    expect(slot.queryByText("5Ч")).toBeNull();
+    expect(slot.getByText("5Ч")).toBeTruthy();
     expect(slot.queryByText("FABLE")).toBeNull();
     expect(
-      slot.getByText(
-        `Исчерпан · автосброс ${new Intl.DateTimeFormat("ru-RU", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "Europe/Moscow" }).format(blockingResetAt)} МСК`,
-      ),
+      slot.getByText(text => text.startsWith(
+        `Исчерпан · сброс ${new Intl.DateTimeFormat("ru-RU", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "Europe/Moscow" }).format(blockingResetAt)} МСК`,
+      )),
     ).toBeTruthy();
     fireEvent.click(
       await slot.findByRole("button", {
@@ -596,7 +604,7 @@ describe("Account Pool settings", () => {
       }),
     );
     expect(await slot.findByText("Неделя")).toBeTruthy();
-    expect(slot.queryByText("5 часов")).toBeNull();
+    expect(slot.getByText("5 часов")).toBeTruthy();
     expect(slot.queryByText("7 дней")).toBeNull();
   });
 
@@ -773,6 +781,39 @@ describe("Account Pool settings", () => {
     );
   });
 
+  it("opens the quota card between its row and the next account, and saves a rule", async () => {
+    const resetAt = Date.now() + (3 * 24 + 4) * 3_600_000;
+    const selected = account({
+      sevenDayUtilization: 0.52,
+      sevenDayResetAt: resetAt,
+      fiveHourUtilization: 1,
+      fiveHourResetAt: Date.now() + 3_600_000,
+      weeklySpending: { mode: "fixed", ceiling: 0.65, utilization: 0.52, resetAt, nextChangeAt: null },
+    });
+    const next = account({ id: "22222222-2222-4222-8222-222222222222", email: "next@example.com" });
+    const slot = render([selected, next], { "account.setWeeklyBudget": () => ({ account: selected }) });
+    const row = await slot.findByRole("button", { name: "Открыть person@example.com" });
+    expect(within(row).getByText(/80% от потолка/)).toBeTruthy();
+    expect(within(row).getByText(/через 3 д 4 ч/)).toBeTruthy();
+    const short = within(row).getByText("5Ч").parentElement!;
+    expect(within(short).getByText(/лимит достигнут/)).toBeTruthy();
+    fireEvent.click(row);
+    const card = slot.getByRole("region", { name: "person@example.com" });
+    expect(row.getAttribute("aria-controls")).toBe(card.id);
+    expect(card.parentElement?.contains(row)).toBe(true);
+    expect(card.compareDocumentPosition(slot.getByRole("button", { name: "Открыть next@example.com" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const rule = within(card).getByRole("region", { name: "Недельное правило" });
+    fireEvent.click(within(rule).getByRole("button", { name: "Изменить недельное правило" }));
+    fireEvent.change(within(rule).getByRole("combobox", { name: "Режим" }), { target: { value: "scheduled" } });
+    fireEvent.click(within(rule).getByRole("button", { name: "Сохранить недельное правило" }));
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({ method: "account.setWeeklyBudget", input: {
+      accountId: selected.id, expected: null,
+      change: { kind: "rule", rule: { mode: "scheduled", ceiling: 50, steps: [
+        { hoursBeforeReset: 48, ceiling: 65 }, { hoursBeforeReset: 24, ceiling: 80 },
+      ] } },
+    } }));
+  });
+
   it("marks the current account, reserve role, and live cap in each row", async () => {
     const work = account({
       id: "22222222-2222-4222-8222-222222222222",
@@ -833,6 +874,7 @@ describe("Account Pool settings", () => {
     const reserved = account({ role: "reserve" });
     const slot = render([reserved], { "account.setRole": () => ({ account: reserved }) });
     fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.click(slot.getByText(/Доступ и маршрут/, { selector: "summary" }));
     fireEvent.click(await slot.findByRole("button", { name: "Изменить роль" }));
     fireEvent.click(await slot.findByRole("button", { name: "Основной" }));
     fireEvent.click(slot.getByRole("button", { name: "Сохранить" }));
@@ -842,6 +884,7 @@ describe("Account Pool settings", () => {
   it("names the delete confirmation with the selected email", async () => {
     const slot = render([account({ label: "Shared Display Name", email: "selected@example.com" })]);
     fireEvent.click(await slot.findByRole("button", { name: "Открыть selected@example.com" }));
+    fireEvent.click(slot.getByText("Аккаунт и действия", { selector: "summary" }));
     fireEvent.pointerDown(slot.getByRole("button", { name: "Другие действия аккаунта" }), { button: 0, ctrlKey: false });
     fireEvent.click(await slot.findByRole("menuitem", { name: "Удалить" }));
     expect(await slot.findByRole("dialog", { name: "Удалить selected@example.com?" })).toBeTruthy();
@@ -853,6 +896,7 @@ describe("Account Pool settings", () => {
       "account.setRole": () => { throw new Error("Role update failed"); },
     });
     fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    fireEvent.click(slot.getByText(/Доступ и маршрут/, { selector: "summary" }));
     fireEvent.click(await slot.findByRole("button", { name: "Изменить роль" }));
     fireEvent.click(await slot.findByRole("button", { name: "Основной" }));
     fireEvent.click(slot.getByRole("button", { name: "Сохранить" }));
@@ -881,7 +925,7 @@ describe("Account Pool settings", () => {
     fireEvent.pointerDown(
       await slot.findByRole("button", { name: "Действия: person@example.com" }),
     );
-    fireEvent.click(await slot.findByText("Задать недельный потолок…"));
+    fireEvent.click(await slot.findByText("Задать плавный недельный потолок…"));
     fireEvent.change(await slot.findByLabelText("Потолок в начале недели"), {
       target: { value: "0.2" },
     });
@@ -1050,18 +1094,20 @@ describe("Account Pool settings", () => {
     fireEvent.click(
       await slot.findByRole("button", { name: "Открыть person@example.com" }),
     );
-    expect(await slot.findAllByText("Резерв")).toHaveLength(2);
+    fireEvent.click(slot.getByText(/Доступ и маршрут/, { selector: "summary" }));
+    fireEvent.click(slot.getByText("Диагностика", { selector: "summary" }));
+    expect(slot.getByText(/Резерв · приоритет/)).toBeTruthy();
     expect(slot.getByText("15% → 98% · сейчас 45%")).toBeTruthy();
     expect(slot.getByText("Запросы через пул")).toBeTruthy();
     expect(slot.getByText("12 успешных с момента начала учёта")).toBeTruthy();
-    expect(slot.getByText((text) => text.includes("сброс") && text.includes("МСК"))).toBeTruthy();
+    expect(slot.getAllByText((text) => text.includes("сброс") && text.includes("МСК"))).toBeTruthy();
     expect(
       slot.getByText(
         "Используется, только когда ни один основной аккаунт не подходит, или за 24 рабочих часов до его недельного сброса.",
       ),
     ).toBeTruthy();
     expect(
-      slot.getByText((text) => text.includes("пропуск при 45%")),
+      within(slot.getByRole("region", { name: "person@example.com" })).getByText((text) => text.includes("потолок 45%") && text.includes("от потолка")),
     ).toBeTruthy();
   });
 
@@ -1081,7 +1127,8 @@ describe("Account Pool settings", () => {
     })]);
     fireEvent.click(await slot.findByRole("button", { name: "Открыть codex@example.com" }));
     expect(slot.getByText("Сохранённые сбросы лимита использования")).toBeTruthy();
-    expect(slot.getByText(/Доступно: 2/)).toBeTruthy();
+    fireEvent.click(slot.getByText(/Сохранённые сбросы лимита использования/, { selector: "summary" }));
+    expect(slot.getAllByText(/Доступно: 2/)).toHaveLength(2);
     expect(slot.getByText(/действует до 5 октября 2030.*23:17:35 МСК/)).toBeTruthy();
     expect(slot.getByText(/действует до 23 октября 2030.*01:12:41 МСК/)).toBeTruthy();
   });
@@ -1096,7 +1143,8 @@ describe("Account Pool settings", () => {
       },
     })]);
     fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
-    expect(slot.getByText(/Доступно: 2/)).toBeTruthy();
+    fireEvent.click(slot.getByText(/Сохранённые сбросы лимита использования/, { selector: "summary" }));
+    expect(slot.getAllByText(/Доступно: 2/)).toHaveLength(2);
     expect(slot.getByText("Сброс лимитов Claude · сбросов: 2")).toBeTruthy();
     expect(slot.getByText(/22 апреля 2030.*12:17:35 МСК/)).toBeTruthy();
     expect(slot.getByText("Обновляет: 5 часов, недельный лимит")).toBeTruthy();
@@ -1146,6 +1194,7 @@ describe("Account Pool settings", () => {
     fireEvent.click(
       slot.getByRole("button", { name: "Открыть карточку: person@example.com" }),
     );
+    fireEvent.click(slot.getByText("Диагностика", { selector: "summary" }));
     expect(await slot.findByText("Почта")).toBeTruthy();
     expect(slot.getAllByText("person@example.com")).toHaveLength(3);
   });
