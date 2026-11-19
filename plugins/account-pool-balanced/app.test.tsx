@@ -228,6 +228,18 @@ describe("Account Pool settings", () => {
     expect(start).toHaveBeenCalledTimes(1);
     expect(slot.getByText(/Приостановит сессии и запросы автопилота/)).toBeTruthy();
   });
+  it("explains when the installed Pooler release is already current", async () => {
+    const operation = {
+      operationId: "11111111-1111-4111-8111-111111111111",
+      hostId: "host-one", terminalId: "terminal-one", startedAt: 1,
+      state: "succeeded", alreadyCurrent: true,
+    };
+    const start = vi.fn(async () => operation);
+    const slot = render([], {"update.start": start, "update.status": () => start.mock.calls.length ? operation : null});
+    fireEvent.click(await slot.findByRole("button", {name: "Обновить Pooler"}));
+    expect((await slot.findByText("Уже установлена последняя версия.")).getAttribute("role")).toBe("status");
+  });
+
   it('recovers update progress after reopening the interface',async()=>{
     const slot=render([],{"update.status":()=>({operationId:'11111111-1111-4111-8111-111111111111',hostId:'host-one',terminalId:'terminal-one',startedAt:1,state:'running'})});
     await slot.findByText('Подготовка и обновление выполняются. Работа возобновится автоматически.');
