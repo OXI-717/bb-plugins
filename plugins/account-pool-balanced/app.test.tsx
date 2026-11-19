@@ -1479,6 +1479,37 @@ describe("Account Pool settings", () => {
 
 
 describe("thread subscription indicator", () => {
+  it("hides the federation refusal and stops polling the remote thread", async () => {
+    vi.useFakeTimers();
+    try {
+      const ui = renderSlot(app.threadHeaderActions[0]!, {
+        threadId: "thr_remote", projectId: "proj_remote", isCompactViewport: true,
+      }, {
+        rpc: { "thread.account": async () => {
+          throw Object.assign(new Error("Plugin RPC is outside federation scope"), {
+            serverCode: "federation_plugin_not_federated", status: 409,
+          });
+        } },
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(ui.queryByRole("button", { name: /Подписка треда/ })).toBeNull();
+      expect(ui.rpcCalls).toEqual([{ method: "thread.account", input: { threadId: "thr_remote" } }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps showing unrelated pool check errors", async () => {
+    const ui = renderSlot(app.threadHeaderActions[0]!, {
+      threadId: "thr_local", projectId: "proj_local", isCompactViewport: false,
+    }, {
+      rpc: { "thread.account": () => {
+        throw Object.assign(new Error("Pool unavailable"), { status: 409 });
+      } },
+    });
+    expect(await ui.findByRole("button", { name: /Пул: ошибка проверки/ })).toBeTruthy();
+  });
+
   it("shows the confirmed account and availability, with details on click", async () => {
     const ui = renderSlot(app.threadHeaderActions[0]!, { threadId: "thr-test", projectId: "project", isCompactViewport: false }, {
       rpc: { "thread.account": () => ({ state: "observed", account: account({ eligible: false }), lastUsedAt: 1800000000000 }) },
