@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 3
     outputs:
       cursor: ${{ steps.select.outputs.cursor }}
+      session_tree: ${{ steps.select.outputs.session_tree }}
       matrix: ${{ steps.select.outputs.matrix }}
       check: ${{ steps.select.outputs.check }}
       upgrade: ${{ steps.select.outputs.upgrade }}
@@ -59,6 +60,7 @@ jobs:
       - name: Check plugin identity and release contract
         run: |
           node scripts/check-manifests.mjs
+          node scripts/check-vpn-contract.mjs
           node --test scripts/check-manifests.test.mjs
       - name: Check documentation links
         run: python3 scripts/check_doc_refs.py
@@ -82,11 +84,6 @@ jobs:
           node-version: ${{ (matrix.plugin == 'oxi-projects' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance') && '24' || '22' }}
           cache: npm
           cache-dependency-path: plugins/${{ matrix.plugin }}/package-lock.json
-      - name: Check publication manifests
-        if: matrix.run
-        run: |
-          node scripts/check-manifests.mjs
-          node scripts/check-vpn-contract.mjs
       - name: Install dependencies
         if: matrix.run
         working-directory: plugins/${{ matrix.plugin }}
@@ -120,24 +117,37 @@ jobs:
         run: git diff --exit-code
 
   session-tree:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.plan.outputs.session_tree == 'true'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: needs.plan.outputs.session_tree == 'true'
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: plugins/oxi-thread-list/package-lock.json
       - run: npm ci
+        if: needs.plan.outputs.session_tree == 'true'
         working-directory: plugins/oxi-thread-list
       - run: npm run typecheck
+        if: needs.plan.outputs.session_tree == 'true'
         working-directory: plugins/oxi-thread-list
       - run: npm test
+        if: needs.plan.outputs.session_tree == 'true'
         working-directory: plugins/oxi-thread-list
       - run: npm exec --yes --package=bb-app@0.49.0 -- bb plugin build .
+        if: needs.plan.outputs.session_tree == 'true'
         working-directory: plugins/oxi-thread-list
       - run: git diff --exit-code
+        if: needs.plan.outputs.session_tree == 'true'
+      - name: Report unchanged Session Tree
+        if: needs.plan.outputs.session_tree != 'true'
+        env:
+          SELECTED: ${{ needs.plan.outputs.session_tree }}
+        run: test "$SELECTED" = false
 
   upgrade-script:
     needs: plan
