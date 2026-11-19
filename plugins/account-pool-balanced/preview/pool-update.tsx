@@ -2,7 +2,7 @@
 import React from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import {readFileSync} from 'node:fs';
-import {PoolTechnicalDetails, PoolUpdateView} from '../pool-update-panel';
+import {PoolSelectedAccounts, PoolTechnicalDetails, PoolUpdateView} from '../pool-update-panel';
 (globalThis as typeof globalThis & {React:typeof React}).React=React;
 const base={operationId:'11111111-1111-4111-8111-111111111111',startedAt:1,hostId:'host-one',terminalId:'terminal-one'};
 const content=<main data-bb-plugin="account-pool-balanced" className="space-y-6">
@@ -12,6 +12,11 @@ const content=<main data-bb-plugin="account-pool-balanced" className="space-y-6"
   <PoolUpdateView operation={{...base,state:'succeeded',alreadyCurrent:true}} busy={false} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={{...base,state:'unknown'}} busy={true} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={null} busy={true} statusUnavailable error="Не удалось проверить состояние обновления. Запуск пока недоступен." onStart={()=>{}}/>
+  <PoolSelectedAccounts accounts={[
+    {provider:'Codex',account:'long-account-address@example.com'},
+    {provider:'Antigravity',account:'Выбирается для сеанса'},
+    {provider:'Claude',account:'Не выбран'},
+  ]}/>
   <PoolTechnicalDetails>
     Хаб принимает · 3 в работе · используют worker-1, worker-2, scheduler
   </PoolTechnicalDetails>
