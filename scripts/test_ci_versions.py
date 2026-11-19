@@ -43,7 +43,8 @@ class ReleaseVectorTests(unittest.TestCase):
             ui.write_text('// initial fixture\n')
             base = commit()
             git('tag', 'account-pool-balanced/v0.4.87')
-            for case in ['version', 'dependency', 'lock', 'inventory', 'unknown', 'deleted', 'malformed', 'duplicate', 'wrong-path', 'other-plugin', 'schema-type', 'field-type', 'other-metadata-only']:
+            git('tag', 'vpn-guard/v0.0.98')
+            for case in ['version', 'dependency', 'lock', 'inventory', 'unknown', 'deleted', 'malformed', 'duplicate', 'wrong-path', 'other-plugin', 'schema-type', 'field-type', 'other-metadata-only', 'accumulated-release']:
                 with self.subTest(case=case):
                     docs = copy.deepcopy(originals)
                     package, lock, market = (docs[p] for p in relative)
@@ -61,8 +62,9 @@ class ReleaseVectorTests(unittest.TestCase):
                         market['plugins'].pop()
                     if case == 'unknown':
                         package['newField'] = True
-                    if case == 'other-metadata-only':
-                        docs = copy.deepcopy(originals)
+                    if case in ('other-metadata-only', 'accumulated-release'):
+                        if case == 'other-metadata-only':
+                            docs = copy.deepcopy(originals)
                         docs[vpn_files[0]]['version'] = '0.0.99'
                         docs[vpn_files[1]]['version'] = '0.0.99'
                         docs[vpn_files[1]]['packages']['']['version'] = '0.0.99'
@@ -86,19 +88,23 @@ class ReleaseVectorTests(unittest.TestCase):
                         other.write_text('// fixture')
                     head = commit()
                     output = root / 'output'
-                    for event in (['pull_request', 'push'] if case == 'version' else ['pull_request']):
+                    tag = {'version': 'account-pool-balanced/v0.4.88',
+                           'accumulated-release': 'vpn-guard/v0.0.99'}.get(case)
+                    for event in (['pull_request', 'push'] if tag else ['pull_request']):
                         if event == 'push':
-                            git('tag', 'account-pool-balanced/v0.4.88')
+                            git('tag', tag)
                         output.write_text('')
                         subprocess.run(['python3', str(source / 'scripts/ci_plan.py')], cwd=root,
                                        env={**os.environ, 'EVENT_NAME': event, 'DIFF_BASE': base,
                                             'DIFF_HEAD': head, 'GITHUB_OUTPUT': str(output),
-                                            'GIT_REF': 'refs/tags/account-pool-balanced/v0.4.88'},
+                                            'GIT_REF': 'refs/tags/' + (tag or '')},
                                        check=True, capture_output=True, timeout=30)
                         plan = {k: json.loads(v) for k, v in (line.split('=', 1) for line in output.read_text().splitlines())}
                         expected = 1 if case == 'version' else 14
                         self.assertEqual(len([row for row in plan['matrix']['include'] if row['run']]), expected)
                         self.assertEqual(plan['upgrade_mac'], case != 'version')
+                        self.assertEqual(plan['cursor'], case not in
+                                         {'version', 'other-plugin', 'other-metadata-only', 'accumulated-release'})
                         if case == 'version':
                             self.assertEqual(len(plan['matrix']['include']), 4)
                             self.assertEqual(plan['matrix']['include'][0]['os'], 'ubuntu-latest')

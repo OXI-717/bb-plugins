@@ -9,7 +9,8 @@ def validate(needs):
             raise ValueError(f'Required check did not succeed: {name}')
     selected = needs['plan']['outputs']
     for name, output in [('check', 'check'), ('upgrade-script', 'upgrade'),
-                         ('auto-archive', 'archive'), ('oxi-op', 'op')]:
+                         ('auto-archive', 'archive'), ('oxi-op', 'op'),
+                         ('cursor-gateway', 'cursor')]:
         value = selected[output]
         if value not in ('true', 'false'):
             raise ValueError(f'Invalid selection: {output}')

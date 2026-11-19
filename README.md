@@ -99,7 +99,7 @@ npm test -- src/balancer.test.ts src/store.test.ts src/server.test.ts app.test.t
 bb plugin build .
 ```
 
-CI runs all plugin tests, typechecks and builds on standard GitHub-hosted runners. The repository also checks manifests and scans Git history for secrets. Accounts or live subscriptions are not required for CI.
+CI runs all plugin tests, typechecks and builds on standard GitHub-hosted runners. The repository also checks manifests and scans Git history for secrets. Accounts or live subscriptions are not required for CI. See the [plugin coverage and event rules](docs/ci-selection.md).
 
 ## License
 
