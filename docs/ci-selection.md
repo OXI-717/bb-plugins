@@ -9,20 +9,19 @@ build with the published BB CLI. Linux means `ubuntu-latest`. Mac means
 | `account-pool-balanced` | `check` | Linux, plus Mac for platform-sensitive changes | Pool files select the package suite. `upgrade-script` rehearses upgrade and restore and tests the Claude host diagnostics. `cursor-gateway` checks the Python launcher on Linux and Mac. See selection rules below. |
 | `automation-catalog` | `check` | Linux and Mac | Catalog files select the package suite and Python collector tests. |
 | `vpn-guard` | `check` | Linux and Mac | Guard files select the package suite. Shared VPN evidence selects the full matrix. |
-| `oxi-projects` | `check` | Linux and Mac | Projects files select package tests and additional Vitest UI and integration tests. Visual acceptance is separate. |
+| `oxi-projects` | `check` | Linux and Mac | Projects files select Node tests in `test/` and the separate Vitest UI and integration suite. Vitest excludes `test/`. Visual acceptance is separate. |
 | `model-connections` | `check` | Linux and Mac | Model Connections files select the package suite. |
 | `federation-pilot` | `check` | Linux and Mac | Federation files select the policy and Node integration tests in the package suite. |
 | `pool-maintenance` | `check` | Linux and Mac | Pool Maintenance files select the package suite. |
 | `auto-archive` | `auto-archive` | Linux | Auto Archive files select the package suite. No hosted Mac job. |
 | `oxi-op` | `oxi-op` | Linux and Mac | OP files and the six Pool modules loaded by its native-task fixture select the package suite. |
-| `oxi-thread-list` | `session-tree` | Linux | Runs on every CI event. No hosted Mac job or Session Tree job in Extended compatibility. |
+| `oxi-thread-list` | `session-tree` | Linux | Runs for Session Tree changes and full plans. Otherwise its job reports an unchanged plugin. No hosted Mac job or Session Tree job in Extended compatibility. |
 
 `plan`, `public-hygiene`, `secrets`, `session-tree` and `release-gate` always
 run in CI. Linux and Mac `check` contexts for Pool and Catalog always exist
 for branch protection. Their steps run only when selected. Publication hygiene
-checks tracked files, manifest identity and release contracts, and doc links.
-Secrets scans all fetched history. Each active `check` row also checks the
-publication manifests and VPN contract. The separate `Plugin tracking migration`
+checks tracked files, manifest identity, the VPN contract, release contracts and
+doc links once per workflow. Secrets scans all fetched history. The separate `Plugin tracking migration`
 workflow runs Linux tests on PRs touching its script, tests or workflow, and on
 manual request.
 
@@ -43,21 +42,24 @@ full plan. Invalid PR ranges fail planning and therefore the release gate.
 
 For Pool, UI/CSS and an explicit list of portable modules use Linux when CI
 selects by path. Browser, host, native, launcher, dependency and other backend
-changes keep Mac. Pool changes generally also select the upgrade rehearsal on
-the corresponding platforms. The Cursor wrapper remains covered by the Pool
-package check and selects the separate gateway job without the rehearsal.
+changes keep Mac. The upgrade rehearsal covers the upgrade scripts, Pool
+backend and package changes, the update panel, and Pool releases. UI and CSS
+changes elsewhere use the package suite. The rehearsal exercises the updater
+against synthetic commands and a synthetic state database. The Cursor wrapper
+selects the package and gateway suites.
 
 ## Cursor and release metadata
 
 `cursor-gateway` imports `plugins/account-pool-balanced/scripts/cursor-route.py`
 from `scripts/test_cursor_route.py`. The suite uses Python's standard library,
 a synthetic `cursor-agent` and a localhost HTTP server. It needs no Cursor
-account, BB process or live provider. Its selection covers the harness, Python
-files in Pool's scripts directory (including future local helpers), Cursor-named
-Pool source files, and the Pool server and standalone entry points implementing
-the HTTP contract. The TypeScript Cursor RPC tests still run in the Pool
-package suite. The standalone AGY Python helper tests have no hosted job.
-Changes limited to known upgrade tooling leave Cursor out.
+account, BB process or live provider. Run it for the wrapper, its harness and
+other Python files in Pool’s scripts directory that could be shared helpers.
+The known Claude host diagnostics and upgrade tooling have their own checks.
+Run the Pool package suite for TypeScript changes, including the Cursor HTTP
+contract in both BB and standalone mode. Unknown paths, shared code and changes
+to the planner or workflows retain the gateway suite. Manual full checks
+retain both platforms. The standalone AGY Python helper tests have no hosted job.
 
 Cursor can skip a release range containing unrelated plugin changes and
 coherent version bumps. A real Cursor input, relevant CI file, shared or
@@ -77,3 +79,6 @@ See [CI workflow](../.github/workflows/ci.yml) and
 
 Run `python3 -m unittest discover -s scripts -p 'test_ci_*.py' -v` to check
 routing with synthetic Git histories and validate the inventory in this table.
+Run `python3 scripts/ci_mutations.py` when reviewing changes to selection,
+the release gate or gateway behavior. It injects representative regressions
+and verifies that their targeted tests fail with assertions.

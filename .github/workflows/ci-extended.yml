@@ -29,6 +29,7 @@ jobs:
       - name: Check plugin identity and release contract
         run: |
           node scripts/check-manifests.mjs
+          node scripts/check-vpn-contract.mjs
           node --test scripts/check-manifests.test.mjs
       - name: Check documentation links
         run: python3 scripts/check_doc_refs.py
@@ -50,10 +51,6 @@ jobs:
           node-version: ${{ (matrix.plugin == 'oxi-projects' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance') && '24' || '22' }}
           cache: npm
           cache-dependency-path: plugins/${{ matrix.plugin }}/package-lock.json
-      - name: Check publication manifests
-        run: |
-          node scripts/check-manifests.mjs
-          node scripts/check-vpn-contract.mjs
       - name: Install dependencies
         working-directory: plugins/${{ matrix.plugin }}
         run: npm ci ${{ matrix.plugin == 'pool-maintenance' && '--legacy-peer-deps' || '' }}

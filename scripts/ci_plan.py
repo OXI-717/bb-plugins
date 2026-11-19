@@ -19,8 +19,12 @@ OP_POOL_MODULES = {'native-sessions', 'native-probe-wire', 'native-accounts',
 POOL = 'plugins/account-pool-balanced/'
 CURSOR_WRAPPER = POOL + 'scripts/cursor-route.py'
 CURSOR_TEST = 'scripts/test_cursor_route.py'
-# Server-side counterparts of the Python gateway's HTTP contract.
-CURSOR_ENTRYPOINTS = {POOL + 'src/server.ts', POOL + 'src/standalone/runtime.ts'}
+# The Python harness runs the launcher against a fake HTTP server.
+# BB and standalone Cursor HTTP contracts are exercised by the Pool package.
+CURSOR_UNRELATED_PYTHON = {
+    POOL + 'scripts/claude-host-doctor.py',
+    POOL + 'scripts/test_claude_host_doctor.py',
+}
 UPGRADE_INPUTS = {'scripts/upgrade-pool.sh', 'scripts/upgrade-protection.sh',
                   'scripts/upgrade_pool.py', 'scripts/upgrade_pool_sandbox.py',
                   'scripts/pool_session_pause.py', 'scripts/pool_candidate_preflight.py',
@@ -35,11 +39,10 @@ def cursor_required(paths, version_paths=()):
     for path in paths:
         if path in version_paths:
             continue
-        if path in CURSOR_ENTRYPOINTS or path == CURSOR_TEST:
+        if path == CURSOR_TEST:
             return True
-        if path.startswith(POOL + 'scripts/') and path.endswith('.py'):
-            return True
-        if path.startswith(POOL + 'src/') and Path(path).name.startswith(('cursor-', 'cursor_')):
+        if (path.startswith(POOL + 'scripts/') and path.endswith('.py')
+                and path not in CURSOR_UNRELATED_PYTHON):
             return True
         if path in UPGRADE_INPUTS or re.fullmatch(r'scripts/test_upgrade_[^/]+\.py', path):
             continue
@@ -74,7 +77,7 @@ def plan(paths, full=False, version_plugin=None, version_paths=()):
     mac = set()
     upgrade = False
     upgrade_mac = False
-    op = archive = False
+    op = archive = session_tree = False
     for path in paths:
         if path == CURSOR_TEST:
             continue
@@ -90,21 +93,23 @@ def plan(paths, full=False, version_plugin=None, version_paths=()):
             selected.add(plugin)
             if plugin != 'account-pool-balanced' or mac_required(path):
                 mac.add(plugin)
-            if plugin == 'account-pool-balanced' and path != CURSOR_WRAPPER:
-                upgrade = True
-                upgrade_mac |= mac_required(path)
-                op |= path in {'plugins/account-pool-balanced/src/' + name + '.ts'
-                               for name in OP_POOL_MODULES}
+            if plugin == 'account-pool-balanced':
+                if path != CURSOR_WRAPPER and (not path.endswith(('.css', '.tsx')) or path == POOL + 'pool-update-panel.tsx'):
+                    upgrade = True
+                    upgrade_mac |= mac_required(path)
+                op |= path in {POOL + 'src/' + name + '.ts' for name in OP_POOL_MODULES}
         elif path.startswith('plugins/oxi-op/'):
             op = True
         elif path.startswith('plugins/auto-archive/'):
             archive = True
+        elif path.startswith('plugins/oxi-thread-list/'):
+            session_tree = True
         else:
             # Includes workflow/planner/shared/lockfile changes and deleted paths.
             full = True
     if full:
         selected, mac = set(PLUGINS), set(PLUGINS)
-        upgrade = upgrade_mac = op = archive = True
+        upgrade = upgrade_mac = op = archive = session_tree = True
     # Required branch-protection contexts must exist even for docs-only PRs.
     # Keep selection separate so these placeholder rows do no expensive work.
     matrix = [{'os': osname, 'plugin': plugin,
@@ -115,7 +120,7 @@ def plan(paths, full=False, version_plugin=None, version_paths=()):
               (plugin in selected and (osname == 'ubuntu-latest' or plugin in mac))]
     return {'matrix': {'include': matrix}, 'check': bool(matrix),
             'upgrade': upgrade, 'upgrade_mac': upgrade_mac, 'op': op, 'archive': archive,
-            'cursor': cursor}
+            'cursor': cursor, 'session_tree': session_tree}
 
 
 def changed_paths(base, head):
