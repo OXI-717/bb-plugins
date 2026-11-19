@@ -208,3 +208,22 @@ route (`sudo -n crontab -u root -l`, or direct crontab when already root).
 It never prompts for a password, changes sudo policy or exports command bodies.
 A denied route remains unknown; a confirmed absent crontab is a successful empty
 inventory. Root and current-user scopes stay distinct.
+
+One-off inventory delivery requires the matching catalog backend (0.1.22 or
+newer) before the new publisher scripts: older backends reject the new optional
+`executionId` field. Release the reviewed package under its immutable
+`automation-catalog/v0.1.22` tag and update the plugin through `bb plugin update
+ automation-catalog`. Deploy `scripts/catalog_inventory.py` and
+`scripts/catalog_compliance.py` together from that same reviewed release into the
+existing publisher script directory. Keep its configuration, audit-state file,
+lock and timer unchanged. The remote inventory transport embeds the updated
+inventory module; no remote service installation is needed. No root runner or
+provider upgrade is required. To roll back, restore the previous publisher scripts
+before downgrading the plugin; retain the state file, card keys and stored runs.
+
+A missed running observation becomes unknown rather than a current running job.
+An already observed terminal result remains pending under the event budget until
+published, including when the service disappears or the source loses access.
+Missing metadata retains the last positively established classification and exact
+terminal result; affirmative properties identifying a persistent/triggered unit
+restore registry checking. Required registry jobs always retain precedence.

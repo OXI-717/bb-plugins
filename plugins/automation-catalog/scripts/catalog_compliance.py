@@ -91,7 +91,14 @@ def evaluate(config, inventories, sources, now, *, catalog_tasks=None):
                            and e.get('reason') and (row['unit'] in e.get('units', []) or any(row['unit'].startswith(p) for p in e.get('prefixes', [])))
                            for e in config.get('exclusions', []))
             if not excluded:
-                add('unregistered', ident, 'Observed scheduler entry has no registry record')
+                data = row.get('systemd', {})
+                disproved = (isinstance(data, dict) and data.get('Id') == row['unit']
+                             and data.get('LoadState') == 'loaded' and (
+                                 data.get('Transient') == 'no' or data.get('Restart') in (
+                                     'always', 'on-success', 'on-failure', 'on-abnormal', 'on-watchdog', 'on-abort')
+                                 or isinstance(data.get('TriggeredBy'), str) and bool(data['TriggeredBy'])))
+                add('unregistered', ident, 'Observed scheduler entry has no registry record',
+                    classificationUnknown=not disproved)
     for expected in config.get('sources', []):
         source = sources.get(expected)
         if not fresh_source(source, now):
@@ -145,6 +152,9 @@ def snapshot(config, findings, previous, now):
     for key in keys:
         item = findings.get(key)
         old = previous.get(key)
+        if (item and item['kind'] == 'unregistered' and item.get('classificationUnknown')
+                and old and old['finding']['kind'] == 'execution'):
+            item = dict(old['finding'], unresolved=True)
         if item is None and old:
             if old['finding']['kind'] == 'execution':
                 # Collection by systemd is not evidence of recovery or success.
@@ -173,24 +183,25 @@ def snapshot(config, findings, previous, now):
             task.update(scheduler='systemd', executor=item['unit'], scheduleKind='once',
                         schedule='Одноразовый процесс · без собственного расписания',
                         executionId='systemd:' + execution['invocation'],
-                        state={'running': 'active', 'succeeded': 'paused', 'failed': 'failed'}.get(status, 'unknown'),
+                        state=('unknown' if item.get('unresolved') and status == 'running' else
+                               {'running': 'active', 'succeeded': 'paused', 'failed': 'failed'}.get(status, 'unknown')),
                         history='available', owner=config['owner'],
                         description=(item['scope'] + ' systemd; Transient=yes; Restart=no; TriggeredBy=empty. '
                                      'InvocationID=' + execution['invocation'] + '. '
                                      'Only the service result is known; provider/session attribution is unverified. '
-                                     + ('Retained evidence; execution no longer confirmed in live inventory.' if item.get('unresolved') else '')))
+                                     + ('Retained evidence; current observation unconfirmed in live inventory.' if item.get('unresolved') else '')))
             tasks.append(task)
             # A delayed event must be retried under the existing publication budget.
             event = {k: execution[k] for k in ('invocation', 'status', 'exitCode', 'finishedAt')}
-            if not item.get('unresolved') and (not old or old.get('executionEvent') != event) and budget > 0:
+            saved = dict(old or {}, active=True, lastEvent=(old or {}).get('lastEvent', now), finding=item)
+            if (not old or old.get('executionEvent') != event) and budget > 0:
                 runs.append(dict(taskId=key, host=item['host'], id='systemd:' + execution['invocation'],
                                  observedAt=now, evidence='execution',
                                  **{k: execution[k] for k in ('startedAt', 'finishedAt', 'status', 'exitCode')},
                                  summary='One-off systemd service execution. Exit status is not a session verdict.'))
-                state[key] = dict(active=True, lastEvent=now, finding=item, executionEvent=event)
+                saved.update(lastEvent=now, executionEvent=event)
                 budget -= 1
-            elif old:
-                state[key] = dict(old, finding=item)
+            state[key] = saved
             continue
         task = task_base(key, 'OXI · ' + item['kind'] + ' · ' + item.get('host', config['host']), item.get('host', config['host']))
         task.update(scheduler='inventory-audit', state='blocked', history='available', owner=config['owner'],

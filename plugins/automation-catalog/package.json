@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-automation-catalog",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "type": "module",
   "engines": {
     "bb": ">=0.43.3",

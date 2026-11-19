@@ -19,6 +19,7 @@ import {
   duration,
   scopeLabel,
   sourceLabel,
+  lastRunLabel,
   runLabel,
   automationStateLabel,
 } from "./lib/operations";
@@ -92,7 +93,7 @@ export function CatalogDetailContent({ detail, children, present = createPresent
           <dt className="text-xs text-muted-foreground">Последний сохранённый результат</dt>
           <dd className="mt-1">
             {task.lastRun
-              ? runLabel(task.lastRun.status)
+              ? lastRunLabel(task)
               : task.history === "not-connected" ? "История не подключена" : "Данных о запусках нет"}
           </dd>
           {task.lastRun && (

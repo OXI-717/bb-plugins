@@ -336,3 +336,25 @@ it("keeps historical sources in the archive while warning about a stale live sou
   expect(slot.getAllByText("Архив источника").length).toBeGreaterThan(0);
   slot.lifecycle.unmount();
 });
+
+describe("retained one-off observations", () => {
+  it("keeps a disappeared running observation out of the running view", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const retained = { ...task, name: "Одноразовое исполнение · sample.service", scheduler: "systemd", scheduleKind: "once", executionId: "systemd:invocation-example", state: "unknown", schedule: "Одноразовый процесс · без собственного расписания", lastRun: { ...task.lastRun, status: "running", finishedAt: null, exitCode: null } };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+      catalog_list: () => ({ tasks: [retained], sources: [source] }),
+    } });
+    fireEvent.click(await slot.findByRole("button", { name: /Все записи/ }));
+    expect(await slot.findByRole("button", { name: retained.name })).toBeTruthy();
+    expect(slot.getAllByText("Состояние не подтверждено").length).toBeGreaterThan(0);
+    expect(slot.getAllByText(/Ранее наблюдался · текущий исход неизвестен/).length).toBeGreaterThan(0);
+    if (process.env.CATALOG_VISUAL_DIR) {
+      const fs = await import("node:fs/promises");
+      await fs.mkdir(process.env.CATALOG_VISUAL_DIR, { recursive: true });
+      const css = await fs.readFile(`${process.cwd()}/dist/app.css`, "utf8");
+      await fs.writeFile(`${process.env.CATALOG_VISUAL_DIR}/unknown.html`, `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style><body>${document.body.innerHTML}</body></html>`);
+    }
+    fireEvent.click(slot.getByRole("button", { name: /Выполняются \/ в очереди/ }));
+    expect(slot.queryByRole("button", { name: retained.name })).toBeNull();
+  });
+});

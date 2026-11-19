@@ -12,7 +12,8 @@ import time
 
 
 def command(argv):
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=25,
+    result = subprocess.run(argv, capture_output=True, text=True,
+                            timeout=3 if argv[0] == 'systemctl' and 'show' in argv else 25,
                             env=dict(os.environ, TZ='UTC', LC_ALL='C'))
     if result.returncode:
         raise RuntimeError('inventory access unavailable')
@@ -51,11 +52,13 @@ SYSTEMD_FIELDS = ('Id', 'LoadState', 'Transient', 'Restart', 'TriggeredBy', 'Inv
                   'ExecMainStartTimestamp', 'ExecMainExitTimestamp')
 
 
-def systemd_metadata(run, prefix, names):
+def systemd_metadata(run, prefix, names, deadline):
     """Bounded allowlisted properties; never export argv, environment or journal text."""
     result = {}
     names = sorted(n for n in names if n.endswith('.service'))
     for offset in range(0, len(names), 64):
+        if time.monotonic() >= deadline:
+            break  # Remaining identities stay unclassified, never disappear.
         batch = names[offset:offset + 64]
         try:
             raw = run(prefix + ['show', *batch, '--no-pager', '--property=' + ','.join(SYSTEMD_FIELDS)])
@@ -127,6 +130,7 @@ def discover(run=command, system=None, home=None, etc=None):
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
             coverage.append(dict(scheduler=scheduler, scope=scope, ok=False))
     if system == 'Linux':
+        metadata_deadline = time.monotonic() + 8
         for scope in ('system', 'user'):
             prefix = ['systemctl'] + (['--user'] if scope == 'user' else [])
             runtime_names = set()
@@ -147,7 +151,7 @@ def discover(run=command, system=None, home=None, etc=None):
                 return names
             probe('systemd', scope, read)
             rows = [r for r in observations if r['scheduler'] == 'systemd' and r['scope'] == scope]
-            metadata = systemd_metadata(run, prefix, runtime_names)
+            metadata = systemd_metadata(run, prefix, runtime_names, metadata_deadline)
             for row in rows:
                 if row['unit'] in metadata:
                     row['systemd'] = metadata[row['unit']]
