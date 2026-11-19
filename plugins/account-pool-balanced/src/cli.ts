@@ -57,7 +57,7 @@ const HELP = [
   "  bb pool account add --provider codex --import [--label <text>] [--priority <n>]",
   "  bb pool account add --provider claude --draft --email <email> [--label <name>]",
   "  bb pool account add --provider claude --login",
-  "  bb pool account add --provider codex --login",
+  "  bb pool account add --provider codex --login [--account-id <id>]",
   "  bb pool account add --provider grok --login",
   "  bb pool account login-poll --session <id> [--provider codex|grok]",
   "  printf '%s\\n' \"$CLAUDE_AUTH_CODE\" | bb pool account login-complete --session <id> --code-stdin",
@@ -401,7 +401,7 @@ export function registerPoolCli(
         summary:
           "Sign in to Claude, Codex, or Grok; import supported credentials; or add an API key",
         usage:
-          "bb pool account add --provider <claude|codex|grok> --login\nbb pool account add --provider <claude|codex> --import [--label <text>] [--priority <n>]\nbb pool account add --provider <claude|kimi|zai|opencode-go|cursor|devin|grok> --api-key-stdin [--label <text>] [--priority <n>]\nUnsafe compatibility form: bb pool account add --provider claude --api-key <key> [--label <text>] [--priority <n>]",
+          "bb pool account add --provider <claude|codex|grok> --login\nbb pool account add --provider codex --login --account-id <id>\nbb pool account add --provider <claude|codex> --import [--label <text>] [--priority <n>]\nbb pool account add --provider <claude|kimi|zai|opencode-go|cursor|devin|grok> --api-key-stdin [--label <text>] [--priority <n>]\nUnsafe compatibility form: bb pool account add --provider claude --api-key <key> [--label <text>] [--priority <n>]",
       },
       {
         name: "account-login-poll",
@@ -623,13 +623,17 @@ export function registerPoolCli(
           const flags = parseFlags(
             argv.slice(2),
             ["import", "api-key-stdin", "login", "draft"],
-            ["provider", "api-key", "label", "priority", "email"],
+            ["provider", "api-key", "label", "priority", "email", "account-id"],
           );
           const draft=flags.booleans.has("draft");
           const imported = flags.booleans.has("import");
           const apiKeyStdin = flags.booleans.has("api-key-stdin");
           const loginRequested = flags.booleans.has("login");
           const apiKey = flags.values.get("api-key");
+          const accountId = flags.values.get("account-id");
+          if (accountId !== undefined && (!loginRequested || flags.values.get("provider") !== "codex")) {
+            throw new Error("--account-id requires --provider codex --login.");
+          }
           const sourceCount =
             Number(draft) + Number(imported) +
             Number(apiKeyStdin) +
@@ -670,7 +674,7 @@ export function registerPoolCli(
               };
             }
             if (provider === "codex") {
-              const started = await codexLogin.start();
+              const started = await codexLogin.start(accountId === undefined ? undefined : accountIdInputSchema.parse({ id: accountId }).id);
               return {
                 exitCode: 0,
                 stdout: `${[

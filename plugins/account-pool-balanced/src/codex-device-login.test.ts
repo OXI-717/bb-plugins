@@ -472,3 +472,31 @@ describe("Codex device login", () => {
     expect(logged).toEqual([]);
   });
 });
+
+it("keeps the selected account transport and target through code, poll and token exchange", async () => {
+  let now = Date.now();
+  const accountId = "fixture-selected-account";
+  const idToken = "fixture." + Buffer.from(JSON.stringify({chatgpt_account_id: "fixture-subscription"})).toString("base64url") + ".signature";
+  const direct = vi.fn<typeof fetch>();
+  const routed = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({device_auth_id: "fixture", user_code: "TEST", interval: 1}))
+    .mockResolvedValueOnce(Response.json({authorization_code: "fixture", code_challenge: "challenge", code_verifier: "verifier"}))
+    .mockResolvedValueOnce(Response.json({access_token: "fixture-access", refresh_token: "fixture-refresh", id_token: idToken}));
+  const accountFetch = vi.fn(async () => routed);
+  const addAccount = vi.fn();
+  const login = new CodexDeviceLogin({fetch: direct, accountFetch, now: () => now, addAccount});
+
+  try {
+    const {sessionId} = await login.start(accountId);
+    now += 1000;
+    expect((await login.poll({sessionId})).status).toBe("complete");
+    expect(accountFetch).toHaveBeenCalledExactlyOnceWith(accountId);
+    expect(routed.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      "/api/accounts/deviceauth/usercode", "/api/accounts/deviceauth/token", "/oauth/token",
+    ]);
+    expect(direct).not.toHaveBeenCalled();
+    expect(addAccount).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({accountId: "fixture-subscription"}), accountId);
+  } finally {
+    login.dispose();
+  }
+});

@@ -7869,7 +7869,7 @@ describe('project subscription routing', () => {
     const edited=await fixture.host.harness.behavior.runCli(['account','projects',fixture.account.id,'off']);expect(edited.exitCode).toBe(0);const all=await request(unknown);expect(all.status).toBe(200);await all.text();
   });
 });
-it('retains authenticated project identity if a client is revoked while reading its body',async()=>{
+it('denies a project-bound client revoked while reading its body',async()=>{
  const attempts:Array<string|null>=[];
  const fixture=await createFixture({upstreamUrl:'https://upstream.example',apiKey:'sk-global',options:{fetch:async(_input,init)=>{attempts.push(new Headers(init?.headers).get('x-api-key'));return Response.json({});}}});
  const assigned=await addApiAccount(fixture,'sk-assigned',200);
@@ -7884,7 +7884,7 @@ it('retains authenticated project identity if a client is revoked while reading 
  });
  try {
   const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(token),body:'{}'});
-  expect(response.status).toBe(200);await response.text();expect(attempts).toEqual(['sk-assigned']);
+  expect(response.status).toBe(403);await response.text();expect(attempts).toEqual([]);
   const revoked=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(token),body:'{}'});expect(revoked.status).toBe(401);
  }finally{body.mockRestore();}
 });
@@ -9183,4 +9183,76 @@ it('exposes route and history capacity through pool status',async()=>{
  const status=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));
  expect(status.routeTracking).toMatchObject({decisions:0,maxDecisions:4096,maxBytes:240*1024,retentionMs:30*86400000});
  expect(status.historyCapacity).toEqual({rows:0,maxRows:65536,maxBytes:64*1024*1024});
+});
+
+describe('Grok device login admission', () => {
+  it.each(['guard', 'manual block', 'maintenance', 'shutdown'] as const)('refuses %s before launching the CLI', async reason => {
+    const fixture = await createFixture({
+      upstreamUrl: 'https://upstream.example',
+      options: {
+        fetch: async () => Response.json({}),
+        grokLoginCommand: process.execPath,
+        grokLoginArgs: ['-e', 'console.log("https://login.example code: TEST")'],
+      },
+    });
+    const { behavior, sdk } = fixture.host.harness;
+    let message: string;
+    if (reason === 'maintenance') {
+      const result = await behavior.runCli(['maintenance', 'acquire', '--owner', '11111111-1111-4111-8111-111111111111', '--json']);
+      expect(result.exitCode).toBe(0);
+      message = 'paused for maintenance';
+    } else if (reason === 'shutdown') {
+      fixture.service.controller.abort();
+      await fixture.service.done;
+      message = 'not accepting requests';
+    } else {
+      sdk.stub('system.config', async () => ({primaryHostId: 'pool-host'}));
+      sdk.stub('plugins.callRpc', async () => ({
+        schema: 'bb-vpn-guard/network-decision/2', hostId: 'pool-host',
+        allowed: false, reason: reason === 'guard' ? 'vpn_unavailable' : 'manual_block',
+      }));
+      await behavior.callRpc('config.set', {vpnGuardEnabled: true});
+      message = 'VPN_GUARD_BLOCKED';
+    }
+    await expect(behavior.callRpc('grokLogin.start', null)).rejects.toThrow(message);
+  });
+});
+
+it('uses the selected Codex account proxy for login and refuses a missing route', async () => {
+  const outbound = vi.fn(async () => Response.json({
+    device_auth_id: 'fixture-device', user_code: 'TEST-CODE', interval: 10,
+  }));
+  const fixture = await createFixture({
+    provider: 'codex', source: 'import', upstreamUrl: 'https://upstream.example',
+    options: {
+      fetch: outbound, codexAuthBaseUrl: 'https://login.example',
+      importCodexCredentials: async () => ({
+        accessToken: 'fixture-access', refreshToken: 'fixture-refresh', idToken: null,
+        accountId: 'fixture-account', email: null, expiresAt: Date.now() + 3600000,
+      }),
+    },
+  });
+  const { behavior, sdk } = fixture.host.harness;
+  sdk.stub('system.config', async () => ({primaryHostId: 'host-one'}));
+  let connects = 0;
+  const proxy = http.createServer();
+  proxy.on('connect', (_request, socket) => {
+    connects++;
+    socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+  });
+  await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  cleanups.push(() => new Promise<void>((resolve, reject) => proxy.close(error => error ? reject(error) : resolve())));
+  const address = proxy.address();
+  if (!address || typeof address === 'string') throw new Error('Proxy did not bind');
+  await behavior.callRpc('egress.proxy', {accountId: fixture.account.id, url: `http://127.0.0.1:${address.port}`});
+  outbound.mockClear();
+  const start = () => behavior.callRpc('codexLogin.start', {accountId: fixture.account.id});
+  await expect(start()).rejects.toThrow('Assigned account egress unavailable');
+  expect(connects).toBe(1);
+  sdk.stub('system.config', async () => ({primaryHostId: 'other-host'}));
+  await expect(start()).rejects.toThrow('Assigned account egress unavailable');
+  expect(connects).toBe(1);
+  expect(outbound).not.toHaveBeenCalled();
+  await expect(behavior.callRpc('codexLogin.start', null)).resolves.toMatchObject({userCode: 'TEST-CODE'});
+  expect(outbound).toHaveBeenCalledTimes(1);
 });

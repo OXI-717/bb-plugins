@@ -450,3 +450,32 @@ it('proxy scope refuses proxy transport failure without replay',async()=>{
   expect((await f.request()).status).toBe(503);
   expect(f.transport).toHaveBeenCalledTimes(1);expect(f.seen).toEqual([]);expect(f.fallback).not.toHaveBeenCalled();
 });
+
+it.each([false, true])('refuses a revoked legacy key at dispatch (assigned route: %s)', async assigned => {
+  const f = await fixture();
+  if (!assigned) f.route({assigned: false, profile: null, fetch: () => undefined});
+  let revoked = false;
+  f.onGuard(async () => {
+    if (revoked) return;
+    revoked = true;
+    await f.tokens.remove('external_fixture_legacy');
+  });
+  expect((await f.request(f.legacy)).status).toBe(403);
+  expect(f.seen).toEqual([]);
+  expect(f.fallback).not.toHaveBeenCalled();
+});
+
+it('does not retry or refresh upstream after revoking a legacy client during its first attempt', async () => {
+  const f = await fixture('codex');
+  f.status(401);
+  const send = f.transport.getMockImplementation()!;
+  f.transport.mockImplementationOnce(async (...args) => {
+    const response = await send(...args);
+    await f.tokens.remove('external_fixture_legacy');
+    return response;
+  });
+  expect((await f.request(f.legacy)).status).not.toBe(200);
+  expect(f.transport).toHaveBeenCalledTimes(1);
+  expect(f.refreshes).toEqual([]);
+  expect(f.fallback).not.toHaveBeenCalled();
+});

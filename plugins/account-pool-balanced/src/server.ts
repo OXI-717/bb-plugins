@@ -11,7 +11,7 @@ import {PoolMaintenance} from './maintenance.js';
 import {PoolUpdate} from './pool-update.js';
 import {serverGuardRead,runGuardProbe,type GuardServerAccess} from './guard-server.js';
 import {registerNativeUnlockRpc} from "./native-unlock-rpc.js";
-import { AccountEgress } from "./account-egress.js";
+import { AccountEgress, EgressUnavailable } from "./account-egress.js";
 import type { HttpScopeEnforcementSource } from './http-scope-acceptance.js';
 import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
 import {NativeSessions,NativeSessionError,nativeHttp} from './native-sessions.js';
@@ -347,11 +347,28 @@ export function createAccountPoolPlugin(
     },onModels:registerAgyModels,now});
     const codexLogin = new CodexDeviceLogin({
       fetch: hub.outboundFetch("codex"),
+      accountFetch: async accountId => {
+        const account = await accounts.get(accountId);
+        if (account?.provider !== "codex" || account.kind !== "oauth") {
+          throw Error("Codex OAuth account no longer exists.");
+        }
+        const original = await egress.acquire(accountId);
+        return async (input, init) => {
+          const current = await accounts.get(accountId);
+          if (current?.provider !== "codex" || current.kind !== "oauth") throw new EgressUnavailable();
+          const route = await egress.acquire(accountId);
+          if (JSON.stringify(route.profile) !== JSON.stringify(original.profile)) throw new EgressUnavailable();
+          const send = route.fetch(true);
+          if (route.assigned && !send) throw new EgressUnavailable();
+          return hub.outboundFetch("codex", send)(input, init);
+        };
+      },
       now,
       authBaseUrl: options.codexAuthBaseUrl,
-      addAccount: (authenticated) => operations.addCodexOAuth(authenticated),
+      addAccount: (authenticated, accountId) => operations.addCodexOAuth(authenticated, accountId),
     });
     const grokLogin = new GrokDeviceLogin({
+      beforeSpawn: () => hub.assertLoginAllowed("grok"),
       now,
       command: options.grokLoginCommand,
       args: options.grokLoginArgs,

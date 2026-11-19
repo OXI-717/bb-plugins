@@ -111,7 +111,10 @@ refuses the update.
 Do not unload this plugin during an operation: core may clear orphaned waits.
 
 On success or ordinary failure, release only the owned model hold, then queue continuations for unchanged stopped sessions
-without provider/model overrides, then release the owned hold and recheck the queue.
+without provider/model overrides, then release the owned hold. The updater verifies
+that each continuation is queued or running. It retries once if the thread still
+matches its stopped snapshot and no work was queued. The private session receipt
+and update log list uncontinued threads and their reasons.
 Previously idle sessions do not start unless they have real queued user work.
 Already queued user work is preserved without adding a redundant continuation.
 An ended operation does not imply a successful update; read the result separately.

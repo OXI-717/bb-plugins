@@ -9,6 +9,10 @@ import urllib.parse
 import urllib.request
 
 
+MAX_RESUME_ATTEMPTS = 2
+RESUME_OBSERVATIONS = 4
+
+
 def running_threads():
     """Public SDK threads.listRunning endpoint: unpaginated, includes hidden work."""
     base = os.environ.get('BB_SERVER_URL', 'http://127.0.0.1:38886')
@@ -189,39 +193,70 @@ class SessionPause:
         self.state['phase'] = 'stopped'
         self.save()
 
+    def observe_resume(self, stopped, *, settle=False):
+        for observation in range(RESUME_OBSERVATIONS if settle else 1):
+            if observation:
+                self.sleep(1)
+            current = self.show(stopped['id'])
+            if any(current[key] != stopped[key] for key in ('id', 'projectId', 'environmentId', 'providerId')):
+                return 'changed-after-stop'
+            if settle and (current['status'] in ('starting', 'active') or current['queuedMessageCount']):
+                return 'resumed'
+            if current != stopped:
+                return 'changed-after-stop'
+        return 'unchanged'
+
+    def resume_session(self, entry):
+        stopped = self.identity(entry['stopped'])
+        attempts = entry.get('resumeAttempts', int(entry['action'] == 'resume-intent'))
+        outcome = self.observe_resume(stopped, settle=attempts > 0)
+        if outcome != 'unchanged':
+            return outcome
+        if stopped['queuedMessageCount']:
+            return 'queued-work-preserved'
+
+        while attempts < MAX_RESUME_ATTEMPTS:
+            attempts += 1
+            entry.update(action='resume-intent', resumeAttempts=attempts)
+            self.save()
+            try:
+                self.bb('thread', 'tell', stopped['id'],
+                        'Please continue the interrupted task.', '--mode', 'auto')
+            except Exception:
+                # The command may have reached BB despite a missing response.
+                # Observe before deciding whether another send is safe.
+                pass
+            outcome = self.observe_resume(stopped, settle=True)
+            if outcome != 'unchanged':
+                return outcome
+        return 'resume-unconfirmed'
+
     def resume(self):
         self.state['phase'] = 'resuming'
         self.save()
-        failures = 0
+        uncertain = {'stop-intent', 'stop-returned', 'resume-intent', 'resume-unconfirmed'}
+        skipped = {'changed-after-stop', 'changed-during-stop'}
         for entry in self.state['sessions']:
-            if entry['action'] in ('stop-intent', 'stop-returned', 'resume-intent'):
-                failures += 1
-                continue
-            if entry['action'] != 'stopped':
+            if entry['action'] not in ('stopped', 'resume-intent'):
                 continue
             try:
-                if self.show(entry['before']['id']) != self.identity(entry['stopped']):
-                    entry['action'] = 'changed-after-stop'
-                    self.save()
-                    continue
-                if entry['stopped'].get('queuedMessageCount', 0):
-                    entry['action'] = 'queued-work-preserved'
-                    self.save()
-                    continue
-                entry['action'] = 'resume-intent'
-                self.save()
-                self.bb('thread', 'tell', entry['before']['id'],
-                        'Please continue the interrupted task.')
-                entry['action'] = 'resumed'
-                self.save()
+                entry['action'] = self.resume_session(entry)
             except Exception:
-                # A timed-out send may have succeeded. Never send it twice on recovery.
-                failures += 1
+                # Could not verify the current thread. Keep the intent for recovery.
+                pass
+            self.save()
+        unresolved = [
+            {'id': entry['before']['id'], 'reason': entry['action']}
+            for entry in self.state['sessions'] if entry['action'] in uncertain | skipped | {'stopped'}
+        ]
+        self.state['uncontinuedThreads'] = unresolved
+        failures = any(item['reason'] not in skipped for item in unresolved)
         self.state['phase'] = 'needs-inspection' if failures else 'finished'
         self.save()
         self.say(f'Session continuation: {self.state["phase"]}. Receipt: {self.path}')
+        self.say('Uncontinued threads: ' + json.dumps(unresolved))
         if failures:
-            raise RuntimeError('Some session command outcomes are uncertain; inspect receipt, do not blindly retry')
+            raise RuntimeError('Some session command outcomes are uncertain; inspect receipt')
 
     def recover(self):
         self.state = json.loads(self.path.read_text())

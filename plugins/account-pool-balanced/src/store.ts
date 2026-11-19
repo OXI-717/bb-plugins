@@ -362,6 +362,20 @@ export class AccountStore {
     });
   }
 
+  async replaceCodexAuthorization(id: string, codexAccountId: string, secret: AccountSecret): Promise<Account> {
+    return this.serialized(async () => {
+      const account = (await this.listMetadata()).find(candidate => candidate.id === id);
+      if (account?.provider !== "codex" || account.kind !== "oauth") {
+        throw new Error("Codex OAuth account no longer exists.");
+      }
+      if (account.codexAccountId !== codexAccountId) {
+        throw new Error("Codex sign-in selected a different ChatGPT account.");
+      }
+      await this.writeSecret(id, secret);
+      return account;
+    });
+  }
+
   async writeSecret(id: string, secret: AccountSecret): Promise<void> {
     await this.initialize();
     const value = `${JSON.stringify(accountSecretSchema.parse(secret))}\n`;
@@ -538,13 +552,21 @@ export class HubTokenStore {
     return (await this.authenticateContext(presented))?.hostId ?? null;
   }
 
-  /** Synchronous dispatch fence: called inside the account snapshot lock, with no await before send. */
+  /** Synchronous dispatch fence, with no await between validation and transport. */
+  validatesCredential(presented: string | null): boolean {
+    return this.dispatchCredential(presented) !== undefined;
+  }
+
   validatesAccountScope(presented: string | null, scope: ClientAccountScope): boolean {
-    if (presented === null) return false;
+    const token = this.dispatchCredential(presented);
+    return token !== undefined && JSON.stringify(token.accountScope) === JSON.stringify(scope);
+  }
+
+  private dispatchCredential(presented: string | null): StoredHubToken | undefined {
+    if (presented === null) return undefined;
     const key = this.tokenIndex.get(this.tokenDigest(presented));
     const token = key === undefined ? undefined : this.tokens.get(key);
-    return token !== undefined && matchesStoredToken(token, presented, this.now()) &&
-      JSON.stringify(token.accountScope) === JSON.stringify(scope);
+    return token !== undefined && matchesStoredToken(token, presented, this.now()) ? token : undefined;
   }
 
   /** Inspect only already-initialized state; never load, prune or update usage. */

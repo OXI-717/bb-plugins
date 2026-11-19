@@ -6,6 +6,7 @@ import {
   CHATGPT_PROFILE_CLAIM,
   codexAccessTokenExpiresAt,
 } from "./credentials.js";
+import { EgressUnavailable } from "./account-egress.js";
 import type { AccountSummary } from "./contracts.js";
 
 const LOGIN_SESSION_TTL_MS = 10 * 60 * 1_000;
@@ -79,6 +80,8 @@ interface DeviceLoginSession {
   expiresAt: number;
   nextPollAt: number;
   polling: boolean;
+  fetch: typeof fetch;
+  targetAccountId?: string;
 }
 
 export interface CodexDeviceAccount {
@@ -93,9 +96,10 @@ export interface CodexDeviceAccount {
 
 export interface CodexDeviceLoginOptions {
   fetch?: typeof fetch;
+  accountFetch?: (accountId: string) => Promise<typeof fetch>;
   now?: () => number;
   authBaseUrl?: string;
-  addAccount: (authenticated: CodexDeviceAccount) => Promise<AccountSummary>;
+  addAccount: (authenticated: CodexDeviceAccount, targetAccountId?: string) => Promise<AccountSummary>;
 }
 
 export interface CodexDeviceLoginStart {
@@ -174,12 +178,16 @@ export class CodexDeviceLogin {
     );
   }
 
-  async start(): Promise<CodexDeviceLoginStart> {
+  async start(targetAccountId?: string): Promise<CodexDeviceLoginStart> {
     const pruneBefore = this.now();
     for (const [sessionId, session] of this.sessions) {
       if (pruneBefore >= session.expiresAt) this.deleteSession(sessionId);
     }
-    const response = await this.fetch(
+    const send = targetAccountId === undefined
+      ? this.fetch
+      : await this.options.accountFetch?.(targetAccountId);
+    if (!send) throw new EgressUnavailable();
+    const response = await send(
       `${this.authBaseUrl}/api/accounts/deviceauth/usercode`,
       {
         method: "POST",
@@ -211,6 +219,8 @@ export class CodexDeviceLogin {
       expiresAt: expiresAt(parsed.data, now),
       nextPollAt: now + intervalMs,
       polling: false,
+      fetch: send,
+      targetAccountId,
     };
     this.sessions.set(session.sessionId, session);
     this.scheduleExpiry(session);
@@ -242,7 +252,7 @@ export class CodexDeviceLogin {
     session.polling = true;
     session.nextPollAt = now + session.intervalMs;
     try {
-      const response = await this.fetch(
+      const response = await session.fetch(
         `${this.authBaseUrl}/api/accounts/deviceauth/token`,
         {
           method: "POST",
@@ -313,8 +323,12 @@ export class CodexDeviceLogin {
         };
       }
       this.deleteSession(session.sessionId);
-      return await this.exchange(parsed.data);
-    } catch {
+      return await this.exchange(parsed.data, session);
+    } catch (error) {
+      if (error instanceof EgressUnavailable) {
+        this.deleteSession(session.sessionId);
+        return { status: "error", message: error.message };
+      }
       if (this.now() < session.expiresAt) return { status: "pending" };
       this.deleteSession(session.sessionId);
       return { status: "error", message: "Code expired, start again." };
@@ -357,8 +371,9 @@ export class CodexDeviceLogin {
 
   private async exchange(
     authorized: z.infer<typeof deviceTokenResponseSchema>,
+    session: DeviceLoginSession,
   ): Promise<CodexDeviceLoginPoll> {
-    const response = await this.fetch(`${this.authBaseUrl}/oauth/token`, {
+    const response = await session.fetch(`${this.authBaseUrl}/oauth/token`, {
       method: "POST",
       headers: {
         accept: "application/json",
@@ -398,7 +413,7 @@ export class CodexDeviceLogin {
         refreshToken: parsed.data.refresh_token,
         idToken: parsed.data.id_token,
         expiresAt: codexAccessTokenExpiresAt(parsed.data.access_token),
-      });
+      }, session.targetAccountId);
       return { status: "complete", account };
     } catch (error) {
       return {
