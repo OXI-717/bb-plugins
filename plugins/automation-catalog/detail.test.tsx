@@ -54,7 +54,7 @@ describe("detail failure states", () => {
   it("separates the project and BB executor from the unknown machine", () => {
     const html = renderToStaticMarkup(<CatalogDetailContent detail={{ ...fixture, task: { ...fixture.task, host: "BB-managed agent", scheduler: "bb", executor: "agent", projectName: "Alpha" } }} />);
     expect(html).toContain("Проект: Alpha");
-    expect(html).toContain("Хост: не указан источником");
+    expect(html).toContain("Машина: не указана");
     expect(html).toContain("Выполнение: агент BB");
     expect(html).not.toContain("BB-managed agent");
   });

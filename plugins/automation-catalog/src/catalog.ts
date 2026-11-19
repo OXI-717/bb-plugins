@@ -342,6 +342,11 @@ export const catalogRpcContract = defineRpcContract({
     input: z.object({ taskKey: z.string().min(1).optional() }).strict(),
     output: z.object({ parentThreadId: z.string(), parentTitle: z.string(), projectId: z.string() }),
   },
+  catalog_display_names: {
+    input: z.null(),
+    output: z.object({ hosts: z.array(z.object({ id: z.string(), name: z.string() })),
+      projects: z.array(z.object({ id: z.string(), name: z.string() })) }),
+  },
   catalog_list: { input: z.null(), output: catalogListSchema },
   catalog_detail: {
     input: catalogDetailInputSchema,
@@ -457,6 +462,16 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
         pluginMetadata: { kind: "automation-discussion", taskKey: taskKey ?? null },
       });
       return { threadId: thread.id };
+    },
+    catalog_display_names: async () => {
+      const [hosts, projects] = await Promise.allSettled([
+        bb.sdk.hosts.list({ signal: AbortSignal.timeout(5000) }),
+        bb.sdk.projects.list({ includePersonal: true, signal: AbortSignal.timeout(5000) }),
+      ]);
+      return {
+        hosts: hosts.status === "fulfilled" ? hosts.value.map(({id, name}) => ({id, name})) : [],
+        projects: projects.status === "fulfilled" ? projects.value.map(({id, name}) => ({id, name})) : [],
+      };
     },
     catalog_list: () => catalog.list(),
     catalog_detail: (input) => catalog.detail(input),
