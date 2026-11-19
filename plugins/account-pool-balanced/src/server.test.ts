@@ -8842,6 +8842,69 @@ describe('server-owned account egress dispatch',()=>{
     expect(status.bindings[fixture.account.id]).toEqual({id:'exit-one',version:1});
     expect((await rpc('account.list',null) as any[])[0].autopilotAllowed).toBe(false);
   });
+  it.each([
+    { name: "refresh succeeds", refreshStatus: 200, retryStatus: 200, status: 200 },
+    { name: "refresh is rejected", refreshStatus: 401, retryStatus: null, status: 401 },
+    { name: "refresh service is unavailable", refreshStatus: 503, retryStatus: null, status: 503 },
+    { name: "refreshed token is rejected", refreshStatus: 200, retryStatus: 401, status: 401 },
+  ])("recovers Codex on its assigned route without fallback when $name", async ({
+    refreshStatus, retryStatus, status,
+  }) => {
+    const clock = 1_900_000_000_000;
+    const nextToken = testJwt({ exp: clock / 1000 + 3600 });
+    const direct = vi.fn(async () => Response.json({ unexpected: true }));
+    const fixture = await createOAuthRequestFixture("codex", direct, () => clock);
+    fixture.host.harness.sdk.stub("system.config", async () => ({ primaryHostId: "host-one" }));
+    const rpc = fixture.host.harness.behavior.callRpc;
+    await rpc("account.add", { provider: "codex", source: { kind: "import" }, label: null, priority: 200 });
+    await rpc("egress.configure", routeProfile);
+    await rpc("egress.bind", { accountId: fixture.account.id, ref: { id: "exit-one", version: 1 } });
+
+    const dispatchers: unknown[] = [];
+    const calls: string[] = [];
+    const routed = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      dispatchers.push((init as RequestInit & { dispatcher?: unknown })?.dispatcher);
+      if (String(input).endsWith("/oauth/token")) {
+        calls.push("refresh");
+        expect(JSON.parse(String(init?.body))).toMatchObject({ refresh_token: "oauth-refresh" });
+        return refreshStatus === 200
+          ? Response.json({ access_token: nextToken, refresh_token: "oauth-rotated" })
+          : Response.json({ error: "invalid_grant" }, { status: refreshStatus });
+      }
+      const headers = new Headers(init?.headers);
+      expect(headers.get("chatgpt-account-id")).toBe("chatgpt-account");
+      const authorization = headers.get("authorization");
+      if (authorization === "Bearer oauth-old") {
+        calls.push("old");
+        return Response.json({ error: { code: "token_expired" } }, { status: 401 });
+      }
+      calls.push("updated");
+      expect(authorization).toBe(`Bearer ${nextToken}`);
+      return Response.json({ id: "synthetic" }, { status: retryStatus! });
+    });
+    try {
+      const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/responses", {
+        headers: authHeaders(fixture.key),
+        body: JSON.stringify({ model: "synthetic-model", input: "fixture" }),
+      });
+      expect(response.status).toBe(status);
+      await response.text();
+      expect(calls).toEqual(retryStatus === null ? ["old", "refresh"] : ["old", "refresh", "updated"]);
+      expect(direct).not.toHaveBeenCalled();
+      expect(dispatchers[0]).toBeDefined();
+      expect(new Set(dispatchers).size).toBe(1);
+      if (retryStatus === 401) {
+        expect(await rpc("account.list", null)).toContainEqual(expect.objectContaining({
+          id: fixture.account.id,
+          eligible: false,
+          error: "OpenAI returned HTTP 401 after OAuth refresh.",
+        }));
+      }
+    } finally {
+      routed.mockRestore();
+    }
+  });
+
   it('returns a route failure without a second account, direct request or model rewrite',async()=>{
     const direct=vi.fn(async()=>Response.json({direct:true}));
     const fixture=await createFixture({upstreamUrl:'https://model.example',options:{fetch:direct}});

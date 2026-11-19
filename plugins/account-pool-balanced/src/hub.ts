@@ -935,7 +935,13 @@ export class AccountPoolHub {
             this.releasePacing(selected.account.id, pacing);
             pacing = null;
           }
-          if(route.assigned && !response.ok){
+          const rejectedAuthorization =
+            response.status === 401 && secret.kind === "oauth" && !authRetried ? secret : null;
+          const retryAssignedCodex = adapter.provider === "codex" && rejectedAuthorization !== null;
+          if (route.assigned && !response.ok && !retryAssignedCodex) {
+            if (adapter.provider === "codex" && response.status === 401 && authRetried) {
+              await this.markAuthError(selected.account, secret, "OpenAI returned HTTP 401 after OAuth refresh.", signal);
+            }
             if(response.status===429 && !adapter.isQuotaRejection(response.headers)){
               const heldUntil=this.options.now()+retryAfterMilliseconds(response.headers.get('retry-after'),this.options.now());
               this.options.quotas.put({...observed,heldUntil});
@@ -1004,17 +1010,13 @@ export class AccountPoolHub {
             // Return it to the client, whose existing retry remains subject to shared admission.
             if (adapter.provider === "claude" && response.status === 503)
               return result(this.errorResponse(adapter, request, failure.status, failure.message, failure.headers));
-            if (
-              response.status === 401 &&
-              secret.kind === "oauth" &&
-              !authRetried
-            ) {
+            if (rejectedAuthorization !== null) {
               authRetried = true;
               try {
                 secret = await abortable(
                   this.freshSecret(selected.account, adapter, {
                     kind: "rejected",
-                    accessToken: secret.accessToken,
+                    accessToken: rejectedAuthorization.accessToken,
                   },route),
                   signal,
                 );
@@ -1062,6 +1064,8 @@ export class AccountPoolHub {
           }
           return result(this.clientResponse(upstream, adapter.provider !== 'cursor'));
         }
+        // OAuth recovery may retry only the selected account on its assigned route.
+        if (route.assigned && authRetried) break;
       }
       signal.throwIfAborted();
       return result(failure === null

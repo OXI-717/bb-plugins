@@ -67,7 +67,19 @@ async function fixture(provider:PoolProvider='claude',ids?:string[],proxyScope=f
   const affinity=new PoolAffinityStore(db),quotas=new QuotaStore(db),tokens=new HubTokenStore(path.join(dir,'tokens'));
   const authority:ClientAccountScope={...scope(ids??[allowed.id]),...(proxyScope?{schema:'bb-account-pool/client-proxy-scope/1' as const}:{})};const token=await tokens.forIssuedClient('external_fixture','project',undefined,authority);
   const legacy=await tokens.forIssuedClient('external_fixture_legacy','project');
-  let status=200;const seen:string[]=[];const direct=vi.fn<typeof fetch>(async(_url,init)=>{if(String(_url).includes('exchange_user_api_key'))return Response.json({accessToken:'fixture-minted'});seen.push(new Headers(init?.headers).get('x-api-key')??new Headers(init?.headers).get('authorization')!);return Response.json({id:'fixture-response'},{status});});
+  let status=200;
+  const seen:string[]=[];
+  const refreshes:object[]=[];
+  const direct=vi.fn<typeof fetch>(async(url,init)=>{
+    if(String(url).endsWith('/oauth/token')){
+      refreshes.push(JSON.parse(String(init?.body)));
+      return Response.json({error:'invalid_grant'},{status:401});
+    }
+    if(String(url).includes('exchange_user_api_key'))return Response.json({accessToken:'fixture-minted'});
+    const headers=new Headers(init?.headers);
+    seen.push(headers.get('x-api-key')??headers.get('authorization')!);
+    return Response.json({id:'fixture-response'},{status});
+  });
   let route:AccountRoute={assigned:true,profile:proxyScope?httpProfile:profile,fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>direct(...args)):direct(...args)};
   const fallback=vi.fn<typeof fetch>(async()=>{throw Error('Unexpected personal transport');});
   let guardAction=async()=>{};
@@ -80,7 +92,7 @@ async function fixture(provider:PoolProvider='claude',ids?:string[],proxyScope=f
   const request=async(key=token,parent?:string,method='POST',signal?:AbortSignal)=>{
     const r=await hub.handle(new Request('http://localhost/pool/v1/'+(method==='GET'?'models':'messages'),{method,signal,headers:{authorization:`Bearer ${key}`,'content-type':'application/json','x-account-id':personal.id,'x-bb-project-id':'other',...(provider==='cursor'?{'x-cursor-rpc-path':'aiserver.v1.AiService/AvailableModels'}:{})},...(method==='GET'?{}:{body:JSON.stringify({accountId:personal.id,accountScope:scope([personal.id]),metadata:{user_id:JSON.stringify({session_id:parent?'child':'same',...(parent?{parent_session_id:parent}:{})})}})})}),provider);
     const text=await r.text();return {status:r.status,text};};
-  return {hub,request,settings,advance:(ms:number)=>{now+=ms;hub.admissionLimitsChanged();},allowed,personal,accounts,affinity,tokens,token,legacy,seen,quotas,fallback,authority,transport:direct,
+  return {hub,request,settings,advance:(ms:number)=>{now+=ms;hub.admissionLimitsChanged();},allowed,personal,accounts,affinity,tokens,token,legacy,seen,refreshes,quotas,fallback,authority,transport:direct,
     status:(s:number)=>status=s,route:(r:AccountRoute)=>route=r,onGuard:(fn:()=>Promise<void>)=>guardAction=fn};
 }
 
@@ -138,9 +150,11 @@ it.each(['claude','codex'] as const)('runs %s model enumeration through the same
   const f=await fixture(provider);expect((await f.request(f.token,undefined,'GET')).status).toBe(200);
   expect(f.seen).toEqual([provider==='codex'?'Bearer fixture-permitted':'fixture-permitted']);
 });
-it.each([200,401,429,503])('Codex dispatch %s stays on the sole permitted account without replay',async status=>{
+it.each([200,401,429,503])('Codex dispatch %s refreshes only on 401 and keeps the sole permitted account',async status=>{
   const f=await fixture('codex');f.status(status);expect((await f.request()).status).toBe(status);
-  expect(f.seen).toEqual(['Bearer fixture-permitted']);expect(f.fallback).not.toHaveBeenCalled();
+  expect(f.seen).toEqual(['Bearer fixture-permitted']);
+  expect(f.refreshes).toEqual(status===401?[expect.objectContaining({grant_type:'refresh_token',refresh_token:'fixture-refresh'})]:[]);
+  expect(f.fallback).not.toHaveBeenCalled();
 });
 it.each(['codex','zai','cursor'] as const)('service %s evidence excludes personal accounts and makes no readiness assertion',async provider=>{
   const f=await fixture(provider);const request=new Request('http://localhost/budget',{headers:{authorization:`Bearer ${f.token}`}});
@@ -342,14 +356,31 @@ it('proxy scope preserves exact authority on restart/rotation and requires repla
   expect(await restored.authenticateContext(token)).toBeNull();
   expect(await restored.authenticateContext(fresh)).toBeNull();
 });
-it.each([200,401,429,503])('proxy-scoped Codex %s uses only its permitted account without replay or VPN observer',async status=>{
+it.each([200,401,429,503])('proxy-scoped Codex %s refreshes only on 401 without changing accounts or calling the VPN observer',async status=>{
   const f=await fixture('codex',undefined,true);f.status(status);
   const prepare=vi.fn(async()=>{throw Error('VPN observer must not be called');});
   f.route({assigned:true,profile:httpProfile,prepareScope:prepare,scopeAccepted:()=>false,
     fetch:(_ipv4,beforeSend)=>(...args)=>beforeSend?beforeSend(()=>f.transport(...args)):f.transport(...args)});
   expect((await f.request()).status).toBe(status);
-  expect(f.seen).toEqual(['Bearer fixture-permitted']);expect(f.fallback).not.toHaveBeenCalled();expect(prepare).not.toHaveBeenCalled();
+  expect(f.seen).toEqual(['Bearer fixture-permitted']);
+  expect(f.refreshes).toEqual(status===401?[expect.objectContaining({grant_type:'refresh_token',refresh_token:'fixture-refresh'})]:[]);
+  expect(f.fallback).not.toHaveBeenCalled();expect(prepare).not.toHaveBeenCalled();
 });
+it('checks client revocation again before the OAuth exchange after a proxy-scoped 401',async()=>{
+  const f=await fixture('codex',undefined,true);
+  f.status(401);
+  const dispatch=f.transport.getMockImplementation()!;
+  f.transport.mockImplementationOnce(async(...args)=>{
+    const response=await dispatch(...args);
+    await f.tokens.remove('external_fixture');
+    return response;
+  });
+  expect((await f.request()).status).toBe(503);
+  expect(f.seen).toEqual(['Bearer fixture-permitted']);
+  expect(f.refreshes).toEqual([]);
+  expect(f.fallback).not.toHaveBeenCalled();
+});
+
 it.each(['disabled','deleted','project','quota','purpose'] as const)('proxy scope denies unavailable permitted account (%s) with another eligible account present',async gate=>{
   const f=await fixture('codex',undefined,true);
   if(gate==='disabled')await f.accounts.setEnabled(f.allowed.id,false);
