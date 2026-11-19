@@ -8893,6 +8893,13 @@ describe('server-owned account egress dispatch',()=>{
       expect(direct).not.toHaveBeenCalled();
       expect(dispatchers[0]).toBeDefined();
       expect(new Set(dispatchers).size).toBe(1);
+      if (retryStatus === 401) {
+        expect(await rpc("account.list", null)).toContainEqual(expect.objectContaining({
+          id: fixture.account.id,
+          eligible: false,
+          error: "OpenAI returned HTTP 401 after OAuth refresh.",
+        }));
+      }
     } finally {
       routed.mockRestore();
     }

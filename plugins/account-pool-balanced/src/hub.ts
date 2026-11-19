@@ -939,6 +939,9 @@ export class AccountPoolHub {
             response.status === 401 && secret.kind === "oauth" && !authRetried ? secret : null;
           const retryAssignedCodex = adapter.provider === "codex" && rejectedAuthorization !== null;
           if (route.assigned && !response.ok && !retryAssignedCodex) {
+            if (adapter.provider === "codex" && response.status === 401 && authRetried) {
+              await this.markAuthError(selected.account, secret, "OpenAI returned HTTP 401 after OAuth refresh.", signal);
+            }
             if(response.status===429 && !adapter.isQuotaRejection(response.headers)){
               const heldUntil=this.options.now()+retryAfterMilliseconds(response.headers.get('retry-after'),this.options.now());
               this.options.quotas.put({...observed,heldUntil});
