@@ -2799,7 +2799,7 @@ function LoginDialog({
 }
 
 export function ThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
-  return <UnlockedThreadAccountIndicator threadId={threadId} isCompactViewport={isCompactViewport} />;
+  return <UnlockedThreadAccountIndicator key={threadId} threadId={threadId} isCompactViewport={isCompactViewport} />;
 }
 
 function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
@@ -2822,16 +2822,25 @@ function UnlockedThreadAccountIndicator({ threadId, isCompactViewport }: { threa
       try {
         const result = await rpc.call("thread.account", { threadId });
         if (!disposed) { setStatus(result); setError(false); }
-      } catch { if (!disposed) setError(true); }
-      finally { running = false; }
+      } catch (error) {
+        if (disposed) return;
+        if (typeof error === "object" && error !== null &&
+            "serverCode" in error && error.serverCode === "federation_plugin_not_federated") {
+          clearInterval(timer);
+          setOpen(false);
+          setStatus({ state: "unsupported", account: null, lastUsedAt: null });
+          return;
+        }
+        setError(true);
+      } finally { running = false; }
     };
-    void refresh();
     const timer = setInterval(() => void refresh(), 15000);
+    void refresh();
     return () => { disposed = true; clearInterval(timer); };
   }, [rpc, threadId]);
   useEffect(()=>{
     setChoices(null);setSelectionError(null);
-    if(!open || status?.state==='bypassed' || status?.state==='unsupported')return;
+    if(!open || !status || status.state==='bypassed' || status.state==='unsupported')return;
     let disposed=false;
     rpc.call('thread.accountChoices',{threadId}).then(value=>{if(!disposed)setChoices(value);}).catch(()=>{if(!disposed)setSelectionError('Не удалось загрузить аккаунты');});
     return ()=>{disposed=true;};
