@@ -20,6 +20,8 @@ export function AccountListRow({
   metrics,
   actions,
   onOpen,
+  expanded,
+  controls,
 }: {
   name: string;
   enabled: boolean;
@@ -30,23 +32,27 @@ export function AccountListRow({
   metrics: ReactNode;
   actions: ReactNode;
   onOpen: () => void;
+  expanded?: boolean;
+  controls?: string;
 }) {
   return (
-    <div className="flex items-center gap-3 text-sm">
+    <div className="flex items-start gap-2 text-sm">
       {leading ?? <span aria-hidden="true" className="w-8 shrink-0" />}
       <div className={cn(
-        "group -mx-2 flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2.5 transition-colors hover:bg-state-hover focus-within:bg-state-hover",
+        "group -mx-2 flex min-w-0 flex-1 items-start gap-2 rounded-md px-2 py-2.5 transition-colors hover:bg-state-hover focus-within:bg-state-hover",
         !enabled && "opacity-55",
       )}>
         <button
           type="button"
-          className="grid min-w-0 flex-1 grid-cols-1 items-center gap-y-1.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-y-0"
+          className="grid min-w-0 flex-1 grid-cols-1 items-center gap-y-1.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
           aria-label={`Открыть ${name}`}
+          aria-expanded={expanded}
+          aria-controls={controls}
           onClick={onOpen}
         >
           <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:flex-nowrap">
-              <span className="w-full min-w-0 text-sm font-medium text-foreground [overflow-wrap:anywhere] sm:w-auto sm:truncate">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <span className="w-full min-w-0 text-sm font-medium text-foreground [overflow-wrap:anywhere] sm:w-auto">
                 {name}
               </span>
               {badges}
@@ -56,13 +62,13 @@ export function AccountListRow({
               {status}
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 sm:flex-nowrap sm:gap-1">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 sm:gap-1">
             {metrics}
           </div>
         </button>
         {actions}
-        <button type="button" aria-label={`Открыть карточку: ${name}`} onClick={onOpen}>
-          <ResourceRowDetailChevron />
+        <button type="button" className="shrink-0 rounded-md px-1.5 py-1 text-xs hover:bg-muted" aria-label={`${expanded ? "Свернуть карточку" : "Открыть карточку"}: ${name}`} aria-expanded={expanded} aria-controls={controls} onClick={onOpen}>
+          {expanded === undefined ? <ResourceRowDetailChevron /> : expanded ? "Свернуть" : "Детали"}
         </button>
       </div>
     </div>

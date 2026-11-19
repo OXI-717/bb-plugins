@@ -401,7 +401,7 @@ export function createAccountPoolPlugin(
         accounts:rows.map(a=>{
           const q=quotas.get(a.id),at=now();
           // The same reset the pool reports when it refuses a request for this account.
-          const reset=blockingResetAt(q,'other',policyThresholds(a,currentSettings.switchThreshold),at);
+          const reset=blockingResetAt(q,'other',policyThresholds(a,currentSettings.switchThreshold,q,at),at);
           const state=!a.enabled?'disabled' as const:q.error?'error' as const:(q.heldUntil??0)>at?'held' as const:!available.has(a.id)?'exhausted' as const:'ready' as const;
           return {id:a.id,label:a.email??a.label,state,until:state==='held'?q.heldUntil:state==='exhausted'&&reset!==null&&reset>at?Math.round(reset):null,
             selectable:a.enabled&&!q.error,assigned:routes.bindings[a.id]!==undefined || routes.pins[context.key]?.accountId===a.id};

@@ -6,6 +6,7 @@ export const accountSettingsCss = `
 .pool-settings-help { margin:0; color:var(--muted-foreground,#666); font-size:12px; line-height:18px; }
 .pool-settings-field { display:grid; gap:6px; min-width:0; font-size:14px; }
 .pool-settings-control { box-sizing:border-box; width:100%; min-width:0; height:var(--pool-control); border:1px solid var(--input,#ddd); border-radius:6px; background:var(--background,white); color:inherit; padding:6px 10px; font:inherit; font-size:14px; }
+.pool-settings-control.pool-settings-wide { width:100%; max-width:420px; }
 .pool-settings-control:focus-visible { outline:2px solid var(--ring,#888); outline-offset:2px; }
 .pool-settings-control:disabled, fieldset:disabled .pool-settings-control { opacity:.5; cursor:not-allowed; }
 .pool-settings-fields { display:grid; gap:12px; border:0; margin:0; padding:0; min-width:0; }
@@ -35,6 +36,12 @@ export const accountSettingsCss = `
 .pool-settings footer, .pool-settings .pool-settings-footer { display:flex; flex-wrap:wrap; justify-content:flex-start; gap:8px; }
 .pool-settings button.pool-settings-link { border-color:transparent; background:transparent; padding-inline:4px; color:var(--muted-foreground,#666); }
 .pool-settings button.pool-settings-link:hover { color:var(--foreground,#222); text-decoration:underline; }
+.pool-account-card { border:1px solid var(--border,#ddd); border-radius:8px; padding:12px; min-width:0; background:var(--card,var(--background,white)); }
+.pool-account-card details { border-top:1px solid var(--border,#ddd); }
+.pool-account-card summary { cursor:pointer; padding:10px 0; }
+.pool-account-card summary span { display:inline-block; margin-inline-start:8px; font-size:12px; color:var(--muted-foreground,#666); overflow-wrap:anywhere; }
+.pool-weekly-step { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; align-items:end; gap:8px; max-width:420px; }
+.pool-weekly-step .pool-settings-control { width:100%; }
 .pool-browser-section { display:grid; gap:8px; min-width:0; }
 .pool-browser-actions { display:flex; flex-wrap:wrap; align-items:center; gap:4px 12px; }
 .pool-browser-link { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:8px; }
@@ -58,7 +65,8 @@ export const accountSettingsCss = `
 .pool-settings-interval { display:grid; width:100%; min-width:0; grid-template-columns:minmax(0,1fr) 96px 12px 96px 36px; align-items:center; gap:8px; }
 .pool-settings-time-separator { text-align:center; }
 @media(max-width:400px) {
- .pool-settings-interval { grid-template-columns:minmax(0,1fr) 64px 8px 64px 28px; gap:4px; }
+ .pool-settings-interval { grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr) 28px; gap:6px; }
+ .pool-settings-interval > select { grid-column:1/-1; }
  .pool-settings-interval .pool-settings-control { padding:4px; font-size:12px; }
  .pool-settings-interval input::-webkit-calendar-picker-indicator { display:none; }
  .pool-settings-interval .pool-settings-remove { width:28px!important; }

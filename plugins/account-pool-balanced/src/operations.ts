@@ -1,3 +1,5 @@
+import { changeWeeklyBudget } from "./weekly-budget.js";
+import type { WeeklyBudgetChange } from "./contracts.js";
 import { summarizeDiagnostics } from './diagnostics.js';
 import type {AgyAuthorization} from "./agy-oauth-login.js";
 import { createHash } from 'node:crypto';
@@ -289,6 +291,14 @@ export class PoolOperations {
 
   async setEmail(id:string,email:string|null,expectedEmail?:string|null):Promise<Account|null>{
     const account=await this.accounts.setEmail(id,email,expectedEmail);this.onAccountsChanged();return account;
+  }
+
+  async setWeeklyBudget(input: WeeklyBudgetChange): Promise<Account | null> {
+    const account = await this.accounts.updateWeeklyBudget(input.accountId, current =>
+      changeWeeklyBudget(current, this.quotas.get(current.id), input, this.now()),
+    );
+    if (account !== null) this.onAccountsChanged();
+    return account;
   }
 
   async setPriority(id: string, priority: number): Promise<Account | null> {

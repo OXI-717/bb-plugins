@@ -12,10 +12,12 @@ type Patch=Omit<NativeAccountUpdate,'accountId'|'expectedRevision'>;
 export function NativeAccountRow({
   account,
   open,
+  expanded,
   managed = true,
 }: {
   account: Account;
   open: () => void;
+  expanded?: boolean;
   managed?: boolean;
 }) {
   const name = account.label ?? 'Аккаунт Google';
@@ -51,9 +53,9 @@ export function NativeAccountRow({
         </>
       }
       metrics={
-        <div className="w-16 text-left tabular-nums sm:text-right" title="Сеансы в работе / предел">
-          <div className="text-2xs uppercase tracking-wide text-subtle-foreground/75">Сеансы</div>
-          <div className="text-xs font-semibold text-foreground">{account.active} / {maxSessions}</div>
+        <div className="text-left text-xs tabular-nums" title="Сеансы в работе / предел">
+          <div className="font-semibold text-foreground">Сеансы <span>{account.active} / {maxSessions}</span></div>
+          <div className="text-muted-foreground">Данных о квотах пока нет</div>
         </div>
       }
       actions={
@@ -63,6 +65,8 @@ export function NativeAccountRow({
         />
       }
       onOpen={open}
+      expanded={expanded}
+      controls={expanded ? `pool-native-${account.accountId}` : undefined}
     />
   );
 }

@@ -1,3 +1,18 @@
+# Account quotas
+
+Open an account’s **Details → Weekly rule** to keep the pool defaults, set a
+fixed ceiling, or set steps relative to the provider’s weekly reset. Each
+percentage is a cumulative share of the provider’s weekly allowance. For
+example, 50% initially, 65% with 48 hours left, and 80% with 24 hours left.
+
+On a configured rule, **Change ceiling now** applies until the next step or
+the reset. The recurring rule stays in place for the next cycle. On Cursor,
+steps follow the billing cycle reset reported by the provider. If the
+reset is unknown, the initial ceiling applies to reported weekly usage and
+temporary overrides are unavailable. The rule replaces the shared weekly
+reserve and progressive weekly cap for that account while selected. Shorter
+windows, model-specific quotas, other existing quota windows, and provider
+limits still apply independently.
 
 # Optional automatic prepared-native unlock
 
