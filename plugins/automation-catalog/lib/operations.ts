@@ -40,6 +40,8 @@ function rawHealth(
     tone,
     paused,
   });
+  if (source?.archivedAt !== undefined)
+    return result("Архив источника", "Сохранённый снимок; обновления не ожидаются", 9, false);
   if (task.missing)
     return result(
       "Отсутствует",

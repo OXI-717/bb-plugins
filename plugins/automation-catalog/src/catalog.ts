@@ -92,6 +92,20 @@ export function createCatalog(db: Db) {
     };
   }
   return {
+    setSourceArchived(id: string, checkedAt: number, archived: boolean) {
+      return db.transaction(() => {
+        const current = source(id);
+        if (current.checkedAt !== checkedAt) throw new Error("Catalog source changed; read its current status");
+        if (archived === (current.archivedAt !== undefined)) return { ok: true as const };
+        const now = Date.now();
+        if (archived && current.managedHere) throw new Error("A managed BB source cannot be archived");
+        if (archived && now - current.checkedAt <= current.staleAfterMs)
+          throw new Error("A fresh catalog source cannot be archived");
+        const status = { ...current, archivedAt: archived ? now : undefined };
+        db.prepare("UPDATE automation_catalog_sources SET data = ? WHERE id = ?").run(JSON.stringify(status), id);
+        return { ok: true as const };
+      })();
+    },
     review(key: string, fingerprint: string, note: string | null) {
       return db.transaction(() => {
         const detail = this.detail({ key });
@@ -179,6 +193,7 @@ export function createCatalog(db: Db) {
         const { bbServerUrl: _bbServerUrl, ...publicSource } = snapshot.source;
         const status = {
           ...publicSource,
+          archivedAt: old?.checkedAt === snapshot.observedAt ? old.archivedAt : undefined,
           managedHere: snapshot.error === null ? managedHere : (old?.managedHere ?? managedHere),
           taskIds:
             snapshot.error === null ? snapshot.source.taskIds : old?.taskIds,
@@ -330,6 +345,10 @@ export const catalogRpcContract = defineRpcContract({
     input: z.object({ key: z.string().min(1) }).strict(),
     output: z.object({ ok: z.literal(true) }),
   },
+  catalog_set_source_archived: {
+    input: z.object({ sourceId: z.string().trim().min(1).max(300), checkedAt: z.number().int().nonnegative(), archived: z.boolean() }).strict(),
+    output: z.object({ ok: z.literal(true) }),
+  },
   catalog_manage_bb: {
     input: z.object({ key: z.string().min(1), action: z.enum(["pause", "resume", "delete"]) }).strict(),
     output: z.object({ ok: z.literal(true) }),
@@ -404,6 +423,11 @@ export function registerCatalog(bb: BbPluginApi, db: Db) {
       return record;
     },
     catalog_audit_list: input => audits.list(input),
+    catalog_set_source_archived: ({ sourceId, checkedAt, archived }) => {
+      const result = catalog.setSourceArchived(sourceId, checkedAt, archived);
+      bb.realtime.publish("automation-catalog", { sourceId });
+      return result;
+    },
     catalog_search: ({ query }) => discovery.search(query),
     catalog_definition: ({ key }) => readDefinition(catalog, bbCli, key),
     catalog_review: ({ key, fingerprint, note }) => {

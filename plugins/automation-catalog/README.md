@@ -132,6 +132,20 @@ payload with that key is rejected. Passed checks require evidence. Records are
 bounded to 32 KiB and 16 evidence references. Keep credentials and personal message
 contents out of notes; the journal has the same access boundary as the catalog.
 
+### Archive a one-time source
+
+When a test or one-time inventory is complete, archive its stale source in the
+catalog. This retains its records and history and stops asking for a refresh.
+The panel shows its records under «Архив источников».
+
+Read the exact source ID and current `checkedAt` from `catalog_list`, then pass
+`{"sourceId":"example-inspection","checkedAt":1700000000000,"archived":true}`
+to `bb plugin rpc call automation-catalog catalog_set_source_archived --input-file request.json --json`.
+Use `archived:false` to restore. The operation refuses fresh sources and locally
+managed BB sources. A new publication automatically restores visibility.
+Archiving a source changes the catalog only. The source's scheduler and publisher
+are managed through their own tools.
+
 ### Selected Linux systemd timers
 
 `catalog_collect.py systemd` reads only an explicit selection, for example:

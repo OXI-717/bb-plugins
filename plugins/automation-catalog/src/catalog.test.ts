@@ -241,3 +241,34 @@ it("enforces snapshot size in UTF-8 bytes before writing", () => {
   expect(() => catalog.publish(input)).toThrow("Snapshot exceeds 4 MB");
   expect(catalog.list()).toEqual({ tasks: [], sources: [] });
 });
+
+describe("source archival", () => {
+  it("preserves task history, allows restoration and treats a new publication as live", () => {
+    const { catalog } = setup();
+    const first = snapshot();
+    catalog.publish(first);
+    const key = catalog.list().tasks[0].key;
+    const history = catalog.detail({ key }).runs;
+    catalog.setSourceArchived("test", first.observedAt, true);
+    expect(catalog.list().sources[0].archivedAt).toBeGreaterThan(0);
+    expect(catalog.detail({ key }).runs).toEqual(history);
+    expect(catalog.list().tasks[0].state).toBe("active");
+    catalog.publish(first);
+    expect(catalog.detail({ key }).source.archivedAt).toBeGreaterThan(0);
+    catalog.setSourceArchived("test", first.observedAt, false);
+    expect(catalog.list().sources[0].archivedAt).toBeUndefined();
+    catalog.setSourceArchived("test", first.observedAt, true);
+    catalog.publish({ ...first, observedAt: first.observedAt + 1 });
+    expect(catalog.list().sources[0].archivedAt).toBeUndefined();
+  });
+
+  it("refuses an old receipt, a current source or a native BB source", () => {
+    const { catalog } = setup();
+    const first = snapshot(Date.now());
+    catalog.publish(first);
+    expect(() => catalog.setSourceArchived("test", first.observedAt - 1, true)).toThrow(/changed/);
+    expect(() => catalog.setSourceArchived("test", first.observedAt, true)).toThrow(/fresh/);
+    catalog.publish({ ...snapshot(), source: { ...first.source, id: "native", bbServerUrl: "http://127.0.0.1:38886" } }, "http://localhost:38886");
+    expect(() => catalog.setSourceArchived("native", 1000, true)).toThrow(/BB/);
+  });
+});

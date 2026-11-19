@@ -315,3 +315,24 @@ it("labels inventory findings with the affected automation, project and machine"
   expect(slot.getByText(/История предупреждения/)).toBeTruthy();
   slot.lifecycle.unmount();
 });
+
+it("keeps historical sources in the archive while warning about a stale live source", async () => {
+  const app = await loadPluginApp(() => import("./app"));
+  const historic = { ...source, id: "historic", name: "Past inspection", archivedAt: 23, lastSuccessAt: 1 };
+  const live = { ...source, id: "live", name: "Current connection", lastSuccessAt: 1 };
+  const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+    catalog_display_names: () => ({ hosts: [], projects: [] }),
+    catalog_list: () => ({
+      tasks: [{ ...task, sourceId: live.id }, { ...task, name: "Archived observation",
+        sourceId: historic.id, key: "ext_historic", state: "failed" }],
+      sources: [live, historic],
+    }),
+  } });
+  await slot.findByText(/Проверьте подключение: Current connection/);
+  expect(slot.queryByText(/Проверьте подключение: Past inspection/)).toBeNull();
+  expect(slot.queryByText("Archived observation")).toBeNull();
+  fireEvent.change(slot.getByRole("combobox", { name: "Раздел автоматизаций" }), { target: { value: "archive" } });
+  expect(slot.getByRole("button", { name: "Archived observation" })).toBeTruthy();
+  expect(slot.getAllByText("Архив источника").length).toBeGreaterThan(0);
+  slot.lifecycle.unmount();
+});
