@@ -236,10 +236,10 @@ class UpgradeTests(unittest.TestCase):
                 self.assertEqual(copied.execute('SELECT value FROM sample').fetchone()[0],42)
             self.assertEqual((target/'secrets'/'synthetic.txt').stat().st_mode & 0o777,0o600)
 
-    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False, wrong_drain=False, routing_after=None, routing_before=None, routing_failure=False):
+    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False, wrong_drain=False, weekly_budget_after=(), routing_after=None, routing_before=None, routing_failure=False):
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         data = Path(temp.name); db=sqlite3.connect(data/'data.db'); db.close()
-        state = {'accepting':True,'inFlight':0,'accounts':[{'id':'synthetic','enabled':True,'policy':{'enabled':False}, 'drainOnce':True, 'drainGeneration':'synthetic-generation'}], 'routing':{'codex':True},'enabledAccountCount':1}
+        state = {'accepting':True,'inFlight':0,'accounts':[{'id':'synthetic','enabled':True,'policy':{'enabled':False}, 'drainOnce':True, 'drainGeneration':'synthetic-generation', 'weeklyBudget': {'enabled': True, 'floorPercent': 10}}], 'routing':{'codex':True},'enabledAccountCount':1}
         if routing_before is not None:
             state['routing'] = routing_before
         source = {'history':[{'version':'b'*40}], 'range':'^0.4.1'}
@@ -254,6 +254,13 @@ class UpgradeTests(unittest.TestCase):
                 status_reads += 1
                 if routing_after is not None and status_reads == 3:
                     return {**state, 'routing': routing_after}
+                if weekly_budget_after != () and status_reads == 3:
+                    account = dict(state['accounts'][0])
+                    if weekly_budget_after is None:
+                        del account['weeklyBudget']
+                    else:
+                        account['weeklyBudget'] = weekly_budget_after
+                    return {**state, 'accounts': [account]}
                 if wrong_drain and status_reads == 3:
                     return {**state, 'accounts': [{**state['accounts'][0], 'drainOnce': False, 'drainGeneration': None}]}
                 return {**state, 'accounts': []} if wrong_accounts and status_reads == 3 else state
@@ -263,7 +270,7 @@ class UpgradeTests(unittest.TestCase):
         args=argparse.Namespace(check=check, version=None, interrupt_now=False)
         with patch.object(u,'installed',side_effect=infos), patch.object(u,'source_info',side_effect=sources), patch.object(u,'release_target',side_effect=targets), patch.object(u,'wait_idle',return_value=False) as idle, patch.object(u,'bb',side_effect=command), patch.object(u,'run',side_effect=u.UpgradeError('simulated update failure') if fail else None) as run:
             output = []
-            if changed or fail or wrong_sha or wrong_accounts or wrong_drain or routing_failure:
+            if changed or fail or wrong_sha or wrong_accounts or wrong_drain or weekly_budget_after != () or routing_failure:
                 with self.assertRaises(u.UpgradeError): u.perform(args,data,data,output.append)
             else:
                 self.assertEqual(u.perform(args,data,data,output.append),'PREFLIGHT_PASS' if check else 'PASS')
@@ -292,6 +299,11 @@ class UpgradeTests(unittest.TestCase):
 
     def test_post_update_null_provider_modified_fails(self):
         self.workflow(routing_before={'codex': None}, routing_after={'codex': True}, routing_failure=True)
+
+    def test_post_update_weekly_budget_loss_or_change_fails(self):
+        for budget in (None, {'enabled': True, 'floorPercent': 20}):
+            with self.subTest(budget=budget):
+                self.workflow(weekly_budget_after=budget)
 
     def test_post_update_drain_state_loss_fails(self): self.workflow(wrong_drain=True)
     def test_post_update_sha_mismatch_fails(self): self.workflow(wrong_sha=True)

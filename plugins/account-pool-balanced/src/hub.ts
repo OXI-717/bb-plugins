@@ -137,7 +137,7 @@ interface HubOptions {
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
   maxAffinityBindings: number;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext" | "validatesAccountScope">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext" | "validatesCredential" | "validatesAccountScope">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;
@@ -334,12 +334,33 @@ export class AccountPoolHub {
   private requiresIpv4(provider:PoolProvider):boolean {const settings=this.options.getSettings();return settings.vpnOnlyProviders.some(value=>value===provider)||(settings.vpnGuardEnabled&&provider!=="kimi"&&provider!=="zai");}
   async assertNetworkAllowed(provider: PoolProvider, observeGuard?: (result:import("./vpn-policy.js").GuardObservation)=>void): Promise<void> { await this.vpn.assert(provider,observeGuard);if(this.requiresIpv4(provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
 
+  private admissionRefusal(): PoolMaintenanceError | Error | undefined {
+    if (this.options.maintenance?.status().lease) return new PoolMaintenanceError();
+    if (!this.accepting) return new Error("Account Pooler is not accepting requests.");
+  }
+
+  async assertLoginAllowed(provider: PoolProvider): Promise<void> {
+    const refusal = this.admissionRefusal();
+    if (refusal) throw refusal;
+    await this.assertNetworkAllowed(provider);
+    const current = this.admissionRefusal();
+    if (current) throw current;
+  }
+
   private async acquireRoute(account:Account,sessionKey?:string|null):Promise<AccountRoute>{
     return this.options.accountRoute?.(account.id,sessionKey) ?? {assigned:false,profile:null,fetch:()=>undefined};
   }
 
-  private accountFetch(account:Account,route:AccountRoute):typeof fetch {
-    return (input,init)=>this.networkFlights.fetch(account.provider,input,init,false,undefined,undefined,route.fetch(this.requiresIpv4(account.provider)));
+  private accountFetch(account: Account, route: AccountRoute, beforeSend?: (send: () => Promise<Response>) => Promise<Response>): typeof fetch {
+    return (input, init) => this.networkFlights.fetch(account.provider, input, init, false,
+      route.assigned ? undefined : beforeSend, undefined, route.fetch(this.requiresIpv4(account.provider), beforeSend));
+  }
+
+  private assertClientCredential(credential: string | null, scope?: ClientAccountScope): void {
+    const tokens = this.options.hubTokens;
+    if (scope ? !tokens.validatesAccountScope?.(credential, scope) : tokens.validatesCredential?.(credential) === false) {
+      throw new ClientPolicyDenied();
+    }
   }
 
   outboundFetch(provider: PoolProvider, accountFetch?:typeof fetch): typeof fetch {
@@ -820,7 +841,7 @@ export class AccountPoolHub {
           const started=await this.options.accounts.withSnapshot(accounts=>{
             signal.throwIfAborted();
             this.options.maintenance?.assertAllowed();
-            if(!accountScope || !this.options.hubTokens.validatesAccountScope?.(credential??null,accountScope))throw new ClientPolicyDenied();
+            this.assertClientCredential(credential ?? null, accountScope);
             assertScope();
             const current=this.eligibleEntries(adapter.provider,projectId,
               accounts.filter(a=>inClientScope(a.id,accountScope)),family,this.options.now(),purpose,freeTier).eligible;
@@ -829,6 +850,10 @@ export class AccountPoolHub {
             return {response:send()};
           });
           return started.value.response;
+        };
+        const recheckCredential = async (send: () => Promise<Response>) => {
+          this.assertClientCredential(credential ?? null, accountScope);
+          return send();
         };
         const route:AccountRoute=accountScope?{...acquired,prepareScope:requiresClientVpn(accountScope)?acquired.prepareScope:undefined,assertScope,fetch:(ipv4,beforeSend)=>{
           const send=acquired.fetch(ipv4,beforeSend??admitScoped);
@@ -851,7 +876,7 @@ export class AccountPoolHub {
         try {
           signal.throwIfAborted();
           secret = await abortable(
-            this.freshSecret(selected.account, adapter, { kind: "normal" },route),
+            this.freshSecret(selected.account, adapter, { kind: "normal" }, route, accountScope ? undefined : recheckCredential),
             signal,
           );
         } catch (error) {
@@ -1029,7 +1054,7 @@ export class AccountPoolHub {
                   this.freshSecret(selected.account, adapter, {
                     kind: "rejected",
                     accessToken: rejectedAuthorization.accessToken,
-                  },route),
+                  }, route, accountScope ? undefined : recheckCredential),
                   signal,
                 );
               } catch (error) {
@@ -1535,6 +1560,7 @@ export class AccountPoolHub {
     adapter: ProviderAdapter,
     use: SecretUse,
     route?:AccountRoute,
+    beforeSend?: (send: () => Promise<Response>) => Promise<Response>,
   ): Promise<AccountSecret> {
     route ??= await this.acquireRoute(account);
     while (true) {
@@ -1639,7 +1665,7 @@ export class AccountPoolHub {
                 quotas: this.options.quotas,
                 fetch: async (input, init) => {
                   refreshStarted = true;
-                  const response = await this.accountFetch(account,route)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) });
+                  const response = await this.accountFetch(account, route, beforeSend)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) });
                   refreshStatus = response.status;
                   return response;
                 },
@@ -1802,8 +1828,8 @@ export class AccountPoolHub {
             const waited = await this.admission.waitCooldown(AbortSignal.any([controller.signal, this.stopped.signal]), cooldown, deadline);
             if (waited) {const previous=phase;phase='cooldown';try{await check();}finally{phase=previous;}}
             const started = await this.options.accounts.withSnapshot(accounts => {
+              this.assertClientCredential(admission.credential ?? null, admission.accountScope);
               if (admission.accountScope) {
-                if (!this.options.hubTokens.validatesAccountScope?.(admission.credential ?? null, admission.accountScope)) throw new ClientPolicyDenied();
                 if (!clientRouteAllowed(route, admission.accountScope,account.id,this.options.now())) throw new EgressUnavailable();
               }
               const current = this.eligibleEntries(adapter.provider, admission.projectId,
@@ -1824,6 +1850,10 @@ export class AccountPoolHub {
             if (started.value !== null) return started.value.response;
           }
         };
+      const routeAdmission = admission.accountScope ? admit : async (send: () => Promise<Response>) => {
+        this.assertClientCredential(admission.credential ?? null);
+        return send();
+      };
       const response = await this.networkFlights.fetch(account.provider,url, {
           method,
           headers,
@@ -1831,7 +1861,7 @@ export class AccountPoolHub {
             ? {}
             : { body: upstreamBody }),
           signal: controller.signal,
-        },true, admission.accountScope?undefined:admit,check,route.fetch(this.requiresIpv4(account.provider),admission.accountScope?admit:undefined),(error,bytesRead)=>{
+        },true, admission.accountScope?undefined:admit,check,route.fetch(this.requiresIpv4(account.provider), routeAdmission),(error,bytesRead)=>{
           this.options.onUpstreamError(account.provider,error,{
             elapsedMs:Math.max(0,this.options.now()-openedAt),transport:this.requiresIpv4(account.provider)?"ipv4":"default",
             stage:"response_body",operation:"model",requestId:trace.requestId,bytesRead,
@@ -2062,7 +2092,7 @@ export function createHub(options: {
   accounts: AccountStore;
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext" | "validatesAccountScope">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext" | "validatesCredential" | "validatesAccountScope">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;

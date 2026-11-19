@@ -178,7 +178,7 @@ def release_target(source, expected=None):
 
 def inventory(pool, routing_keys=None):
     # Restrict only post-update verification; pre-update races remain strict.
-    fields = ('id', 'provider', 'kind', 'enabled', 'priority', 'role', 'cap', 'policy', 'projects', 'drainOnce', 'drainGeneration')
+    fields = ('id', 'provider', 'kind', 'enabled', 'priority', 'role', 'cap', 'policy', 'weeklyBudget', 'projects', 'drainOnce', 'drainGeneration')
     return {
         'accounts': sorted(({k: a.get(k) for k in fields} for a in pool['accounts']), key=lambda a: a['id']),
         'routing': {k: v for k, v in pool['routing'].items() if routing_keys is None or k in routing_keys},

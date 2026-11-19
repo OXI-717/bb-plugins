@@ -89,7 +89,7 @@ class SessionPauseTests(unittest.TestCase):
         sends = [c for c in self.bb.calls if c[1] == 'tell']
         self.assertEqual(len(sends), 1)
         self.assertEqual(sends[0][2], 'thread-a')
-        self.assertEqual(len(sends[0]), 4)
+        self.assertEqual(sends[0][-2:], ('--mode', 'auto'))
         self.assertNotIn('PRIVATE', self.path.read_text())
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
@@ -117,11 +117,27 @@ class SessionPauseTests(unittest.TestCase):
     def test_ambiguous_send_is_never_duplicated(self):
         self.pause.stop()
         self.bb.ambiguous_send = True
-        with self.assertRaises(RuntimeError):
-            self.pause.resume()
-        with self.assertRaises(RuntimeError):
-            SessionPause(self.path, self.bb, lambda _: None, running=self.bb.running).recover()
+        self.pause.resume()
+        SessionPause(self.path, self.bb, lambda _: None, running=self.bb.running).recover()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'resumed')
         self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 1)
+
+    def test_lost_continuation_is_retried_and_confirmed(self):
+        self.pause.stop()
+        sends = []
+        def lose_first(*args):
+            if args[:2] == ('thread', 'tell'):
+                sends.append(args)
+                if len(sends) == 1:
+                    return {'delivery': 'sent'}
+            return self.bb(*args)
+        self.pause.bb = lose_first
+        self.pause.sleep = lambda _: None
+        self.pause.resume()
+        self.assertEqual(len(sends), 2)
+        self.assertEqual(sends[-1][-2:], ('--mode', 'auto'))
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
+        self.assertEqual(self.pause.state['uncontinuedThreads'], [])
 
     def test_failed_stop_never_blindly_continues(self):
         self.bb.fail_stop = True
@@ -144,10 +160,20 @@ class SessionPauseTests(unittest.TestCase):
     def test_resume_attempts_other_sessions_after_one_send_failure(self):
         self.bb.threads['thread-b']['status'] = 'active'
         self.pause.stop()
-        self.bb.ambiguous_send = True
+        def no_delivery(*args):
+            if args[:3] == ('thread', 'tell', 'thread-a'):
+                self.bb.calls.append(args)
+                raise TimeoutError()
+            return self.bb(*args)
+        self.pause.bb = no_delivery
+        self.pause.sleep = lambda _: None
         with self.assertRaises(RuntimeError):
             self.pause.resume()
-        self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 2)
+        self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 3)
+        self.assertEqual(self.pause.state['uncontinuedThreads'], [
+            {'id': 'thread-a', 'reason': 'resume-unconfirmed'}
+        ])
+        self.assertEqual(self.bb.threads['thread-b']['status'], 'active')
 
     def test_missing_metadata_refuses_before_stopping(self):
         self.bb.threads['thread-a'].pop('updatedAt')

@@ -1321,11 +1321,16 @@ function UnlockedAccountPoolSettings() {
       setPastedCode("");
     });
   }
-  async function startCodex(): Promise<void> {
+  async function startCodex(targetAccountId?: string): Promise<void> {
+    if (codexStep !== null) void rpc.call("codexLogin.cancel", {sessionId: codexStep.sessionId}).catch(() => undefined);
+    setBrowserError(null);
+    setBrowserNotice(null);
+    setReauthorizeAccountId(targetAccountId ?? null);
+    setCodexStep(null);
     setDialog({ kind: "codex-login" });
     setLoginDone(null);
     await run("codex-login", async () => {
-      setCodexStep(await rpc.call("codexLogin.start", null));
+      setCodexStep(await rpc.call("codexLogin.start", targetAccountId ? {accountId: targetAccountId} : null));
     });
   }
   async function startAgy():Promise<void>{
@@ -1721,7 +1726,7 @@ function UnlockedAccountPoolSettings() {
                             }
                             close={() => toggleAccountDetails(account.id)}
                             pending={pending !== null}
-                            reauthorize={() => void startClaude(account.id)}
+                            reauthorize={() => void (account.provider === "codex" ? startCodex(account.id) : startClaude(account.id))}
                             act={(action) => void accountAction(account, action)}
                           />
                         ) : null}
@@ -2335,18 +2340,25 @@ function UnlockedAccountPoolSettings() {
           <LoginDialog
             provider="codex"
             loginStep={null}
+            reauthorizing={reauthorizeAccountId === null ? null : status?.accounts.find(account => account.id === reauthorizeAccountId)?.label ?? "этого аккаунта"}
             codexStep={codexStep}
             grokStep={null}
             loginDone={loginDone}
             pending={pending !== null}
             pastedCode=""
             countdown={countdown}
-            error={error}
+            error={error ?? (browserError?.accountId === reauthorizeAccountId ? browserError.text : null)}
             close={closeDialog}
-            openUrl={navigate.openUrl}
+            openUrl={url => {
+              if (reauthorizeAccountId === null) return navigate.openUrl(url);
+              void openBrowser(reauthorizeAccountId, url);
+              return true;
+            }}
+            openAccountUrl={reauthorizeAccountId === null ? undefined : url => void openBrowser(reauthorizeAccountId, url)}
+            browserNotice={browserNotice?.accountId === reauthorizeAccountId ? browserNotice.text : null}
             setPastedCode={() => {}}
             complete={() => {}}
-            restart={() => void startCodex()}
+            restart={() => void startCodex(reauthorizeAccountId ?? undefined)}
           />
         ) : null}
         {dialog?.kind === "grok-login" ? (
@@ -2561,7 +2573,7 @@ function AccountCard({
               <DropdownMenuItem disabled={pending || !!account.draft} onSelect={() => act("toggle")}>
                 {account.enabled ? "Выключить" : "Включить"}
               </DropdownMenuItem>
-              {account.provider === "claude" && account.kind === "oauth" && (
+              {(account.provider === "claude" || account.provider === "codex") && account.kind === "oauth" && (
                 <DropdownMenuItem disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onSelect={reauthorize}>
                   {account.draft?"Войти в аккаунт":"Авторизоваться заново"}
                 </DropdownMenuItem>
@@ -2712,7 +2724,7 @@ function LoginDialog({
   const deviceStep = provider === "grok" ? grokStep : codexStep;
   return (
     <DialogFrame
-      title={reauthorizing === null ? `Вход в ${name}` : "Повторная авторизация Claude"}
+      title={reauthorizing === null ? `Вход в ${name}` : `Повторная авторизация ${name}`}
       className="sm:max-w-xl"
       footer={
         loginDone !== null ? (

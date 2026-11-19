@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import type {
   Account,
   AccountSummary,
+  AccountSecret,
   HubTokenSummary,
   PoolProvider,
   PoolStatus,
@@ -165,34 +166,31 @@ export class PoolOperations {
 
   async addCodexOAuth(
     authenticated: CodexDeviceAccount,
+    targetAccountId?: string,
   ): Promise<AccountSummary> {
-    const account = await this.accounts.add(
-      {
-        provider: "codex",
-        kind: "oauth",
-        label: authenticated.label,
-        email: authenticated.email,
-        accountUuid: null,
-        codexAccountId: authenticated.accountId,
-        subscriptionType: null,
-        rateLimitTier: null,
-        enabled: true,
-        priority: 100,
-      },
-      {
-        kind: "oauth",
-        accessToken: authenticated.accessToken,
-        refreshToken: authenticated.refreshToken,
-        idToken: authenticated.idToken,
-        expiresAt: authenticated.expiresAt,
-      },
-    );
-    this.onAccountsChanged();
-    await this.onAccountEnabled(account.id);
-    const summary = (await this.list()).find((item) => item.id === account.id);
-    if (summary === undefined) {
-      throw new Error("Added Codex account could not be read back.");
+    const secret: AccountSecret = {
+      kind: "oauth",
+      accessToken: authenticated.accessToken,
+      refreshToken: authenticated.refreshToken,
+      idToken: authenticated.idToken,
+      expiresAt: authenticated.expiresAt,
+    };
+    const account = targetAccountId === undefined
+      ? await this.accounts.add({
+          provider: "codex", kind: "oauth", label: authenticated.label,
+          email: authenticated.email, accountUuid: null, codexAccountId: authenticated.accountId,
+          subscriptionType: null, rateLimitTier: null, enabled: true, priority: 100,
+        }, secret)
+      : await this.hub.replaceAccountAuthorization(targetAccountId,
+          () => this.accounts.replaceCodexAuthorization(targetAccountId, authenticated.accountId, secret));
+    if (targetAccountId !== undefined) {
+      const quota = this.quotas.get(account.id);
+      this.quotas.put({ ...quota, error: null, heldUntil: null });
     }
+    this.onAccountsChanged();
+    if (account.enabled) await this.onAccountEnabled(account.id);
+    const summary = (await this.list()).find(item => item.id === account.id);
+    if (summary === undefined) throw new Error("Codex account could not be read back.");
     return summary;
   }
 

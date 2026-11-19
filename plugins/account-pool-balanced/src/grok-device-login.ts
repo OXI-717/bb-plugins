@@ -28,6 +28,7 @@ export interface GrokDeviceLoginOptions {
   now?: () => number;
   command?: string;
   args?: string[];
+  beforeSpawn?: () => Promise<void>;
   spawnLogin?: (env: NodeJS.ProcessEnv) => LoginChild;
   addAccount: (credentials: GrokSubscriptionCredentials) => Promise<AccountSummary>;
 }
@@ -44,6 +45,7 @@ interface LoginSession {
   output: string;
   settled: { code: number | null; failed: boolean } | null;
   polling: boolean;
+  expiryTimer?: ReturnType<typeof setTimeout>;
 }
 
 const URL_PATTERN = /https:\/\/[^\s"'<>]+/u;
@@ -75,6 +77,13 @@ export class GrokDeviceLogin {
       "GROK_OIDC_ISSUER",
       "GROK_OIDC_CLIENT_ID",
     ]) delete env[name];
+
+    try {
+      await this.options.beforeSpawn?.();
+    } catch (error) {
+      await rm(grokHome, { recursive: true, force: true });
+      throw error;
+    }
 
     let child: LoginChild;
     try {
@@ -116,6 +125,8 @@ export class GrokDeviceLogin {
       session.settled ??= { code, failed: false };
     });
     this.sessions.set(session.sessionId, session);
+    session.expiryTimer = setTimeout(() => void this.disposeSession(session), LOGIN_TIMEOUT_MS);
+    session.expiryTimer.unref();
 
     const deadline = Date.now() + LOGIN_PROMPT_TIMEOUT_MS;
     // URL and code can arrive in separate output chunks: wait for both,
@@ -155,6 +166,9 @@ export class GrokDeviceLogin {
       }
       const authFile = path.join(session.grokHome, "auth.json");
       const credentials = parseGrokAuthFile(await readFile(authFile, "utf8"));
+      if (this.sessions.get(session.sessionId) !== session || this.now() >= session.expiresAt) {
+        return { status: "error", message: "Grok sign-in expired or was cancelled. Start again." };
+      }
       const account = await this.options.addAccount(credentials);
       await this.disposeSession(session);
       return { status: "complete", account };
@@ -182,9 +196,10 @@ export class GrokDeviceLogin {
   }
 
   private async disposeSession(session: LoginSession): Promise<void> {
-    this.sessions.delete(session.sessionId);
+    if (!this.sessions.delete(session.sessionId)) return;
+    clearTimeout(session.expiryTimer);
     session.output = "";
-    if (session.settled === null) session.child.kill();
+    if (session.settled === null) session.child.kill("SIGKILL");
     await rm(session.grokHome, { recursive: true, force: true }).catch(() => undefined);
   }
 }
