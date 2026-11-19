@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     outputs:
+      cursor: ${{ steps.select.outputs.cursor }}
       matrix: ${{ steps.select.outputs.matrix }}
       check: ${{ steps.select.outputs.check }}
       upgrade: ${{ steps.select.outputs.upgrade }}
@@ -40,6 +41,7 @@ jobs:
           GIT_REF: ${{ github.ref }}
           DIFF_BASE: ${{ github.event.pull_request.base.sha }}
           DIFF_HEAD: ${{ github.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
 
   public-hygiene:
     runs-on: ubuntu-latest
@@ -160,10 +162,25 @@ jobs:
         run: /bin/bash scripts/upgrade-pool.sh --sandbox
       - name: Test upgrade without a live BB server
         run: python3 -m unittest discover -s scripts -p 'test_upgrade_*.py' -v
-      - name: Test Cursor gateway with a synthetic local CLI
-        run: python3 -m unittest discover -s scripts -p test_cursor_route.py -v
       - name: Test read-only Claude host diagnostics
         run: python3 -m unittest discover -s plugins/account-pool-balanced/scripts -p test_claude_host_doctor.py -v
+
+  cursor-gateway:
+    needs: plan
+    if: needs.plan.outputs.cursor == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test Cursor gateway with a synthetic local CLI
+        run: python3 -m unittest discover -s scripts -p test_cursor_route.py -v
 
   secrets:
     runs-on: ubuntu-latest
@@ -231,7 +248,7 @@ jobs:
 
   release-gate:
     if: always()
-    needs: [plan, public-hygiene, secrets, check, upgrade-script, auto-archive, oxi-op, session-tree]
+    needs: [plan, public-hygiene, secrets, check, upgrade-script, auto-archive, oxi-op, session-tree, cursor-gateway]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
