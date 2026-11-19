@@ -218,8 +218,22 @@ newer) before the new publisher scripts: older backends reject the new optional
 existing publisher script directory. Keep its configuration, audit-state file,
 lock and timer unchanged. The remote inventory transport embeds the updated
 inventory module; no remote service installation is needed. No root runner or
-provider upgrade is required. To roll back, restore the previous publisher scripts
-before downgrading the plugin; retain the state file, card keys and stored runs.
+provider upgrade is required.
+
+Before deployment, acquire the publisher's existing `sync.lock` through its
+normal maintenance path and save a private pre-update backup of `audit-state.json`
+under that same lock. Verify the backup before replacing both scripts. Keep the
+backup outside the source tree with the publisher's private configuration. Do not
+change the timer or bypass an operator lock. After deployment, preserve the
+post-update state/outbox and published card/run evidence before any rollback.
+Old collector scripts cannot consume an execution-aware state: they can fabricate
+recovery events for disappeared executions. Roll back only to a compatible reader,
+or restore the verified pre-update state backup together with the old scripts,
+under the same lock, retaining a separate copy of all post-update evidence.
+Keep the backend capable of reading stored `executionId` values; do not downgrade
+to a backend that rejects those existing records. Never delete cards or run history
+to make an older reader work. If the required backup or compatibility proof is
+unavailable, stop the rollback and retain the evidence.
 
 A missed running observation becomes unknown rather than a current running job.
 An already observed terminal result remains pending under the event budget until
@@ -227,3 +241,12 @@ published, including when the service disappears or the source loses access.
 Missing metadata retains the last positively established classification and exact
 terminal result; affirmative properties identifying a persistent/triggered unit
 restore registry checking. Required registry jobs always retain precedence.
+
+Deferred execution evidence is an outbox keyed by InvocationID, separate from the
+last unit classification. A newer invocation or an affirmative transition to a
+persistent unit cannot replace an unacknowledged result. A terminal result for
+one invocation survives later incomplete observations. The outbox holds at most
+16 invocations per identity; only already acknowledged entries can be evicted.
+Exhaustion is a persistent visible blocked/overflow state requiring reconciliation,
+never a successful or complete history. Publication still obeys the shared event
+budget, and advances the outbox only after the existing publication acknowledgement.

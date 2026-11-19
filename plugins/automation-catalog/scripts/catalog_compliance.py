@@ -142,6 +142,38 @@ def coverage_blocks(old, failed):
     return old['identity'] == failed['identity']
 
 
+def execution_event(value):
+    return {k: value[k] for k in ('invocation', 'status', 'exitCode', 'finishedAt')}
+
+
+def remember_execution(saved, execution, observed_at=None):
+    """Bounded outbox independent of the current unit identity/classification."""
+    queue = saved.setdefault('executionEvidence', {})
+    invocation = execution['invocation']
+    prior = queue.get(invocation)
+    terminal = lambda value: value['finishedAt'] is not None and value['status'] in ('failed', 'succeeded')
+    if prior and terminal(prior['execution']):
+        return prior['execution']  # Partial/late observations cannot undo terminal proof.
+    if not prior and len(queue) >= 16:
+        # Only acknowledged evidence may leave the bounded outbox. Its durable
+        # history remains in the catalog. Never silently evict pending failures.
+        evict = next((k for k,v in queue.items() if v.get('published') == execution_event(v['execution'])), None)
+        if evict is None:
+            saved['executionOverflow'] = True
+            return execution
+        del queue[evict]
+    queue[invocation] = dict(prior or {}, execution=execution,
+                             observedAt=prior.get('observedAt') if prior and prior['execution'] == execution else observed_at)
+    return execution
+
+
+def evidence_task(task, saved):
+    if saved.get('executionOverflow'):
+        task.update(state='blocked', description=task['description'] +
+                    ' Evidence queue overflow: more than 16 unacknowledged invocations; history is incomplete. Operator reconciliation required.')
+    return task
+
+
 def snapshot(config, findings, previous, now):
     """Stable visible cards; bounded repeat history, recovery recorded only after valid coverage."""
     from catalog_collect import task_base
@@ -152,6 +184,29 @@ def snapshot(config, findings, previous, now):
     for key in keys:
         item = findings.get(key)
         old = previous.get(key)
+        saved = dict(old or {})
+        saved['executionEvidence'] = {k: dict(v) for k,v in saved.get('executionEvidence', {}).items()}
+        if old and old['finding']['kind'] == 'execution':
+            value = remember_execution(saved, old['finding']['execution'])
+            # Compatibility with the first execution-aware state format.
+            if old.get('executionEvent') == execution_event(value):
+                saved['executionEvidence'][value['invocation']]['published'] = execution_event(value)
+        if item and item['kind'] == 'execution':
+            value = remember_execution(saved, item['execution'], now)
+            item = dict(item, execution=value, **({'unresolved': True} if value != item['execution'] else {}))
+        host = (item or (old or {}).get('finding', {})).get('host', config['host'])
+        for value in saved['executionEvidence'].values():
+            execution = value['execution']
+            event = execution_event(execution)
+            if value.get('published') != event and budget > 0:
+                runs.append(dict(taskId=key, host=host, id='systemd:' + execution['invocation'],
+                                 observedAt=value.get('observedAt'), evidence='execution',
+                                 **{k: execution[k] for k in ('startedAt', 'finishedAt', 'status', 'exitCode')},
+                                 summary='One-off systemd service execution. Exit status is not a session verdict.'))
+                value['published'] = event
+                budget -= 1
+        if saved['executionEvidence'] or saved.get('executionOverflow'):
+            state[key] = saved
         if (item and item['kind'] == 'unregistered' and item.get('classificationUnknown')
                 and old and old['finding']['kind'] == 'execution'):
             item = dict(old['finding'], unresolved=True)
@@ -165,7 +220,7 @@ def snapshot(config, findings, previous, now):
             elif budget > 0 and old.get('active'):
                 runs.append(dict(taskId=key, host=old['finding'].get('host', config['host']), id=f'{key}:{now}:recovered', status='succeeded',
                                  startedAt=now, finishedAt=now, exitCode=0, summary=('Identity classified by explicit registry decision; runtime coverage remains separate' if explicitly_classified(config, old['finding']) else 'Inventory finding no longer observed'), evidence='execution'))
-                state[key] = dict(old, active=False, lastEvent=now)
+                state[key] = dict(state.get(key, old), active=False, lastEvent=now)
                 budget -= 1
         if item is None:
             if old and old.get('active') and budget == 0:
@@ -174,7 +229,7 @@ def snapshot(config, findings, previous, now):
                 resolved = task_base(key, 'OXI · resolved · ' + old['finding'].get('host', config['host']), old['finding'].get('host', config['host']))
                 resolved.update(scheduler='inventory-audit', state='paused', history='available', owner=config['owner'],
                                 description='Previous inventory finding recovered. ' + old['finding']['identity'])
-                tasks.append(resolved)
+                tasks.append(evidence_task(resolved, saved))
                 continue
         if item['kind'] == 'execution':
             execution = item['execution']
@@ -190,28 +245,19 @@ def snapshot(config, findings, previous, now):
                                      'InvocationID=' + execution['invocation'] + '. '
                                      'Only the service result is known; provider/session attribution is unverified. '
                                      + ('Retained evidence; current observation unconfirmed in live inventory.' if item.get('unresolved') else '')))
-            tasks.append(task)
-            # A delayed event must be retried under the existing publication budget.
-            event = {k: execution[k] for k in ('invocation', 'status', 'exitCode', 'finishedAt')}
-            saved = dict(old or {}, active=True, lastEvent=(old or {}).get('lastEvent', now), finding=item)
-            if (not old or old.get('executionEvent') != event) and budget > 0:
-                runs.append(dict(taskId=key, host=item['host'], id='systemd:' + execution['invocation'],
-                                 observedAt=now, evidence='execution',
-                                 **{k: execution[k] for k in ('startedAt', 'finishedAt', 'status', 'exitCode')},
-                                 summary='One-off systemd service execution. Exit status is not a session verdict.'))
-                saved.update(lastEvent=now, executionEvent=event)
-                budget -= 1
-            state[key] = saved
+            tasks.append(evidence_task(task, saved))
+            state[key] = dict(state.get(key, saved), active=True,
+                              lastEvent=(old or {}).get('lastEvent', now), finding=item)
             continue
         task = task_base(key, 'OXI · ' + item['kind'] + ' · ' + item.get('host', config['host']), item.get('host', config['host']))
         task.update(scheduler='inventory-audit', state='blocked', history='available', owner=config['owner'],
                     description=item['summary'] + '. Identity: ' + item['identity'] + '. No automatic stop. Inspect original scheduler before disabling.')
-        tasks.append(task)
-        due = not old or not old.get('active') or now - old['lastEvent'] >= config.get('reminderMs', 86400000)
+        tasks.append(evidence_task(task, saved))
+        due = not old or not old.get('active') or old['finding']['kind'] != item['kind'] or now - old['lastEvent'] >= config.get('reminderMs', 86400000)
         if due and budget > 0:
             runs.append(dict(taskId=key, host=item.get('host', config['host']), id=f'{key}:{now}:finding', status='failed',
                              startedAt=now, finishedAt=now, exitCode=1, summary=item['summary'], evidence='execution'))
-            state[key] = dict(active=True, lastEvent=now, finding=item)
+            state[key] = dict(state.get(key, {}), active=True, lastEvent=now, finding=item)
             budget -= 1
     return dict(source=dict(id=config['sourceId'], name=config['name'], staleAfterMs=config['staleAfterMs']),
                 observedAt=now, error=None, tasks=tasks, runs=runs), state

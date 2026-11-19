@@ -8,11 +8,11 @@ from catalog_compliance import evaluate, snapshot
 
 
 def metadata(**changes):
-    return dict(Id='sample.service', LoadState='loaded', Transient='yes', Restart='no',
+    return {**dict(Id='sample.service', LoadState='loaded', Transient='yes', Restart='no',
                 TriggeredBy='', InvocationID='a' * 32, ActiveState='failed', Result='exit-code',
                 ExecMainCode='1', ExecMainStatus='70',
                 ExecMainStartTimestamp='Thu 2026-11-19 01:00:00 UTC',
-                ExecMainExitTimestamp='Thu 2026-11-19 01:00:02 UTC', **changes)
+                ExecMainExitTimestamp='Thu 2026-11-19 01:00:02 UTC'), **changes}
 
 
 def row(data=None):
@@ -172,6 +172,52 @@ class TransientTests(unittest.TestCase):
         later,_=snapshot(self.config,self.evaluate(),state,1001)
         self.assertEqual(later['tasks'][0]['scheduler'],'inventory-audit')
         self.assertEqual(later['tasks'][0]['state'],'blocked')
+
+    def test_pending_invocation_survives_name_reuse_and_persistent_reclassification(self):
+        for persistent in (False,True):
+            self.inventory['observations'][0]['systemd']=metadata()
+            self.config['maxEventsPerCycle']=0
+            first,state=snapshot(self.config,self.evaluate(),{},1000)
+            if persistent:
+                self.inventory['observations'][0]['systemd']['Transient']='no'
+            else:
+                self.inventory['observations'][0]['systemd'].update(InvocationID='b'*32,ExecMainStatus='0',Result='success',ActiveState='inactive')
+            self.config['maxEventsPerCycle']=2
+            later,state=snapshot(self.config,self.evaluate(),state,1001)
+            a=[r for r in later['runs'] if r['id']=='systemd:'+'a'*32]
+            self.assertEqual(len(a),1)
+            self.assertEqual(a[0]['exitCode'],70)
+            self.assertEqual(a[0]['observedAt'],1000)
+            self.assertEqual(a[0]['status'],'failed')
+            self.assertEqual(a[0]['taskId'],first['tasks'][0]['id'])
+            repeated,_=snapshot(self.config,self.evaluate(),state,1002)
+            self.assertFalse(any(r['id']==a[0]['id'] for r in repeated['runs']))
+
+    def test_terminal_same_invocation_cannot_be_downgraded_by_partial_snapshot(self):
+        for budget in (0,1):
+            self.inventory['observations'][0]['systemd']=metadata()
+            self.config['maxEventsPerCycle']=budget
+            _,state=snapshot(self.config,self.evaluate(),{},1000)
+            self.inventory['observations'][0]['systemd'].update(ExecMainExitTimestamp='',ExecMainStatus='0',Result='success',ActiveState='active')
+            self.config['maxEventsPerCycle']=2
+            later,_=snapshot(self.config,self.evaluate(),state,1001)
+            self.assertEqual(later['tasks'][0]['state'],'failed')
+            if budget==0:
+                self.assertEqual(later['runs'][0]['exitCode'],70)
+            else:
+                self.assertEqual(later['runs'],[])
+
+    def test_bounded_pending_evidence_has_visible_overflow(self):
+        self.config['maxEventsPerCycle']=0
+        state={}
+        for i in range(17):
+            self.inventory['observations'][0]['systemd']=metadata(InvocationID=f'{i:032x}')
+            result,state=snapshot(self.config,self.evaluate(),state,1000+i)
+        value=next(iter(state.values()))
+        self.assertLessEqual(len(value['executionEvidence']),16)
+        self.assertTrue(value['executionOverflow'])
+        self.assertEqual(result['tasks'][0]['state'],'blocked')
+        self.assertIn('overflow',result['tasks'][0]['description'].lower())
 
     def test_budget_defers_without_losing_event(self):
         self.config['maxEventsPerCycle']=0
