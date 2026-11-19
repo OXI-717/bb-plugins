@@ -14,7 +14,7 @@ export function EgressControl({accountId,provider,state,pending,error,save}:{
  const selected=state?.profiles.find(p=>p.id===ref?.id&&p.version===ref?.version);
  return <section className="pool-settings-section">
    <label className="pool-settings-field"><span>Выходной профиль</span>
-     <select className="pool-settings-control" aria-label="Выходной профиль" disabled={!state||pending||!supported}
+     <select className="pool-settings-control pool-settings-wide" aria-label="Выходной профиль" disabled={!state||pending||!supported}
        value={ref?`${ref.id}:${ref.version}`:''} onChange={event=>{
          const profile=state?.profiles.find(p=>`${p.id}:${p.version}`===event.target.value);
          save(profile?{id:profile.id,version:profile.version}:null);

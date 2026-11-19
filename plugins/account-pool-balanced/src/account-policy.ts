@@ -33,11 +33,11 @@ export function scheduleAllows(policy: AccountPolicy | undefined, now: number): 
 export function reserveHours(account: { policy?: AccountPolicy }, fallback: number): number {
   return account.policy?.enabled ? account.policy.reserveDrainHours ?? fallback : fallback;
 }
-export function policySummary(policy?: AccountPolicy): string {
+export function policySummary(policy?: AccountPolicy, modelReserveOnly = false): string {
   if (!policy?.enabled) return '';
   return [
     policy.fiveHourKeep == null ? null : `5 ч: оставить ${policy.fiveHourKeep}%`,
-    policy.weeklyKeep == null ? null : `Неделя: оставить ${policy.weeklyKeep}%`,
+    policy.weeklyKeep == null ? null : `${modelReserveOnly ? 'Модели' : 'Неделя'}: оставить ${policy.weeklyKeep}%`,
     policy.reserveDrainHours == null ? null : `Резерв: за ${policy.reserveDrainHours} ч`,
     policy.schedule ? `${policy.schedule.intervals.map(i => `${i.days.map(d => ["Вс","Пн","Вт","Ср","Чт","Пт","Сб"][d]).join(",")} ${i.start}–${i.end}`).join("; ") || "Нет разрешённых интервалов"} · ${policy.schedule.timeZone}` : null,
   ].filter(Boolean).join(' · ') || 'Наследуются общие значения';

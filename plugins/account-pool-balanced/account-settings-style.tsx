@@ -6,6 +6,7 @@ export const accountSettingsCss = `
 .pool-settings-help { margin:0; color:var(--muted-foreground,#666); font-size:12px; line-height:18px; }
 .pool-settings-field { display:grid; gap:6px; min-width:0; font-size:14px; }
 .pool-settings-control { box-sizing:border-box; width:100%; min-width:0; height:var(--pool-control); border:1px solid var(--input,#ddd); border-radius:6px; background:var(--background,white); color:inherit; padding:6px 10px; font:inherit; font-size:14px; }
+.pool-settings-control.pool-settings-wide { width:100%; max-width:420px; }
 .pool-settings-control:focus-visible { outline:2px solid var(--ring,#888); outline-offset:2px; }
 .pool-settings-control:disabled, fieldset:disabled .pool-settings-control { opacity:.5; cursor:not-allowed; }
 .pool-settings-fields { display:grid; gap:12px; border:0; margin:0; padding:0; min-width:0; }
@@ -64,7 +65,8 @@ export const accountSettingsCss = `
 .pool-settings-interval { display:grid; width:100%; min-width:0; grid-template-columns:minmax(0,1fr) 96px 12px 96px 36px; align-items:center; gap:8px; }
 .pool-settings-time-separator { text-align:center; }
 @media(max-width:400px) {
- .pool-settings-interval { grid-template-columns:minmax(0,1fr) 64px 8px 64px 28px; gap:4px; }
+ .pool-settings-interval { grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr) 28px; gap:6px; }
+ .pool-settings-interval > select { grid-column:1/-1; }
  .pool-settings-interval .pool-settings-control { padding:4px; font-size:12px; }
  .pool-settings-interval input::-webkit-calendar-picker-indicator { display:none; }
  .pool-settings-interval .pool-settings-remove { width:28px!important; }

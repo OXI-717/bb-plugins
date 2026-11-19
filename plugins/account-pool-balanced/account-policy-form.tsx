@@ -46,7 +46,7 @@ export function AccountPolicyForm({ account, threshold, drainHours, save, onUnsa
   );
   return <section className="pool-settings-section">
     <label className="pool-settings-toggle"><input type="checkbox" checked={draft.enabled} disabled={pending} onChange={e => change({ enabled: e.target.checked })} />Индивидуальные настройки</label>
-    <p className="pool-settings-help">{draft.enabled ? policySummary(draft) : 'Действуют общие правила. Личные значения сохраняются.'}</p>
+    <p className="pool-settings-help">{draft.enabled ? policySummary(draft, account.weeklyBudget !== undefined) : 'Действуют общие правила. Личные значения сохраняются.'}</p>
     {!account.policy && <p className="pool-settings-help">Поля заполнены текущими общими значениями. При включении они сохранятся как индивидуальные.</p>}
     <fieldset disabled={!draft.enabled || pending} className="pool-settings-fields">
       {hasFiveHour && numberField('fiveHourKeep', 'Оставлять квоту 5 часов, %', inheritedKeep)}
