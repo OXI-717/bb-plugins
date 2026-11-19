@@ -20,7 +20,8 @@ import {
 } from "./lib/filters";
 import {
   health,
-  runLabel,
+  hasCurrentRun,
+  lastRunLabel,
   timestamp,
   scopeLabel,
   sourceLabel,
@@ -158,9 +159,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
     {
       id: "running",
       label: "Выполняются / в очереди",
-      count: filteredTasks.filter((t) =>
-        !t.missing && ["running", "queued"].includes(t.lastRun?.status ?? ""),
-      ).length,
+      count: filteredTasks.filter(hasCurrentRun).length,
     },
     {
       id: "paused",
@@ -199,7 +198,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
             : filters.state === "missing"
               ? t.missing
             : filters.state === "running"
-              ? !t.missing && ["running", "queued"].includes(t.lastRun?.status ?? "")
+              ? hasCurrentRun(t)
               : t.state === filters.state),
     )
     .sort(
@@ -487,7 +486,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
                           </p>
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 md:hidden">
                             {status}
-                            {runTime != null && <span className="text-xs text-muted-foreground">{finding ? "Обнаружено" : runLabel(t.lastRun!.status)} · {timestamp(runTime)}</span>}
+                            {runTime != null && <span className="text-xs text-muted-foreground">{finding ? "Обнаружено" : lastRunLabel(t)} · {timestamp(runTime)}</span>}
                           </div>
                           {!finding && t.agent && <p className="mt-1 hidden text-xs text-muted-foreground lg:block">{modelLabel(t)}</p>}
                           {!finding && t.schedule && <p className="mt-2 text-xs text-muted-foreground md:hidden">{catalogSchedule(t.schedule)}</p>}
@@ -514,7 +513,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
                                     : ""
                                 }
                               >
-                                {runLabel(t.lastRun.status)}
+                                {lastRunLabel(t)}
                               </span>
                               <p className="mt-1 text-muted-foreground">
                                 {timestamp(

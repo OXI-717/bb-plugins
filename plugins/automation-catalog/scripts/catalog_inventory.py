@@ -1,4 +1,5 @@
 """Bounded metadata-only scheduler discovery. Never executes or changes a job."""
+import datetime
 import hashlib
 import json
 import os
@@ -11,7 +12,9 @@ import time
 
 
 def command(argv):
-    result = subprocess.run(argv, capture_output=True, text=True, timeout=25)
+    result = subprocess.run(argv, capture_output=True, text=True,
+                            timeout=3 if argv[0] == 'systemctl' and 'show' in argv else 25,
+                            env=dict(os.environ, TZ='UTC', LC_ALL='C'))
     if result.returncode:
         raise RuntimeError('inventory access unavailable')
     if len(result.stdout) > 4_000_000:
@@ -44,8 +47,75 @@ def launchd_services(scope, run=command):
     return labels
 
 
+SYSTEMD_FIELDS = ('Id', 'LoadState', 'Transient', 'Restart', 'TriggeredBy', 'InvocationID',
+                  'ActiveState', 'Result', 'ExecMainCode', 'ExecMainStatus',
+                  'ExecMainStartTimestamp', 'ExecMainExitTimestamp')
+
+
+def systemd_metadata(run, prefix, names, deadline):
+    """Bounded allowlisted properties; never export argv, environment or journal text."""
+    result = {}
+    names = sorted(n for n in names if n.endswith('.service'))
+    for offset in range(0, len(names), 64):
+        if time.monotonic() >= deadline:
+            break  # Remaining identities stay unclassified, never disappear.
+        batch = names[offset:offset + 64]
+        try:
+            raw = run(prefix + ['show', *batch, '--no-pager', '--property=' + ','.join(SYSTEMD_FIELDS)])
+            for block in raw.strip().split('\n\n'):
+                values = dict(line.split('=', 1) for line in block.splitlines() if '=' in line)
+                unit = values.get('Id')
+                if unit in batch:
+                    result[unit] = {k: v for k, v in values.items() if k in SYSTEMD_FIELDS}
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            pass  # Identity remains visible as unclassified; never infer a one-off.
+    return result
+
+
+def systemd_execution(row):
+    """Positive classification only. Legacy/missing metadata retains registry checks."""
+    data = row.get('systemd', {})
+    if (row.get('scheduler') != 'systemd' or not row.get('unit', '').endswith('.service')
+            or not isinstance(data, dict) or any(not isinstance(v, str) or len(v) > 1000 for v in data.values())
+            or data.get('Id') != row['unit']
+            or data.get('LoadState') != 'loaded' or data.get('Transient') != 'yes'
+            or data.get('Restart') != 'no' or data.get('TriggeredBy') != ''
+            or not re.fullmatch('[a-f0-9]{32}', data.get('InvocationID', ''))):
+        return None
+    def stamp(key):
+        parts = data.get(key, '').split()
+        try:
+            if len(parts) != 4 or parts[3] != 'UTC':
+                return None
+            value = datetime.datetime.fromisoformat(parts[1] + 'T' + parts[2])
+            return int(value.replace(tzinfo=datetime.timezone.utc).timestamp() * 1000)
+        except (ValueError, IndexError):
+            return None
+    started, finished = stamp('ExecMainStartTimestamp'), stamp('ExecMainExitTimestamp')
+    if started is None:
+        return None
+    if finished is not None and finished < started:
+        finished = None
+    status, code = 'unknown', None
+    if finished is not None:
+        if data.get('ExecMainCode') == '1' and re.fullmatch(r'[0-9]{1,3}', data.get('ExecMainStatus', '')) and int(data['ExecMainStatus']) <= 255:
+            code = int(data['ExecMainStatus'])
+            if code != 0 or data.get('ActiveState') == 'failed' or data.get('Result') not in (None, '', 'success'):
+                status = 'failed'
+            elif data.get('Result') == 'success' and data.get('ActiveState') == 'inactive':
+                status = 'succeeded'
+        elif data.get('Result') not in (None, '', 'success'):
+            status = 'failed'
+    elif data.get('ActiveState') == 'failed':
+        status = 'failed'
+    elif data.get('ActiveState') in ('active', 'activating'):
+        status = 'running'
+    return dict(invocation=data['InvocationID'], startedAt=started, finishedAt=finished,
+                status=status, exitCode=code)
+
+
 def discover(run=command, system=None, home=None, etc=None):
-    """Return identities only; command arguments and environment never leave host."""
+    """Return identities and allowlisted execution metadata, never commands or env."""
     home = Path(home or Path.home())
     etc = Path(etc or '/etc')
     system = system or platform.system()
@@ -60,8 +130,10 @@ def discover(run=command, system=None, home=None, etc=None):
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
             coverage.append(dict(scheduler=scheduler, scope=scope, ok=False))
     if system == 'Linux':
+        metadata_deadline = time.monotonic() + 8
         for scope in ('system', 'user'):
             prefix = ['systemctl'] + (['--user'] if scope == 'user' else [])
+            runtime_names = set()
             def read(prefix=prefix):
                 names = set()
                 for action in ('list-unit-files', 'list-units'):
@@ -74,8 +146,15 @@ def discover(run=command, system=None, home=None, etc=None):
                             continue
                         if first.endswith(('.service', '.timer')):
                             names.add(first)
+                            if action == 'list-units':
+                                runtime_names.add(first)
                 return names
             probe('systemd', scope, read)
+            rows = [r for r in observations if r['scheduler'] == 'systemd' and r['scope'] == scope]
+            metadata = systemd_metadata(run, prefix, runtime_names, metadata_deadline)
+            for row in rows:
+                if row['unit'] in metadata:
+                    row['systemd'] = metadata[row['unit']]
     elif system == 'Darwin':
         for folder, scope in ((home/'Library/LaunchAgents', 'user'), (Path('/Library/LaunchAgents'), 'global-user'), (Path('/Library/LaunchDaemons'), 'system')):
             def read(folder=folder, scope=scope):

@@ -9,6 +9,14 @@ export type Health = {
   tone: "danger" | "neutral";
   paused: boolean;
 };
+export function hasCurrentRun(task: CatalogTask) {
+  return !task.missing && task.state !== 'unknown' && ['running', 'queued'].includes(task.lastRun?.status ?? '');
+}
+export function lastRunLabel(task: CatalogTask) {
+  if (task.state === 'unknown' && ['running', 'queued'].includes(task.lastRun?.status ?? ''))
+    return 'Ранее наблюдался · текущий исход неизвестен';
+  return task.lastRun ? runLabel(task.lastRun.status) : 'Данных о запусках нет';
+}
 function rawHealth(
   task: CatalogTask,
   source?: Source,
@@ -113,9 +121,9 @@ function rawHealth(
       "Время запуска прошло; проверьте планировщик",
       6,
     );
-  if (task.lastRun?.status === "running")
+  if (hasCurrentRun(task) && task.lastRun?.status === "running")
     return result("Выполняется", "Идёт выполнение", 6, false);
-  if (task.lastRun?.status === "queued")
+  if (hasCurrentRun(task) && task.lastRun?.status === "queued")
     return result("В очереди", "Ожидает выполнения", 7, false);
   if (completedOnce)
     return result("Завершена", "Одноразовый запуск выполнен", 8, false);

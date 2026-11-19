@@ -168,6 +168,20 @@ recognized cleanup JSON are exported, never paths or arbitrary stdout. Missing
 journal access is explicit; it does not erase the systemctl execution evidence.
 The collector never invokes sudo, changes unit permissions or starts a service.
 
+The inventory audit also reads a bounded property allowlist for loaded services.
+An unregistered service becomes a one-off execution only with matching `Id`,
+`LoadState=loaded`, `Transient=yes`, `Restart=no`, empty `TriggeredBy`, a valid
+`InvocationID` and a UTC start timestamp. Names and prefixes never classify it.
+The existing catalog key and earlier findings remain in history. The optional
+`executionId` binds its displayed result to the exact systemd invocation, so a
+later registry observation cannot replace that result. A retained failure stays
+failed when the unit disappears; disappearance never creates a successful run.
+Missing metadata keeps the previous registry checks. Registered and required
+jobs still follow their registry rules. Remote inventory exports carry the same
+allowlist; older exports remain unclassified. No commands, environment values or
+journal output are exported. A service exit code proves only its service result;
+it does not identify a provider, session, controller transition or launch failure.
+
 For periodic refresh, add `kind: "systemd"` with `--selection` in `options` to the
 existing `catalog_sync.py` configuration. Keep settings, selections and snapshots
 outside the source checkout. If a host has no publisher, an explicitly configured
@@ -194,3 +208,45 @@ route (`sudo -n crontab -u root -l`, or direct crontab when already root).
 It never prompts for a password, changes sudo policy or exports command bodies.
 A denied route remains unknown; a confirmed absent crontab is a successful empty
 inventory. Root and current-user scopes stay distinct.
+
+One-off inventory delivery requires the matching catalog backend (0.1.22 or
+newer) before the new publisher scripts: older backends reject the new optional
+`executionId` field. Release the reviewed package under its immutable
+`automation-catalog/v0.1.22` tag and update the plugin through `bb plugin update
+ automation-catalog`. Deploy `scripts/catalog_inventory.py` and
+`scripts/catalog_compliance.py` together from that same reviewed release into the
+existing publisher script directory. Keep its configuration, audit-state file,
+lock and timer unchanged. The remote inventory transport embeds the updated
+inventory module; no remote service installation is needed. No root runner or
+provider upgrade is required.
+
+Before deployment, acquire the publisher's existing `sync.lock` through its
+normal maintenance path and save a private pre-update backup of `audit-state.json`
+under that same lock. Verify the backup before replacing both scripts. Keep the
+backup outside the source tree with the publisher's private configuration. Do not
+change the timer or bypass an operator lock. After deployment, preserve the
+post-update state/outbox and published card/run evidence before any rollback.
+Old collector scripts cannot consume an execution-aware state: they can fabricate
+recovery events for disappeared executions. Roll back only to a compatible reader,
+or restore the verified pre-update state backup together with the old scripts,
+under the same lock, retaining a separate copy of all post-update evidence.
+Keep the backend capable of reading stored `executionId` values; do not downgrade
+to a backend that rejects those existing records. Never delete cards or run history
+to make an older reader work. If the required backup or compatibility proof is
+unavailable, stop the rollback and retain the evidence.
+
+A missed running observation becomes unknown rather than a current running job.
+An already observed terminal result remains pending under the event budget until
+published, including when the service disappears or the source loses access.
+Missing metadata retains the last positively established classification and exact
+terminal result; affirmative properties identifying a persistent/triggered unit
+restore registry checking. Required registry jobs always retain precedence.
+
+Deferred execution evidence is an outbox keyed by InvocationID, separate from the
+last unit classification. A newer invocation or an affirmative transition to a
+persistent unit cannot replace an unacknowledged result. A terminal result for
+one invocation survives later incomplete observations. The outbox holds at most
+16 invocations per identity; only already acknowledged entries can be evicted.
+Exhaustion is a persistent visible blocked/overflow state requiring reconciliation,
+never a successful or complete history. Publication still obeys the shared event
+budget, and advances the outbox only after the existing publication acknowledgement.
