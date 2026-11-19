@@ -218,6 +218,12 @@ class TransientTests(unittest.TestCase):
         self.assertTrue(value['executionOverflow'])
         self.assertEqual(result['tasks'][0]['state'],'blocked')
         self.assertIn('overflow',result['tasks'][0]['description'].lower())
+        self.inventory['observations'][0]['systemd']['Transient']='no'
+        self.config['maxEventsPerCycle']=100
+        _,state=snapshot(self.config,self.evaluate(),state,2000)
+        later,_=snapshot(self.config,{},state,2001)
+        self.assertEqual(later['tasks'][0]['state'],'blocked')
+        self.assertFalse(any(r['status']=='succeeded' for r in later['runs']))
 
     def test_budget_defers_without_losing_event(self):
         self.config['maxEventsPerCycle']=0

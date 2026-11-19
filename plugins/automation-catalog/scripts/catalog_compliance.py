@@ -211,7 +211,9 @@ def snapshot(config, findings, previous, now):
                 and old and old['finding']['kind'] == 'execution'):
             item = dict(old['finding'], unresolved=True)
         if item is None and old:
-            if old['finding']['kind'] == 'execution':
+            if saved.get('executionOverflow'):
+                item = dict(old['finding'], unresolved=True)
+            elif old['finding']['kind'] == 'execution':
                 # Collection by systemd is not evidence of recovery or success.
                 item = dict(old['finding'], unresolved=True)
             # A missing host/source is not evidence that its old problems recovered.
