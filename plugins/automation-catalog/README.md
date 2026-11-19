@@ -168,6 +168,20 @@ recognized cleanup JSON are exported, never paths or arbitrary stdout. Missing
 journal access is explicit; it does not erase the systemctl execution evidence.
 The collector never invokes sudo, changes unit permissions or starts a service.
 
+The inventory audit also reads a bounded property allowlist for loaded services.
+An unregistered service becomes a one-off execution only with matching `Id`,
+`LoadState=loaded`, `Transient=yes`, `Restart=no`, empty `TriggeredBy`, a valid
+`InvocationID` and a UTC start timestamp. Names and prefixes never classify it.
+The existing catalog key and earlier findings remain in history. The optional
+`executionId` binds its displayed result to the exact systemd invocation, so a
+later registry observation cannot replace that result. A retained failure stays
+failed when the unit disappears; disappearance never creates a successful run.
+Missing metadata keeps the previous registry checks. Registered and required
+jobs still follow their registry rules. Remote inventory exports carry the same
+allowlist; older exports remain unclassified. No commands, environment values or
+journal output are exported. A service exit code proves only its service result;
+it does not identify a provider, session, controller transition or launch failure.
+
 For periodic refresh, add `kind: "systemd"` with `--selection` in `options` to the
 existing `catalog_sync.py` configuration. Keep settings, selections and snapshots
 outside the source checkout. If a host has no publisher, an explicitly configured

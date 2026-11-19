@@ -272,3 +272,26 @@ describe("source archival", () => {
     expect(() => catalog.setSourceArchived("native", 1000, true)).toThrow(/BB/);
   });
 });
+
+describe("one-off execution classification", () => {
+  it("preserves the card and old findings while binding the actual invocation", () => {
+    const { catalog } = setup();
+    const legacy = snapshot(3000);
+    legacy.tasks[0].scheduler = "inventory-audit";
+    legacy.runs[0] = { ...legacy.runs[0], id: "old-inventory-finding", startedAt: 3000, finishedAt: 3000, status: "succeeded" };
+    catalog.publish(legacy);
+    const key = catalog.list().tasks[0].key;
+    const invocation = { ...snapshot(4000), tasks: [{ ...legacy.tasks[0], scheduler: "systemd", scheduleKind: "once" as const, state: "failed" as const, executionId: "systemd:invocation-one" }],
+      runs: [{ ...legacy.runs[0], id: "systemd:invocation-one", startedAt: 1000, finishedAt: 2000, status: "failed" as const, exitCode: 70 }] };
+    catalog.publish(invocation);
+    expect(catalog.list().tasks[0]).toMatchObject({ key, state: "failed", lastRun: { id: "systemd:invocation-one", exitCode: 70 } });
+    const detail = catalog.detail({ key });
+    expect(detail.task.lastRun).toMatchObject({ id: "systemd:invocation-one", exitCode: 70 });
+    expect(detail.total).toBe(2);
+    expect(detail.runs.find(r => r.id === "old-inventory-finding")).toMatchObject({ startedAt: 3000, status: "succeeded" });
+    catalog.publish({ ...invocation, observedAt: 5000, tasks: [{ ...invocation.tasks[0], executionId: "systemd:not-yet-published" }], runs: [] });
+    expect(catalog.list().tasks[0].lastRun).toBeNull();
+    expect(catalog.detail({ key }).task.lastRun).toBeNull();
+    expect(catalog.detail({ key }).total).toBe(2);
+  });
+});

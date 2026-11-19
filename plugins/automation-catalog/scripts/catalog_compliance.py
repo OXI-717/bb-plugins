@@ -1,6 +1,7 @@
 """Registry comparison for the existing catalog publisher; no scheduler mutations."""
 import hashlib
 import json
+from catalog_inventory import systemd_execution
 
 REQUIRED = ('name', 'owner', 'project', 'purpose', 'source', 'limits', 'stop', 'rollback')
 
@@ -17,8 +18,8 @@ def fresh_source(source, now):
 def evaluate(config, inventories, sources, now, *, catalog_tasks=None):
     """All expected hosts/sources are explicit. Failed coverage is never empty success."""
     findings = {}
-    def add(kind, ident, summary, **evidence):
-        key = hashlib.sha256((kind + ':' + ident).encode()).hexdigest()[:32]
+    def add(kind, ident, summary, *, key_kind=None, **evidence):
+        key = hashlib.sha256(((key_kind or kind) + ':' + ident).encode()).hexdigest()[:32]
         try:
             parsed = json.loads(ident)
             host = parsed[0] if isinstance(parsed, list) else config['host']
@@ -77,6 +78,13 @@ def evaluate(config, inventories, sources, now, *, catalog_tasks=None):
                 missing = [field for field in REQUIRED if not registry[ident].get(field)]
                 if missing:
                     add('noncompliant', ident, 'Registry fields missing: ' + ', '.join(missing))
+                continue
+            execution = systemd_execution(row)
+            if execution is not None:
+                # Preserve the existing identity/card and all earlier audit runs.
+                # This is a classification, never an exclusion or a recovery.
+                add('execution', ident, 'Observed one-off systemd execution; session outcome is not inferred',
+                    key_kind='unregistered', execution=execution, unit=row['unit'], scope=row['scope'])
                 continue
             # Explicit exact/prefix exclusions, constrained to host/scheduler/scope.
             excluded = any(e['host'] == host and e['scheduler'] == row['scheduler'] and e['scope'] == row['scope']
@@ -138,8 +146,11 @@ def snapshot(config, findings, previous, now):
         item = findings.get(key)
         old = previous.get(key)
         if item is None and old:
+            if old['finding']['kind'] == 'execution':
+                # Collection by systemd is not evidence of recovery or success.
+                item = dict(old['finding'], unresolved=True)
             # A missing host/source is not evidence that its old problems recovered.
-            if old.get('active') and not explicitly_classified(config, old['finding']) and any(coverage_blocks(old['finding'], f) for f in findings.values()):
+            elif old.get('active') and not explicitly_classified(config, old['finding']) and any(coverage_blocks(old['finding'], f) for f in findings.values()):
                 item = dict(old['finding'], unresolved=True)
             elif budget > 0 and old.get('active'):
                 runs.append(dict(taskId=key, host=old['finding'].get('host', config['host']), id=f'{key}:{now}:recovered', status='succeeded',
@@ -155,6 +166,32 @@ def snapshot(config, findings, previous, now):
                                 description='Previous inventory finding recovered. ' + old['finding']['identity'])
                 tasks.append(resolved)
                 continue
+        if item['kind'] == 'execution':
+            execution = item['execution']
+            task = task_base(key, 'Одноразовое исполнение · ' + item['unit'], item['host'])
+            status = execution['status']
+            task.update(scheduler='systemd', executor=item['unit'], scheduleKind='once',
+                        schedule='Одноразовый процесс · без собственного расписания',
+                        executionId='systemd:' + execution['invocation'],
+                        state={'running': 'active', 'succeeded': 'paused', 'failed': 'failed'}.get(status, 'unknown'),
+                        history='available', owner=config['owner'],
+                        description=(item['scope'] + ' systemd; Transient=yes; Restart=no; TriggeredBy=empty. '
+                                     'InvocationID=' + execution['invocation'] + '. '
+                                     'Only the service result is known; provider/session attribution is unverified. '
+                                     + ('Retained evidence; execution no longer confirmed in live inventory.' if item.get('unresolved') else '')))
+            tasks.append(task)
+            # A delayed event must be retried under the existing publication budget.
+            event = {k: execution[k] for k in ('invocation', 'status', 'exitCode', 'finishedAt')}
+            if not item.get('unresolved') and (not old or old.get('executionEvent') != event) and budget > 0:
+                runs.append(dict(taskId=key, host=item['host'], id='systemd:' + execution['invocation'],
+                                 observedAt=now, evidence='execution',
+                                 **{k: execution[k] for k in ('startedAt', 'finishedAt', 'status', 'exitCode')},
+                                 summary='One-off systemd service execution. Exit status is not a session verdict.'))
+                state[key] = dict(active=True, lastEvent=now, finding=item, executionEvent=event)
+                budget -= 1
+            elif old:
+                state[key] = dict(old, finding=item)
+            continue
         task = task_base(key, 'OXI · ' + item['kind'] + ' · ' + item.get('host', config['host']), item.get('host', config['host']))
         task.update(scheduler='inventory-audit', state='blocked', history='available', owner=config['owner'],
                     description=item['summary'] + '. Identity: ' + item['identity'] + '. No automatic stop. Inspect original scheduler before disabling.')

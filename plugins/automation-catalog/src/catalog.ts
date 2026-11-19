@@ -261,7 +261,7 @@ export function createCatalog(db: Db) {
     list() {
       const tasks = db
         .prepare(
-          "SELECT data, missing, (SELECT data FROM automation_catalog_runs WHERE task_key = automation_catalog_tasks.key AND COALESCE(json_extract(data, '$.evidence'), 'execution') = 'execution' ORDER BY COALESCE(started_at, json_extract(data, '$.finishedAt'), json_extract(data, '$.observedAt'), 0) DESC, id DESC LIMIT 1) AS last_run FROM automation_catalog_tasks WHERE EXISTS (SELECT 1 FROM automation_catalog_sources AS source WHERE source.id = automation_catalog_tasks.source_id AND (json_extract(source.data, '$.taskIds') IS NULL OR json_extract(automation_catalog_tasks.data, '$.id') IN (SELECT value FROM json_each(source.data, '$.taskIds')))) ORDER BY key",
+          "SELECT data, missing, (SELECT data FROM automation_catalog_runs WHERE task_key = automation_catalog_tasks.key AND COALESCE(json_extract(data, '$.evidence'), 'execution') = 'execution' AND (json_extract(automation_catalog_tasks.data, '$.executionId') IS NULL OR id = json_extract(automation_catalog_tasks.data, '$.executionId')) ORDER BY COALESCE(started_at, json_extract(data, '$.finishedAt'), json_extract(data, '$.observedAt'), 0) DESC, id DESC LIMIT 1) AS last_run FROM automation_catalog_tasks WHERE EXISTS (SELECT 1 FROM automation_catalog_sources AS source WHERE source.id = automation_catalog_tasks.source_id AND (json_extract(source.data, '$.taskIds') IS NULL OR json_extract(automation_catalog_tasks.data, '$.id') IN (SELECT value FROM json_each(source.data, '$.taskIds')))) ORDER BY key",
         )
         .all()
         .map((row) => ({
@@ -302,9 +302,9 @@ export function createCatalog(db: Db) {
         );
       const latest = db
         .prepare(
-          "SELECT data FROM automation_catalog_runs WHERE task_key = ? AND COALESCE(json_extract(data, '$.evidence'), 'execution') = 'execution' ORDER BY COALESCE(started_at, json_extract(data, '$.finishedAt'), json_extract(data, '$.observedAt'), 0) DESC, id DESC LIMIT 1",
+          "SELECT data FROM automation_catalog_runs WHERE task_key = ? AND COALESCE(json_extract(data, '$.evidence'), 'execution') = 'execution' AND (? IS NULL OR id = ?) ORDER BY COALESCE(started_at, json_extract(data, '$.finishedAt'), json_extract(data, '$.observedAt'), 0) DESC, id DESC LIMIT 1",
         )
-        .get(key);
+        .get(key, task.executionId ?? null, task.executionId ?? null);
       return catalogDetailSchema.parse({
         task: {
           ...task,
