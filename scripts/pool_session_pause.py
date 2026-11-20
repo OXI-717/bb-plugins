@@ -89,14 +89,16 @@ class SessionPause:
             self.state['admission'] = 'not-owned-or-expired'
         self.save()
 
-    def acquire_model_hold(self):
+    def acquire_model_hold(self, action='acquire'):
         self.state['modelAdmission'] = 'acquire-intent'
         self.save()
-        value = self.bb('pool', 'maintenance', 'acquire', '--owner', self.state['operationId'])
+        value = self.bb('pool', 'maintenance', action, '--owner', self.state['operationId'])
         verify_model_hold(value, self.state['operationId'])
         self.state['modelAdmission'] = 'held'
         self.save()
-        self.say('All model clients paused, including external automation workers.')
+        if action == 'acquire-upgrade' and value['lease'].get('upgrade') != 'draining':
+            raise RuntimeError('Upgrade model admission unavailable; update refused')
+        self.say('New model clients paused, including external automation workers.')
 
     def interrupt_model_requests(self):
         value = self.bb('pool', 'maintenance', 'interrupt', '--owner', self.state['operationId'])
@@ -193,23 +195,23 @@ class SessionPause:
         self.state['phase'] = 'stopped'
         self.save()
 
-    def observe_resume(self, stopped, *, settle=False):
+    def observe_resume(self, stopped, *, settle=False, accept_running=False):
         for observation in range(RESUME_OBSERVATIONS if settle else 1):
             if observation:
                 self.sleep(1)
             current = self.show(stopped['id'])
             if any(current[key] != stopped[key] for key in ('id', 'projectId', 'environmentId', 'providerId')):
                 return 'changed-after-stop'
-            if settle and (current['status'] in ('starting', 'active') or current['queuedMessageCount']):
+            if (settle or accept_running) and (current['status'] in ('starting', 'active') or current['queuedMessageCount']):
                 return 'resumed'
             if current != stopped:
                 return 'changed-after-stop'
         return 'unchanged'
 
-    def resume_session(self, entry):
+    def resume_session(self, entry, *, admission_released=False):
         stopped = self.identity(entry['stopped'])
         attempts = entry.get('resumeAttempts', int(entry['action'] == 'resume-intent'))
-        outcome = self.observe_resume(stopped, settle=attempts > 0)
+        outcome = self.observe_resume(stopped, settle=attempts > 0, accept_running=admission_released)
         if outcome != 'unchanged':
             return outcome
         if stopped['queuedMessageCount']:
@@ -231,7 +233,7 @@ class SessionPause:
                 return outcome
         return 'resume-unconfirmed'
 
-    def resume(self):
+    def resume(self, *, admission_released=False):
         self.state['phase'] = 'resuming'
         self.save()
         uncertain = {'stop-intent', 'stop-returned', 'resume-intent', 'resume-unconfirmed'}
@@ -240,7 +242,7 @@ class SessionPause:
             if entry['action'] not in ('stopped', 'resume-intent'):
                 continue
             try:
-                entry['action'] = self.resume_session(entry)
+                entry['action'] = self.resume_session(entry, admission_released=admission_released)
             except Exception:
                 # Could not verify the current thread. Keep the intent for recovery.
                 pass

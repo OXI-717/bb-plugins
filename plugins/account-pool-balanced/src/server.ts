@@ -397,6 +397,8 @@ export function createAccountPoolPlugin(
       status:()=>maintenance.status(),
       acquire:(owner:string)=>maintenance.acquire(owner),
       acquireGraceful:(owner:string)=>maintenance.acquireGraceful(owner),
+      acquireUpgrade:(owner:string)=>maintenance.acquireUpgrade(owner),
+      sealUpgrade:(owner:string)=>maintenance.sealUpgrade(owner),
       release:(owner:string)=>maintenance.release(owner),
       interrupt:async(owner:string)=>{hub.interruptForMaintenance(owner);return maintenance.status();},
     };
@@ -462,6 +464,7 @@ export function createAccountPoolPlugin(
         return { opened: true };
       }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update,input=>nativeSessions.updateAccount(input),input=>nativeSessions.probe(input,async()=>{try{return (await browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})).protocol===1;}catch{return false;}},request=>browserHost.call('nativeProbe',request,{hostId:input.hostId,timeoutMs:125000})),selection),
     );
+    operations.uncertainNativeLeases=()=>nativeSessions.uncertainLeases();
     operations.routeTracking=async()=>{await egress.cleanup();return egress.capacity();};
     registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})),()=>update.status());
     registerUsageSource(bb, hub, false);

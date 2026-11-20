@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -222,12 +223,14 @@ def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=9
     next_report = start
     stable = 0
     asked = False
+    native_leases_waiting = []
     while time.monotonic() - start < deadline_seconds:
         pool = bb('pool', 'status')
         count = pool['inFlight']
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             raise UpgradeError('Invalid in-flight request count')
-        native_count = native_in_flight() if include_native else 0
+        native_leases_waiting = native_leases() if include_native else []
+        native_count = len(native_leases_waiting)
         transport_count = model_activity() if include_native else 0
         count += native_count + transport_count
         stable = stable + 1 if count == 0 else 0
@@ -248,7 +251,7 @@ def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=9
                 return True
             say('No interruption approved; continuing to wait up to 15 minutes.')
         time.sleep(3)
-    raise UpgradeError('Idle wait expired; nothing updated')
+    raise UpgradeError('Idle wait expired; nothing updated' + uncertain_lease_details(native_leases_waiting))
 
 
 def backup_state(data, destination, pool, source, info, config):
@@ -286,18 +289,43 @@ def model_activity():
     return activity
 
 
-def native_in_flight():
+def native_leases():
     value = bb('pool', 'native', 'status')
     leases = value.get('leases')
     if not isinstance(leases, list):
         raise UpgradeError('Native executor inventory is unavailable; update refused')
-    return len(leases)
+    return leases
 
 
-def verify_pause(args):
+def native_in_flight():
+    return len(native_leases())
+
+
+def uncertain_lease_details(leases):
+    now = int(time.time() * 1000)
+    details = []
+    for lease in leases:
+        if not isinstance(lease, dict) or lease.get('state') != 'uncertain':
+            continue
+        executor, kind, lease_id, created_at = (lease.get(key) for key in ('executorId', 'kind', 'id', 'createdAt'))
+        if (not isinstance(executor, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', executor)
+                or kind not in ('task', 'catalog', 'diagnostic')
+                or not isinstance(lease_id, str) or not re.fullmatch(r'[0-9a-fA-F-]{36}', lease_id)
+                or type(created_at) not in (int, float) or not math.isfinite(created_at)):
+            continue
+        age = max(0, int((now - created_at) / 1000))
+        details.append(f'Unconfirmed native stop: {executor} ({kind}), age {age} s. '
+                       f'After confirming stopped: bb pool native attest-stopped {lease_id} --confirmed')
+    return '\n' + '\n'.join(details) if details else ''
+
+
+def verify_pause(args, *, sealed=False):
     if getattr(args, 'pause_sessions', False) or getattr(args, 'drain_sessions', False):
         from pool_session_pause import verify_hold, verify_model_hold
-        verify_model_hold(bb('pool', 'maintenance', 'status'), args.maintenance_owner)
+        model = bb('pool', 'maintenance', 'status')
+        verify_model_hold(model, args.maintenance_owner)
+        if sealed and getattr(args, 'pause_sessions', False) and model['lease'].get('upgrade') != 'sealed':
+            raise UpgradeError('Model admission is not sealed; update refused')
         verify_hold(bb('pool-maintenance', 'status'), args.maintenance_owner)
 
 
@@ -322,13 +350,22 @@ def perform(args, data, output, say):
     paused = getattr(args, 'pause_sessions', False) or getattr(args, 'drain_sessions', False)
     forced = wait_idle(say, args.interrupt_now, offer_interrupt=not paused,
                        deadline_seconds=90 if paused else 900, include_native=paused)
+    if getattr(args, 'pause_sessions', False):
+        from pool_session_pause import verify_model_hold
+        sealed = bb('pool', 'maintenance', 'seal-upgrade', '--owner', args.maintenance_owner)
+        verify_model_hold(sealed, args.maintenance_owner)
+        if sealed['lease'].get('upgrade') != 'sealed':
+            raise UpgradeError('Model admission was not sealed; update refused')
     before = bb('pool', 'status')
     config = bb('plugin', 'config', PLUGIN)['values']
     if not before['accepting'] or (before['inFlight'] and not forced):
         raise UpgradeError('Pool state changed; retry after requests finish')
-    verify_pause(args)
-    if paused and (native_in_flight() or model_activity()):
-        raise UpgradeError('Native processes or auxiliary work have not stopped; update refused')
+    verify_pause(args, sealed=True)
+    if paused:
+        leases = native_leases()
+        if leases or model_activity():
+            raise UpgradeError('Native processes or auxiliary work have not stopped; update refused'
+                               + uncertain_lease_details(leases))
     backup_state(data, output / 'backup', before, source, info, config)
     say('Verified backup created.')
     # Fail closed if a new release or a source/settings change appeared while waiting.
@@ -339,15 +376,18 @@ def perform(args, data, output, say):
         raise UpgradeError('Account settings changed during backup; retry')
     if latest['inFlight'] and not forced:
         raise UpgradeError('New requests arrived during backup; retry')
-    verify_pause(args)
-    if paused and (native_in_flight() or model_activity()):
-        raise UpgradeError('Native processes or auxiliary work appeared during backup; update refused')
+    verify_pause(args, sealed=True)
+    if paused:
+        leases = native_leases()
+        if leases or model_activity():
+            raise UpgradeError('Native processes or auxiliary work appeared during backup; update refused'
+                               + uncertain_lease_details(leases))
     say(f'Updating to {target} using BB plugin update.')
     run('bb', 'plugin', 'update', PLUGIN, '--yes', timeout=600)
     after_info = installed()
     after_source = source_info()
     after = bb('pool', 'status')
-    verify_pause(args)
+    verify_pause(args, sealed=True)
     if (after_info['version'] != target or not after_source.get('history')
             or after_source['history'][0]['version'] != sha):
         raise UpgradeError('Updated version or commit differs from verified release; inspect backup/RECOVERY.txt')
@@ -491,13 +531,20 @@ def main():
                             try:
                                 pause.acquire_hold()
                                 args.maintenance_owner = pause.state['operationId']
-                                # Record and stop BB turns before model interruption can
-                                # make them disappear from the running-session inventory.
+                                pause.acquire_model_hold('acquire-upgrade')
                                 pause.stop()
-                                pause.acquire_model_hold()
-                                pause.interrupt_model_requests()
                                 result = perform(args, data, output, say)
-                            finally:
+                            except (Exception, KeyboardInterrupt) as refusal:
+                                say('Update failed before recovery: ' + str(refusal))
+                                try:
+                                    pause.release_model_hold()
+                                finally:
+                                    try:
+                                        pause.release_hold()
+                                    finally:
+                                        pause.resume(admission_released=True)
+                                raise
+                            else:
                                 try:
                                     pause.release_model_hold()
                                 finally:

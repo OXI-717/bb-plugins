@@ -208,6 +208,7 @@ export class AccountPoolHub {
   private accepting = false;
   private stopped = new AbortController();
   private readonly inFlightByAccount = new Map<string, number>();
+  private admittedModelRequests = 0;
   private readonly activeControllers = new Set<AbortController>();
   private readonly refreshes = new Map<string, SecretFlight>();
   // Internal binding only: rejected tokens must never become error properties
@@ -438,23 +439,40 @@ export class AccountPoolHub {
     if (context === null || context.hostId === null) {
       return this.errorResponse(adapter, request, 401, "Invalid Account Pooler bearer token.");
     }
-    if (this.options.maintenance?.status().lease)
-      return this.errorResponse(adapter, request, 503, "Account Pooler is paused for maintenance.", {"x-bb-pool-error":"POOL_MAINTENANCE","retry-after":"30"});
+    const admissionSignal = AbortSignal.any([request.signal, this.stopped.signal, ...(maintenanceSignal ? [maintenanceSignal] : [])]);
+    const maintenanceRefusal = () => this.errorResponse(adapter, request, 503,
+      "Account Pooler is paused for maintenance.", {"x-bb-pool-error":"POOL_MAINTENANCE","retry-after":"30"});
+    try {
+      for (let held = this.options.maintenance?.waitForUpgrade(admissionSignal); held; held = this.options.maintenance?.waitForUpgrade(admissionSignal)) {
+        await held;
+      }
+    } catch (error) {
+      if (error instanceof PoolMaintenanceError) return maintenanceRefusal();
+      if (!admissionSignal.aborted) throw error;
+    }
+    if (request.signal.aborted)
+      return this.errorResponse(adapter, request, 499, "Account Pooler request was canceled.", {"x-bb-pool-error":"POOL_REQUEST_CANCELED"});
+    if (maintenanceSignal?.aborted || this.options.maintenance?.status().lease) return maintenanceRefusal();
     if (!this.accepting)
       return this.errorResponse(adapter, request,
         503,
         "Account Pooler is not accepting requests.",
         {"x-bb-pool-error":"POOL_SHUTTING_DOWN"},
       );
-    try { await this.assertNetworkAllowed(provider); }
-    catch (error) {
-      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 503, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
-      throw error;
+    this.admittedModelRequests++;
+    try {
+      try { await this.assertNetworkAllowed(provider); }
+      catch (error) {
+        if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 503, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
+        throw error;
+      }
+      const body = new Uint8Array(await request.arrayBuffer());
+      const refusal = adapter.guardRequest?.(request, body);
+      if (refusal !== null && refusal !== undefined) return refusal;
+      return await this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null, "purpose" in context ? context.purpose : undefined, maintenanceSignal, "accountScope" in context ? context.accountScope : undefined, token);
+    } finally {
+      this.admittedModelRequests--;
     }
-    const body = new Uint8Array(await request.arrayBuffer());
-    const refusal = adapter.guardRequest?.(request, body);
-    if (refusal !== null && refusal !== undefined) return refusal;
-    return this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null, "purpose" in context ? context.purpose : undefined, maintenanceSignal, "accountScope" in context ? context.accountScope : undefined, token);
   }
 
   threadObservation(provider:PoolProvider,hostId:string,threadId:string,projectId:string|null):AccountBinding|null {
@@ -730,7 +748,7 @@ export class AccountPoolHub {
     };
   }
 
-  maintenanceActivity():number { return this.networkFlights.size + this.refreshes.size + this.usageRefreshes.size; }
+  maintenanceActivity():number { return this.admittedModelRequests + this.networkFlights.size + this.refreshes.size + this.usageRefreshes.size; }
 
   /**
    * Accounts of this provider that a request from this project could use now, by the same

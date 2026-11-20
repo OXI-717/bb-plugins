@@ -1,7 +1,7 @@
 import {type NativeProbeInput,type NativeProbeLaunch,type NativeProbeResult,nativeProbeResultSchema} from './native-probe-wire.js';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { z } from 'zod';
-import {accountProjectsSchema, NATIVE_MAX_CONCURRENT_SESSIONS, type AccountProjects} from './contracts.js';
+import {accountProjectsSchema, nativeLeaseKindSchema, NATIVE_MAX_CONCURRENT_SESSIONS, type AccountProjects} from './contracts.js';
 import {projectTier} from './project-policy.js';
 import {nativeAccountRoutingSchema, nativeAccountUpdateSchema, type NativeAccountUpdate, nativeProjectsSchema, summarizeNativeAccounts} from './native-accounts.js';
 
@@ -35,7 +35,7 @@ interface NativeReply {
 function sameCaller(a:NativeCaller,b:NativeCaller){return a.hostId===b.hostId&&a.projectId===b.projectId&&a.threadId===b.threadId&&a.purpose===b.purpose;}
 const leaseSchema = z.object({
   id: z.string().uuid(), sessionId: z.string().uuid(), executor: nativeExecutorSchema,
-  kind: z.enum(['task','catalog','diagnostic']).default('task'),
+  kind: nativeLeaseKindSchema.default('task'),
   caller: z.object({hostId:id,projectId:id.nullable(),threadId:id.optional(),purpose:z.literal('autopilot').optional()}).strict(),
   state: z.enum(['queued','active','uncertain']), deadline: z.number(), createdAt: z.number(),
   unlock:z.object({requestId:z.string().uuid(),deadline:z.number(),state:z.enum(['issued','consumed','completed','uncertain'])}).strict().optional(),
@@ -54,7 +54,7 @@ interface Storage {get<T>(key:string):Promise<T|null|undefined>;set(key:string,v
 const KEY='native-agy-sessions-v1';
 export const NATIVE_LEASE_MS=30_000;
 export const nativeRequestSchema=z.discriminatedUnion('action',[
-  z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid(),kind:z.enum(['task','catalog','diagnostic']).default('task')}).strict(),
+  z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid(),kind:nativeLeaseKindSchema.default('task')}).strict(),
   z.object({action:z.literal('poll'),leaseId:z.string().uuid()}).strict(),
   z.object({action:z.literal('unlock-start'),leaseId:z.string().uuid()}).strict(),
   z.object({action:z.literal('unlock-cancel'),leaseId:z.string().uuid()}).strict(),
@@ -229,6 +229,17 @@ export class NativeSessions {
     return concurrency&&Object.hasOwn(concurrency,accountId)?concurrency[accountId]!:1;
   }
   async accounts(){return this.serial(()=>({...summarizeNativeAccounts(this.state),selectionRevision:this.selectionRevision()}));}
+  async uncertainLeases() {
+    await this.tail;
+    const now = this.now();
+    // Reading status must not write storage. An expired active lease is already
+    // a blocker and attestStopped will sweep it before applying confirmation.
+    return this.state.leases.filter(lease => lease.state === 'uncertain' ||
+      (lease.state === 'active' && lease.deadline <= now)).map(lease => ({
+      leaseId: lease.id, executorId: lease.executor.id, kind: lease.kind,
+      ageMs: Math.max(0, Math.floor(now - lease.createdAt)),
+    }));
+  }
   async snapshot(){return this.serial(()=>({managed:this.state.managed,preferredExecutors:this.state.preferredExecutors,executors:this.state.executors,
     ...(this.state.accountConcurrency?{accountConcurrency:this.state.accountConcurrency}:{}),
     leases:this.state.leases.map(({id,executor,caller,kind,state,deadline,createdAt})=>({id,executorId:executor.id,accountId:executor.accountId,hostId:executor.hostId,projectId:caller.projectId,kind,state,deadline,createdAt})),

@@ -33,8 +33,10 @@ class FakeBB:
     def __call__(self, *args):
         self.calls.append(args)
         if args[:2] == ('pool', 'maintenance'):
-            if args[2] == 'acquire':
+            if args[2] in ('acquire', 'acquire-upgrade'):
                 self.model_lease = {'owner': args[4], 'expiresAt': time.time()*1000+1_800_000}
+                if args[2] == 'acquire-upgrade':
+                    self.model_lease['upgrade'] = 'draining'
             elif args[2] == 'release':
                 if self.model_lease and self.model_lease['owner'] != args[4]:
                     raise RuntimeError('foreign pause')
@@ -328,11 +330,25 @@ class MaintenanceIntegrationTests(unittest.TestCase):
                 if args.check:
                     return 'PREFLIGHT_PASS'
                 self.assertEqual(fake.threads['thread-a']['status'], 'idle')
-                raise RuntimeError('synthetic update failure')
+                self.assertIsNotNone(fake.lease)
+                self.assertEqual(fake.model_lease.get('upgrade'), 'draining')
+                fake.threads['thread-b']['queuedMessageCount'] = 2
+                raise upgrade.UpgradeError('Idle wait expired; nothing updated')
             with patch('pool_session_pause.running_threads', fake.running), patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', side_effect=perform), patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(upgrade.main(), 1)
             self.assertEqual(calls, [True, False])
+            self.assertIsNone(fake.model_lease)
+            self.assertIsNone(fake.lease)
             self.assertEqual(fake.threads['thread-a']['status'], 'active')
+            self.assertEqual(fake.threads['thread-b']['status'], 'active')
+            self.assertEqual(fake.threads['thread-b']['queuedMessageCount'], 0)
+            self.assertFalse(any(c[:3] == ('pool','maintenance','interrupt') for c in fake.calls))
+            actions = [c[:3] for c in fake.calls]
+            model_release = actions.index(('pool', 'maintenance', 'release'))
+            dispatch_release = next(i for i, c in enumerate(actions) if c[:2] == ('pool-maintenance', 'release'))
+            continue_turn = actions.index(('thread', 'tell', 'thread-a'))
+            self.assertLess(model_release, dispatch_release)
+            self.assertLess(dispatch_release, continue_turn)
 
     def test_missing_model_pause_api_never_holds_queue_or_stops_sessions(self):
         for response in (None, {}, {'schemaVersion': 1, 'scope': 'all-hosts-all-projects'}):
@@ -355,7 +371,7 @@ class MaintenanceIntegrationTests(unittest.TestCase):
                 self.assertEqual(fake.calls, [])
                 self.assertIsNone(fake.lease)
 
-    def test_model_pause_follows_saved_stop_and_release_failure_still_cleans_queue(self):
+    def test_model_pause_precedes_stop_and_release_failure_still_cleans_queue(self):
         for fail_release in (False, True):
             with self.subTest(fail_release=fail_release), tempfile.TemporaryDirectory() as directory:
                 data = Path(directory) / 'plugins' / upgrade.PLUGIN
@@ -365,10 +381,10 @@ class MaintenanceIntegrationTests(unittest.TestCase):
                 def bb(*args):
                     if args == ('status',):
                         return {'dataDir': directory}
-                    if args[:3] == ('pool', 'maintenance', 'acquire'):
-                        self.assertEqual(fake.threads['thread-a']['status'], 'idle')
+                    if args[:3] == ('pool', 'maintenance', 'acquire-upgrade'):
+                        self.assertEqual(fake.threads['thread-a']['status'], 'active')
                         receipt = next((Path(directory) / 'backups').glob('*/sessions.json'))
-                        self.assertEqual(json.loads(receipt.read_text())['sessions'][0]['action'], 'stopped')
+                        self.assertEqual(json.loads(receipt.read_text())['sessions'], [])
                     if fail_release and args[:3] == ('pool', 'maintenance', 'release'):
                         raise RuntimeError('synthetic model release failure')
                     return fake(*args)
@@ -452,12 +468,21 @@ class ModelMaintenanceTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 verify_model_hold(bad, 'owner-a', now=0)
 
-    def test_native_lease_is_not_treated_as_an_idle_pool(self):
-        times=iter([0,0,0,1,2,3])
-        with patch.object(upgrade, 'bb', return_value={'inFlight':0,'accounts':[]}), patch.object(upgrade, 'native_in_flight', return_value=1), patch.object(upgrade, 'model_activity', return_value=0), patch.object(upgrade.time, 'sleep'), patch.object(upgrade, 'report_pool'), patch.object(upgrade.time, 'monotonic', side_effect=lambda:next(times)):
-            with self.assertRaises(upgrade.UpgradeError):
+    def test_idle_refusal_names_uncertain_native_lease_without_releasing_it(self):
+        times = iter([0, 0, 0, 1, 2, 3])
+        lease_id = '11111111-1111-4111-8111-111111111111'
+        lease = {'state': 'uncertain', 'executorId': 'example-executor', 'kind': 'catalog',
+                 'id': lease_id, 'createdAt': 175_000}
+        def bb(*args):
+            if args == ('pool', 'native', 'status'):
+                return {'leases': [lease]}
+            self.assertEqual(args, ('pool', 'status'))
+            return {'inFlight': 0, 'accounts': []}
+        with patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'model_activity', return_value=0), patch.object(upgrade.time, 'sleep'), patch.object(upgrade, 'report_pool'), patch.object(upgrade.time, 'monotonic', side_effect=lambda:next(times)), patch.object(upgrade.time, 'time', return_value=300):
+            with self.assertRaises(upgrade.UpgradeError) as error:
                 upgrade.wait_idle(lambda _: None, offer_interrupt=False, deadline_seconds=2, include_native=True)
-
+            self.assertIn('example-executor (catalog), age 125 s', str(error.exception))
+            self.assertIn(f'bb pool native attest-stopped {lease_id} --confirmed', str(error.exception))
 
 
 class GracefulDrainTests(unittest.TestCase):

@@ -343,6 +343,16 @@ describe("Account Pool settings", () => {
     expect(slot.getByRole("switch", {name:"Направлять треды Antigravity"})).toBeTruthy();
     expect(slot.rpcCalls.some(call=>call.method.startsWith("agyLogin."))).toBe(false);
   });
+  it("shows the executor, kind, age and operator command for an uncertain lease", async () => {
+    const leaseId = "11111111-1111-4111-8111-111111111111";
+    const slot = render([], {"status.get": () => ({
+      ...status([]),
+      uncertainNativeLeases: [{leaseId, executorId:"example-executor", kind:"catalog", ageMs:125_000}],
+    })});
+    expect(await slot.findByText("example-executor · каталог · 2 мин")).toBeTruthy();
+    expect(slot.getByText(`bb pool native attest-stopped ${leaseId} --confirmed`)).toBeTruthy();
+  });
+
   it("marks uncertain execution and does not present it as ready", async () => {
     const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
       {id: "official-desktop", enabled: true, autopilotAllowed: false},
@@ -1273,13 +1283,17 @@ describe("Account Pool settings", () => {
   );
 
   it("copies the exact device code and distinguishes it from the URL copy", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
+    const codeWrite = deferred<void>();
+    const writeText = vi.fn().mockImplementationOnce(() => codeWrite.promise).mockResolvedValue(undefined);
     vi.stubGlobal("navigator", {
       ...navigator,
       clipboard: { writeText },
     });
     const slot = render([], { "codexLogin.start": codexLoginStart });
-    fireEvent.click(await slot.findByRole("button", { name: "Войти в Codex" }));
+    const loginButton = await slot.findByRole("button", { name: "Войти в Codex" });
+    await act(async () => {
+      fireEvent.click(loginButton);
+    });
     const codeCopyButton = await slot.findByRole("button", {
       name: "Скопировать код входа Codex",
     });
@@ -1296,11 +1310,12 @@ describe("Account Pool settings", () => {
       return expirationTimer;
     }) as typeof setTimeout);
     try {
-      await act(async () => {
-        fireEvent.click(codeCopyButton);
-        await writeText.mock.results[0]?.value;
-      });
+      fireEvent.click(codeCopyButton);
       expect(writeText).toHaveBeenCalledWith("ABCD-1234");
+      await act(async () => {
+        codeWrite.resolve(undefined);
+        await codeWrite.promise;
+      });
       expect(await slot.findByText("Код входа скопирован")).toBeTruthy();
       expect(codeCopyButton.querySelector('[data-icon="Check"]')).not.toBeNull();
       expect(expire).toBeTypeOf("function");
