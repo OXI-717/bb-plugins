@@ -159,3 +159,33 @@ it('targeted probe reports unavailable without enabling, acquiring or calling up
     expect(upstream).not.toHaveBeenCalled();
   }finally{await host.harness.lifecycle.dispose();}
 });
+
+it('reports expired native leases through pool status until the operator confirms the stop',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  let now=1_800_000_000_000;
+  try {
+    await createAccountPoolPlugin({now:()=>now})(host.bb);
+    const executor={id:'example-executor',accountId:'subscription-one',hostId:'host-one',
+      callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+    const cli=async(...args:string[])=>(await host.harness.behavior.runCli(args));
+    expect((await cli('native','configure',JSON.stringify(executor))).exitCode).toBe(0);
+    expect((await cli('native','mode','managed')).exitCode).toBe(0);
+    const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
+    const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
+    const response=await host.harness.behavior.fetchHttp('POST','/native/agy',{
+      headers:{authorization:`Bearer ${token}`},body:JSON.stringify({action:'acquire',executorId:executor.id,sessionId:randomUUID()}),
+    });
+    expect(response.status).toBe(200);
+    const {leaseId}=await response.json();
+    const status=async()=>JSON.parse((await cli('status','--json')).stdout);
+    expect((await status()).uncertainNativeLeases).toEqual([]);
+    now+=125_000;
+    const expected=[{leaseId,executorId:executor.id,kind:'task',ageMs:125_000}];
+    expect((await status()).uncertainNativeLeases).toEqual(expected);
+    expect(await host.harness.behavior.callRpc('status.get',null)).toMatchObject({uncertainNativeLeases:expected});
+    expect((await cli('status')).stdout).toContain(`bb pool native attest-stopped ${leaseId} --confirmed`);
+    expect((await status()).uncertainNativeLeases).toEqual(expected);
+    expect((await cli('native','attest-stopped',leaseId,'--confirmed')).exitCode).toBe(0);
+    expect((await status()).uncertainNativeLeases).toEqual([]);
+  } finally {await host.harness.lifecycle.dispose();}
+});

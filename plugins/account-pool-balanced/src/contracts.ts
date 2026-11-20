@@ -484,12 +484,22 @@ export const providerReadinessSchema = z.object({
 }).strict();
 export type ProviderReadiness = z.infer<typeof providerReadinessSchema>;
 
+export const nativeLeaseKindSchema = z.enum(['task', 'catalog', 'diagnostic']);
+export const uncertainNativeLeaseSchema = z.object({
+  leaseId: z.uuid(),
+  executorId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
+  kind: nativeLeaseKindSchema,
+  ageMs: z.number().int().nonnegative(),
+}).strict();
+export const attestNativeLeaseCommand = (leaseId: string) => `bb pool native attest-stopped ${leaseId} --confirmed`;
+
 export const statusSchema = z
   .object({
     route: z.string(),
     routeTracking:z.object({decisions:z.number(),maxDecisions:z.number(),bytes:z.number(),maxBytes:z.number(),retentionMs:z.number(),trackedKeys:z.number().optional(),cachedRoutes:z.number().optional()}).optional(),
     historyCapacity:z.object({rows:z.number(),maxRows:z.number(),maxBytes:z.number()}).optional(),
     vpn: z.object({ state: z.enum(["connected", "disconnected", "unknown"]), blockedProviders: z.array(providerSchema), guardEnabled:z.boolean().default(false), assurance:z.enum(["verified_ipv4","unverified","invalid"]).optional(),reason:z.string().optional() }).strict().optional(),
+    uncertainNativeLeases: z.array(uncertainNativeLeaseSchema).max(128).optional(),
     enabledAccountCount: z.number().int().nonnegative(),
     inFlight: z.number().int().nonnegative(),
     accepting: z.boolean(),

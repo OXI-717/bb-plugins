@@ -1,4 +1,4 @@
-import {describe,it,expect} from 'vitest';
+import {describe,it,expect,vi} from 'vitest';
 import {PoolMaintenance} from './maintenance.js';
 
 const owner='11111111-1111-4111-8111-111111111111';
@@ -64,4 +64,28 @@ describe('graceful pool admission',()=>{
     expect(gate.signal.aborted).toBe(false);
     expect(()=>gate.assertAllowed()).not.toThrow();
   });
+});
+
+
+it('seals drained upgrade admission, persists it and wakes parked requests only on release', async()=>{
+  let stored:unknown;
+  const save=async(value:unknown)=>{stored=structuredClone(value);};
+  const gate=new PoolMaintenance(save);
+  await gate.acquireUpgrade(owner);
+  const resumed=vi.fn();
+  const held=gate.waitForUpgrade(new AbortController().signal)!.then(resumed);
+  const canceled=new AbortController();
+  const pendingCancellation=expect(gate.waitForUpgrade(canceled.signal)).rejects.toThrow('client canceled');
+  canceled.abort(new Error('client canceled'));
+  await pendingCancellation;
+  await expect(gate.sealUpgrade(foreign)).rejects.toThrow('not owned');
+  expect((await gate.sealUpgrade(owner)).lease?.upgrade).toBe('sealed');
+  expect(resumed).not.toHaveBeenCalled();
+  const reloaded=new PoolMaintenance(save);
+  await reloaded.initialize(stored);
+  expect(()=>reloaded.assertAllowed()).toThrow('maintenance');
+  await gate.release(owner);
+  await held;
+  expect(resumed).toHaveBeenCalledTimes(1);
+  expect(gate.waitForUpgrade(new AbortController().signal)).toBeUndefined();
 });

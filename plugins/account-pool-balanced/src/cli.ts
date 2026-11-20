@@ -31,6 +31,7 @@ import {
   type LimitWindow,
   type ModelFamily,
   type PoolStatusReport,
+  attestNativeLeaseCommand,
 } from "./contracts.js";
 import type { PoolOperations } from "./operations.js";
 import type {createBrowserRouter} from "./browser-host.js";
@@ -47,7 +48,7 @@ interface ParsedFlags {
 }
 
 const HELP = [
-  "  bb pool maintenance <status|acquire-graceful|acquire|interrupt|release> [--owner <uuid>] --json",
+  "  bb pool maintenance <status|acquire-graceful|acquire-upgrade|seal-upgrade|acquire|interrupt|release> [--owner <uuid>] --json",
   "Usage:",
   "  bb pool egress status --json",
   "  bb pool egress configure <profile-json>",
@@ -229,6 +230,8 @@ function formatStatus(status: PoolStatusReport): string {
     `Accepting: ${status.accepting}`,
     `Enabled accounts: ${status.enabledAccountCount}`,
     `In flight: ${status.inFlight}`,
+    ...(status.uncertainNativeLeases ?? []).map(lease =>
+      `Native stop unconfirmed: ${lease.executorId} (${lease.kind}), age ${Math.floor(lease.ageMs / 1000)} s. After confirming stopped: ${attestNativeLeaseCommand(lease.leaseId)}`),
     ...(status.routeTracking?[`Route tracking: ${status.routeTracking.decisions}/${status.routeTracking.maxDecisions} decisions; ${status.routeTracking.bytes}/${status.routeTracking.maxBytes} bytes`]:[]),
     ...(status.historyCapacity?[`History: ${status.historyCapacity.rows}/${status.historyCapacity.maxRows} rows; byte limit ${status.historyCapacity.maxBytes}`]:[]),
     "",
@@ -386,7 +389,7 @@ export function registerPoolCli(
   grokLogin?: GrokDeviceLogin,
   guardProbe?:(input:GuardProbeInput)=>ReturnType<typeof runGuardProbe>,
   streamProbe?:(threadId:string,requestId?:string)=>{streams:CursorStream[];interrupted?:boolean},
-  maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & Partial<Pick<PoolMaintenance,'acquireGraceful'>> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
+  maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & Partial<Pick<PoolMaintenance,'acquireGraceful'|'acquireUpgrade'|'sealUpgrade'>> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
   nativePreflight?:(input:import('./native-probe-wire.js').NativeProbeInput)=>Promise<object>,
   updateStatus?:()=>Promise<import("zod").z.infer<typeof import("./pool-update.js").updateStatusSchema>>,
 ): void {
@@ -509,9 +512,11 @@ export function registerPoolCli(
           if(!maintenance)throw Error('Model maintenance unavailable');
           let result:object;
           if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=maintenance.status();
-          else if(argv[1]==='acquire-graceful'&&argv.length===5&&argv[2]==='--owner'&&argv[4]==='--json'){
-            if(!maintenance.acquireGraceful)throw Error('Graceful model admission unavailable');
-            result=await maintenance.acquireGraceful(z.uuid().parse(argv[3]));
+          else if (argv.length===5&&argv[2]==='--owner'&&argv[4]==='--json'&&
+            (argv[1]==='acquire-graceful'||argv[1]==='acquire-upgrade'||argv[1]==='seal-upgrade')) {
+            const method = argv[1]==='acquire-graceful' ? 'acquireGraceful' : argv[1]==='acquire-upgrade' ? 'acquireUpgrade' : 'sealUpgrade';
+            if (!maintenance[method]) throw Error('Requested model admission operation unavailable');
+            result = await maintenance[method](z.uuid().parse(argv[3]));
           }
           else if(['acquire','release','interrupt'].includes(argv[1]!)&&argv.length===5&&argv[2]==='--owner'&&argv[4]==='--json'){
             const owner=z.uuid().parse(argv[3]);

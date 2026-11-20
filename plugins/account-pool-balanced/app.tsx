@@ -86,6 +86,7 @@ import {
   DEFAULT_ACCOUNT_POOL_CONFIG,
   modelFamilySchema,
   statusSchema,
+  attestNativeLeaseCommand,
 } from "./src/contracts.js";
 import { blockingResetAt } from "./src/quota.js";
 import { DEFAULT_RESERVE_CAP } from "./src/balancer.js";
@@ -1547,6 +1548,20 @@ function UnlockedAccountPoolSettings() {
           className="rounded-md border border-destructive/40 bg-surface-destructive px-3 py-2 text-sm text-destructive-text"
         >
           {error}
+        </div>
+      )}
+      {!statusIsCached && !!status?.uncertainNativeLeases?.length && (
+        <div role="status" className="rounded-md border border-border px-3 py-2 text-sm">
+          <p className="font-medium">Остановка исполнителя Antigravity не подтверждена</p>
+          <p className="text-muted-foreground">После проверки, что процесс остановлен, подтвердите остановку командой.</p>
+          <ul className="mt-2 space-y-2">
+            {status.uncertainNativeLeases.map(lease => (
+              <li key={lease.leaseId}>
+                <span>{lease.executorId} · {{task:"задача", catalog:"каталог", diagnostic:"диагностика"}[lease.kind]} · {lease.ageMs >= 60_000 ? `${Math.floor(lease.ageMs / 60_000)} мин` : `${Math.floor(lease.ageMs / 1000)} с`}</span>
+                <code className="block [overflow-wrap:anywhere]">{attestNativeLeaseCommand(lease.leaseId)}</code>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {status !== null && !statusIsCached && accounts.length === 0 && nativeAccounts?.accounts.length === 0 ? (

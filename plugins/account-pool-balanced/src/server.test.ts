@@ -1,4 +1,5 @@
 import {GUARD_UNREADABLE_GRACE_MS} from './network-flights.js';
+import {PoolMaintenance} from './maintenance.js';
 import {vpnProof} from './vpn-test-fixture.js';
 import fs from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -9084,6 +9085,40 @@ describe('maintenance races and existing streams',()=>{
   const owner='11111111-1111-4111-8111-111111111111';
   const pause=(f:Fixture)=>f.host.harness.behavior.runCli(['maintenance','acquire','--owner',owner,'--json']);
   const resume=(f:Fixture)=>f.host.harness.behavior.runCli(['maintenance','release','--owner',owner,'--json']);
+  it('keeps Claude requests through a refused upgrade, with a fresh queue budget for held arrivals',async()=>{
+    let now=1_800_000_000_000;
+    let finishFirst!:()=>void;
+    const firstBody = new ReadableStream<Uint8Array>({
+      start(controller){finishFirst=()=>controller.close();},
+    });
+    const outbound=vi.fn(async()=>Response.json({ok:true}));
+    const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound,now:()=>now}});
+    await f.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:1});
+    outbound.mockClear().mockImplementationOnce(async()=>new Response(firstBody));
+    const request=()=>f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    const first=await request();
+    const existing=request();
+    await vi.waitFor(async()=>{
+      const accounts=await f.host.harness.behavior.callRpc('account.list',null) as AccountSummary[];
+      expect(accounts[0]?.queuedRequests).toBe(1);
+    });
+    const maintenance=(action:string)=>f.host.harness.behavior.runCli(['maintenance',action,'--owner',owner,'--json']);
+    expect((await maintenance('acquire-upgrade')).exitCode).toBe(0);
+    const waitForUpgrade=vi.spyOn(PoolMaintenance.prototype,'waitForUpgrade');
+    const held=request();
+    await vi.waitFor(()=>expect(waitForUpgrade.mock.results[0]?.value).toBeInstanceOf(Promise));
+    expect(outbound).toHaveBeenCalledTimes(1);
+    expect((await maintenance('seal-upgrade')).exitCode).toBe(1);
+    finishFirst();await first.text();
+    const drained=await existing;
+    expect(drained.status).toBe(200);await drained.text();
+    // Simulate an idle refusal caused by a blocker outside the HTTP path.
+    now+=16*60_000;
+    expect((await maintenance('release')).exitCode).toBe(0);
+    const continued=await held;
+    expect(continued.status).toBe(200);await continued.text();
+    expect(outbound).toHaveBeenCalledTimes(3);
+  });
   it('does not dispatch a request admitted before a pause after the pause is released',async()=>{
     let hold=false,entered=false;
     let release!:()=>void;

@@ -79,39 +79,33 @@ Use `bash scripts/upgrade-pool.sh --pause-sessions --version X.Y.Z` from a separ
 BB machine terminal. Stopping the initiating session must not kill the executor.
 
 After release/server preflight and model-pause API validation, hold new BB
-dispatches across **all projects and hosts**, then snapshot active/starting
-sessions through the unpaginated public threads.listRunning API. Stop current
-turns with history/provider settings retained. Only after that saved stop does the
-updater acquire the model hold, which interrupts model and auxiliary traffic.
-The hook queues starts, follow-ups,
-steers and retries, instead of rejecting them. Queue cards and sidebar clocks
-show the reason. No concurrency limits change.
+dispatches across **all projects and hosts** and acquire the model upgrade hold.
+Snapshot active/starting sessions through the unpaginated public threads.listRunning
+API and stop current turns with history and provider settings retained. The
+dispatch hook queues starts, follow-ups, steers and retries. Queue cards and
+sidebar clocks show the reason. No concurrency limits change.
 
 The existing upgrade lock, verified backup, immutable release/source verification,
 settings and post-update checks remain mandatory. Forced pool interruption stays
 disabled; drain is bounded to 90 seconds. Before wait, backup and update, the owned
 hold must have 15 minutes remaining. Missing/foreign/expiring hold refuses update.
-The pool admission hold covers external clients as well as BB: new model calls
-return a provider-native 503 with `x-bb-pool-error: POOL_MAINTENANCE` and
-`Retry-After: 30`. Budget/readiness routes report paused. Routing, account opt-ins,
-scheduler state and VPN policy remain unchanged. External schedulers can still
-tick; their pool model requests cannot dispatch. Direct traffic outside this pool
-is outside this boundary.
+The model hold parks new authenticated HTTP requests before they start their
+account queue deadline. Requests already admitted can drain. Once model work
+drains, the updater seals admission before backup, preventing new auxiliary
+transport. Budget and readiness routes report paused. Native acquisition, poll
+and unlock admission refuse, and confirmed release or cancellation remains
+available. If an unconfirmed native process prevents the update, the failure
+lists the executor, lease kind, age and operator confirmation command.
+The model hold is persisted and loaded before new routes are exposed after
+reload. The updater never resends a request that reached its provider.
 
-Admission rechecks immediately before every upstream send. Acquisition cancels
-old admission generations, active streams and auxiliary transport; queued or
-half-prepared inference cannot redispatch after release. The updater also waits
-for credential/quota work and native leases to finish. Native acquisition, poll
-and unlock admission refuse, but confirmed release/cancellation remains available.
-An unconfirmed native process stops the update; its lease is never force-cleared.
-A request already sent can have an ambiguous outcome and is never replayed by
-this updater. The model hold is persisted before acknowledgement and loaded before
-new routes are exposed after reload. Missing or malformed ownership evidence
-refuses the update.
 Do not unload this plugin during an operation: core may clear orphaned waits.
 
-On success or ordinary failure, release only the owned model hold, then queue continuations for unchanged stopped sessions
-without provider/model overrides, then release the owned hold. The updater verifies
+On failure, release both owned holds before verifying or sending session
+continuations. Parked HTTP requests can then enter the account queue with
+their full wait budget. On success, release the model hold, queue continuations
+for unchanged stopped sessions without provider or model overrides and then
+release the dispatch hold. The updater verifies
 that each continuation is queued or running. It retries once if the thread still
 matches its stopped snapshot and no work was queued. The private session receipt
 and update log list uncontinued threads and their reasons.
