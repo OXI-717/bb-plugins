@@ -534,7 +534,8 @@ def main():
                                 pause.acquire_model_hold('acquire-upgrade')
                                 pause.stop()
                                 result = perform(args, data, output, say)
-                            except (Exception, KeyboardInterrupt):
+                            except (Exception, KeyboardInterrupt) as refusal:
+                                say('Update failed before recovery: ' + str(refusal))
                                 try:
                                     pause.release_model_hold()
                                 finally:

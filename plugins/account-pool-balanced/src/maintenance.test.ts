@@ -89,3 +89,20 @@ it('seals drained upgrade admission, persists it and wakes parked requests only 
   expect(resumed).toHaveBeenCalledTimes(1);
   expect(gate.waitForUpgrade(new AbortController().signal)).toBeUndefined();
 });
+
+
+it('keeps one live admission generation across an upgrade refusal for a later hard pause', async()=>{
+  let now=100;
+  const gate=new PoolMaintenance(async()=>{},()=>now);
+  const original=gate.signal;
+  await gate.acquire(owner);
+  expect(original.aborted).toBe(true);
+  now+=1_800_001;
+  await gate.acquireUpgrade(owner);
+  const duringUpgrade=gate.signal;
+  expect(duringUpgrade.aborted).toBe(false);
+  await gate.release(owner);
+  expect(gate.signal).toBe(duringUpgrade);
+  await gate.acquire(foreign);
+  expect(duringUpgrade.aborted).toBe(true);
+});

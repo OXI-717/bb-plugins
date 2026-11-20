@@ -28,20 +28,24 @@ export class PoolMaintenance {
     this.lease = lease;
     if (!lease.upgrade) this.controller.abort(new PoolMaintenanceError());
   }
+  private currentLease(): Lease | null {
+    return this.lease && this.lease.expiresAt > this.now() ? this.lease : null;
+  }
   status(): z.infer<typeof maintenanceStatusSchema> {
-    return {schemaVersion: 1, scope: 'all-model-clients', transportInFlight:this.activity(), lease: this.lease && this.lease.expiresAt > this.now() ? {...this.lease} : null};
+    const lease = this.currentLease();
+    return {schemaVersion: 1, scope: 'all-model-clients', transportInFlight:this.activity(), lease: lease ? {...lease} : null};
   }
   get signal(): AbortSignal {
-    if (!this.status().lease && this.controller.signal.aborted) this.controller = new AbortController();
+    if (!this.currentLease() && this.controller.signal.aborted) this.controller = new AbortController();
     return this.controller.signal;
   }
   assertAllowed() {
-    const lease = this.status().lease;
+    const lease = this.currentLease();
     if (lease && lease.upgrade !== 'draining') throw new PoolMaintenanceError();
   }
   /** Park authenticated arrivals before they enter the account queue or start its deadline. */
   waitForUpgrade(signal: AbortSignal): Promise<void> | undefined {
-    const lease = this.status().lease;
+    const lease = this.currentLease();
     if (!lease?.upgrade) return;
     signal.throwIfAborted();
     if (this.upgradeWaiters.size >= 1024) throw new PoolMaintenanceError();
@@ -65,13 +69,17 @@ export class PoolMaintenance {
   acquireUpgrade(owner: string) { return this.acquire(owner, false, 'draining'); }
   acquire(owner: string, interrupt = true, upgrade?: 'draining') { return this.serial(async () => {
     z.uuid().parse(owner);
-    const current = this.status().lease;
+    const current = this.currentLease();
     if (current) { if (current.owner !== owner || !!current.upgrade !== !!upgrade) throw Error('Another operation owns pool maintenance'); return this.status(); }
+    if (this.controller.signal.aborted) this.controller = new AbortController();
     const now = this.now(); const lease = {owner, createdAt: now, expiresAt: now + 1_800_000, ...(upgrade ? {upgrade} : {})};
-    await this.persist(lease); this.lease = lease; if (interrupt) this.controller.abort(new PoolMaintenanceError()); return this.status();
+    await this.persist(lease);
+    this.lease = lease;
+    if (interrupt) this.controller.abort(new PoolMaintenanceError());
+    return this.status();
   }); }
   sealUpgrade(owner: string) { return this.serial(async () => {
-    const lease = this.status().lease;
+    const lease = this.currentLease();
     if (!lease?.upgrade || lease.owner !== owner) throw Error('Upgrade admission is not owned');
     if (this.activity() !== 0) throw Error('Model work has not drained');
     const sealed: Lease = {...lease, upgrade: 'sealed'};
@@ -82,7 +90,9 @@ export class PoolMaintenance {
   release(owner: string) { return this.serial(async () => {
     z.uuid().parse(owner);
     if (this.lease && this.lease.owner !== owner) throw Error('Cannot release another operation maintenance');
-    await this.persist(null); this.lease = null; this.controller = new AbortController();
+    await this.persist(null);
+    this.lease = null;
+    if (this.controller.signal.aborted) this.controller = new AbortController();
     for (const wake of this.upgradeWaiters) wake();
     return this.status();
   }); }
