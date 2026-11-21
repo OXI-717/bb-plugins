@@ -2,6 +2,7 @@ import {type NativeProbeInput,type NativeProbeLaunch,type NativeProbeResult,nati
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { z } from 'zod';
 import {accountProjectsSchema, nativeLeaseKindSchema, NATIVE_MAX_CONCURRENT_SESSIONS, type AccountProjects} from './contracts.js';
+import {GuardRequiredError} from './network-errors.js';
 import {projectTier} from './project-policy.js';
 import {nativeAccountRoutingSchema, nativeAccountUpdateSchema, type NativeAccountUpdate, nativeProjectsSchema, summarizeNativeAccounts} from './native-accounts.js';
 
@@ -53,6 +54,9 @@ type State = z.infer<typeof stateSchema>;
 interface Storage {get<T>(key:string):Promise<T|null|undefined>;set(key:string,value:unknown):Promise<void>}
 const KEY='native-agy-sessions-v1';
 export const NATIVE_LEASE_MS=30_000;
+export const NATIVE_REQUEST_BODY_TIMEOUT_MS=5_000;
+const NATIVE_ACTIONS=new Set(['acquire','poll','release','unlock-start','unlock-cancel']);
+export interface NativeHttpRejection {status:number;code:string;action:string|null;hostId:string|null;}
 export const nativeRequestSchema=z.discriminatedUnion('action',[
   z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid(),kind:nativeLeaseKindSchema.default('task')}).strict(),
   z.object({action:z.literal('poll'),leaseId:z.string().uuid()}).strict(),
@@ -472,13 +476,24 @@ export class NativeSessions {
   }
 }
 
-export async function nativeHttp(request:Request,sessions:NativeSessions,authenticate:(token:string|null)=>Promise<NativeCaller|null>){
+export async function nativeHttp(
+  request:Request,
+  sessions:NativeSessions,
+  authenticate:(token:string|null)=>Promise<NativeCaller|null>,
+  observe?:(event:NativeHttpRejection)=>void,
+){
+  let callerHostId:string|null=null;
+  let action:string|null=null;
+  const emit=(status:number,code:string)=>{
+    try{observe?.({status,code,action,hostId:callerHostId});}catch{/* Diagnostics cannot alter admission. */}
+  };
   try{
     const bearer=request.headers.get('authorization');
     const token=bearer?.startsWith('Bearer ')?bearer.slice(7):null;
     const diagnosticCaller=token?sessions.diagnosticCaller(token):null;
     const caller=diagnosticCaller??await authenticate(token);
-    if(!caller)return Response.json({error:'native-unauthorized'},{status:401});
+    if(!caller){emit(401,'native-unauthorized');return Response.json({error:'native-unauthorized'},{status:401});}
+    callerHostId=caller.hostId;
     // Stream-bound input, independent of Content-Length and chunking.
     const reader=request.body?.getReader();let body='';let length=0;
     if(!reader)throw new NativeSessionError(400,'native-invalid-request');
@@ -486,12 +501,22 @@ export async function nativeHttp(request:Request,sessions:NativeSessions,authent
     let timer:ReturnType<typeof setTimeout>|undefined;
     try{await Promise.race([(async()=>{while(true){const part=await reader.read();if(part.done)break;length+=part.value.byteLength;
       if(length>4096)throw new NativeSessionError(413,'native-request-too-large');chunks.push(part.value);
-    }})(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new NativeSessionError(408,'native-request-timeout')),2000);})]);
+    }})(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new NativeSessionError(408,'native-request-timeout')),NATIVE_REQUEST_BODY_TIMEOUT_MS);})]);
     }finally{clearTimeout(timer);void reader.cancel().catch(()=>{});}
     body=Buffer.concat(chunks).toString('utf8');
-    return Response.json(await sessions.request(caller,JSON.parse(body),diagnosticCaller?token!:undefined));
+    const parsed=JSON.parse(body);
+    if(parsed&&typeof parsed==='object'&&typeof (parsed as {action?:unknown}).action==='string'&&NATIVE_ACTIONS.has((parsed as {action:string}).action)){
+      action=(parsed as {action:string}).action;
+    }
+    return Response.json(await sessions.request(caller,parsed,diagnosticCaller?token!:undefined));
   }catch(error){
-    const known=error instanceof NativeSessionError;
-    return Response.json({error:known?error.code:'native-invalid-request'},{status:known?error.status:400});
+    let status=400,code='native-invalid-request';
+    if(error instanceof NativeSessionError){status=error.status;code=error.code;}
+    else if(error instanceof GuardRequiredError){
+      if(error.code==='VPN_GUARD_BLOCKED'){status=403;code='native-guard-blocked';}
+      else{status=503;code='native-guard-unavailable';}
+    }
+    emit(status,code);
+    return Response.json({error:code},{status});
   }
 }

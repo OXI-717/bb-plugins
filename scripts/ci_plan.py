@@ -13,7 +13,7 @@ PORTABLE = {'balancer', 'account-policy', 'project-policy', 'purpose-affinity',
             'provider-budget', 'codex-budget', 'zai-budget', 'usage-error'}
 # OP's native task integration fixture loads these Pooler modules directly.
 OP_POOL_MODULES = {'native-sessions', 'native-probe-wire', 'native-accounts',
-                   'native-unlock-rpc', 'contracts', 'project-policy'}
+                   'native-unlock-rpc', 'contracts', 'project-policy', 'network-errors'}
 
 
 POOL = 'plugins/account-pool-balanced/'

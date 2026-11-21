@@ -165,13 +165,31 @@ export function createAccountPoolPlugin(
     const maintenance = new PoolMaintenance(value=>bb.storage.kv.set('model-maintenance-v1',value),now,()=>maintenanceActivity());
     await maintenance.initialize(await bb.storage.kv.get('model-maintenance-v1'));
     const update = new PoolUpdate(bb,now);
+    const nativeGuardChecks=new Map<string,ReturnType<typeof createGuardNetworkCheck>>();
+    const nativeGuardCheckFor=(hostId:string)=>{
+      let check=nativeGuardChecks.get(hostId);
+      if(!check){
+        if(nativeGuardChecks.size>=64)nativeGuardChecks.clear();
+        check=createGuardNetworkCheck(async(provider,signal,trace)=>{
+          trace.host(hostId);
+          trace.stage('guard-rpc');
+          const decision=await bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal});
+          trace.stage('validate-host');
+          return bindGuardNetworkDecision(decision,hostId);
+        },undefined,event=>{
+          if(event.attempt===1&&(event.outcome==='allowed'||event.outcome==='direct'))return;
+          bb.log.warn('Account Pooler native Guard permission '+JSON.stringify(event));
+        });
+        nativeGuardChecks.set(hostId,check);
+      }
+      return check;
+    };
     const nativeSessions=new NativeSessions(bb.storage.kv,now,async(hostId,caller)=>{
-      if(!(await routing.isProviderEnabled('agy')))throw Error('Native AGY routing disabled');
-      if(!(await bb.sdk.hosts.list()).some(host=>host.id===hostId))throw Error('Native executor host not enrolled');
+      if(!(await routing.isProviderEnabled('agy')))throw new NativeSessionError(403,'native-routing-disabled');
+      if(!(await bb.sdk.hosts.list()).some(host=>host.id===hostId))throw new NativeSessionError(403,'native-host-not-enrolled');
       if(currentSettings.vpnGuardEnabled){
-        await createGuardNetworkCheck(async(provider,signal)=>bindGuardNetworkDecision(
-          await bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal}),hostId))('agy');
-      }else if(currentSettings.vpnOnlyProviders.includes('agy'))throw Error('Native protected host requires its Guard decision');
+        await nativeGuardCheckFor(hostId)('agy');
+      }else if(currentSettings.vpnOnlyProviders.includes('agy'))throw new NativeSessionError(503,'native-guard-required');
       if(caller.threadId&&await routing.isBypassed(caller.threadId))throw new NativeSessionError(403,'native-thread-bypassed');
     },executor=>{if(executor.execution){try{egress.validateNativeProfile(executor.execution.profile,executor.hostId);}
       catch{throw new NativeSessionError(503,'native-execution-unprepared');}}},async(requestId,signal)=>{
@@ -541,7 +559,8 @@ export function createAccountPoolPlugin(
     );
     bb.http.route('GET','/agy/v1beta/models',context=>hub.handle(context.req.raw,'agy'),{auth:'none'});
     bb.http.route('POST','/native/agy',context=>nativeHttp(context.req.raw,nativeSessions,
-      async token=>{const caller=await combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token);return caller?.accountScope?null:caller;}),{auth:'none'});
+      async token=>{const caller=await combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token);return caller?.accountScope?null:caller;},
+      event=>bb.log.warn('Account Pooler native admission rejected '+JSON.stringify(event))),{auth:'none'});
     bb.providers.experimental_contributeEnv('acp-agy',async context=>{
       if(nativeSessions.managed()){
         const catalog=context.threadId===null;
