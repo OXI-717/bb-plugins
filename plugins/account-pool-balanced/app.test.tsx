@@ -1399,3 +1399,18 @@ it('shows Gemini declared plan, model quota and absolute credits without a fabri
  expect(slot.container.textContent).toContain('Google One AI credits: 0');
  expect(slot.container.textContent).toContain('gemini-fixture');
 });
+
+it('distinguishes Gemini token types without claiming a per-model routing threshold',async()=>{
+ const selected=account({provider:'gemini',geminiUsage:{observedAt:100,plan:null,credits:null,models:[
+  {modelId:'gemini-fixture',tokenType:'REQUESTS',usedPercent:0,resetAt:null},
+  {modelId:'gemini-fixture',tokenType:'WTUS',usedPercent:100,resetAt:null},
+ ]}});
+ const slot=render([selected]);
+ await waitFor(()=>expect(slot.container.textContent).toContain('gemini-fixture · REQUESTS'));
+ expect(slot.container.textContent).toContain('gemini-fixture · WTUS');
+ fireEvent.click(slot.getByRole('button',{name:`Open ${selected.label}`}));
+ const details=await slot.findByLabelText('Gemini model quotas');
+ expect(details.textContent).toContain('gemini-fixture · REQUESTS');
+ expect(details.textContent).toContain('gemini-fixture · WTUS');
+ expect(details.textContent).not.toContain('skip at');
+});

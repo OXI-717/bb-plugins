@@ -455,7 +455,7 @@ type QuotaSlot = {
 
 function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
   if(account.provider === 'gemini') return (account.geminiUsage?.models ?? []).filter(model => model.resetAt === null || model.resetAt > Date.now()).map((model,index)=>({
-    key: `gemini:${model.modelId}:${index}`, label: `${model.modelId}${model.resetAt === null ? "" : ` · ${resetLabel(model.resetAt)}`}`, utilization: model.usedPercent / 100, status: null, limit: 1,
+    key: `gemini:${model.modelId}:${index}`, label: `${model.modelId}${model.tokenType ? ` · ${model.tokenType}` : ''}${model.resetAt === null ? "" : ` · ${resetLabel(model.resetAt)}`}`, utilization: model.usedPercent / 100, status: null, limit: 1,
   }));
   if (account.drainOnce) threshold = 1;
   const limits = policyThresholds(account, threshold);
@@ -845,11 +845,13 @@ function QuotaDetail({
   quota,
   threshold,
   skipAt,
+  showSkipAt = true,
 }: {
   label: string;
   quota: FamilyQuota | null;
   threshold: number;
   skipAt?: number;
+  showSkipAt?: boolean;
 }) {
   const utilization = quota?.utilization ?? null;
   const limit = skipAt ?? threshold;
@@ -877,7 +879,7 @@ function QuotaDetail({
           {quota?.resetAt === null || quota === null
             ? " · reset time unknown"
             : ` · ${resetLabel(quota.resetAt)}`}{" "}
-          · skip at {Math.round(limit * 100)}%
+          {showSkipAt && <>· skip at {Math.round(limit * 100)}%</>}
         </div>
       </div>
     </div>
@@ -2632,10 +2634,12 @@ function AccountDialog({
       )}
       <div className="space-y-4">
         {account.provider === "gemini" ? (
-          account.geminiUsage?.models.length ? account.geminiUsage.models.map((model, index) => (
-            <QuotaDetail key={`${model.modelId}:${index}`} label={model.modelId}
-              quota={{...shared(model.usedPercent / 100, model.resetAt, null), source: "usage", observedAt: account.geminiUsage!.observedAt}} threshold={1} />
-          )) : <div className="text-sm text-muted-foreground">No model quotas observed yet.</div>
+          <div aria-label="Gemini model quotas">
+          {account.geminiUsage?.models.length ? account.geminiUsage.models.map((model, index) => (
+            <QuotaDetail key={`${model.modelId}:${index}`} label={`${model.modelId}${model.tokenType ? ` · ${model.tokenType}` : ''}`}
+              quota={{...shared(model.usedPercent / 100, model.resetAt, null), source: "usage", observedAt: account.geminiUsage!.observedAt}} threshold={1} showSkipAt={false} />
+          )) : <div className="text-sm text-muted-foreground">No model quotas observed yet.</div>}
+          </div>
         ) : account.provider === "codex" ? (
           account.limitWindows.length === 0 ? (
             <div className="text-sm text-muted-foreground">
