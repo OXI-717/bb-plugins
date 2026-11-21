@@ -1,6 +1,7 @@
 import {describe,it,expect} from 'vitest';
 import {randomUUID} from 'node:crypto';
-import {NativeSessions,nativeHttp,NATIVE_LEASE_MS,type NativeCaller} from './native-sessions.js';
+import {NativeSessions,nativeHttp,NATIVE_LEASE_MS,NATIVE_REQUEST_BODY_TIMEOUT_MS,type NativeCaller,type NativeHttpRejection} from './native-sessions.js';
+import {GuardRequiredError} from './network-errors.js';
 
 const caller:NativeCaller={hostId:'mac',projectId:'project-one',threadId:'thread-one'};
 const executor={id:'mac-official',accountId:'subscription-one',hostId:'mac',callerIds:['mac'],projectIds:['project-one'],enabled:true,autopilotAllowed:false};
@@ -401,4 +402,43 @@ it('treats account identifiers as opaque keys even when they match object proper
   expect(await sessions.executorFor(caller)).toBe('other-executor');
   const restarted=new NativeSessions(kv);await restarted.initialize();
   expect(await restarted.executorFor(caller)).toBe('other-executor');
+});
+
+it('maps Guard block and unavailability distinctly and reports safe structured HTTP rejections',async()=>{
+  let mode:'ok'|'blocked'|'unavailable'='ok';
+  const sessions=new NativeSessions(storage(),()=>1000,async()=>{
+    if(mode==='blocked')throw new GuardRequiredError('agy',false);
+    if(mode==='unavailable')throw new GuardRequiredError('agy',true,'timeout');
+  });
+  await sessions.initialize();await sessions.configure(executor);await sessions.setManaged(true);
+  const req=(body:string,token='valid')=>new Request('https://pool.example/native/agy',{method:'POST',body,headers:{authorization:`Bearer ${token}`}});
+  const auth=async(token:string|null)=>token==='valid'?caller:null;
+  const observed:NativeHttpRejection[]=[];
+  const acquired=await nativeHttp(req(JSON.stringify(acquire())),sessions,auth,e=>observed.push(e));
+  expect(acquired.status).toBe(200);
+  const {leaseId}=await acquired.json();
+  expect(observed).toEqual([]);
+
+  mode='blocked';
+  const blocked=await nativeHttp(req(JSON.stringify(poll(leaseId))),sessions,auth,e=>observed.push(e));
+  expect(blocked.status).toBe(403);
+  expect(await blocked.json()).toEqual({error:'native-guard-blocked'});
+
+  mode='unavailable';
+  const unavailable=await nativeHttp(req(JSON.stringify(poll(leaseId))),sessions,auth,e=>observed.push(e));
+  expect(unavailable.status).toBe(503);
+  expect(await unavailable.json()).toEqual({error:'native-guard-unavailable'});
+
+  const badAction=await nativeHttp(req(JSON.stringify({action:'synthetic-secret-action'})),sessions,auth,e=>observed.push(e));
+  expect(badAction.status).toBe(400);
+  expect(observed).toEqual([
+    {status:403,code:'native-guard-blocked',action:'poll',hostId:'mac'},
+    {status:503,code:'native-guard-unavailable',action:'poll',hostId:'mac'},
+    {status:400,code:'native-invalid-request',action:null,hostId:'mac'},
+  ]);
+  expect(NATIVE_REQUEST_BODY_TIMEOUT_MS).toBeGreaterThanOrEqual(5_000);
+  // Failing observer never alters HTTP admission outcomes.
+  mode='blocked';
+  const resilient=await nativeHttp(req(JSON.stringify(poll(leaseId))),sessions,auth,()=>{throw Error('log-failed');});
+  expect(resilient.status).toBe(403);
 });

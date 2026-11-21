@@ -189,3 +189,76 @@ it('reports expired native leases through pool status until the operator confirm
     expect((await status()).uncertainNativeLeases).toEqual([]);
   } finally {await host.harness.lifecycle.dispose();}
 });
+
+it('shares in-flight native Guard checks per host without caching completed decisions and distinguishes block vs unavailability',async()=>{
+  let decision:{allowed:boolean;reason:string}={allowed:true,reason:'direct'};
+  let rpcMode:'resolve'|'deferred'|'fail'='resolve';
+  let rpcCalls=0;
+  let releaseDeferred:(()=>void)|undefined;
+  const host=createFakePluginHost({
+    pluginId:'account-pool',
+    sdk:{
+      hosts:{list:async()=>[{id:'host-one',name:'One'}]},
+      plugins:{
+        callRpc:async(request)=>{
+          if(request.pluginId==='vpn-guard'&&request.method==='networkDecisionV2'){
+            const input=request.input as {hostId:string;provider:string};
+            rpcCalls+=1;
+            if(rpcMode==='fail')throw Error('guard rpc failed');
+            if(rpcMode==='deferred'){
+              await new Promise<void>(resolve=>{releaseDeferred=resolve;});
+            }
+            return {schema:'bb-vpn-guard/network-decision/2',hostId:input.hostId,...decision};
+          }
+          throw Error(`unexpected rpc ${request.pluginId}.${request.method}`);
+        },
+      },
+    },
+  });
+  try {
+    await createAccountPoolPlugin({fetch:vi.fn(async()=>new Response('{}'))})(host.bb);
+    const cli=async(...args:string[])=>(await host.harness.behavior.runCli(args));
+    expect((await cli('config','set','vpnGuardEnabled','true')).exitCode).toBe(0);
+    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+    expect((await cli('native','configure',JSON.stringify(executor))).exitCode).toBe(0);
+    expect((await cli('native','mode','managed')).exitCode).toBe(0);
+    const accounts=nativeAccountsSchema.parse(await host.harness.behavior.callRpc('native.accounts',null));
+    await host.harness.behavior.callRpc('native.updateAccount',{accountId:'subscription-one',maxConcurrentSessions:2,expectedRevision:accounts.selectionRevision});
+    const envA=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
+    const envB=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-two'});
+    const tokA=envA.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value as string;
+    const tokB=envB.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value as string;
+    const post=(tok:string,body:object)=>host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${tok}`},body:JSON.stringify(body)});
+    const leaseA=await (await post(tokA,{action:'acquire',executorId:'native-one',sessionId:randomUUID()})).json();
+    const leaseB=await (await post(tokB,{action:'acquire',executorId:'native-one',sessionId:randomUUID()})).json();
+    const beforeConcurrent=rpcCalls;
+    rpcMode='deferred';
+    const pendingA=post(tokA,{action:'poll',leaseId:leaseA.leaseId});
+    const pendingB=post(tokB,{action:'poll',leaseId:leaseB.leaseId});
+    while(!releaseDeferred)await new Promise(resolve=>setTimeout(resolve,5));
+    // Give second concurrent poll a tick to join the same in-flight Guard read.
+    await new Promise(resolve=>setTimeout(resolve,15));
+    (releaseDeferred as ()=>void)();
+    const [resA,resB]=await Promise.all([pendingA,pendingB]);
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+    expect(rpcCalls-beforeConcurrent).toBe(1);
+    // Completed decision is never cached: next poll triggers a fresh Guard read.
+    rpcMode='resolve';
+    expect((await post(tokA,{action:'poll',leaseId:leaseA.leaseId})).status).toBe(200);
+    expect(rpcCalls-beforeConcurrent).toBe(2);
+    // Explicit Guard block returns 403 native-guard-blocked.
+    decision={allowed:false,reason:'manual_block'};
+    const blocked=await post(tokA,{action:'poll',leaseId:leaseA.leaseId});
+    expect(blocked.status).toBe(403);
+    expect(await blocked.json()).toEqual({error:'native-guard-blocked'});
+    // Guard RPC unavailability returns 503 native-guard-unavailable.
+    rpcMode='fail';
+    const unavailable=await post(tokA,{action:'poll',leaseId:leaseA.leaseId});
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({error:'native-guard-unavailable'});
+    // Release still succeeds without Guard check.
+    expect((await post(tokA,{action:'release',leaseId:leaseA.leaseId,stopped:true})).status).toBe(200);
+    expect((await post(tokB,{action:'release',leaseId:leaseB.leaseId,stopped:true})).status).toBe(200);
+  } finally {await host.harness.lifecycle.dispose();}
+});
