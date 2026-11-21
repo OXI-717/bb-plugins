@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-account-pool-balanced",
-  "version": "0.4.58",
+  "version": "0.4.32",
   "private": true,
   "type": "module",
   "description": "Balance account usage, quotas, and reserve accounts for BB agents.",
@@ -36,7 +36,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "^0.4.94",
+    "@get-bb/plugin-sdk": "0.6.104",
     "@radix-ui/react-dialog": "^1.1.19",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-tooltip": "^1.2.8",

@@ -4,6 +4,7 @@ import { OAuthRefreshRejectedError } from "./provider-adapter.js";
 
 export const GROK_CHAT_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 export const GROK_REFRESH_URL = "https://auth.x.ai/oauth2/token";
+export const GROK_SUBSCRIPTION_HEADER_PREFIXES = ["x-grok-", "x-xai-"] as const;
 
 const refreshResponseSchema = z
   .object({
@@ -15,13 +16,14 @@ const refreshResponseSchema = z
 
 export async function refreshGrokAccess(input: {
   fetch: typeof fetch;
+  url: string;
   now: () => number;
   secret: Extract<AccountSecret, { kind: "oauth" }>;
 }): Promise<Extract<AccountSecret, { kind: "oauth" }>> {
   if (input.secret.clientId === undefined) {
     throw new OAuthRefreshRejectedError(401, "invalid_client");
   }
-  const response = await input.fetch(GROK_REFRESH_URL, {
+  const response = await input.fetch(input.url, {
     method: "POST",
     headers: {
       accept: "application/json",
@@ -37,11 +39,8 @@ export async function refreshGrokAccess(input: {
     await response.body?.cancel();
     throw new OAuthRefreshRejectedError(response.status, null);
   }
-  const parsed = refreshResponseSchema.safeParse(
-    await response.json().catch(() => null),
-  );
+  const parsed = refreshResponseSchema.safeParse(await response.json().catch(() => null));
   if (!parsed.success) {
-    await response.body?.cancel().catch(() => undefined);
     throw new OAuthRefreshRejectedError(response.status, null);
   }
   return {
@@ -52,9 +51,7 @@ export async function refreshGrokAccess(input: {
       parsed.data.expires_in === undefined
         ? input.secret.expiresAt
         : input.now() + parsed.data.expires_in * 1_000,
-    ...(input.secret.idToken === undefined
-      ? {}
-      : { idToken: input.secret.idToken }),
+    ...(input.secret.idToken === undefined ? {} : { idToken: input.secret.idToken }),
     clientId: input.secret.clientId,
   };
 }

@@ -52,10 +52,13 @@ export const USAGE_PROVIDER_IDS: Record<PoolProvider, string> = {
   zai: "acp-opencode-zai",
   "opencode-go": "acp-opencode-go",
   neuraldeep: "acp-opencode-neuraldeep",
+  nvidia: "acp-opencode-nvidia",
+  ifm: "acp-opencode-ifm",
   agy: "acp-agy",
   cursor: "acp-oxi-cursor",
   devin: "acp-devin",
   grok: "acp-grok",
+  gemini: "acp-antigravity",
 };
 
 const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
@@ -65,19 +68,55 @@ const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
   zai: "Z.ai Coding Plan",
   "opencode-go": "OpenCode Go",
   neuraldeep: "NeuralDeep",
+  nvidia: "NVIDIA NIM",
+  ifm: "IFM",
   agy: "Antigravity",
   cursor: "Cursor",
   devin: "Devin",
   grok: "Grok",
+  gemini: "Gemini",
 };
 
-// Devin and Grok have no quota collector. Do not advertise an unmeasurable
-// resource as a failed collection; the account remains available for routing.
-function reportsUsage(account: Pick<AccountSummary, "provider">): boolean {
-  return account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy" && account.provider !== "grok";
+export function usageResourceLabel(
+  account: Pick<AccountSummary, "provider" | "label" | "email">,
+): string {
+  const providerLabel = USAGE_FALLBACK_LABELS[account.provider];
+  const customLabel = account.label.trim();
+  const email = (account.email ?? "").trim();
+  if (customLabel.startsWith(`${providerLabel} ·`)) return customLabel;
+  const hasCustomLabel =
+    customLabel !== "" &&
+    customLabel !== providerLabel &&
+    customLabel !== email;
+  const identity =
+    hasCustomLabel && email !== ""
+      ? `${customLabel} (${email})`
+      : hasCustomLabel
+        ? customLabel
+        : email;
+  if (identity === "" || identity === providerLabel) return providerLabel;
+  return `${providerLabel} · ${identity}`;
 }
 
-export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
+function isExpiredAuthorizationError(error: string | null): boolean {
+  return (
+    error !== null &&
+    /^\[(?:OAUTH_REAUTH_REQUIRED|API_KEY_EXPIRED)\]/u.test(error)
+  );
+}
+
+// Devin, NeuralDeep and Antigravity have no quota collector here. Do not
+// advertise an unmeasurable resource as a failed collection; the account
+// remains available for routing.
+function reportsUsage(account: Pick<AccountSummary, "provider">): boolean {
+  return account.provider !== "ifm" && account.provider !== "nvidia" && account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy";
+}
+
+export function registerUsageSource(
+  bb: BbPluginApi,
+  hub: AccountPoolHub,
+  now?: () => number,
+) {
   bb.rpc.register(
     usageSourceRpcContract,
     {
@@ -89,7 +128,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
             id: account.id,
             accountKey: accountKey(account),
             providerId: USAGE_PROVIDER_IDS[account.provider],
-            label: account.email ?? USAGE_FALLBACK_LABELS[account.provider],
+            label: usageResourceLabel(account),
             scope: { kind: "shared" as const },
           })),
         };
@@ -98,11 +137,15 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
         const account = (await hub.status()).accounts.find(account => account.id === resourceId);
         if (!account) throw new Error("Usage resource no longer exists.");
         if (!reportsUsage(account)) {
-          const name = account.provider === "grok" ? "Grok" : "Devin";
-          throw new Error(`Quota reporting is not available for ${name}.`);
+          throw new Error(`Quota reporting is not available for ${USAGE_FALLBACK_LABELS[account.provider]}.`);
         }
         await hub.assertNetworkAllowed(account.provider);
-        await hub.refreshUsage(resourceId, refresh, true);
+        try {
+          await hub.refreshUsage(resourceId, refresh, true);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!isExpiredAuthorizationError(message)) throw error;
+        }
         const { accounts: allAccounts } = await hub.status();
         const accounts = allAccounts.filter(
           (account) => account.id === resourceId && reportsUsage(account),
@@ -110,6 +153,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
         if (accounts.length === 0)
           throw new Error("Usage resource no longer exists.");
         const resources: UsageResource[] = accounts.map((account) => {
+          const referenceNow = now ? now() : (account.observedAt ?? Date.now());
           const windows: Extract<
             UsageResource["usage"],
             { status: "ok" }
@@ -122,6 +166,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
             model: string | null,
           ) => {
             if (utilization === null) return;
+            if (reset !== null && reset <= referenceNow) return;
             windows.push({
               kind:
                 label === "Five-hour limit"
@@ -176,25 +221,30 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
                 family,
               );
           }
+          // Z.AI reports a plan name, not a Claude Max multiplier. Preserve
+          // stored account metadata without interpreting an unrelated tier.
+          const rateLimitTier = account.provider === "zai" ? null : account.rateLimitTier;
           const accountFields = {
             plan: account.subscriptionType
               ? {
                   id: account.subscriptionType.toLowerCase(),
                   multiplier:
-                    Number(account.rateLimitTier?.match(/max_(\d+)x/u)?.[1]) ||
+                    Number(rateLimitTier?.match(/max_(\d+)x/u)?.[1]) ||
                     null,
                 }
               : null,
-            accountEmail: account.email,
-            planLabel: usagePlanLabel(account),
+            accountEmail: null,
+            planLabel: usagePlanLabel({ ...account, rateLimitTier }),
           };
-          const error =
-            (account.error === null
-              ? null
-              : "Usage could not be collected for this account. Try refreshing usage.") ??
-            (account.observedAt === null
-              ? "Usage has not been observed for this account."
-              : null);
+          const expiredAuth = isExpiredAuthorizationError(account.error);
+          const error = expiredAuth
+            ? null
+            : (account.error === null
+                ? null
+                : "Usage could not be collected for this account. Try refreshing usage.") ??
+              (account.observedAt === null
+                ? "Usage has not been observed for this account."
+                : null);
           return {
             id: account.id,
             accountKey: accountKey(account),
@@ -202,8 +252,9 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub) {
             label: account.label,
             scope: { kind: "shared" },
             observedAt: account.observedAt,
-            usage:
-              error === null
+            usage: expiredAuth
+              ? { status: "expired", ...accountFields }
+              : error === null
                 ? { status: "ok", ...accountFields, windows }
                 : { status: "error", ...accountFields, message: error },
           };

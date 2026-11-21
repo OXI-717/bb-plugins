@@ -12,6 +12,7 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   grokUpstreamBaseUrl: "https://api.x.ai/v1",
   maxConcurrentRequestsPerAccount: 2,
   claudeRequestStartIntervalMs: 0,
+  geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
   switchThreshold: 0.98,
   routingStrategy: "sequential" as const,
   reserveDrainHours: 24,
@@ -93,6 +94,9 @@ export const accountPoolConfigSchema = z
     ),
     claudeRequestStartIntervalMs: z.number().int().min(0).max(60_000).default(DEFAULT_ACCOUNT_POOL_CONFIG.claudeRequestStartIntervalMs),
     maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).default(DEFAULT_ACCOUNT_POOL_CONFIG.maxConcurrentRequestsPerAccount),
+    geminiUpstreamBaseUrl: httpUrlSchema.default(
+      DEFAULT_ACCOUNT_POOL_CONFIG.geminiUpstreamBaseUrl,
+    ),
     switchThreshold: switchThresholdSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.switchThreshold,
     ),
@@ -126,6 +130,7 @@ export const accountPoolConfigSetInputSchema = z
     grokUpstreamBaseUrl: httpUrlSchema.optional(),
     maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).optional(),
     claudeRequestStartIntervalMs: z.number().int().min(0).max(60_000).optional(),
+    geminiUpstreamBaseUrl: httpUrlSchema.optional(),
     switchThreshold: switchThresholdSchema.optional(),
     routingStrategy: routingStrategySchema.optional(),
     reserveDrainHours: reserveDrainHoursSchema.optional(),
@@ -153,10 +158,13 @@ export const providerSchema = z.enum([
   "zai",
   "opencode-go",
   "neuraldeep",
+  "nvidia",
+  "ifm",
   "agy",
   "cursor",
   "devin",
   "grok",
+  "gemini",
 ]);
 export type PoolProvider = z.infer<typeof providerSchema>;
 export const accountKindSchema = z.enum(["oauth", "api-key"]);
@@ -443,10 +451,13 @@ export const statusSchema = z
         zai: z.string().uuid().nullable(),
         "opencode-go": z.string().uuid().nullable(),
         neuraldeep: z.string().uuid().nullable(),
+        nvidia: z.string().uuid().nullable(),
+        ifm: z.string().uuid().nullable(),
         agy: z.string().uuid().nullable(),
         cursor: z.string().uuid().nullable(),
         devin: z.string().uuid().nullable(),
         grok: z.string().uuid().nullable(),
+        gemini: z.string().uuid().nullable(),
       })
       .strict(),
     routing: z
@@ -457,10 +468,13 @@ export const statusSchema = z
         zai: z.boolean(),
         "opencode-go": z.boolean(),
         neuraldeep: z.boolean(),
+        nvidia: z.boolean(),
+        ifm: z.boolean(),
         agy: z.boolean(),
         cursor: z.boolean(),
         devin: z.boolean(),
         grok: z.boolean(),
+        gemini: z.boolean(),
       })
       .strict(),
   })
@@ -511,6 +525,16 @@ export const codexLoginStartSchema = z
     sessionId: z.string().uuid(),
     verificationUri: z.string().url(),
     userCode: z.string().min(1),
+    expiresAt: z.number().int().positive(),
+    intervalMs: z.number().int().positive(),
+  })
+  .strict();
+
+export const geminiLoginStartSchema = z
+  .object({
+    sessionId: z.string().uuid(),
+    verificationUri: z.string().url().nullable(),
+    userCode: z.string().min(1).nullable(),
     expiresAt: z.number().int().positive(),
     intervalMs: z.number().int().positive(),
   })

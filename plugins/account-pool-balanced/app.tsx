@@ -10,6 +10,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import {
@@ -76,6 +77,7 @@ import type { ThreadAccountStatus, accountPoolRpcContract } from "./src/rpc.js";
 import type { OAuthLoginStart } from "./src/oauth-login.js";
 import type { CodexDeviceLoginStart } from "./src/codex-device-login.js";
 import type { GrokDeviceLoginStart } from "./src/grok-device-login.js";
+import type { GeminiLoginStart } from "./src/gemini-login.js";
 import {
   DEFAULT_ACCOUNT_POOL_CONFIG,
   modelFamilySchema,
@@ -93,7 +95,7 @@ type DialogState =
       kind: "account" | "priority" | "role" | "cap" | "remove";
       accountId: string;
     }
-  | { kind: "claude-login" | "codex-login" | "agy-login" | "grok-login" }
+  | { kind: "claude-login" | "codex-login" | "agy-login" | "grok-login" | "gemini-login" }
   | { kind: "api-key"; provider: PoolProvider }
   | null;
 
@@ -135,6 +137,16 @@ const PROVIDERS: Array<{
     description: "Google sign-in is stored on the Pool server; client machines receive only a scoped Pool token.",
   },
   {
+    id: "ifm",
+    title: "IFM",
+    description: "IFM API keys stay on the Pool server. Quota is not reported by this integration.",
+  },
+  {
+    id: "nvidia",
+    title: "NVIDIA NIM",
+    description: "NVIDIA API keys stay on the Pool server. Quota is not reported by this integration.",
+  },
+  {
     id: "neuraldeep",
     title: "NeuralDeep",
     description: "The key is stored on the Pool server; client machines receive only a scoped Pool token.",
@@ -160,7 +172,13 @@ const PROVIDERS: Array<{
     id: "grok",
     title: "Grok",
     description:
-      "Grok Code subscriptions are stored on the Pool server; ACP sessions receive only a scoped Pool token.",
+      "acp-grok threads use these subscription accounts. An API key is only the paid fallback.",
+  },
+  {
+    id: "gemini",
+    title: "Gemini",
+    description:
+      "acp-antigravity threads use these subscription accounts. An API key is only the paid fallback.",
   },
 ];
 const FAMILY_LABELS: Record<ModelFamily, string> = {
@@ -198,6 +216,7 @@ function configDrafts(config: AccountPoolConfig): Record<ConfigField, string> {
     devinUpstreamBaseUrl: config.devinUpstreamBaseUrl,
     maxConcurrentRequestsPerAccount: String(config.maxConcurrentRequestsPerAccount),
     grokUpstreamBaseUrl: config.grokUpstreamBaseUrl,
+    geminiUpstreamBaseUrl: config.geminiUpstreamBaseUrl,
     switchThreshold: String(config.switchThreshold),
   };
 }
@@ -742,25 +761,29 @@ function AddAccountMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
-        {(provider === "claude" || provider === "codex" || provider === "agy" || provider === "grok") ? <DropdownMenuItem
+        {(provider === "claude" || provider === "codex" || provider === "agy" || provider === "grok" || provider === "gemini") ? <DropdownMenuItem
           className="items-start py-2"
           onSelect={() => onChoose("login")}
         >
           <Icon name="UserRound" className="mt-0.5" />
           <span>
             <span className="block">
-              Sign in to {provider === "claude" ? "Claude" : provider === "agy" ? "Antigravity" : provider === "grok" ? "Grok" : "Codex"}
+              Sign in to {provider === "claude" ? "Claude" : provider === "agy" ? "Antigravity" : provider === "grok" ? "Grok" : provider === "gemini" ? "Gemini" : "Codex"}
             </span>
             <span className="block text-xs text-muted-foreground">
               {provider === "claude"
                 ? "Opens claude.ai; paste the code back here"
                 : provider === "agy"
                   ? "Sign in to Google; paste the code back here"
-                  : "Opens ChatGPT with a device code"}
+                  : provider === "grok"
+                    ? "Opens the Grok login with a device code"
+                    : provider === "gemini"
+                      ? "Opens Google sign-in"
+                      : "Opens ChatGPT with a device code"}
             </span>
           </span>
         </DropdownMenuItem> : null}
-        {(provider === "claude" || provider === "codex") ? <DropdownMenuItem
+        {(provider === "claude" || provider === "codex" || provider === "grok" || provider === "gemini") ? <DropdownMenuItem
           className="items-start py-2"
           onSelect={() => onChoose("import")}
         >
@@ -768,14 +791,14 @@ function AddAccountMenu({
           <span>
             <span className="block">Import from this machine</span>
             <span className="block text-xs text-muted-foreground">
-              Copies the {provider === "claude" ? "~/.claude" : "Codex"} login from
+              Copies the {provider === "claude" ? "~/.claude" : provider === "grok" ? "~/.grok" : provider === "gemini" ? "~/.gemini" : "Codex"} login from
               the server host
             </span>
           </span>
         </DropdownMenuItem> : null}
         {provider !== "codex" && provider !== "agy" ? (
           <>
-            {provider === "claude" ? <DropdownMenuSeparator /> : null}
+            {provider === "claude" || provider === "grok" || provider === "gemini" ? <DropdownMenuSeparator /> : null}
             <DropdownMenuItem
               className="items-start py-2"
               onSelect={() => onChoose("api-key")}
@@ -784,7 +807,7 @@ function AddAccountMenu({
               <span>
                 <span className="block">{provider === "devin" ? "Add PAT…" : "Add API key…"}</span>
                 <span className="block text-xs text-muted-foreground">
-                  {provider === "claude" ? "Paid fallback, selected last" : provider === "grok" ? "For xAI API billing; stored on the Pool server" : "Key is stored on the Pool server"}
+                  {provider === "claude" || provider === "grok" || provider === "gemini" ? "Paid fallback, selected last" : "Key is stored on the pool server"}
                 </span>
               </span>
             </DropdownMenuItem>
@@ -887,7 +910,7 @@ function useCopyToClipboard(text: string, selectFallback: () => void) {
   return { copyState, copy };
 }
 
-function UserCodeBlock({ userCode, provider }: { userCode: string; provider: "Codex" | "Grok" }) {
+function UserCodeBlock({ name, userCode }: { name: string; userCode: string }) {
   const codeRef = useRef<HTMLSpanElement>(null);
   const selectCode = useCallback(() => {
     const element = codeRef.current;
@@ -907,14 +930,14 @@ function UserCodeBlock({ userCode, provider }: { userCode: string; provider: "Co
         <span
           ref={codeRef}
           className="col-start-2 select-all text-center font-mono text-2xl font-semibold tracking-widest"
-          aria-label={`${provider} device code`}
+          aria-label={`${name} device code`}
         >
           {userCode}
         </span>
         <Button
           type="button"
           variant="ghost"
-          aria-label={`Copy ${provider} sign-in code`}
+          aria-label={`Copy ${name} sign-in code`}
           className="col-start-3 size-11 justify-self-start text-muted-foreground hover:text-foreground sm:size-9"
           onClick={copy}
         >
@@ -1063,6 +1086,7 @@ function AccountPoolSettings() {
     devinUpstreamBaseUrl: "",
     maxConcurrentRequestsPerAccount: "",
     grokUpstreamBaseUrl: "",
+    geminiUpstreamBaseUrl: "",
     switchThreshold: "",
   });
   const [configErrors, setConfigErrors] = useState<
@@ -1078,6 +1102,7 @@ function AccountPoolSettings() {
     devinUpstreamBaseUrl: null,
     maxConcurrentRequestsPerAccount: null,
     grokUpstreamBaseUrl: null,
+    geminiUpstreamBaseUrl: null,
     switchThreshold: null,
   });
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -1103,6 +1128,7 @@ function AccountPoolSettings() {
   );
   const [grokStep, setGrokStep] = useState<GrokDeviceLoginStart | null>(null);
   const [agyStep,setAgyStep]=useState<{sessionId:string;authorizeUrl:string;expiresAt:number}|null>(null);
+  const [geminiStep, setGeminiStep] = useState<GeminiLoginStart | null>(null);
   const [loginDone, setLoginDone] = useState<string | null>(null);
   const [reauthorizeAccountId, setReauthorizeAccountId] = useState<string | null>(null);
   const [pastedCode, setPastedCode] = useState("");
@@ -1231,6 +1257,43 @@ function AccountPoolSettings() {
       if (timer !== null) clearTimeout(timer);
     };
   }, [grokStep, loginDone, refresh, rpc]);
+  useEffect(() => {
+    if (geminiStep === null || loginDone !== null) return;
+    const update = () => setCountdown(Math.max(0, Math.ceil((geminiStep.expiresAt - Date.now()) / 1_000)));
+    update();
+    const interval = window.setInterval(update, 1_000);
+    return () => window.clearInterval(interval);
+  }, [geminiStep, loginDone]);
+  useEffect(() => {
+    if (geminiStep === null || loginDone !== null) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+    const poll = async () => {
+      try {
+        const result = await rpc.call("geminiLogin.poll", { sessionId: geminiStep.sessionId });
+        if (disposed) return;
+        if (result.status === "complete") {
+          setLoginDone(result.account.label);
+          setGeminiStep(null);
+          await refresh();
+          return;
+        }
+        if (result.status === "error") {
+          setError(result.message);
+          return;
+        }
+      } catch (pollError) {
+        if (!disposed) setError(errorText(pollError));
+        return;
+      }
+      if (!disposed) timer = setTimeout(poll, geminiStep.intervalMs);
+    };
+    timer = setTimeout(poll, geminiStep.intervalMs);
+    return () => {
+      disposed = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [geminiStep, loginDone, refresh, rpc]);
   const accounts = status?.accounts ?? [];
   const selectedAccount =
     dialog?.kind === "account" ||
@@ -1326,6 +1389,13 @@ function AccountPoolSettings() {
       setPastedCode("");
     });
   }
+  async function startGemini(): Promise<void> {
+    setDialog({ kind: "gemini-login" });
+    setLoginDone(null);
+    await run("gemini-login", async () => {
+      setGeminiStep(await rpc.call("geminiLogin.start", null));
+    });
+  }
   async function startCodex(): Promise<void> {
     setDialog({ kind: "codex-login" });
     setLoginDone(null);
@@ -1353,8 +1423,9 @@ function AccountPoolSettings() {
   ): Promise<void> {
     if (choice === "login") {
       if (provider === "agy") await startAgy();
-      else if (provider === "grok") await startGrok();
       else if (provider === "claude") await startClaude();
+      else if (provider === "grok") await startGrok();
+      else if (provider === "gemini") await startGemini();
       else await startCodex();
       return;
     }
@@ -1473,10 +1544,13 @@ function AccountPoolSettings() {
     if (dialog?.kind === "account" && policyUnsaved) return;
     if (dialog?.kind === "codex-login" && codexStep !== null)
       void rpc.call("codexLogin.cancel", { sessionId: codexStep.sessionId });
-    if(dialog?.kind==="agy-login"&&agyStep)void rpc.call("agyLogin.cancel",{sessionId:agyStep.sessionId}).catch(()=>undefined);
+    if (dialog?.kind === "agy-login" && agyStep) void rpc.call("agyLogin.cancel", { sessionId: agyStep.sessionId }).catch(() => undefined);
     if (dialog?.kind === "grok-login" && grokStep !== null)
       void rpc.call("grokLogin.cancel", { sessionId: grokStep.sessionId }).catch(() => undefined);
-    setAgyStep(null);setPastedCode("");
+    if (dialog?.kind === "gemini-login" && geminiStep !== null)
+      void rpc.call("geminiLogin.cancel", { sessionId: geminiStep.sessionId }).catch(() => undefined);
+    setAgyStep(null);
+    setPastedCode("");
     if (dialog?.kind === "api-key") setApiKey("");
     setDialog(null);
     setBrowserError(null);
@@ -1484,6 +1558,7 @@ function AccountPoolSettings() {
     setLoginStep(null);
     setCodexStep(null);
     setGrokStep(null);
+    setGeminiStep(null);
     setLoginDone(null);
     setError(null);
   }
@@ -2274,7 +2349,6 @@ function AccountPoolSettings() {
             reauthorizing={reauthorizeAccountId === null ? null : status?.accounts.find(account => account.id === reauthorizeAccountId)?.email ?? "this account"}
             loginStep={loginStep}
             codexStep={null}
-            grokStep={null}
             loginDone={loginDone}
             pending={pending !== null}
             pastedCode={pastedCode}
@@ -2299,12 +2373,28 @@ function AccountPoolSettings() {
             restart={() => void startClaude(reauthorizeAccountId??undefined)}
           />
         ) : null}
+        {dialog?.kind === "codex-login" ? (
+          <LoginDialog
+            provider="codex"
+            loginStep={null}
+            codexStep={codexStep}
+            loginDone={loginDone}
+            pending={pending !== null}
+            pastedCode=""
+            countdown={countdown}
+            error={error}
+            close={closeDialog}
+            openUrl={navigate.openUrl}
+            setPastedCode={() => {}}
+            complete={() => {}}
+            restart={() => void startCodex()}
+          />
+        ) : null}
         {dialog?.kind === "grok-login" ? (
           <LoginDialog
             provider="grok"
             loginStep={null}
-            codexStep={null}
-            grokStep={grokStep}
+            codexStep={grokStep}
             loginDone={loginDone}
             pending={pending !== null}
             pastedCode=""
@@ -2317,12 +2407,12 @@ function AccountPoolSettings() {
             restart={() => void startGrok()}
           />
         ) : null}
-        {dialog?.kind === "codex-login" ? (
+        {dialog?.kind === "gemini-login" ? (
           <LoginDialog
-            provider="codex"
+            provider="gemini"
             loginStep={null}
-            codexStep={codexStep}
-            grokStep={null}
+            codexStep={null}
+            geminiStep={geminiStep}
             loginDone={loginDone}
             pending={pending !== null}
             pastedCode=""
@@ -2332,7 +2422,7 @@ function AccountPoolSettings() {
             openUrl={navigate.openUrl}
             setPastedCode={() => {}}
             complete={() => {}}
-            restart={() => void startCodex()}
+            restart={() => void startGemini()}
           />
         ) : null}
       </Dialog>
@@ -2658,7 +2748,7 @@ function LoginDialog({
   reauthorizing = null,
   loginStep,
   codexStep,
-  grokStep,
+  geminiStep = null,
   loginDone,
   pending,
   pastedCode,
@@ -2676,7 +2766,7 @@ function LoginDialog({
   reauthorizing?: string | null;
   loginStep: OAuthLoginStart | null;
   codexStep: CodexDeviceLoginStart | null;
-  grokStep: GrokDeviceLoginStart | null;
+  geminiStep?: GeminiLoginStart | null;
   loginDone: string | null;
   pending: boolean;
   pastedCode: string;
@@ -2690,9 +2780,15 @@ function LoginDialog({
   complete: () => void;
   restart: () => void;
 }) {
-  const name = provider === "claude" ? "Claude" : provider === "grok" ? "Grok" : "Codex";
-  const url = provider === "claude" ? loginStep?.authorizeUrl : provider === "grok" ? grokStep?.verificationUri : codexStep?.verificationUri;
-  const deviceStep = provider === "grok" ? grokStep : codexStep;
+  const name = provider === "claude" ? "Claude" : provider === "grok" ? "Grok" : provider === "gemini" ? "Gemini" : "Codex";
+  const url =
+    provider === "claude"
+      ? loginStep?.authorizeUrl
+      : provider === "gemini"
+        ? geminiStep === null
+          ? undefined
+          : geminiStep.verificationUri ?? ""
+        : codexStep?.verificationUri;
   return (
     <DialogFrame
       title={reauthorizing === null ? `Sign in to ${name}` : "Reauthorize Claude"}
@@ -2748,14 +2844,22 @@ function LoginDialog({
             {provider === "claude"
               ? "Sign in at claude.ai, then paste the code from the final page."
               : provider === "grok"
-                ? "Open the verification page, sign in to Grok, and enter this code. The Pool stores the resulting credentials on its server."
-                : "Open the verification page, sign in to ChatGPT, and enter this code."}
+                ? "Open the verification page, sign in to Grok, and enter this code."
+                : provider === "gemini"
+                  ? geminiStep?.verificationUri
+                    ? "Open the Google page and finish sign-in."
+                    : "Finish Google sign-in on this machine."
+                  : "Open the verification page, sign in to ChatGPT, and enter this code."}
           </p>
           {reauthorizing === null ? null : <p className="text-sm text-muted-foreground">Sign in to {reauthorizing}. Signing in to another account will not replace this subscription.</p>}
-          {deviceStep === null ? null : (
-            <UserCodeBlock userCode={deviceStep.userCode} provider={provider === "grok" ? "Grok" : "Codex"} />
-          )}
-          <AuthorizationUrlRow name={name} url={url} openUrl={openUrl} />
+          {provider === "gemini"
+            ? geminiStep?.userCode
+              ? <UserCodeBlock name={name} userCode={geminiStep.userCode} />
+              : null
+            : codexStep === null ? null : (
+              <UserCodeBlock name={name} userCode={codexStep.userCode} />
+            )}
+          {url ? <AuthorizationUrlRow name={name} url={url} openUrl={openUrl} /> : null}
           {openAccountUrl === undefined ? null : <div className="space-y-1">
             <Button variant="outline" disabled={pending} onClick={() => openAccountUrl(url)}>Open in account profile</Button>
             <p className="text-sm text-muted-foreground">The window will open on the Pooler machine.</p>
@@ -2780,49 +2884,82 @@ function LoginDialog({
   );
 }
 
-export function ThreadAccountIndicator({ threadId, isCompactViewport }: { threadId: string; isCompactViewport: boolean }) {
+type ThreadAccountView = { status: ThreadAccountStatus | null; error: boolean };
+let threadAccountSnapshot: { target: string | null; views: Record<string, ThreadAccountView> } = { target: null, views: {} };
+const threadAccountListeners = new Set<() => void>();
+const subscribeThreadAccount = (listener: () => void) => {
+  threadAccountListeners.add(listener);
+  return () => { threadAccountListeners.delete(listener); };
+};
+const getThreadAccountSnapshot = () => threadAccountSnapshot;
+function publishThreadAccount(next: typeof threadAccountSnapshot) {
+  threadAccountSnapshot = next;
+  for (const listener of threadAccountListeners) listener();
+}
+function openThreadAccount(target: string | null) {
+  publishThreadAccount({ ...threadAccountSnapshot, target });
+}
+export function useThreadAccountData({ threadIds }: { threadIds: readonly string[] }) {
   const rpc = useRpc<typeof accountPoolRpcContract>();
-  const [status, setStatus] = useState<ThreadAccountStatus | null>(null);
-  const [open, setOpen] = useState(false);
-  const [error, setError] = useState(false);
+  const snapshot = useSyncExternalStore(subscribeThreadAccount, getThreadAccountSnapshot);
+  const key = JSON.stringify(threadIds);
   useEffect(() => {
+    const ids: string[] = JSON.parse(key);
     let disposed = false;
     let running = false;
-    setStatus(null);
-    setError(false);
+    publishThreadAccount({ target: threadAccountSnapshot.target !== null && ids.includes(threadAccountSnapshot.target) ? threadAccountSnapshot.target : null, views: Object.fromEntries(ids.map(id => [id, threadAccountSnapshot.views[id] ?? { status: null, error: false }])) });
     const refresh = async () => {
       if (running) return;
       running = true;
-      try {
-        const result = await rpc.call("thread.account", { threadId });
-        if (!disposed) { setStatus(result); setError(false); }
-      } catch { if (!disposed) setError(true); }
-      finally { running = false; }
+      await Promise.all(ids.map(async threadId => {
+        let view: ThreadAccountView;
+        try { view = { status: await rpc.call("thread.account", { threadId }), error: false }; }
+        catch { view = { status: threadAccountSnapshot.views[threadId]?.status ?? null, error: true }; }
+        if (!disposed) publishThreadAccount({ ...threadAccountSnapshot, views: { ...threadAccountSnapshot.views, [threadId]: view } });
+      }));
+      running = false;
     };
     void refresh();
     const timer = setInterval(() => void refresh(), 15000);
     return () => { disposed = true; clearInterval(timer); };
-  }, [rpc, threadId]);
-  if (status?.state === "unsupported") return null;
+  }, [rpc, key]);
+  return snapshot.views;
+}
+function threadAccountPresentation({ status, error }: ThreadAccountView) {
   const account = status?.account;
   const availability = account === null || account === undefined ? "" : !account.enabled ? "disabled" : account.eligible ? "eligible" : "currently unavailable";
   const label = error ? "Pool: status check failed" : status === null ? "Pool: checking…" : status.state === "bypassed" ? "Outside pool" : status.state === "unobserved" ? "Pool: no data yet" : `${(account ? accountFullName(account) : "Deleted account")} · ${availability}`;
   const details = status?.state === "observed"
     ? `Last confirmed request: ${label}. ${status.lastUsedAt === null ? "" : new Date(status.lastUsedAt).toLocaleString("en-US")}. The next request may use a different account. Active requests for this account: ${account?.inFlight ?? 0}.`
     : "The account is selected when a request is made. Only confirmed pool data is shown here.";
-  return <>
-    <button type="button" className="max-w-64 truncate text-xs text-muted-foreground" title={details} aria-label={`Thread account: ${label}`} onClick={() => setOpen(true)}>{isCompactViewport ? "Pool" : label}</button>
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogFrame title="Thread account" footer={<Button onClick={() => setOpen(false)}>Close</Button>}>
-        <p>{label}</p><p className="text-sm text-muted-foreground">{details}</p>
-        {account ? <p className="text-sm">{account.role === "reserve" ? "Reserve" : "Primary"} · {account.provider} · quotas refreshed {account.observedAt === null ? "never" : new Date(account.observedAt).toLocaleString("en-US")}</p> : null}
-      </DialogFrame>
-    </Dialog>
-  </>;
+
+  return { account, label, details };
+}
+export function ThreadAccountOverlay() {
+  const snapshot = useSyncExternalStore(subscribeThreadAccount, getThreadAccountSnapshot);
+  const view = snapshot.target === null ? null : snapshot.views[snapshot.target];
+  if (!view || view.status?.state === "unsupported") return null;
+  const { account, label, details } = threadAccountPresentation(view);
+  return <Dialog open={snapshot.target !== null} onOpenChange={open => { if (!open) openThreadAccount(null); }}>
+    <DialogFrame title="Thread account" footer={<Button onClick={() => openThreadAccount(null)}>Close</Button>}>
+      <p>{label}</p><p className="text-sm text-muted-foreground">{details}</p>
+      {account ? <p className="text-sm">{account.role === "reserve" ? "Reserve" : "Primary"} · {account.provider} · quotas refreshed {account.observedAt === null ? "never" : new Date(account.observedAt).toLocaleString("en-US")}</p> : null}
+    </DialogFrame>
+  </Dialog>;
 }
 
 export default definePluginApp((app) => {
-  app.slots.experimental_threadHeaderAction({ id: "pool-account", title: "Thread account", component: ThreadAccountIndicator });
+  app.slots.experimental_threadAction({
+    id: "pool-account", title: "Thread account", icon: "Layers", group: "pool", placement: "header",
+    useData: useThreadAccountData,
+    item: ({ thread, data }) => {
+      const view = data[thread.id] ?? { status: null, error: false };
+      if (view.status?.state === "unsupported") return null;
+      const { label, details } = threadAccountPresentation(view);
+      return { label, detail: details, icon: "Layers", run: () => openThreadAccount(thread.id) };
+    },
+  });
+  app.slots.experimental_appOverlay({ id: "pool-account-details", component: ThreadAccountOverlay });
   app.slots.settingsSection({
     id: "accounts",
     component: AccountPoolSettings,

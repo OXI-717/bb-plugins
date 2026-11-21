@@ -252,6 +252,16 @@ export class AccountStore {
     return this.update(id, (account) => ({ ...account, accountUuid }));
   }
 
+  async setZaiSubscriptionType(
+    id: string,
+    subscriptionType: "lite" | "pro" | "max" | null,
+  ): Promise<Account | null> {
+    const plan = z.enum(["lite", "pro", "max"]).nullable().parse(subscriptionType);
+    return this.update(id, (account) =>
+      account.provider !== "zai" || account.subscriptionType === plan
+        ? account : { ...account, subscriptionType: plan });
+  }
+
   private async update(
     id: string,
     change: (account: Account) => Account,
@@ -261,7 +271,9 @@ export class AccountStore {
       const index = accounts.findIndex((account) => account.id === id);
       const current = accounts[index];
       if (index < 0 || current === undefined) return null;
-      const updated = accountSchema.parse(change(current));
+      const changed = change(current);
+      if (changed === current) return current;
+      const updated = accountSchema.parse(changed);
       accounts[index] = updated;
       await this.kv.set(ACCOUNTS_KEY, accounts);
       return updated;

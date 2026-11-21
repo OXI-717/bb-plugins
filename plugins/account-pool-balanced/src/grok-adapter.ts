@@ -9,7 +9,7 @@ import {
 } from "./provider-adapter.js";
 import { isQuotaRejection, modelFamily, quotaFromHeaders } from "./quota.js";
 import { parseRequestBody } from "./request-body.js";
-import { refreshGrokAccess, GROK_CHAT_PROXY_BASE_URL } from "./grok-oauth.js";
+import { refreshGrokAccess, GROK_CHAT_PROXY_BASE_URL, GROK_REFRESH_URL } from "./grok-oauth.js";
 
 export const GROK_MOUNT_PREFIX = "grok/";
 const GROK_UPSTREAM_MOUNT_PREFIX = `${GROK_MOUNT_PREFIX}v1/`;
@@ -62,6 +62,7 @@ export function createGrokAdapter(): ProviderAdapter {
       if (due.clientId === undefined) throw new OAuthRefreshRejectedError(401, "invalid_client");
       const secret = await refreshGrokAccess({
         fetch: context.fetch,
+        url: GROK_REFRESH_URL,
         now: context.now,
         secret: due,
       });

@@ -39,7 +39,7 @@ describe("VPN permission", () => {
   it("denies protected providers on every uncertain state and leaves others independent", async () => {
     const reader = vi.fn(async () => { throw new Error("unavailable"); });
     const policy = createVpnPolicy(() => accountPoolConfigSchema.parse({}), () => now, reader);
-    for (const provider of ["kimi", "zai", "opencode-go"] as const) await policy.assert(provider);
+    for (const provider of ["kimi", "zai", "opencode-go", "grok", "gemini"] as const) await policy.assert(provider);
     expect(reader).not.toHaveBeenCalled();
     for (const provider of ["codex", "claude", "cursor", "devin"] as const) await expect(policy.assert(provider)).rejects.toBeInstanceOf(VpnRequiredError);
     expect(reader).toHaveBeenCalledTimes(4);

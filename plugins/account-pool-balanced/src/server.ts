@@ -33,11 +33,14 @@ import {
 } from "./cursor-adapter.js";
 import { KIMI_MOUNT_PREFIX } from "./kimi-adapter.js";
 import { DEVIN_MOUNT_PREFIX, DEVIN_PROXIED_PATHS } from "./devin-adapter.js";
-import { GROK_MOUNT_PREFIX } from "./grok-adapter.js";
 import {
+  GROK_MOUNT_PREFIX,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
+import { GEMINI_MOUNT_PREFIX, GEMINI_ROUTE_SUFFIXES } from "./gemini-adapter.js";
+import { GeminiLogin } from "./gemini-login.js";
+import { writeGeminiPoolHome } from "./gemini-home.js";
 import { PoolOperations } from "./operations.js";
 import { registerUsageSource } from "./usage-source.js";
 import { accountPoolRpcContract, createRpcHandlers } from "./rpc.js";
@@ -85,6 +88,17 @@ export interface AccountPoolPluginOptions {
   codexAuthBaseUrl?: string;
   grokLoginCommand?: string;
   grokLoginArgs?: string[];
+  grokChatProxyBaseUrl?: string;
+  grokRefreshUrl?: string;
+  grokUsagesUrl?: string;
+  importGrokCredentials?: () => Promise<import("./grok-credentials.js").GrokSubscriptionCredentials>;
+  geminiLoginCommand?: string;
+  geminiLoginArgs?: string[];
+  geminiCloudCodeBaseUrl?: string;
+  geminiUsageUrl?: string;
+  geminiRefreshUrl?: string;
+  geminiOAuthClientSecret?: string | (() => Promise<string>);
+  importGeminiCredentials?: () => Promise<import("./gemini-credentials.js").GeminiSubscriptionCredentials>;
 }
 
 interface ProviderEnvScope {
@@ -221,6 +235,15 @@ export function createAccountPoolPlugin(
       profileUrl: options.oauthProfileUrl,
       importClaudeCredentials: options.importCredentials,
       importCodexCredentials: options.importCodexCredentials,
+      grokChatProxyBaseUrl: options.grokChatProxyBaseUrl,
+      grokRefreshUrl: options.grokRefreshUrl,
+      grokUsagesUrl: options.grokUsagesUrl,
+      importGrokCredentials: options.importGrokCredentials,
+      geminiCloudCodeBaseUrl: options.geminiCloudCodeBaseUrl,
+      geminiUsageUrl: options.geminiUsageUrl,
+      geminiRefreshUrl: options.geminiRefreshUrl,
+      geminiOAuthClientSecret: options.geminiOAuthClientSecret,
+      importGeminiCredentials: options.importGeminiCredentials,
       drainTimeoutMs: options.drainTimeoutMs,
       maxAffinityBindings: options.maxAffinityBindings,
       onUpstreamError: (provider, error, context) => {
@@ -269,9 +292,9 @@ export function createAccountPoolPlugin(
     const retryProviders:Readonly<Record<string,PoolProvider>>={
       codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor',
       'acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai',
-      'acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi',
+      'acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-nvidia':'nvidia','acp-opencode-ifm':'ifm','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi',
       'acp-opencode-kimi-highspeed':'kimi',
-      'acp-grok':'grok',
+      'acp-grok':'grok','acp-antigravity':'gemini',
     };
     await registerNetworkRetry(bb,async(threadId,providerId)=>{
       const provider=retryProviders[providerId];
@@ -304,7 +327,13 @@ export function createAccountPoolPlugin(
       now,
       command: options.grokLoginCommand,
       args: options.grokLoginArgs,
-      addAccount: (credentials) => operations.addGrokOAuth(credentials),
+      addAccount: (authenticated) => operations.addGrokOAuth(authenticated),
+    });
+    const geminiLogin = new GeminiLogin({
+      now,
+      command: options.geminiLoginCommand,
+      args: options.geminiLoginArgs,
+      addAccount: (authenticated) => operations.addGeminiOAuth(authenticated),
     });
     if ((await accounts.list()).every((account) => !account.enabled)) {
       bb.status.needsConfiguration(
@@ -325,7 +354,7 @@ export function createAccountPoolPlugin(
       accountPoolRpcContract,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
         const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
-        const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi','acp-grok':'grok'} as Record<string,PoolProvider>)[thread.providerId]??null;
+        const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-nvidia':'nvidia','acp-opencode-ifm':'ifm','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi','acp-grok':'grok','acp-antigravity':'gemini'} as Record<string,PoolProvider>)[thread.providerId]??null;
         const empty = { account: null, lastUsedAt: null };
         if (provider === null) return { state: "unsupported", ...empty };
         if (await routing.isBypassed(threadId) || !(await operations.isRoutingEnabled(provider)))
@@ -353,10 +382,10 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url), grokLogin),
+      }, agyLogin, url=>browser.openAgyLogin(url), grokLogin, geminiLogin),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,grokLogin);
-    registerUsageSource(bb, hub);
+    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,grokLogin,geminiLogin);
+    registerUsageSource(bb, hub, now);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
       if (readiness.reason === "routing-disabled") return null;
@@ -435,7 +464,7 @@ export function createAccountPoolPlugin(
       if(nativeSessions.managed()){
         const catalog=context.threadId===null;
         const executorId=!(await operations.isRoutingEnabled('agy'))||await isThreadBypassed(context)?null:
-          catalog?await nativeSessions.catalogExecutorFor(context.hostId):await nativeSessions.executorFor(context);
+          catalog?await nativeSessions.catalogExecutorFor(context.hostId):await nativeSessions.executorFor({ ...context, threadId: context.threadId ?? undefined });
         // Missing admission never restores local fallback or old gateway auth.
         return [{name:'OXI_AGY_NATIVE_REQUIRED',value:'1',reason:'Official native AGY managed by Pooler'},
           {name:'OXI_AGY_NATIVE_EXECUTOR',value:executorId??'',reason:'Explicit host and project executor'},
@@ -509,6 +538,20 @@ export function createAccountPoolPlugin(
         providerId: "acp-opencode-zai",
         keyEnv: "ZAI_API_KEY",
         baseUrlEnv: "OXI_ZAI_BASE_URL",
+      },
+      {
+        provider: "nvidia",
+        mountPrefix: "nvidia/",
+        providerId: "acp-opencode-nvidia",
+        keyEnv: "NVIDIA_API_KEY",
+        baseUrlEnv: "OXI_NVIDIA_BASE_URL",
+      },
+      {
+        provider: "ifm",
+        mountPrefix: "ifm/",
+        providerId: "acp-opencode-ifm",
+        keyEnv: "IFM_API_KEY",
+        baseUrlEnv: "OXI_IFM_BASE_URL",
       },
       {
         provider: "neuraldeep",
@@ -620,10 +663,68 @@ export function createAccountPoolPlugin(
         proxiedHealth("cursor", context),
       );
     }
+    for (const suffix of GEMINI_ROUTE_SUFFIXES) {
+      bb.http.route(
+        "POST",
+        `/${GEMINI_MOUNT_PREFIX}${suffix}`,
+        (context) => hub.handle(context.req.raw, "gemini"),
+        { auth: "none" },
+      );
+    }
+    bb.http.route(
+      "POST",
+      `/${GEMINI_MOUNT_PREFIX}v1beta/models/*`,
+      (context) => hub.handle(context.req.raw, "gemini", { accountKind: "api-key" }),
+      { auth: "none" },
+    );
+    bb.providers.experimental_contributeEnv("acp-antigravity", async (context) => {
+      if (
+        !(await operations.isRoutingEnabled("gemini")) ||
+        (await isThreadBypassed(context)) ||
+        !(await operations.hasUsableEnabledAccount("gemini"))
+      ) {
+        return [];
+      }
+      const token = await scopedHubToken(context);
+      if (await operations.hasUsableEnabledOAuthAccount("gemini")) {
+        const email = (await operations.list()).find((account) =>
+          account.provider === "gemini" && account.enabled && account.kind === "oauth")?.email ?? null;
+        const home = await writeGeminiPoolHome({
+          dataDir: bb.server.experimental_dataDir,
+          hubToken: token,
+          email,
+        });
+        return [
+          {
+            name: "CLOUD_CODE_URL",
+            value: { serverPath: `${hubBasePath(bb.pluginId)}/${GEMINI_MOUNT_PREFIX}`.replace(/\/$/u, "") },
+            reason: "Subscription traffic goes through the Account Pooler hub",
+          },
+          {
+            name: "HOME",
+            value: home,
+            reason: "Isolated Pool-owned Gemini authentication profile",
+          },
+        ];
+      }
+      return [
+        {
+          name: "GOOGLE_GEMINI_BASE_URL",
+          value: { serverPath: `${hubBasePath(bb.pluginId)}/${GEMINI_MOUNT_PREFIX}`.replace(/\/$/u, "") },
+          reason: "Paid API key fallback routed through the Account Pooler hub",
+        },
+        {
+          name: "GEMINI_API_KEY",
+          value: token,
+          reason: "Account Pooler hub token for this machine",
+        },
+      ];
+    });
+    bb.providers.experimental_contributeEnvHealth("acp-antigravity", context => proxiedHealth("gemini", context));
     for (const entry of openAiCompatibleRoutes) {
-      for (const route of (entry.provider === "neuraldeep" ? ["chat/completions", "models"] : ["chat/completions", "responses", "models"])) {
+      for (const route of ((entry.provider === "neuraldeep" || entry.provider === "nvidia" || entry.provider === "ifm") ? ["chat/completions", "models"] : ["chat/completions", "responses", "models"])) {
         bb.http.route(
-          entry.provider === "neuraldeep" && route === "models" ? "GET" : "POST",
+          (entry.provider === "neuraldeep" || entry.provider === "nvidia" || entry.provider === "ifm") && route === "models" ? "GET" : "POST",
           `/${entry.mountPrefix}v1/${route}`,
           (context) => hub.handle(context.req.raw, entry.provider),
           { auth: "none" },
@@ -694,6 +795,7 @@ export function createAccountPoolPlugin(
       agyLogin.dispose();
       codexLogin.dispose();
       grokLogin.dispose();
+      geminiLogin.dispose();
       let timer: ReturnType<typeof setTimeout> | null = null;
       try {
         const inspection = inspectDisableState(bb, operations);

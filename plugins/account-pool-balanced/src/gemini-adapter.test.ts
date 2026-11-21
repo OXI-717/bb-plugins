@@ -1,0 +1,124 @@
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_ACCOUNT_POOL_CONFIG, type Account, type AccountQuota } from "./contracts.js";
+import { createGeminiAdapter, GEMINI_USAGE_REQUEST_TIMEOUT_MS } from "./gemini-adapter.js";
+import { GEMINI_OAUTH_CLIENT_ID, GEMINI_USER_AGENT } from "./gemini-oauth.js";
+import type { QuotaStore } from "./store.js";
+
+const account = { id: "11111111-1111-4111-8111-111111111111" } as Account;
+const oauth = {
+  kind: "oauth" as const,
+  accessToken: "google-access",
+  refreshToken: "refresh",
+  expiresAt: 1,
+  clientId: GEMINI_OAUTH_CLIENT_ID,
+};
+
+function previous(): AccountQuota {
+  return {
+    accountId: account.id,
+    fiveHourUtilization: 0.2,
+    fiveHourResetAt: 5,
+    fiveHourStatus: null,
+    sevenDayUtilization: null,
+    sevenDayResetAt: null,
+    sevenDayStatus: null,
+    representativeClaim: null,
+    familyWeekly: { fable: null, sonnet: null, opus: null, haiku: null, other: null },
+    limitWindows: [],
+    observedAt: null,
+    heldUntil: null,
+    error: null,
+  };
+}
+
+function adapter() {
+  return createGeminiAdapter({
+    cloudCodeBaseUrl: "https://daily-cloudcode-pa.googleapis.com",
+    apiBaseUrl: (settings) => settings.geminiUpstreamBaseUrl,
+    refreshUrl: "https://oauth2.googleapis.com/token",
+    clientSecret: "fake-secret",
+  });
+}
+
+describe("gemini adapter", () => {
+  it("keeps the colon path and the query on the cloud code host", () => {
+    const request = new Request(
+      "https://hub.example/api/v1/plugins/account-pool/http/gemini/v1internal:streamGenerateContent?alt=sse",
+      { method: "POST" },
+    );
+    expect(adapter().upstreamUrl(request, {
+      ...DEFAULT_ACCOUNT_POOL_CONFIG,
+      geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
+    }, account, oauth).toString()).toBe(
+      "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+    );
+  });
+
+  it("sends an API key to the generative language host", () => {
+    const request = new Request(
+      "https://hub.example/gemini/v1internal:generateContent",
+      { method: "POST" },
+    );
+    const settings = {
+      ...DEFAULT_ACCOUNT_POOL_CONFIG,
+      geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
+    };
+    expect(adapter().upstreamUrl(request, settings, account, { kind: "api-key", apiKey: "stored-key" }).origin)
+      .toBe("https://generativelanguage.googleapis.com");
+    const headers = adapter().requestHeaders(
+      new Headers({ authorization: "Bearer hub-token" }),
+      account,
+      { kind: "api-key", apiKey: "stored-key" },
+    );
+    expect(headers.get("authorization")).toBe("Bearer stored-key");
+    expect(headers.get("x-goog-api-key")).toBe("stored-key");
+    expect(headers.get("user-agent")).toBe(GEMINI_USER_AGENT);
+  });
+
+  it("keeps an inbound user agent and collects the busiest bucket", async () => {
+    const headers = adapter().requestHeaders(
+      new Headers({ "user-agent": "antigravity/test" }),
+      account,
+      oauth,
+    );
+    expect(headers.get("authorization")).toBe("Bearer google-access");
+    expect(headers.get("user-agent")).toBe("antigravity/test");
+    const calls: string[] = [];
+    const stored: { quota: AccountQuota | null } = { quota: null };
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      if (calls.length === 1) return new Response("no", { status: 401 });
+      return Response.json({
+        buckets: [{ modelId: "gemini-2.5-pro", remainingFraction: 0.25, resetTime: "2026-11-04T21:01:05Z" }],
+      });
+    });
+    await adapter().refreshUsage({
+      account,
+      freshSecret: async (rejected) => {
+        expect(rejected === undefined || rejected === "google-access").toBe(true);
+        return rejected === undefined ? oauth : { ...oauth, accessToken: "fresh-access" };
+      },
+      accounts: null as never,
+      quotas: { get: () => previous(), put: (quota: AccountQuota) => { stored.quota = quota; } } as unknown as QuotaStore,
+      fetch: fetch as unknown as typeof globalThis.fetch,
+      now: () => 10,
+    });
+    expect(calls[1]).toContain("/v1internal:retrieveUserQuota");
+    expect(stored.quota?.fiveHourUtilization).toBe(0.75);
+  });
+
+  it("does not collect usage for an API key", async () => {
+    const fetch = vi.fn();
+    await adapter().refreshUsage({
+      account,
+      freshSecret: async () => ({ kind: "api-key", apiKey: "stored-key" }),
+      accounts: null as never,
+      quotas: null as never,
+      fetch: fetch as unknown as typeof globalThis.fetch,
+      now: () => 0,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(adapter().refreshesApiKeyUsage).toBe(false);
+    expect(GEMINI_USAGE_REQUEST_TIMEOUT_MS).toBe(20_000);
+  });
+});

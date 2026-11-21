@@ -20,6 +20,7 @@ import {
   codexLoginPollInputSchema,
   codexLoginPollSchema,
   codexLoginStartSchema,
+  geminiLoginStartSchema,
   hubTokenSummarySchema,
   loginCompleteInputSchema,
   loginStartSchema,
@@ -35,6 +36,7 @@ import type { PoolOperations } from "./operations.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
 import type { GrokDeviceLogin } from "./grok-device-login.js";
+import type { GeminiLogin } from "./gemini-login.js";
 
 export const threadAccountStatusSchema = z.object({
   state: z.enum(["observed", "unobserved", "bypassed", "unsupported"]),
@@ -172,6 +174,18 @@ export const accountPoolRpcContract = defineRpcContract({
     input: codexLoginPollInputSchema,
     output: codexLoginCancelSchema,
   },
+  "geminiLogin.start": {
+    input: z.null(),
+    output: geminiLoginStartSchema,
+  },
+  "geminiLogin.poll": {
+    input: codexLoginPollInputSchema,
+    output: codexLoginPollSchema,
+  },
+  "geminiLogin.cancel": {
+    input: codexLoginPollInputSchema,
+    output: codexLoginCancelSchema,
+  },
   "status.get": {
     input: z.null(),
     output: statusSchema,
@@ -201,6 +215,7 @@ export function createRpcHandlers(
   agyLogin?: AgyOAuthLogin,
   openAgyBrowser:(url:string)=>Promise<{opened:true}>=async()=>{throw Error("Sign-in browser unavailable");},
   grokLogin?: GrokDeviceLogin,
+  geminiLogin?: GeminiLogin,
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
     "readiness.get": ({projectId}) => operations.readiness(projectId),
@@ -274,6 +289,17 @@ export function createRpcHandlers(
     },
     "grokLogin.cancel": (input) => ({
       cancelled: grokLogin === undefined ? false : grokLogin.cancel(input),
+    }),
+    "geminiLogin.start": () => {
+      if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
+      return geminiLogin.start();
+    },
+    "geminiLogin.poll": (input) => {
+      if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
+      return geminiLogin.poll(input);
+    },
+    "geminiLogin.cancel": (input) => ({
+      cancelled: geminiLogin === undefined ? false : geminiLogin.cancel(input),
     }),
     "status.get": () => operations.status(),
     "status.routedThreads": () => operations.routedThreadsWithoutLocalLogin(),

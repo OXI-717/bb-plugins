@@ -4,6 +4,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { Hono } from "hono";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_PROXIED_PATHS } from "./cursor-adapter.js";
@@ -60,6 +61,10 @@ interface Fixture {
   key: string;
   account: AccountSummary;
 }
+
+type HttpRouteHandler = Parameters<
+  ReturnType<typeof createFakePluginHost>["bb"]["http"]["route"]
+>[2];
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -274,6 +279,16 @@ function importedCredentials(
   };
 }
 
+const grokDeviceLoginStub = [
+  'process.stdout.write("Open this URL in your browser to approve: https://example.test/device\\nCode: ABCD-1234\\n");',
+  "setInterval(() => {}, 1000);",
+].join("");
+
+const geminiDeviceLoginStub = [
+  'process.stdout.write("Open https://example.test/gemini\\nCode: GEM-1234\\n");',
+  "setInterval(() => {}, 1000);",
+].join("");
+
 function testJwt(payload: object): string {
   return [
     Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url"),
@@ -285,7 +300,7 @@ function testJwt(payload: object): string {
 async function createFixture(args: {
   upstreamUrl: string;
   options?: AccountPoolPluginOptions;
-  provider?: "claude" | "codex" | "kimi" | "zai" | "opencode-go" | "neuraldeep" | "cursor" | "devin" | "grok";
+  provider?: "claude" | "codex" | "kimi" | "zai" | "opencode-go" | "neuraldeep" | "nvidia" | "ifm" | "cursor" | "devin" | "grok" | "gemini";
   source?: "api-key" | "import";
   apiKey?: string;
   priority?: number;
@@ -309,9 +324,11 @@ async function createFixture(args: {
     zaiUpstreamBaseUrl: args.upstreamUrl,
     opencodeGoUpstreamBaseUrl: args.upstreamUrl,
     neuraldeepUpstreamBaseUrl: args.upstreamUrl,
+    nvidiaUpstreamBaseUrl: args.upstreamUrl,
     cursorUpstreamBaseUrl: args.upstreamUrl,
     devinUpstreamBaseUrl: args.upstreamUrl,
     grokUpstreamBaseUrl: args.upstreamUrl,
+    geminiUpstreamBaseUrl: args.upstreamUrl,
   });
   const plugin = createAccountPoolPlugin({
     vpnPayload: async (timestamp) => vpnProof(timestamp, "connected"),
@@ -366,6 +383,10 @@ async function createFixture(args: {
                 "OXI_ZAI_BASE_URL",
               )
             ).token
+          : args.provider === "ifm"
+            ? (await resolveAcpEnv(host, "acp-opencode-ifm", "IFM_API_KEY", "OXI_IFM_BASE_URL")).token
+          : args.provider === "nvidia"
+            ? (await resolveAcpEnv(host, "acp-opencode-nvidia", "NVIDIA_API_KEY", "OXI_NVIDIA_BASE_URL")).token
           : args.provider === "neuraldeep"
             ? (await resolveAcpEnv(host, "acp-opencode-neuraldeep", "NEURALDEEP_API_KEY", "OXI_NEURALDEEP_BASE_URL")).token
           : args.provider === "opencode-go"
@@ -381,6 +402,34 @@ async function createFixture(args: {
               ? await resolveCursorToken(host)
               : args.provider === "grok"
                 ? (await resolveGrokEnv(host)).token
+            : args.provider === "gemini"
+              ? args.source === "import"
+                ? await (async () => {
+                    const entries = await host.harness.behavior.resolveProviderEnv("acp-antigravity", {
+                      threadId: "thread-acp-antigravity",
+                      projectId: "project-one",
+                      hostId: "host-one",
+                    });
+                    const dir = entries.find((entry) => entry.name === "HOME");
+                    if (dir === undefined || typeof dir.value !== "string") {
+                      throw new Error("Gemini home was not resolved.");
+                    }
+                    const raw = JSON.parse(await fs.readFile(
+                      path.join(dir.value, ".gemini", "antigravity-cli", "antigravity-oauth-token"),
+                      "utf8",
+                    )) as { token?: { access_token?: string } };
+                    const token = raw.token?.access_token;
+                    if (token === undefined) throw new Error("Gemini hub token was not written.");
+                    return token;
+                  })()
+                : (
+                    await resolveAcpEnv(
+                      host,
+                      "acp-antigravity",
+                      "GEMINI_API_KEY",
+                      "GOOGLE_GEMINI_BASE_URL",
+                    )
+                  ).token
               : args.provider === "devin"
                 ? await (async () => {
                     const output = path.join(dataDir, "devin-client.token");
@@ -504,6 +553,7 @@ describe("Account Pool config schema", () => {
       devinUpstreamBaseUrl: "https://server.codeium.com",
       maxConcurrentRequestsPerAccount: 2,
       claudeRequestStartIntervalMs: 0,
+      geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
       switchThreshold: 0.98,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -616,6 +666,7 @@ describe("Account Pool plugin", () => {
       devinUpstreamBaseUrl: "https://server.codeium.com",
       maxConcurrentRequestsPerAccount: 2,
       claudeRequestStartIntervalMs: 0,
+      geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
       switchThreshold: 0.75,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -862,7 +913,7 @@ describe("Account Pool plugin", () => {
     expect(outbound).not.toHaveBeenCalled();
   });
 
-  it("omits unsupported Grok quota resources without removing the pooled account", async () => {
+  it("lists a Grok API key and reports that usage has not been observed", async () => {
     const outbound = vi.fn(async () => Response.json({}));
     const fixture = await createFixture({
       upstreamUrl: "https://upstream.example",
@@ -871,14 +922,16 @@ describe("Account Pool plugin", () => {
       options: { fetch: outbound },
     });
     const inventory = await fixture.host.harness.behavior.callRpc("provider-usage.v1.listResources", {});
-    expect(inventory).toMatchObject({ label: "Account Pooler", resources: [] });
+    expect(inventory).toMatchObject({ label: "Account Pooler", resources: [{ id: fixture.account.id }] });
     const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
     expect(accounts.some(account => account.id === fixture.account.id && account.enabled)).toBe(true);
-    for (const refresh of [false, true]) {
-      await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
-        resourceId: fixture.account.id, refresh,
-      })).rejects.toThrow("Quota reporting is not available for Grok.");
-    }
+    const resource = await fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
+      resourceId: fixture.account.id,
+      refresh: true,
+    });
+    expect(resource).toMatchObject({
+      usage: { status: "error", message: "Usage has not been observed for this account." },
+    });
     expect(outbound).not.toHaveBeenCalled();
   });
 
@@ -1024,6 +1077,81 @@ describe("Account Pool plugin", () => {
     expect(requests[0]?.headers.has("x-unrelated-header")).toBe(false);
     expect(requests[0]?.headers.has("x-bb-cursor-rpc-path")).toBe(false);
     expect(await requests[0]?.text()).toBe(body);
+  });
+
+  it("routes NVIDIA Chat/SSE with server credentials and leaves quota unknown", async () => {
+    const requests: Request[] = [];
+    const fixture = await createFixture({upstreamUrl:"https://integrate.api.nvidia.com/v1",provider:"nvidia",apiKey:"synthetic-nvidia-private",options:{fetch:async(input, init)=>{
+      const request = new Request(input, init); requests.push(request);
+      return new Response('data: {"choices":[]}\n\ndata: [DONE]\n\n', {headers:{"content-type":"text/event-stream"}});
+    }}});
+    const body = JSON.stringify({model:"deepseek-ai/deepseek-v4.1-flash",messages:[{role:"user",content:"synthetic"}],stream:true});
+    const response = await fixture.host.harness.behavior.fetchHttp("POST", "/nvidia/v1/chat/completions", {headers:authHeaders(fixture.key),body});
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(await response.text()).toContain("[DONE]");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.url).toBe("https://integrate.api.nvidia.com/v1/chat/completions");
+    expect(requests[0]!.headers.get("authorization")).toBe("Bearer synthetic-nvidia-private");
+    expect(await requests[0]!.text()).toBe(body);
+    expect(fixture.key).not.toBe("synthetic-nvidia-private");
+    const result = await fixture.host.harness.behavior.runCli(["status","--json"]);
+    expect(result.stdout).not.toContain("synthetic-nvidia-private");
+    const status = statusReportSchema.parse(JSON.parse(result.stdout));
+    expect(status.accounts.find(a=>a.id===fixture.account.id)?.observedAt).toBeNull();
+  });
+
+  it("rejects NVIDIA malformed Chat bodies before upstream", async () => {
+    const requests: Request[] = [];
+    const fixture = await createFixture({upstreamUrl:"https://integrate.api.nvidia.com/v1",provider:"nvidia",options:{fetch:async(input,init)=>{requests.push(new Request(input,init));return Response.json({});}}});
+    const result = await fixture.host.harness.behavior.fetchHttp("POST","/nvidia/v1/chat/completions",{headers:authHeaders(fixture.key),body:JSON.stringify({input:"synthetic"})});
+    expect(result.status).toBe(400);
+    expect(requests).toHaveLength(0);
+  });
+
+  it("routes IFM Chat/SSE with server credentials and leaves quota unknown", async () => {
+    const requests: Request[] = [];
+    const fixture = await createFixture({upstreamUrl:"https://api.ifm.ai/v1",provider:"ifm",apiKey:"synthetic-ifm-private",options:{fetch:async(input, init)=>{
+      const request = new Request(input, init); requests.push(request);
+      return new Response('data: {"choices":[]}\n\ndata: [DONE]\n\n', {headers:{"content-type":"text/event-stream"}});
+    }}});
+    const body = JSON.stringify({model:"IFM/K2-Horizon-375B-A23B",messages:[{role:"user",content:"synthetic"}],stream:true});
+    const response = await fixture.host.harness.behavior.fetchHttp("POST", "/ifm/v1/chat/completions", {headers:authHeaders(fixture.key),body});
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(await response.text()).toContain("[DONE]");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.url).toBe("https://api.ifm.ai/v1/chat/completions");
+    expect(requests[0]!.headers.get("authorization")).toBe("Bearer synthetic-ifm-private");
+    expect(await requests[0]!.text()).toBe(body);
+    expect(fixture.key).not.toBe("synthetic-ifm-private");
+    const result = await fixture.host.harness.behavior.runCli(["status","--json"]);
+    expect(result.stdout).not.toContain("synthetic-ifm-private");
+    const status = statusReportSchema.parse(JSON.parse(result.stdout));
+    expect(status.accounts.find(a=>a.id===fixture.account.id)?.observedAt).toBeNull();
+  });
+
+  it("rejects IFM malformed Chat bodies before upstream", async () => {
+    const requests: Request[] = [];
+    const fixture = await createFixture({upstreamUrl:"https://api.ifm.ai/v1",provider:"ifm",options:{fetch:async(input,init)=>{requests.push(new Request(input,init));return Response.json({});}}});
+    const result = await fixture.host.harness.behavior.fetchHttp("POST","/ifm/v1/chat/completions",{headers:authHeaders(fixture.key),body:JSON.stringify({input:"synthetic"})});
+    expect(result.status).toBe(400);
+    expect(requests).toHaveLength(0);
+  });
+
+  it.each(["nvidia", "ifm"] as const)("keeps %s model listing authenticated and handles upstream denial", async provider => {
+    const requests: Request[] = [];
+    const fixture = await createFixture({upstreamUrl:"https://unused.example/v1",provider,options:{fetch:async(input,init)=>{
+      requests.push(new Request(input,init)); return Response.json({error:{message:"Unauthorized"}}, {status:401});
+    }}});
+    const denied = await fixture.host.harness.behavior.fetchHttp("GET",`/${provider}/v1/models`,{});
+    expect(denied.status).toBe(401); expect(requests).toHaveLength(0);
+    const result = await fixture.host.harness.behavior.fetchHttp("GET",`/${provider}/v1/models`,{headers:authHeaders(fixture.key)});
+    expect(result.status).toBe(401); expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(provider === "nvidia" ? "https://integrate.api.nvidia.com/v1/models" : "https://api.ifm.ai/v1/models");
+    const status = statusReportSchema.parse(JSON.parse((await fixture.host.harness.behavior.runCli(["status","--json"])).stdout));
+    expect(status.accounts.find(a => a.id === fixture.account.id)?.eligible).toBe(false);
   });
 
   it("routes NeuralDeep with server credentials and preserves native Chat/SSE", async () => {
@@ -2374,7 +2502,15 @@ describe("Account Pool plugin", () => {
       response.end("{}");
     });
     cleanups.push(upstream.close);
-    const fixture = await createFixture({ upstreamUrl: upstream.url });
+    const fixture = await createFixture({
+      upstreamUrl: upstream.url,
+      options: {
+        grokLoginCommand: process.execPath,
+        grokLoginArgs: ["-e", grokDeviceLoginStub],
+        geminiLoginCommand: process.execPath,
+        geminiLoginArgs: ["-e", geminiDeviceLoginStub],
+      },
+    });
     const help = await fixture.host.harness.behavior.runCli([
       "account",
       "add",
@@ -2386,11 +2522,33 @@ describe("Account Pool plugin", () => {
     expect(help.stdout).toContain("--code-stdin");
     expect(help.stdout).toContain("--api-key-stdin");
     expect(help.stdout).toContain(
-      "bb pool account add --provider <kimi|zai|opencode-go|neuraldeep|cursor|devin|grok> --api-key-stdin [--label <text>] [--priority <n>]",
+      "bb pool account add --provider <kimi|zai|opencode-go|neuraldeep|nvidia|ifm|cursor|devin|grok|gemini> --api-key-stdin [--label <text>] [--priority <n>]",
     );
     expect(help.stdout).toContain("Unsafe: exposes the key");
     expect(help.stdout).toContain("bb pool account add --provider grok --login");
-    expect(help.stdout).toContain("account login-poll --session <id> [--provider codex|grok]");
+    expect(help.stdout).toContain("account login-poll --session <id> [--provider codex|grok|gemini]");
+    const grokLogin = await fixture.host.harness.behavior.runCli([
+      "account",
+      "add",
+      "--provider",
+      "grok",
+      "--login",
+    ]);
+    expect(grokLogin.exitCode).toBe(0);
+    expect(grokLogin.stdout).toContain("Open this URL to sign in to Grok:");
+    expect(grokLogin.stdout).toContain("https://example.test/device");
+    expect(grokLogin.stdout).toContain("Enter this code: ABCD-1234");
+    const geminiLogin = await fixture.host.harness.behavior.runCli([
+      "account",
+      "add",
+      "--provider",
+      "gemini",
+      "--login",
+    ]);
+    expect(geminiLogin.exitCode).toBe(0);
+    expect(geminiLogin.stdout).toContain("Open this URL to sign in to Gemini:");
+    expect(geminiLogin.stdout).toContain("https://example.test/gemini");
+    expect(geminiLogin.stdout).toContain("Enter this code: GEM-1234");
     expect(help.stdout).toContain("account refresh <id>");
     const list = await fixture.host.harness.behavior.runCli([
       "account",
@@ -6659,11 +6817,12 @@ describe("Account Pool plugin", () => {
       kimi: true,
       zai: true,
       "opencode-go": true,
-      neuraldeep: true,
+      neuraldeep: true, nvidia: true, ifm: true,
       agy: true,
       cursor: true,
       devin: true,
       grok: true,
+      gemini: true,
     });
   });
 
@@ -7246,11 +7405,12 @@ describe("sequential pool recovery", () => {
       kimi: null,
       zai: null,
       "opencode-go": null,
-      neuraldeep: null,
+      neuraldeep: null, nvidia: null, ifm: null,
       agy: null,
       cursor: null,
       devin: null,
       grok: null,
+      gemini: null,
     });
     expect(
       pool.accounts.find((account) => account.id === fixture.account.id)
@@ -7782,9 +7942,9 @@ describe('VPN Guard linked network policy',()=>{
     fixture.host.harness.sdk.stub('plugins.callRpc',call);
     await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true});
     const status=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));
-    expect(maxActive).toBe(8);
-    expect(call).toHaveBeenCalledTimes(8);
-    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin','opencode-go','neuraldeep','agy','grok']);
+    expect(maxActive).toBe(11);
+    expect(call).toHaveBeenCalledTimes(11);
+    expect(status.vpn?.blockedProviders).toEqual(['codex','claude','cursor','devin','opencode-go','neuraldeep','nvidia','ifm','agy','grok','gemini']);
     expect(outbound).not.toHaveBeenCalled();
   });
   it('shares one deadline across server lookup and a slow successful Guard RPC',async()=>{
@@ -7871,6 +8031,358 @@ it('cancels a retained linked protected stream through the actual policy service
    const ended=await reader.read().then(r=>r.done,()=>true);expect(ended).toBe(true);
    await vi.waitFor(async()=>{const value=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));expect(value.inFlight).toBe(0);});
  }finally{service.controller.abort();await service.done;}
+});
+
+describe("grok hub route", () => {
+  it("routes acp-grok chat completions through the hub token", async () => {
+    const requests: Request[] = [];
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "grok",
+      options: {
+        fetch: async (input, init) => {
+          requests.push(new Request(input, init));
+          return Response.json({ ok: true });
+        },
+      },
+    });
+    const resolved = await resolveAcpEnv(
+      fixture.host,
+      "acp-grok",
+      "XAI_API_KEY",
+      "GROK_CLI_CHAT_PROXY_BASE_URL",
+    );
+    expect(resolved.token).toBe(fixture.key);
+    expect(resolved.baseUrl.endsWith("/grok/v1")).toBe(true);
+    const body = JSON.stringify({
+      model: "fixture",
+      messages: [{ role: "user", content: "test" }],
+    });
+    const response = await fixture.host.harness.behavior.fetchHttp(
+      "POST",
+      "/grok/v1/chat/completions",
+      {
+        headers: {
+          authorization: `Bearer ${fixture.key}`,
+          "content-type": "application/json",
+        },
+        body,
+      },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("https://upstream.example/chat/completions");
+    expect(requests[0]?.headers.get("authorization")).toBe("Bearer sk-account");
+  });
+
+  it("routes a Grok subscription through the chat proxy and rotates the refresh token", async () => {
+    const now = Date.parse("2026-11-04T12:00:00Z");
+    const seen: Array<{ url: string; body: string; authorization: string | null; tokenAuth: string | null; client: string | null; contentType: string | null }> = [];
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "grok",
+      source: "import",
+      options: {
+        now: () => now,
+        grokChatProxyBaseUrl: "https://cli-chat-proxy.grok.com/v1",
+        grokRefreshUrl: "https://auth.example/oauth2/token",
+        importGrokCredentials: async () => ({
+          label: "grok@example.com",
+          email: "grok@example.com",
+          accessToken: "old-access",
+          refreshToken: "old-refresh",
+          expiresAt: now - 1_000,
+          clientId: "client-id",
+          issuer: "https://auth.x.ai",
+        }),
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          seen.push({
+            url: request.url,
+            body: await request.clone().text(),
+            authorization: request.headers.get("authorization"),
+            tokenAuth: request.headers.get("x-xai-token-auth"),
+            client: request.headers.get("x-grok-client-identifier"),
+            contentType: request.headers.get("content-type"),
+          });
+          if (request.url === "https://auth.example/oauth2/token") {
+            return Response.json({
+              access_token: "next-access",
+              refresh_token: "next-refresh",
+              expires_in: 3600,
+            });
+          }
+          if (request.url === "https://cli-chat-proxy.grok.com/v1/billing?format=credits") {
+            return Response.json({
+              config: {
+                currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: "2026-11-11T15:08:57.657+00:00" },
+                creditUsagePercent: 10,
+                productUsage: [{ product: "GrokBuild", usagePercent: 10 }],
+                billingPeriodEnd: "2026-11-11T15:08:57.657+00:00",
+              },
+            });
+          }
+          return Response.json({ ok: true });
+        },
+      },
+    });
+    const entries = await fixture.host.harness.behavior.resolveProviderEnv("acp-grok", {
+      threadId: "thread-acp-grok",
+      projectId: "project-one",
+      hostId: "host-one",
+    });
+    const names = entries.map((entry) => entry.name);
+    // ACP can authenticate without selecting an external auth method. The value
+    // is the hub credential, never the subscription access or refresh token.
+    expect(names).toEqual(["GROK_HOME", "GROK_CLI_CHAT_PROXY_BASE_URL", "XAI_API_KEY"]);
+    expect(entries.find((entry) => entry.name === "XAI_API_KEY")?.value).toBe(fixture.key);
+    expect(JSON.stringify(entries)).not.toContain("old-access");
+    expect(JSON.stringify(entries)).not.toContain("old-refresh");
+    const headers = {
+      authorization: `Bearer ${fixture.key}`,
+      "content-type": "application/json",
+      "x-grok-client-identifier": "fixture-client",
+    };
+    const response = await fixture.host.harness.behavior.fetchHttp("POST", "/grok/v1/responses", {
+      headers,
+      body: JSON.stringify({ model: "fixture", input: "pong" }),
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    for (const path of ["/grok/v1/settings", "/grok/v1/user", "/grok/v1/feedback/config"] as const) {
+      const follow = await fixture.host.harness.behavior.fetchHttp("GET", path, { headers });
+      expect(follow.status).toBe(200);
+      await follow.text();
+    }
+    const refresh = seen.filter((call) => call.url === "https://auth.example/oauth2/token");
+    expect(refresh).toHaveLength(1);
+    expect(refresh[0]?.contentType).toContain("application/x-www-form-urlencoded");
+    expect(refresh[0]?.body).toContain("grant_type=refresh_token");
+    expect(refresh[0]?.body).toContain("refresh_token=old-refresh");
+    expect(refresh[0]?.body).toContain("client_id=client-id");
+    expect(seen.map((call) => call.url)).toEqual([
+      "https://auth.example/oauth2/token",
+      "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+      "https://cli-chat-proxy.grok.com/v1/responses",
+      "https://cli-chat-proxy.grok.com/v1/settings",
+      "https://cli-chat-proxy.grok.com/v1/user",
+      "https://cli-chat-proxy.grok.com/v1/feedback/config",
+    ]);
+    expect(seen[1]?.authorization).toBe("Bearer next-access");
+    expect(seen[1]?.tokenAuth).toBe("xai-grok-cli");
+    for (const call of seen.slice(2)) {
+      expect(call.authorization).toBe("Bearer next-access");
+      expect(call.tokenAuth).toBe("xai-grok-cli");
+      expect(call.client).toBe("fixture-client");
+    }
+    const listed = z.array(accountSummarySchema).parse(
+      await fixture.host.harness.behavior.callRpc("account.list", null),
+    );
+    expect(listed.find((account) => account.id === fixture.account.id)?.sevenDayUtilization).toBe(0.1);
+    const store = new AccountStore(
+      fixture.host.bb.storage.kv,
+      path.join(fixture.dataDir, "plugins", fixture.host.bb.pluginId, "secrets", "accounts"),
+    );
+    expect(await store.readSecret(fixture.account.id)).toMatchObject({
+      kind: "oauth",
+      accessToken: "next-access",
+      refreshToken: "next-refresh",
+      clientId: "client-id",
+    });
+    await fixture.host.harness.behavior.callRpc("account.add", {
+      provider: "grok",
+      source: { kind: "api-key", apiKey: "sk-paid-fallback" },
+      label: null,
+      priority: 100,
+    });
+    const mixed = await fixture.host.harness.behavior.resolveProviderEnv("acp-grok", {
+      threadId: "thread-acp-grok-mixed",
+      projectId: "project-one",
+      hostId: "host-one",
+    });
+    expect(mixed.some((entry) => entry.name === "XAI_API_KEY")).toBe(true);
+    expect(mixed.some((entry) => entry.name === "GROK_AUTH_PROVIDER_COMMAND")).toBe(false);
+  });
+
+  it("routes a Gemini subscription through Cloud Code and records quota", async () => {
+    const now = Date.parse("2026-11-04T12:00:00Z");
+    const seen: Array<{ url: string; method: string; authorization: string | null; userAgent: string | null }> = [];
+    let dynamicRoute: { method: string; path: string; handler: HttpRouteHandler } | null = null;
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "gemini",
+      source: "import",
+      beforePlugin(host) {
+        const originalRoute = host.bb.http.route.bind(host.bb.http);
+        vi.spyOn(host.bb.http, "route").mockImplementation((method, path, handler, options) => {
+          if (method === "POST" && path === "/gemini/v1beta/models/*") {
+            dynamicRoute = { method, path, handler };
+          }
+          originalRoute(method, path, handler, options);
+        });
+      },
+      options: {
+        now: () => now,
+        geminiOAuthClientSecret: "fake-secret",
+        geminiCloudCodeBaseUrl: "https://daily-cloudcode-pa.googleapis.com",
+        importGeminiCredentials: async () => ({
+          label: "pool@example.com",
+          email: "pool@example.com",
+          accessToken: "google-access",
+          refreshToken: "google-refresh",
+          expiresAt: now + 60 * 60 * 1_000,
+          clientId: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+        }),
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          seen.push({
+            url: request.url,
+            method: request.method,
+            authorization: request.headers.get("authorization"),
+            userAgent: request.headers.get("user-agent"),
+          });
+          if (request.url.endsWith("/v1internal:retrieveUserQuota")) {
+            return Response.json({
+              buckets: [
+                { modelId: "gemini-2.5-pro", remainingFraction: 0.9, resetTime: "2026-11-04T21:01:05Z" },
+                { modelId: "gemini-3-flash", remainingFraction: 0.6683725, resetTime: "2026-11-04T22:01:05Z" },
+              ],
+            });
+          }
+          return Response.json({ ok: true });
+        },
+      },
+    });
+    const entries = await fixture.host.harness.behavior.resolveProviderEnv("acp-antigravity", {
+      threadId: "thread-acp-antigravity",
+      projectId: "project-one",
+      hostId: "host-one",
+    });
+    expect(entries.map((entry) => entry.name)).toEqual(["CLOUD_CODE_URL", "HOME"]);
+    expect(entries.some((entry) => entry.name === "GEMINI_API_KEY")).toBe(false);
+    const home = entries.find((entry) => entry.name === "HOME")?.value;
+    expect(typeof home).toBe("string");
+    const tokenPath = path.join(String(home), ".gemini", "antigravity-cli", "antigravity-oauth-token");
+    const token = JSON.parse(await fs.readFile(tokenPath, "utf8")) as {
+      token: { access_token: string; refresh_token?: string; expiry: string };
+      auth_method: string;
+      id_token_email: string;
+    };
+    expect(token.token.refresh_token).toBeUndefined();
+    expect(token.token.access_token).toBe(fixture.key);
+    expect(token.token.expiry).toBe("2099-01-01T00:00:00Z");
+    expect(token.auth_method).toBe("consumer");
+    expect(token.id_token_email).toBe("pool@example.com");
+    await expect(fs.lstat(path.join(String(home), ".gemini", "antigravity-cli", "settings.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    const response = await fixture.host.harness.behavior.fetchHttp(
+      "POST",
+      "/gemini/v1internal:streamGenerateContent?alt=sse",
+      { headers: { authorization: `Bearer ${fixture.key}`, "content-type": "application/json" }, body: "{}" },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    const inference = seen.find((call) => call.url.includes("streamGenerateContent"));
+    expect(inference?.url).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse");
+    expect(inference?.authorization).toBe("Bearer google-access");
+    expect(inference?.userAgent).toBe("antigravity/1.11.0 (os_type=linux; arch=amd64; auth_method=consumer)");
+    expect(seen.some((call) => call.url.endsWith("/v1internal:retrieveUserQuota") && call.method === "POST")).toBe(true);
+    expect(dynamicRoute).not.toBeNull();
+    const dynamicApp = new Hono();
+    dynamicApp.on(dynamicRoute!.method, dynamicRoute!.path, dynamicRoute!.handler);
+    const apiKeyPathResponse = await dynamicApp.request(
+      "/gemini/v1beta/models/gemini-2.5-pro:generateContent",
+      { method: "POST", headers: { authorization: `Bearer ${fixture.key}` }, body: "{}" },
+    );
+    expect(apiKeyPathResponse.status).toBe(503);
+    expect(apiKeyPathResponse.headers.get("x-bb-pool-error")).toBe("POOL_NO_ACCOUNTS");
+    await apiKeyPathResponse.text();
+    expect(seen.some((call) => call.url.includes("/v1beta/models/"))).toBe(false);
+    const listed = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
+    expect(listed.find((account) => account.id === fixture.account.id)?.fiveHourUtilization).toBeCloseTo(1 - 0.6683725);
+    await fixture.host.harness.behavior.callRpc("account.add", {
+      provider: "gemini",
+      source: { kind: "api-key", apiKey: "stored-key" },
+      label: null,
+      priority: 100,
+    });
+    const mixed = await fixture.host.harness.behavior.resolveProviderEnv("acp-antigravity", {
+      threadId: "thread-gemini-mixed",
+      projectId: "project-one",
+      hostId: "host-one",
+    });
+    expect(mixed.some((entry) => entry.name === "GEMINI_API_KEY")).toBe(false);
+    expect(mixed.some((entry) => entry.name === "CLOUD_CODE_URL")).toBe(true);
+  });
+
+  it("uses the Gemini API key only when no subscription account is enabled", async () => {
+    const seen: Request[] = [];
+    let dynamicRoute: { method: string; path: string; handler: HttpRouteHandler } | null = null;
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "gemini",
+      apiKey: "stored-key",
+      beforePlugin(host) {
+        const originalRoute = host.bb.http.route.bind(host.bb.http);
+        vi.spyOn(host.bb.http, "route").mockImplementation((method, path, handler, options) => {
+          if (method === "POST" && path === "/gemini/v1beta/models/*") {
+            dynamicRoute = { method, path, handler };
+          }
+          originalRoute(method, path, handler, options);
+        });
+      },
+      options: {
+        geminiOAuthClientSecret: "fake-secret",
+        fetch: async (input, init) => {
+          seen.push(new Request(input, init));
+          return Response.json({ ok: true });
+        },
+      },
+    });
+    const resolved = await resolveAcpEnv(fixture.host, "acp-antigravity", "GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL");
+    expect(resolved.token).toBe(fixture.key);
+    expect(resolved.baseUrl.endsWith("/gemini")).toBe(true);
+    const response = await fixture.host.harness.behavior.fetchHttp(
+      "POST",
+      "/gemini/v1internal:generateContent",
+      { headers: { authorization: `Bearer ${fixture.key}` }, body: "{}" },
+    );
+    expect(response.status).toBe(200);
+    await response.text();
+    const forwarded = seen.find((request) => request.url.includes("generateContent"));
+    expect(forwarded?.url).toBe("https://upstream.example/v1internal:generateContent");
+    expect(forwarded?.headers.get("authorization")).toBe("Bearer stored-key");
+    expect(forwarded?.headers.get("x-goog-api-key")).toBe("stored-key");
+
+    expect(dynamicRoute).not.toBeNull();
+    const app = new Hono();
+    app.on(dynamicRoute!.method, dynamicRoute!.path, dynamicRoute!.handler);
+    const dynamicResponse = await app.request(
+      "/gemini/v1beta/models/gemini-2.5-pro:generateContent",
+      { method: "POST", headers: { authorization: `Bearer ${fixture.key}` }, body: "{}" },
+    );
+    expect(dynamicResponse.status).toBe(200);
+    await dynamicResponse.text();
+    const dynamicForwarded = seen.find((request) => request.url.includes("/v1beta/models/"));
+    expect(dynamicForwarded?.url).toBe(
+      "https://upstream.example/v1beta/models/gemini-2.5-pro:generateContent",
+    );
+    expect(dynamicForwarded?.headers.get("authorization")).toBe("Bearer stored-key");
+    expect(dynamicForwarded?.headers.get("x-goog-api-key")).toBe("stored-key");
+  });
+
+  it("leaves acp-grok env empty when no grok account is enabled", async () => {
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+    });
+    await expect(
+      fixture.host.harness.behavior.resolveProviderEnv("acp-grok", {
+        threadId: "thread-acp-grok",
+        projectId: "project-one",
+        hostId: "host-one",
+      }),
+    ).resolves.toEqual([]);
+  });
 });
 
 it.each(['devin','opencode-go'] as const)('refuses linked %s before any provider call on manual block',async provider=>{
@@ -8580,7 +9092,7 @@ describe("cached provider readiness", () => {
     const result=await f.host.harness.behavior.runCli(["readiness","--project","project-one","--json"]);
     expect(result.exitCode).toBe(0);
     const entries=JSON.parse(result.stdout);
-    expect(entries).toHaveLength(10);
+    expect(entries).toHaveLength(13);
     expect(entries.find((x:{provider:string})=>x.provider==="agy")).toMatchObject({ready:false,reason:"no-enabled-account",projectId:"project-one"});
     expect(result.stdout).not.toContain("sk-account");
   });

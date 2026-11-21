@@ -2,6 +2,7 @@ import type {AgyAuthorization} from "./agy-oauth-login.js";
 import { createHash } from 'node:crypto';
 import type {
   Account,
+  AccountSecret,
   AccountSummary,
   HubTokenSummary,
   PoolProvider,
@@ -21,6 +22,7 @@ import type {
 import type { ClaudeOAuthAccount } from "./oauth-login.js";
 import type { CodexDeviceAccount } from "./codex-device-login.js";
 import type { GrokSubscriptionCredentials } from "./grok-credentials.js";
+import type { GeminiSubscriptionCredentials } from "./gemini-credentials.js";
 
 interface PoolHost {
   id: string;
@@ -83,7 +85,12 @@ export class PoolOperations {
       await this.onAccountEnabled(account.id);
       return account;
     }
-    if (input.provider !== "claude" && input.provider !== "codex") {
+    if (
+      input.provider !== "claude" &&
+      input.provider !== "codex" &&
+      input.provider !== "grok" &&
+      input.provider !== "gemini"
+    ) {
       throw new Error(
         `${input.provider} accounts can only be added with --api-key-stdin.`,
       );
@@ -225,6 +232,38 @@ export class PoolOperations {
     return account;
   }
 
+  async addGeminiOAuth(
+    authenticated: GeminiSubscriptionCredentials,
+  ): Promise<AccountSummary> {
+    const account = await this.accounts.add(
+      {
+        provider: "gemini",
+        kind: "oauth",
+        label: authenticated.label,
+        email: authenticated.email,
+        accountUuid: null,
+        subscriptionType: null,
+        rateLimitTier: null,
+        enabled: true,
+        priority: 100,
+      },
+      {
+        kind: "oauth",
+        accessToken: authenticated.accessToken,
+        refreshToken: authenticated.refreshToken,
+        expiresAt: authenticated.expiresAt,
+        clientId: authenticated.clientId,
+      },
+    );
+    this.onAccountsChanged();
+    await this.onAccountEnabled(account.id);
+    const summary = (await this.list()).find((item) => item.id === account.id);
+    if (summary === undefined) {
+      throw new Error("Added Gemini account could not be read back.");
+    }
+    return summary;
+  }
+
   async list(): Promise<AccountSummary[]> {
     return (await this.status()).accounts;
   }
@@ -357,17 +396,20 @@ export class PoolOperations {
     await this.hubTokens.prune(hosts.map((host) => host.id));
     const status = await this.hub.status();
     const hostNames = new Map(hosts.map((host) => [host.id, host.name]));
-    const [claude, codex, kimi, zai, opencodeGo, neuraldeep, agy, cursor, devin, grok] = await Promise.all([
+    const [claude, codex, kimi, zai, opencodeGo, neuraldeep, nvidia, ifm, agy, cursor, devin, grok, gemini] = await Promise.all([
       this.routing.isProviderEnabled("claude"),
       this.routing.isProviderEnabled("codex"),
       this.routing.isProviderEnabled("kimi"),
       this.routing.isProviderEnabled("zai"),
       this.routing.isProviderEnabled("opencode-go"),
       this.routing.isProviderEnabled("neuraldeep"),
+      this.routing.isProviderEnabled("nvidia"),
+      this.routing.isProviderEnabled("ifm"),
       this.routing.isProviderEnabled("agy"),
       this.routing.isProviderEnabled("cursor"),
       this.routing.isProviderEnabled("devin"),
       this.routing.isProviderEnabled("grok"),
+      this.routing.isProviderEnabled("gemini"),
     ]);
     return {
       ...status,
@@ -389,10 +431,13 @@ export class PoolOperations {
         zai,
         "opencode-go": opencodeGo,
         neuraldeep,
+        nvidia,
+        ifm,
         agy,
         cursor,
         devin,
         grok,
+        gemini,
       },
     };
   }
@@ -434,16 +479,24 @@ export class PoolOperations {
   }
 
   async hasUsableEnabledAccount(provider: PoolProvider): Promise<boolean> {
+    return (await this.usableSecrets(provider)).length > 0;
+  }
+
+  async hasUsableEnabledOAuthAccount(provider: PoolProvider): Promise<boolean> {
+    return (await this.usableSecrets(provider)).some((secret) => secret.kind === "oauth");
+  }
+
+  private async usableSecrets(provider: PoolProvider) {
+    const secrets: AccountSecret[] = [];
     for (const account of await this.accounts.list()) {
       if (!account.enabled || account.provider !== provider) continue;
       try {
-        await this.accounts.readSecret(account.id);
-        return true;
+        secrets.push(await this.accounts.readSecret(account.id));
       } catch {
         continue;
       }
     }
-    return false;
+    return secrets;
   }
 
   async routedThreadsWithoutLocalLogin(): Promise<RoutedThreadStatus[]> {

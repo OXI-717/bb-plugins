@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { ThreadAccountOverlay } from "./app";
 import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
@@ -103,10 +104,11 @@ function status(
     kimi: null,
     zai: null,
     "opencode-go": null,
-    neuraldeep: null, agy: null,
+    neuraldeep: null, nvidia: null, ifm: null, agy: null,
     cursor: null,
     devin: null,
     grok: null,
+    gemini: null,
   },
 ): PoolStatus {
   return {
@@ -125,10 +127,11 @@ function status(
       kimi: true,
       zai: true,
       "opencode-go": true,
-    neuraldeep: true, agy: true,
+    neuraldeep: true, nvidia: true, ifm: true, agy: true,
       cursor: true,
       devin: true,
       grok: true,
+      gemini: true,
     },
   };
 }
@@ -146,6 +149,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     maxConcurrentRequestsPerAccount: 2,
     claudeRequestStartIntervalMs: 0,
     grokUpstreamBaseUrl: "https://api.x.ai/v1",
+    geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
     switchThreshold: 0.98,
     routingStrategy: "sequential",
     reserveDrainHours: 24,
@@ -347,7 +351,7 @@ describe("Account Pool settings", () => {
     window.localStorage.setItem(STATUS_CACHE_KEY, '{"accounts":"nope"}');
     const live = deferred<PoolStatus>();
     const slot = render([], { "status.get": () => live.promise });
-    expect(slot.getAllByText("Loading…")).toHaveLength(10);
+    expect(slot.getAllByText("Loading…")).toHaveLength(13);
     live.resolve(status());
     expect(await slot.findByText("person@example.com")).toBeTruthy();
   });
@@ -520,36 +524,55 @@ describe("Account Pool settings", () => {
     await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'agyLogin.cancel',input:{sessionId:'synthetic-session'}}));
   });
 
-  it("offers isolated Grok device login and a separate API-key option", async () => {
+  it("offers Grok sign-in, import, and the API key last", async () => {
     const slot = render([], {
       "grokLogin.start": () => ({
-        sessionId: "synthetic-grok-session",
-        verificationUri: "https://grok.com/device",
-        userCode: "SAFE-GROK-CODE",
+        sessionId: "44444444-4444-4444-8444-444444444444",
+        verificationUri: "https://auth.example/device",
+        userCode: "WXYZ-5678",
         expiresAt: Date.now() + 600_000,
         intervalMs: 60_000,
       }),
+      "grokLogin.poll": () => ({ status: "pending" }),
+      "grokLogin.cancel": () => ({ cancelled: true }),
     });
     const addButtons = await slot.findAllByRole("button", { name: "Add account" });
-    fireEvent.pointerDown(addButtons[9]!);
-    expect(await slot.findByText("Add API key…")).toBeTruthy();
-    expect(slot.queryByText("Import from this machine")).toBeNull();
-    fireEvent.click(await slot.findByText("Sign in to Grok", { selector: "span.block" }));
-    expect((await slot.findByLabelText("Grok device code")).textContent).toContain("SAFE-GROK-CODE");
+    fireEvent.pointerDown(addButtons[11]!);
+    expect(await slot.findByText("Sign in to Grok", { selector: "span.block" })).toBeTruthy();
+    expect(slot.getByText("Import from this machine")).toBeTruthy();
+    expect(slot.getByText("Add API key…")).toBeTruthy();
+    expect(slot.getByText("Paid fallback, selected last")).toBeTruthy();
+    fireEvent.click(slot.getByText("Sign in to Grok", { selector: "span.block" }));
+    expect((await slot.findByLabelText("Grok device code")).textContent).toContain("WXYZ-5678");
     expect(slot.rpcCalls).toContainEqual({ method: "grokLogin.start", input: null });
-    fireEvent.click(slot.getByRole("button", { name: "Close" }));
-    await waitFor(() =>
-      expect(slot.rpcCalls).toContainEqual({
-        method: "grokLogin.cancel",
-        input: { sessionId: "synthetic-grok-session" },
+  });
+
+  it("offers Gemini sign-in and hides the code when Google does not provide one", async () => {
+    const slot = render([], {
+      "geminiLogin.start": () => ({
+        sessionId: "55555555-5555-4555-8555-555555555555",
+        verificationUri: null,
+        userCode: null,
+        expiresAt: Date.now() + 600_000,
+        intervalMs: 60_000,
       }),
-    );
+      "geminiLogin.poll": () => ({ status: "pending" }),
+      "geminiLogin.cancel": () => ({ cancelled: true }),
+    });
+    const addButtons = await slot.findAllByRole("button", { name: "Add account" });
+    fireEvent.pointerDown(addButtons[12]!);
+    expect(await slot.findByText("Sign in to Gemini", { selector: "span.block" })).toBeTruthy();
+    expect(slot.getByText("Paid fallback, selected last")).toBeTruthy();
+    fireEvent.click(slot.getByText("Sign in to Gemini", { selector: "span.block" }));
+    expect(await slot.findByText("Finish Google sign-in on this machine.")).toBeTruthy();
+    expect(slot.queryByText("Starting sign-in…")).toBeNull();
+    expect(slot.queryByLabelText("Gemini device code")).toBeNull();
   });
 
   it("adds a Devin PAT from its card without offering Codex login", async () => {
     const slot = render([], { "account.add": () => account({ provider: "devin" }) });
     const addButtons = await slot.findAllByRole("button", { name: "Add account" });
-    fireEvent.pointerDown(addButtons[8]!);
+    fireEvent.pointerDown(addButtons[10]!);
     expect(slot.queryByText("Sign in to Codex", { selector: "span.block" })).toBeNull();
     fireEvent.click(await slot.findByText("Add PAT…"));
     const dialog = await slot.findByRole("dialog", { name: "Add PAT for Devin" });
@@ -643,18 +666,19 @@ describe("Account Pool settings", () => {
           kimi: null,
           zai: null,
           "opencode-go": null,
-    neuraldeep: null, agy: null,
+    neuraldeep: null, nvidia: null, ifm: null, agy: null,
           cursor: null,
           devin: null,
           grok: null,
+          gemini: null,
         }),
     });
     expect(
       await slot.findByRole("region", { name: "Selected accounts" }),
     ).toBeTruthy();
-    expect(within(slot.getByRole("region", { name: "Selected accounts" })).getAllByText("Not selected")).toHaveLength(9);
+    expect(within(slot.getByRole("region", { name: "Selected accounts" })).getAllByText("Not selected")).toHaveLength(12);
     expect(slot.getAllByText("Grok")).toHaveLength(2);
-    expect(slot.getByText((text) => text.includes("ACP sessions receive only a scoped Pool token"))).toBeTruthy();
+    expect(slot.getByText((text) => text.includes("acp-grok threads use these subscription accounts."))).toBeTruthy();
     expect(slot.getAllByText("Current")).toHaveLength(1);
     expect(slot.getAllByText("Reserve")).toHaveLength(1);
     expect(slot.getByText("current cap 39% (15%→98%)")).toBeTruthy();
@@ -663,8 +687,7 @@ describe("Account Pool settings", () => {
   it("uses email instead of display names in the overview, rows and account dialog", async () => {
     const named = account({ label: "Synthetic Display Name", email: "identity@example.com" });
     const slot = render([named], {
-      "status.get": () => status([named], { claude: named.id, codex: null, kimi: null, zai: null, "opencode-go": null,
-    neuraldeep: null, agy: null, cursor: null, devin: null, grok: null }),
+      "status.get": () => status([named], { claude: named.id, codex: null, kimi: null, zai: null, "opencode-go": null, neuraldeep: null, nvidia: null, ifm: null, agy: null, cursor: null, devin: null, grok: null, gemini: null }),
     });
     const overview = await slot.findByRole("region", { name: "Selected accounts" });
     expect(within(overview).getByText("identity@example.com")).toBeTruthy();
@@ -821,7 +844,7 @@ describe("Account Pool settings", () => {
     expect(await slot.findByText("Usage windows")).toBeTruthy();
     expect(slot.getByText("already open")).toBeTruthy();
     const table = slot.getByLabelText("Claude usage windows");
-    expect(slot.queryByLabelText("Usage windows Codex")).toBeNull();
+    expect(slot.queryByLabelText("Codex usage windows")).toBeNull();
     const rows = Array.from(table.querySelectorAll("tbody tr")).map(
       (row) => row.textContent ?? "",
     );
@@ -905,11 +928,7 @@ describe("Account Pool settings", () => {
     expect(slot.getByText("15% → 98% · currently 45%")).toBeTruthy();
     expect(slot.getByText("Requests through pool")).toBeTruthy();
     expect(slot.getByText("12 successful since tracking began")).toBeTruthy();
-    expect(
-      within(slot.getByRole("dialog")).getByText(
-        (text) => text.includes("reset") && text.includes("UTC+3"),
-      ),
-    ).toBeTruthy();
+    expect(within(slot.getByRole("dialog")).getByText((text) => text.includes("reset") && text.includes("UTC+3"))).toBeTruthy();
     expect(
       slot.getByText(
         "Used only when no primary account is eligible, or within 24 working hours of its weekly reset.",
@@ -1329,17 +1348,26 @@ describe("Account Pool settings", () => {
 });
 
 
+const threadAccountHeaderSlot = { component: function Header({ threadId, threadIds = [threadId] }: { threadId: string; threadIds?: string[] }) {
+  const registration = app.threadActions[0]!;
+  const data = registration.useData!({ threadIds });
+  const action = registration.item({ thread: { id: threadId }, data } as Parameters<typeof registration.item>[0]);
+  return <>{action ? <button aria-label={`Thread account: ${action.label}`} onClick={() => void action.run({ requestRename: () => {} })}>{action.label}</button> : null}<ThreadAccountOverlay /></>;
+} };
+
 describe("thread subscription indicator", () => {
   it("shows the confirmed account and availability, with details on click", async () => {
-    const ui = renderSlot(app.threadHeaderActions[0]!, { threadId: "thr-test", projectId: "project", isCompactViewport: false }, {
+    const ui = renderSlot(threadAccountHeaderSlot, { threadId: "thr-test", projectId: "project", isCompactViewport: false }, {
       rpc: { "thread.account": () => ({ state: "observed", account: account({ eligible: false }), lastUsedAt: 1800000000000 }) },
     });
     const button = await ui.findByRole("button", { name: /Thread account: person@example.com · currently unavailable/ });
     fireEvent.click(button);
     expect(await ui.findByText(/Last confirmed request/)).toBeTruthy();
+    fireEvent.click(ui.getAllByRole("button", { name: "Close" })[1]!);
+    await waitFor(() => expect(ui.queryByRole("dialog")).toBeNull());
   });
   it("does not claim an account before observing a request", async () => {
-    const ui = renderSlot(app.threadHeaderActions[0]!, { threadId: "thr-test", projectId: "project", isCompactViewport: false }, {
+    const ui = renderSlot(threadAccountHeaderSlot, { threadId: "thr-test", projectId: "project", isCompactViewport: false }, {
       rpc: { "thread.account": () => ({ state: "unobserved", account: null, lastUsedAt: null }) },
     });
     expect(await ui.findByText("Pool: no data yet")).toBeTruthy();
@@ -1360,6 +1388,6 @@ it('enables fail-closed VPN Guard linkage through the existing autosave config R
 });
 
 it.each(['kimi','zai','opencode-go','cursor','devin'] as const)('shows the observed %s email in the thread header',async provider=>{
- const ui=renderSlot(app.threadHeaderActions[0]!,{threadId:'thread-one',projectId:'project',isCompactViewport:false},{rpc:{'thread.account':()=>({state:'observed',account:account({provider,kind:'api-key',email:'other@example.com',label:'Subscription'}),lastUsedAt:1800000000000})}});
+ const ui=renderSlot(threadAccountHeaderSlot,{threadId:'thread-one',projectId:'project',isCompactViewport:false},{rpc:{'thread.account':()=>({state:'observed',account:account({provider,kind:'api-key',email:'other@example.com',label:'Subscription'}),lastUsedAt:1800000000000})}});
  expect(await ui.findByRole('button',{name:/Thread account: other@example.com/})).toBeTruthy();
 });

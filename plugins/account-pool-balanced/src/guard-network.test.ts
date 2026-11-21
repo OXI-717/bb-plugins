@@ -1,5 +1,5 @@
 import {expect,it,vi} from 'vitest';
-import {createGuardNetworkCheck} from './guard-network.js';
+import {createGuardNetworkCheck, requiresGuardCheck} from './guard-network.js';
 import {createVpnPolicy} from './vpn-policy.js';
 import {accountPoolConfigSchema} from './contracts.js';
 
@@ -75,8 +75,9 @@ it('bounds a stalled Guard decision and rejects inconsistent permission',async()
 it('gates OpenCode Go as well as Devin, leaving only Kimi and Z.ai exempt',async()=>{
  const read=vi.fn(async()=>({schema:'bb-vpn-guard/network-decision/1',allowed:false,reason:'manual_block'}));
  const check=createGuardNetworkCheck(read);
- for(const p of ['codex','claude','cursor','devin','opencode-go'] as const)await expect(check(p)).rejects.toThrow('VPN_GUARD_BLOCKED');
- await check('kimi');await check('zai');expect(read).toHaveBeenCalledTimes(5);
+ for(const p of ['codex','claude','cursor','devin','opencode-go','grok'] as const)await expect(check(p)).rejects.toThrow('VPN_GUARD_BLOCKED');
+ await check('kimi');await check('zai');expect(read).toHaveBeenCalledTimes(6);
  const config=accountPoolConfigSchema.parse({vpnGuardEnabled:true,vpnOnlyProviders:[]});
  await expect(createVpnPolicy(()=>config,Date.now,undefined,check).assert('opencode-go')).rejects.toThrow('VPN_GUARD_BLOCKED');
+ expect(requiresGuardCheck('grok')).toBe(true);
 });
