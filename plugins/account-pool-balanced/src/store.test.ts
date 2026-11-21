@@ -278,3 +278,18 @@ describe("session observations", () => {
     } finally { db.close(); }
   });
 });
+
+it('persists display-only Gemini metadata while preserving account identity and policies',async()=>{
+ const dataDir=await mkdtemp(path.join(tmpdir(),'bb-gemini-display-'));
+ const host=createFakePluginHost({pluginId:'account-pool',dataDir});
+ cleanups.push(async()=>{await host.harness.lifecycle.dispose();await fs.rm(dataDir,{recursive:true,force:true});});
+ const store=new AccountStore(host.bb.storage.kv,path.join(dataDir,'secrets'));
+ const value:Account={id:'00000000-0000-4000-8000-000000000001',provider:'gemini',kind:'oauth',label:'Synthetic',email:null,accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:false,autopilotAllowed:false,priority:7,createdAt:1,lastUsedAt:null,lastUsedHostId:null,role:'reserve',cap:null,drainOnce:true};
+ await host.bb.storage.kv.set('accounts:v1',[value]);
+ const before=await store.get(value.id);
+ const usage={observedAt:100,plan:{id:'fixture-tier',name:'Fixture'},credits:'0',models:[]};
+ await store.setGeminiUsage(value.id,usage);
+ const reloaded=await new AccountStore(host.bb.storage.kv,path.join(dataDir,'secrets')).get(value.id);
+ expect(reloaded?.geminiUsage).toEqual(usage);
+ const {geminiUsage:_usage,...rest}=reloaded!;expect(rest).toEqual(before);
+});

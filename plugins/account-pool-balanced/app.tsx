@@ -1,3 +1,4 @@
+import {geminiPlanLabel, geminiCreditLabel} from './src/gemini-usage.js';
 import {AccountEmailForm} from './account-email-form';
 import { AccountSettingsStyle } from './account-settings-style';
 import type { AccountProjects } from "./src/contracts.js";
@@ -403,6 +404,7 @@ function statusPresentation(
   return { label: "Active", dot: "bg-success" };
 }
 function tier(account: AccountSummary): string {
+  if(account.provider === 'gemini') return account.geminiUsage ? geminiPlanLabel(account.geminiUsage) ?? 'Plan unknown' : 'Plan unknown';
   return (
     account.subscriptionType ??
     (account.kind === "api-key" ? "API key" : "OAuth")
@@ -452,6 +454,9 @@ type QuotaSlot = {
 };
 
 function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
+  if(account.provider === 'gemini') return (account.geminiUsage?.models ?? []).filter(model => model.resetAt === null || model.resetAt > Date.now()).map((model,index)=>({
+    key: `gemini:${model.modelId}:${index}`, label: `${model.modelId}${model.resetAt === null ? "" : ` · ${resetLabel(model.resetAt)}`}`, utilization: model.usedPercent / 100, status: null, limit: 1,
+  }));
   if (account.drainOnce) threshold = 1;
   const limits = policyThresholds(account, threshold);
   const weeklyLimit = Math.min(limits.weekly, account.capLimit ?? limits.weekly);
@@ -586,6 +591,7 @@ function AccountRow({
   onOpen: () => void;
   reorderDisabled: boolean;
 }) {
+  const credits = account.provider === 'gemini' && account.geminiUsage ? geminiCreditLabel(account.geminiUsage) : null;
   const cap = capText(account);
   const status = statusPresentation(account, threshold);
   const slots = quotaSlots(account, threshold);
@@ -633,6 +639,7 @@ function AccountRow({
           onClick={onOpen}
         >
           <div className="min-w-0 flex-1 space-y-1">
+            {credits && <div className="text-2xs text-muted-foreground">{credits}</div>}
             <div className="flex min-w-0 items-center gap-1.5">
               <span className="truncate text-sm font-medium text-foreground">
                 {accountFullName(account)}
@@ -2624,7 +2631,12 @@ function AccountDialog({
         </div>
       )}
       <div className="space-y-4">
-        {account.provider === "codex" ? (
+        {account.provider === "gemini" ? (
+          account.geminiUsage?.models.length ? account.geminiUsage.models.map((model, index) => (
+            <QuotaDetail key={`${model.modelId}:${index}`} label={model.modelId}
+              quota={{...shared(model.usedPercent / 100, model.resetAt, null), source: "usage", observedAt: account.geminiUsage!.observedAt}} threshold={1} />
+          )) : <div className="text-sm text-muted-foreground">No model quotas observed yet.</div>
+        ) : account.provider === "codex" ? (
           account.limitWindows.length === 0 ? (
             <div className="text-sm text-muted-foreground">
               No limits observed yet.

@@ -198,3 +198,21 @@ describe("pooled providers on the usage surface", () => {
     );
   });
 });
+
+it('exposes Gemini models and declared plan, with absolute credits in the existing resource label',async()=>{
+ let handlers:Record<string,(input: {resourceId:string;refresh:boolean})=>Promise<unknown>>={};
+ const bb={rpc:{register:(_contract:unknown,methods:typeof handlers)=>{handlers=methods;}}} as unknown as BbPluginApi;
+ const account={id:'00000000-0000-4000-8000-000000000001',provider:'gemini',label:'Synthetic',email:null,accountUuid:null,subscriptionType:null,rateLimitTier:null,observedAt:100,error:null,limitWindows:[],familyWeekly:EMPTY_FAMILY_WEEKLY,
+ geminiUsage:{observedAt:100,plan:{id:'fixture-tier',name:'Fixture plan'},credits:'12',models:[{modelId:'gemini-fixture',tokenType:'REQUESTS',usedPercent:0,resetAt:null},{modelId:'gemini-fixture-pro',tokenType:'WTUS',usedPercent:100,resetAt:200}]}};
+ const hub={status:async()=>({accounts:[account]}),assertNetworkAllowed:vi.fn(),refreshUsage:vi.fn()} as unknown as AccountPoolHub;
+ registerUsageSource(bb,hub,()=>100);
+ const list=usageResourceListSchema.parse(await handlers[usageListMethod]!({resourceId:'',refresh:false}));
+ expect(list.resources[0]?.label).toContain('Google One AI credits: 12');
+ const result=usageMeasurementSchema.parse(await handlers[usageFetchMethod]!({resourceId:account.id,refresh:false}));
+ expect(result.usage.status).toBe('ok');
+ if(result.usage.status!=='ok')throw Error('measurement failed');
+ expect(result.usage.plan).toEqual({id:'fixture-tier',multiplier:null});expect(result.usage.planLabel).toBe('Fixture plan');
+ expect(result.usage.windows.map(w=>w.usedPercent)).toEqual([0,100]);expect(result.usage.windows.map(w=>w.model)).toEqual(['gemini-fixture','gemini-fixture-pro']);
+ expect(result.usage.windows[0]?.resetsAt).toBeNull();expect(result.usage.windows[1]?.resetsAt).toBe(new Date(200).toISOString());
+ expect(result.usage.windows.every(w=>w.cost===null)).toBe(true);
+});

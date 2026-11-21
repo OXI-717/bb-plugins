@@ -1,3 +1,4 @@
+import {geminiUsageObservation} from './gemini-usage.js';
 import type {
   AccountPoolConfig,
   AccountSecret,
@@ -150,7 +151,20 @@ export function createGeminiAdapter(options: GeminiAdapterOptions): ProviderAdap
         context.quotas.get(context.account.id),
         context.now(),
       );
-      if (quota !== null) context.quotas.put(quota);
+      if (quota !== null) {
+        context.quotas.put(quota);
+        // Optional display metadata never invalidates a valid quota observation.
+        let enrichment: unknown = null;
+        try {
+          const auxiliary = await context.fetch(`${options.cloudCodeBaseUrl.replace(/\/+$/u, '')}/v1internal:loadCodeAssist`, {
+            method: 'POST', headers: {authorization: `Bearer ${secret.accessToken}`, 'content-type': 'application/json', accept: 'application/json', 'user-agent': GEMINI_USER_AGENT},
+            body: JSON.stringify({metadata: {}}), signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
+          });
+          if (auxiliary.ok) enrichment = await auxiliary.json().catch(() => null);
+          else await auxiliary.body?.cancel();
+        } catch { /* Quota remains valid when optional enrichment is unavailable. */ }
+        await context.accounts.setGeminiUsage(context.account.id, geminiUsageObservation(payload, enrichment, context.now()));
+      }
     },
     errorResponse(status, message, headers, request) {
       return poolErrorResponse("gemini", status, message, headers, request);

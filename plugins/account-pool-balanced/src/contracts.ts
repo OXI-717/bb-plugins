@@ -1,3 +1,4 @@
+import {geminiUsageSchema} from './gemini-usage.js';
 import { z } from "zod";
 
 export const DEFAULT_ACCOUNT_POOL_CONFIG = {
@@ -285,6 +286,7 @@ export const accountSchema = z
     email: z.string().email().nullable(),
     accountUuid: z.string().uuid().nullable().default(null),
     codexAccountId: z.string().min(1).optional(),
+    geminiUsage: geminiUsageSchema.optional(),
     subscriptionType: z.string().nullable(),
     rateLimitTier: z.string().nullable(),
     enabled: z.boolean(),

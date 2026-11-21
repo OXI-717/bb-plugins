@@ -1391,3 +1391,11 @@ it.each(['kimi','zai','opencode-go','cursor','devin'] as const)('shows the obser
  const ui=renderSlot(threadAccountHeaderSlot,{threadId:'thread-one',projectId:'project',isCompactViewport:false},{rpc:{'thread.account':()=>({state:'observed',account:account({provider,kind:'api-key',email:'other@example.com',label:'Subscription'}),lastUsedAt:1800000000000})}});
  expect(await ui.findByRole('button',{name:/Thread account: other@example.com/})).toBeTruthy();
 });
+
+it('shows Gemini declared plan, model quota and absolute credits without a fabricated window', async()=>{
+ const selected=account({provider:'gemini',geminiUsage:{observedAt:100,plan:{id:'fixture-tier',name:'Fixture Gemini plan'},credits:'0',models:[{modelId:'gemini-fixture',tokenType:'REQUESTS',usedPercent:100,resetAt:null}]}});
+ const slot=render([selected]);
+ await waitFor(()=>expect(slot.container.textContent).toContain('Fixture Gemini plan'));
+ expect(slot.container.textContent).toContain('Google One AI credits: 0');
+ expect(slot.container.textContent).toContain('gemini-fixture');
+});

@@ -1,3 +1,4 @@
+import {geminiPlanLabel, geminiCreditLabel} from './gemini-usage.js';
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { AccountSummary, PoolProvider } from "./contracts.js";
 import type { AccountPoolHub } from "./hub.js";
@@ -128,7 +129,7 @@ export function registerUsageSource(
             id: account.id,
             accountKey: accountKey(account),
             providerId: USAGE_PROVIDER_IDS[account.provider],
-            label: usageResourceLabel(account),
+            label: [usageResourceLabel(account), account.provider === 'gemini' && account.geminiUsage ? geminiCreditLabel(account.geminiUsage) : null].filter(Boolean).join(' · '),
             scope: { kind: "shared" as const },
           })),
         };
@@ -184,7 +185,15 @@ export function registerUsageSource(
               cost: null,
             });
           };
-          if (account.limitWindows.length > 0) {
+          const isGemini = account.provider === 'gemini';
+          const gemini = isGemini ? account.geminiUsage : undefined;
+          if (gemini) for (const [index, model] of gemini.models.entries()) {
+            if (model.resetAt !== null && model.resetAt <= referenceNow) continue;
+            windows.push({kind: 'custom', id: `gemini:${model.modelId}:${model.tokenType ?? 'quota'}:${index}`,
+              label: `${model.modelId}${model.tokenType ? ` · ${model.tokenType}` : ''}`,
+              usedPercent: model.usedPercent, resetsAt: model.resetAt === null ? null : new Date(model.resetAt).toISOString(), model: model.modelId, cost: null});
+          }
+          if (!isGemini && account.limitWindows.length > 0) {
             for (const window of account.limitWindows) {
               add(
                 window.slot,
@@ -195,7 +204,7 @@ export function registerUsageSource(
               );
             }
           }
-          if(account.limitWindows.length===0 || account.provider==='opencode-go') {
+          if(!isGemini && (account.limitWindows.length===0 || account.provider==='opencode-go')) {
             if(!account.limitWindows.some(window=>window.windowMinutes===300)) add(
               "five-hour",
               "Five-hour limit",
@@ -225,7 +234,7 @@ export function registerUsageSource(
           // stored account metadata without interpreting an unrelated tier.
           const rateLimitTier = account.provider === "zai" ? null : account.rateLimitTier;
           const accountFields = {
-            plan: account.subscriptionType
+            plan: isGemini ? (gemini?.plan ? {id: gemini.plan.id, multiplier: null} : null) : account.subscriptionType
               ? {
                   id: account.subscriptionType.toLowerCase(),
                   multiplier:
@@ -234,7 +243,7 @@ export function registerUsageSource(
                 }
               : null,
             accountEmail: null,
-            planLabel: usagePlanLabel({ ...account, rateLimitTier }),
+            planLabel: isGemini ? (gemini ? geminiPlanLabel(gemini) : null) : usagePlanLabel({ ...account, rateLimitTier }),
           };
           const expiredAuth = isExpiredAuthorizationError(account.error);
           const error = expiredAuth

@@ -262,6 +262,11 @@ export class AccountStore {
         ? account : { ...account, subscriptionType: plan });
   }
 
+  async setGeminiUsage(id: string, observation: NonNullable<Account['geminiUsage']>): Promise<Account | null> {
+    return this.update(id, account => account.provider !== 'gemini' || JSON.stringify(account.geminiUsage) === JSON.stringify(observation)
+      ? account : {...account, geminiUsage: observation});
+  }
+
   private async update(
     id: string,
     change: (account: Account) => Account,

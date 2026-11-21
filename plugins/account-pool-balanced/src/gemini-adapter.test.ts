@@ -98,7 +98,7 @@ describe("gemini adapter", () => {
         expect(rejected === undefined || rejected === "google-access").toBe(true);
         return rejected === undefined ? oauth : { ...oauth, accessToken: "fresh-access" };
       },
-      accounts: null as never,
+      accounts: {setGeminiUsage: vi.fn()} as never,
       quotas: { get: () => previous(), put: (quota: AccountQuota) => { stored.quota = quota; } } as unknown as QuotaStore,
       fetch: fetch as unknown as typeof globalThis.fetch,
       now: () => 10,
@@ -121,4 +121,26 @@ describe("gemini adapter", () => {
     expect(adapter().refreshesApiKeyUsage).toBe(false);
     expect(GEMINI_USAGE_REQUEST_TIMEOUT_MS).toBe(20_000);
   });
+});
+
+describe('Gemini optional enrichment',()=>{
+ it.each(['success','403','network','invalid-json'] as const)('keeps quota valid with auxiliary %s',async mode=>{
+  const put=vi.fn();const setGeminiUsage=vi.fn();
+  const fetch=vi.fn(async(input:unknown)=>{
+   if(String(input).endsWith(':retrieveUserQuota'))return Response.json({buckets:[{modelId:'gemini-fixture',remainingFraction:0.5}]});
+   if(mode==='network')throw Error('synthetic network failure');
+   if(mode==='403')return new Response(null,{status:403});
+   if(mode==='invalid-json')return new Response('invalid');
+   return Response.json({paidTier:{id:'fixture-tier',name:'Fixture plan',availableCredits:[{creditType:'GOOGLE_ONE_AI',creditAmount:'12'}]}});
+  });
+  await adapter().refreshUsage({account,freshSecret:async()=>oauth,accounts:{setGeminiUsage} as never,quotas:{get:previous,put} as never,fetch:fetch as never,now:()=>100});
+  expect(put).toHaveBeenCalledOnce();expect(put.mock.calls[0]?.[0].fiveHourUtilization).toBe(0.5);
+  expect(setGeminiUsage).toHaveBeenCalledOnce();expect(setGeminiUsage.mock.calls[0]?.[1].models[0].usedPercent).toBe(50);
+  expect(setGeminiUsage.mock.calls[0]?.[1].credits).toBe(mode==='success'?'12':null);
+ });
+ it('does not enrich or write metadata after rejected quota',async()=>{
+  const fetch=vi.fn(async()=>new Response(null,{status:403}));const setGeminiUsage=vi.fn();const put=vi.fn();
+  await adapter().refreshUsage({account,freshSecret:async()=>oauth,accounts:{setGeminiUsage} as never,quotas:{get:previous,put} as never,fetch:fetch as never,now:()=>100});
+  expect(fetch).toHaveBeenCalledOnce();expect(setGeminiUsage).not.toHaveBeenCalled();expect(put).not.toHaveBeenCalled();
+ });
 });
