@@ -3,6 +3,7 @@ import type { CatalogTask } from "../src/catalog-types";
 export function category(task: CatalogTask) {
   if (task.missing) return "missing";
   if (task.scheduler === "inventory-audit") return "registry";
+  if (task.scheduler === "systemd" && task.scheduleKind === "once" && task.executionId) return "executions";
   if (task.history === "not-connected" || task.state === "unknown") return "unmonitored";
   if (task.scheduleKind === "once" && task.state === "paused" && task.lastRun?.status === "succeeded") return "completed";
   if (task.state === "paused") return "paused";
@@ -13,6 +14,7 @@ export function nextStep(task: CatalogTask) {
   switch (category(task)) {
     case "missing": return "Задачи больше нет в источнике. Историю можно оставить или удалить запись из каталога.";
     case "unmonitored": return "Это описание из реестра. Для проверки работы нужно подключить состояние и историю исходного планировщика.";
+    case "executions": return "Разовое исполнение systemd. Его результат и журнал доступны в карточке.";
     case "completed": return "Одноразовая задача завершена. Повторный запуск не запланирован.";
     case "paused": return task.lastRun?.status === "failed"
       ? "Расписание отключено, а последний запуск завершился ошибкой. Откройте его результат и разберите причину перед включением."

@@ -189,6 +189,24 @@ describe("automation workflows", () => {
     expect(slot.queryByRole("button", { name: "Daily report" })).toBeNull();
     slot.lifecycle.unmount();
   });
+  it("keeps observed transient runs out of current schedules but retains failures", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const transient = { ...task, id: "demo-worker", key: "transient", name: "Temporary execution",
+      scheduler: "systemd", schedule: null, scheduleKind: "once", executionId: "systemd:example",
+      state: "failed", lastRun: { ...task.lastRun, taskId: "demo-worker", exitCode: 70 } };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+      catalog_list: () => ({ tasks: [task, transient], sources: [source] }),
+    } });
+    await slot.findByRole("button", { name: "Daily report" });
+    expect(slot.queryByRole("button", { name: "Temporary execution" })).toBeNull();
+    fireEvent.change(slot.getByRole("combobox", { name: "Раздел автоматизаций" }), { target: { value: "executions" } });
+    expect(slot.getByRole("button", { name: "Temporary execution" })).toBeTruthy();
+    expect(slot.queryByRole("button", { name: "Daily report" })).toBeNull();
+    fireEvent.click(slot.getByRole("button", { name: /Требуют внимания/ }));
+    expect(slot.getByRole("button", { name: "Temporary execution" })).toBeTruthy();
+    expect(slot.getByRole("button", { name: "Daily report" })).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
   it("uses the scheduler refresh RPC before reloading the table", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");
