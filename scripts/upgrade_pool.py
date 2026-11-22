@@ -177,7 +177,32 @@ def release_target(source, expected=None):
     return target, sha
 
 
+def validate_pool_status(pool, required=()):
+    if not isinstance(pool, dict):
+        raise UpgradeError('Invalid pool status response')
+    if pool.get('management') == 'locked':
+        raise UpgradeError('Pool management is locked; pass --operator-key-file or --grant-file')
+    missing = [key for key in required if key not in pool]
+    if missing:
+        raise UpgradeError('Pool status is missing required fields: ' + ', '.join(missing))
+    return pool
+
+
+def pool_status(required=()):
+    return validate_pool_status(bb('pool', 'status'), required)
+
+
+def explicit_private_file(raw_path, label):
+    candidate = Path(os.path.abspath(raw_path))
+    if candidate.is_symlink():
+        raise UpgradeError(f'Unsafe {label}')
+    if not candidate.is_file():
+        raise UpgradeError(f'{label.capitalize()} not found')
+    return candidate
+
+
 def inventory(pool, routing_keys=None):
+    validate_pool_status(pool, ('accounts', 'routing', 'enabledAccountCount'))
     # Restrict only post-update verification; pre-update races remain strict.
     fields = ('id', 'provider', 'kind', 'enabled', 'priority', 'role', 'cap', 'policy', 'weeklyBudget', 'projects', 'drainOnce', 'drainGeneration')
     return {
@@ -193,6 +218,7 @@ def save_json(path, value):
 
 
 def report_pool(pool, say):
+    validate_pool_status(pool, ('inFlight', 'accounts'))
     say(f"In-flight requests: {pool['inFlight']}")
     names = {h['hostId']: h.get('hostName') or h['hostId'] for h in pool.get('hosts', [])}
     for account in pool['accounts']:
@@ -225,7 +251,7 @@ def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=9
     asked = False
     native_leases_waiting = []
     while time.monotonic() - start < deadline_seconds:
-        pool = bb('pool', 'status')
+        pool = pool_status(('inFlight',))
         count = pool['inFlight']
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             raise UpgradeError('Invalid in-flight request count')
@@ -337,7 +363,7 @@ def perform(args, data, output, say):
     if version(target) < version(info['version']):
         raise UpgradeError('Downgrades are not supported')
     if args.check:
-        report_pool(bb('pool', 'status'), say)
+        report_pool(pool_status(('inFlight', 'accounts')), say)
     if target == info['version']:
         if not source.get('history') or source['history'][0]['version'] != sha:
             raise UpgradeError('Installed version matches but resolved commit differs')
@@ -356,7 +382,7 @@ def perform(args, data, output, say):
         verify_model_hold(sealed, args.maintenance_owner)
         if sealed['lease'].get('upgrade') != 'sealed':
             raise UpgradeError('Model admission was not sealed; update refused')
-    before = bb('pool', 'status')
+    before = pool_status(('accepting', 'inFlight', 'accounts', 'routing', 'enabledAccountCount'))
     config = bb('plugin', 'config', PLUGIN)['values']
     if not before['accepting'] or (before['inFlight'] and not forced):
         raise UpgradeError('Pool state changed; retry after requests finish')
@@ -371,7 +397,7 @@ def perform(args, data, output, say):
     # Fail closed if a new release or a source/settings change appeared while waiting.
     if source_info() != source or release_target(source, target) != (target, sha):
         raise UpgradeError('Source or release changed while waiting; nothing updated')
-    latest = bb('pool', 'status')
+    latest = pool_status(('inFlight', 'accounts', 'routing', 'enabledAccountCount'))
     if inventory(latest) != inventory(before) or bb('plugin', 'config', PLUGIN)['values'] != config:
         raise UpgradeError('Account settings changed during backup; retry')
     if latest['inFlight'] and not forced:
@@ -386,7 +412,7 @@ def perform(args, data, output, say):
     run('bb', 'plugin', 'update', PLUGIN, '--yes', timeout=600)
     after_info = installed()
     after_source = source_info()
-    after = bb('pool', 'status')
+    after = pool_status(('accepting', 'accounts', 'routing', 'enabledAccountCount'))
     verify_pause(args, sealed=True)
     if (after_info['version'] != target or not after_source.get('history')
             or after_source['history'][0]['version'] != sha):
@@ -449,6 +475,9 @@ def main():
         parser.error('--wait-idle cannot be combined with update or interruption options')
     os.umask(0o077)
     output = None
+    global MANAGEMENT_KEY_FILE, MANAGEMENT_GRANT_FILE
+    previous_key_file = MANAGEMENT_KEY_FILE
+    previous_grant_file = MANAGEMENT_GRANT_FILE
     try:
         if args.version:
             version(args.version)
@@ -456,10 +485,8 @@ def main():
         if remote.hostname not in ('localhost', '127.0.0.1', '::1'):
             raise UpgradeError('Run this script on the BB server host with a local BB connection')
         root = Path(bb('status')['dataDir']).resolve()
-        global MANAGEMENT_KEY_FILE
-        MANAGEMENT_KEY_FILE = Path(args.operator_key_file).resolve() if args.operator_key_file else None
-        global MANAGEMENT_GRANT_FILE
-        MANAGEMENT_GRANT_FILE = Path(args.grant_file).resolve() if args.grant_file else None
+        MANAGEMENT_KEY_FILE = explicit_private_file(args.operator_key_file, 'private management key file') if args.operator_key_file else None
+        MANAGEMENT_GRANT_FILE = explicit_private_file(args.grant_file, 'management grant file') if args.grant_file else None
         data = root / 'plugins' / PLUGIN
         if not (data / 'data.db').is_file():
             raise UpgradeError('Local plugin database not found; run on the BB server host')
@@ -500,7 +527,7 @@ def main():
                                 pause.acquire_hold()
                                 args.maintenance_owner = pause.state['operationId']
                                 def idle():
-                                    return (bb('pool', 'status')['inFlight'] == 0
+                                    return (pool_status(('inFlight',))['inFlight'] == 0
                                             and native_in_flight() == 0 and model_activity() == 0)
                                 pause.drain(idle, args.drain_timeout)
                                 # Requires the explicit non-cancelling API; no fallback.
@@ -575,6 +602,9 @@ def main():
         else:
             print(f'FAILED: {error}', file=sys.stderr)
         return 1
+    finally:
+        MANAGEMENT_KEY_FILE = previous_key_file
+        MANAGEMENT_GRANT_FILE = previous_grant_file
 
 
 if __name__ == '__main__':

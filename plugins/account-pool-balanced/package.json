@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-account-pool-balanced",
-  "version": "0.4.102",
+  "version": "0.4.103",
   "private": true,
   "type": "module",
   "description": "Balance provider accounts, track quotas and switch to reserve accounts for BB agents.",

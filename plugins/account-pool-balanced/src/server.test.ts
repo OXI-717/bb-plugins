@@ -8322,7 +8322,7 @@ describe('trusted automation account admission', () => {
   }
   const routes = {
     claude:['/v1/messages','/v1/messages/count_tokens'],
-    codex:['/v1/responses','/v1/images/generations','/v1/images/edits','/v1/alpha/search','/v1/models'],
+    codex:['/v1/responses','/v1/responses/compact','/v1/images/generations','/v1/images/edits','/v1/alpha/search','/v1/models'],
     kimi:['/kimi/v1/messages','/kimi/v1/messages/count_tokens'],
     zai:['/zai/v1/chat/completions','/zai/v1/responses','/zai/v1/models'],
     'opencode-go':['/opencode-go/v1/chat/completions','/opencode-go/v1/responses','/opencode-go/v1/messages','/opencode-go/v1/models'],
@@ -9290,4 +9290,117 @@ it('uses the selected Codex account proxy for login and refuses a missing route'
   expect(outbound).not.toHaveBeenCalled();
   await expect(behavior.callRpc('codexLogin.start', null)).resolves.toMatchObject({userCode: 'TEST-CODE'});
   expect(outbound).toHaveBeenCalledTimes(1);
+});
+
+it('routes POST /v1/responses/compact to the Codex upstream', async () => {
+  const seenUrls: string[] = [];
+  const outbound = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : String(input);
+    seenUrls.push(url);
+    if (url.includes('/usage')) return Response.json({ rate_limit: { allowed: true, limit_reached: false, primary_window: null, secondary_window: null } });
+    return Response.json({ id: 'compact-fixture', object: 'response.compaction' });
+  });
+  const fixture = await createFixture({
+    provider: 'codex',
+    source: 'import',
+    upstreamUrl: 'https://upstream.example/backend-api/codex',
+    options: {
+      fetch: outbound,
+      importCodexCredentials: async () => ({
+        accessToken: 'fixture-access',
+        refreshToken: 'fixture-refresh',
+        idToken: null,
+        accountId: 'fixture-account',
+        email: null,
+        expiresAt: Date.now() + 3_600_000,
+      }),
+    },
+  });
+  const response = await fixture.host.harness.behavior.fetchHttp('POST', '/v1/responses/compact', {
+    headers: authHeaders(fixture.key),
+    body: JSON.stringify({ model: 'gpt-5.4', input: [] }),
+  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ id: 'compact-fixture', object: 'response.compaction' });
+  expect(seenUrls).toContain('https://upstream.example/backend-api/codex/responses/compact');
+});
+
+it('skips Guard RPC checks on background usage ticks while accounts are not due', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  try {
+    const dataDir = await fs.mkdtemp(path.join(tmpdir(), 'usage-tick-guard-'));
+    cleanups.push(() => fs.rm(dataDir, { recursive: true, force: true }));
+    let blocked = false;
+    const guardCalls = vi.fn(async () => ({
+      schema: 'bb-vpn-guard/network-decision/2',
+      hostId: 'pool-host',
+      allowed: !blocked,
+      reason: blocked ? 'manual_block' : 'observe',
+    }));
+    const usageCalls = vi.fn(async () => Response.json({
+      rate_limit: { allowed: true, limit_reached: false, primary_window: null, secondary_window: null },
+    }));
+    const host = createFakePluginHost({
+      pluginId: 'account-pool-balanced',
+      dataDir,
+      sdk: {
+        hosts: { list: async () => [{ id: 'pool-host', name: 'Fixture' }] },
+        system: { config: async () => ({ primaryHostId: 'pool-host' }), providerStates: async () => ({ providers: [] }) },
+        plugins: { callRpc: guardCalls },
+      },
+    });
+    cleanups.push(() => host.harness.lifecycle.dispose());
+    await host.bb.storage.kv.set('config', { vpnGuardEnabled: true, vpnOnlyProviders: [], vpnPolicyVersion: 2 });
+    await createAccountPoolPlugin({
+      fetch: usageCalls,
+      fetchIpv4: usageCalls,
+      now: () => Date.now(),
+      importCodexCredentials: async () => ({
+        accessToken: 'fixture-access',
+        refreshToken: 'fixture-refresh',
+        idToken: null,
+        accountId: 'fixture-account',
+        email: null,
+        expiresAt: Date.now() + 3_600_000,
+      }),
+    })(host.bb);
+    const account = await host.harness.behavior.callRpc('account.add', {
+      provider: 'codex',
+      source: { kind: 'import' },
+      label: 'Fixture',
+      priority: 100,
+    }) as AccountSummary;
+    expect(guardCalls.mock.calls.length).toBeGreaterThan(0);
+    expect(usageCalls).toHaveBeenCalledTimes(1);
+    guardCalls.mockClear();
+    usageCalls.mockClear();
+    const service = host.harness.behavior.runService('hub');
+    try {
+      // Initial hub tick + four 60-second ticks inside the 5-minute refresh interval must not invoke Guard or upstream.
+      await vi.advanceTimersByTimeAsync(4 * 60_000 + 10);
+      expect(guardCalls).not.toHaveBeenCalled();
+      expect(usageCalls).not.toHaveBeenCalled();
+
+      // Once the 5-minute interval elapses, Guard and usage refresh run again.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => expect(usageCalls).toHaveBeenCalledTimes(1));
+      const afterDueGuardCalls = guardCalls.mock.calls.length;
+      expect(afterDueGuardCalls).toBeGreaterThan(0);
+
+      // Subsequent ticks inside the new 5-minute window stay silent as well.
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(guardCalls.mock.calls.length).toBe(afterDueGuardCalls);
+      expect(usageCalls).toHaveBeenCalledTimes(1);
+
+      // Explicit forced refresh still enforces Guard immediately even inside the interval.
+      blocked = true;
+      await expect(host.harness.behavior.callRpc('account.refreshUsage', { accountId: account.id })).rejects.toThrow('VPN_GUARD_BLOCKED');
+    } finally {
+      service.controller.abort();
+      await service.done;
+    }
+  } finally {
+    vi.useRealTimers();
+  }
 });

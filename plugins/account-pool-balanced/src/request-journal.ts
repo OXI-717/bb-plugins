@@ -11,11 +11,23 @@ export const MAX_ROWS=2048, TTL_MS=86400000, MAX_BYTES=2*1024*1024;
 export const SNAPSHOT_INTERVAL_MS=15_000, HISTORY_SNAPSHOT_INTERVAL_MS=60_000;
 const number=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
 const binding=(prefix:string)=>z.string().regex(new RegExp(`^${prefix}_[a-z0-9]{6,32}$`)).nullable();
+const PUBLIC_MODEL_PATTERNS = [
+  /^gpt-\d+(?:\.\d+)?(?:-(?:codex|mini|nano|pro|turbo|astra|sol|spark|preview|max|fast|high|low|\d{4}-\d{2}-\d{2}))*$/,
+  /^o[1-9](?:-(?:mini|pro|preview|\d{4}-\d{2}-\d{2}))*$/,
+  /^claude-(?:opus|sonnet|haiku|fable)-\d+(?:[.-]\d+)*(?:-(?:\d{8}|fast|preview|thinking|1m))?$/,
+  /^gemini-\d+(?:\.\d+)?-(?:pro|flash|ultra)(?:-(?:lite|preview|exp|thinking|high|low|\d{3,8}))*$/,
+  /^glm-\d+(?:\.\d+)?(?:-(?:air|flash|plus|pro|max|turbo|code|coding|thinking|x|v|preview))*$/,
+  /^kimi-(?:k\d+(?:\.\d+)?|for-coding)(?:-(?:thinking|turbo|preview|fast|instruct|\d{4}))*$/,
+  /^grok-(?:\d+(?:\.\d+)?|code)(?:-(?:mini|fast|code|beta|vision|reasoning|preview|\d+))*$/,
+  /^(?:deepseek|qwen\d*|minimax|mimo)-(?:r\d+|v\d+|m\d+(?:\.\d+)?|\d+(?:\.\d+)?|chat|coder|reasoner)(?:-(?:r\d+|v\d+|m\d+|chat|coder|reasoner|pro|plus|max|turbo|flash|mini|fast|thinking|instruct|preview|\d+))*$/,
+  /^swe-\d+(?:\.\d+)?(?:-(?:mini|pro|fast|preview))*$/,
+] as const;
+const publicModelSchema = z.string().max(64).refine(value => PUBLIC_MODEL_PATTERNS.some(pattern => pattern.test(value))).nullable();
 export const observationSchema=z.object({
  at:z.number().int().nonnegative(),requestId:z.string().uuid(),attempt:z.number().int().min(0).max(100000),
  event:z.enum(['request','attempt','upstream','local-held','hold','result','stream-end','queue-wait','account-switch','auth-refresh','guard-check']),provider:providerSchema,
  accountId:z.string().uuid().nullable(),clientHash:z.string().regex(/^[a-f0-9]{24}$/).nullable(),projectId:binding('proj'),threadId:binding('thr'),
- model:z.enum(['gpt-6-astra','gpt-6.1-sol','gpt-6-sol','gpt-5.4','gpt-5.3-codex','claude-opus-4-6','claude-sonnet-4-6']).nullable(),
+ model:publicModelSchema,
  modelFamily:z.enum(['fable','sonnet','opus','haiku','other']),status:z.number().int().min(100).max(599).nullable(),
  durationMs:number,inFlight:z.number().int().nonnegative(),accountInFlight:z.number().int().nonnegative(),retryAfterMs:number,retryAfterSupplied:z.boolean().nullable(),quotaEvidence:z.boolean().nullable(),
  holdSource:z.enum(['upstream429','upstream403','existing-hold']).nullable(),heldUntil:number,
