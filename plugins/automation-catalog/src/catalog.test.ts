@@ -295,3 +295,64 @@ describe("one-off execution classification", () => {
     expect(catalog.detail({ key }).total).toBe(2);
   });
 });
+
+describe("bounded per-task run history and indexed queries", () => {
+  it("prunes excess runs per task while preserving executionId and latest execution outcome", () => {
+    const db = new Database(":memory:");
+    databases.push(db);
+    db.exec(catalogMigration);
+    const catalog = createCatalog(db, { maxRunsPerTask: 5 });
+    const base = snapshot(10_000);
+    const runs = [
+      { ...base.runs[0], id: "exec-pinned", evidence: "execution" as const, startedAt: 100, finishedAt: 110, observedAt: 110, status: "failed" as const, exitCode: 1 },
+      { ...base.runs[0], id: "exec-latest", evidence: "execution" as const, startedAt: 200, finishedAt: 210, observedAt: 210, status: "succeeded" as const, exitCode: 0 },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        ...base.runs[0],
+        id: `state-${String(index).padStart(2, "0")}`,
+        evidence: "state-change" as const,
+        status: "unknown" as const,
+        startedAt: null,
+        finishedAt: null,
+        observedAt: 1000 + index * 10,
+        exitCode: null,
+      })),
+    ];
+    catalog.publish({ ...base, tasks: [{ ...base.tasks[0], scheduleKind: "once" as const, executionId: "exec-pinned" }], runs });
+    const list = catalog.list();
+    expect(list.tasks).toHaveLength(1);
+    const key = list.tasks[0].key;
+    expect(list.tasks[0].lastRun?.id).toBe("exec-pinned");
+    const detail = catalog.detail({ key, offset: 0, limit: 25 });
+    expect(detail.total).toBe(7); // 5 newest state-changes + pinned executionId + latest execution
+    const ids = detail.runs.map((run) => run.id);
+    expect(ids).toContain("exec-pinned");
+    expect(ids).toContain("exec-latest");
+    expect(ids).toContain("state-11");
+    expect(ids).not.toContain("state-00");
+    // Dropping executionId still preserves latest execution outcome.
+    catalog.publish({
+      ...base,
+      observedAt: 20_000,
+      tasks: [{ ...base.tasks[0], scheduleKind: "recurring" as const }],
+      runs: [{ ...runs[runs.length - 1], id: "state-12", observedAt: 2000 }],
+    });
+    expect(catalog.list().tasks[0].lastRun?.id).toBe("exec-latest");
+    const after = catalog.detail({ key, offset: 0, limit: 25 });
+    expect(after.total).toBe(6); // 5 newest state-changes + latest execution
+    expect(after.runs.map((run) => run.id)).toContain("exec-latest");
+  });
+
+  it("avoids temporary B-tree sorting in detail and list run lookups", () => {
+    const { db, catalog } = setup();
+    catalog.publish(snapshot());
+    const key = catalog.list().tasks[0].key;
+    const detailPlan = db
+      .prepare("EXPLAIN QUERY PLAN SELECT data FROM automation_catalog_runs WHERE task_key = ? ORDER BY sort_at DESC, id DESC LIMIT 25 OFFSET 0")
+      .all(key) as Array<{ detail: string }>;
+    const latestPlan = db
+      .prepare("EXPLAIN QUERY PLAN SELECT data FROM automation_catalog_runs WHERE task_key = ? AND evidence = 'execution' ORDER BY sort_at DESC, id DESC LIMIT 1")
+      .all(key) as Array<{ detail: string }>;
+    expect(detailPlan.map((row) => row.detail).join("\n")).not.toContain("TEMP B-TREE");
+    expect(latestPlan.map((row) => row.detail).join("\n")).not.toContain("TEMP B-TREE");
+  });
+});
