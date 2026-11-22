@@ -2878,6 +2878,7 @@ function LoginDialog({
                   : "Open the verification page, sign in to ChatGPT, and enter this code."}
           </p>
           {reauthorizing === null ? null : <p className="text-sm text-muted-foreground">Sign in to {reauthorizing}. Signing in to another account will not replace this subscription.</p>}
+          {provider === "gemini" && reauthorizing !== null ? <p className="text-sm text-muted-foreground">Once authorization is being saved, closing this dialog does not undo it.</p> : null}
           {provider === "gemini"
             ? geminiStep?.userCode
               ? <UserCodeBlock name={name} userCode={geminiStep.userCode} />

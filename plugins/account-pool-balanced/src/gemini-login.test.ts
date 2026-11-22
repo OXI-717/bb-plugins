@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as credentials from "./gemini-credentials.js";
 import type { AccountSummary } from "./contracts.js";
 import { GeminiLogin } from "./gemini-login.js";
 
@@ -100,4 +101,39 @@ it('binds reauthentication to the selected account and uses explicit isolated CL
   while(result.status==='pending'&&Date.now()<deadline){await new Promise(r=>setTimeout(r,40));result=await login.poll({sessionId:started.sessionId});}
   expect(result).toEqual({status:'complete',account});expect(added).toBe(0);expect(replaced).toBe(1);
  }finally{login.dispose();}
+});
+
+
+function barrier<T>() { let resolve!: (value:T)=>void; const promise=new Promise<T>(r=>{resolve=r;});return {promise,resolve}; }
+function cancellationLogin(reauthorizeAccount: NonNullable<ConstructorParameters<typeof GeminiLogin>[0]['reauthorizeAccount']>) {
+ const closed=barrier<void>();
+ const login=new GeminiLogin({
+  spawnLogin:env=>{const child=spawn(process.execPath,['-e',loginScript(0,true)],{env,stdio:['ignore','pipe','pipe']});child.once('close',()=>closed.resolve());return child;},
+  addAccount:async()=>{throw Error('Unexpected account creation');},reauthorizeAccount,
+ });
+ return {login,closed};
+}
+const syntheticAuthorization={label:'Synthetic',email:'pool@example.com',accessToken:'synthetic-access',refreshToken:'synthetic-refresh',expiresAt:null,clientId:'synthetic-client'};
+
+it('cancel boundary: accepted cancellation before commit leaves authorization unchanged',async()=>{
+ const entered=barrier<void>();const release=barrier<typeof syntheticAuthorization>();let authorization='old';
+ const read=vi.spyOn(credentials,'importGeminiCredentials').mockImplementation(async()=>{entered.resolve();return release.promise;});
+ const {login,closed}=cancellationLogin(async()=>{authorization='new';return account;});
+ try{
+  const started=await login.start(account.id);await closed.promise;
+  const poll=login.poll({sessionId:started.sessionId});await entered.promise;
+  expect(login.cancel({sessionId:started.sessionId})).toBe(true);
+  release.resolve(syntheticAuthorization);expect((await poll).status).toBe('error');expect(authorization).toBe('old');
+ }finally{read.mockRestore();login.dispose();}
+});
+it('cancel boundary: cancellation is declined once authorization commit has begun',async()=>{
+ const entered=barrier<void>();const release=barrier<void>();let authorization='old';
+ const read=vi.spyOn(credentials,'importGeminiCredentials').mockResolvedValue(syntheticAuthorization);
+ const {login,closed}=cancellationLogin(async()=>{entered.resolve();await release.promise;authorization='new';return account;});
+ try{
+  const started=await login.start(account.id);await closed.promise;
+  const poll=login.poll({sessionId:started.sessionId});await entered.promise;
+  expect(login.cancel({sessionId:started.sessionId})).toBe(false);
+  release.resolve();expect((await poll).status).toBe('complete');expect(authorization).toBe('new');
+ }finally{release.resolve();read.mockRestore();login.dispose();}
 });

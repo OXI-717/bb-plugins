@@ -49,6 +49,8 @@ interface LoginSession {
   output: string;
   settled: { code: number | null; error: string | null } | null;
   polling: boolean;
+  cancelled: boolean;
+  commitStarted: boolean;
 }
 
 const URL_LINE = /https:\/\/\S+/u;
@@ -92,6 +94,8 @@ export class GeminiLogin {
       output: "",
       settled: null,
       polling: false,
+      cancelled: false,
+      commitStarted: false,
     };
     const capture = (chunk: Buffer) => {
       session.output += chunk.toString("utf8");
@@ -140,6 +144,11 @@ export class GeminiLogin {
         return { status: "error", message: "Gemini sign-in did not finish. Start again." };
       }
       const authenticated = await importGeminiCredentials(session.authFile);
+      if (session.cancelled || this.sessions.get(session.sessionId) !== session)
+        return { status: "error", message: "Sign-in was cancelled before authorization was saved." };
+      // Logical commit boundary: cancellation cannot be accepted while the
+      // save callback waits for the hub/store authorization locks.
+      session.commitStarted = true;
       const account = session.targetAccountId !== undefined
         ? await this.options.reauthorizeAccount!(session.targetAccountId, authenticated)
         : await this.options.addAccount(authenticated);
@@ -163,7 +172,8 @@ export class GeminiLogin {
 
   cancel(input: { sessionId: string }): boolean {
     const session = this.sessions.get(input.sessionId);
-    if (session === undefined) return false;
+    if (session === undefined || session.commitStarted) return false;
+    session.cancelled = true;
     void this.disposeSession(session);
     return true;
   }
@@ -185,6 +195,7 @@ export class GeminiLogin {
   }
 
   private async disposeSession(session: LoginSession): Promise<void> {
+    session.cancelled = true;
     this.sessions.delete(session.sessionId);
     if (session.settled === null) session.child.kill();
     await rm(session.home, { recursive: true, force: true }).catch(() => undefined);
