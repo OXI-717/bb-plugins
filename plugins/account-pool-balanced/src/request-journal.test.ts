@@ -18,12 +18,15 @@ async function fixture(){
 }
 it('removes unrecognized fields and refuses arbitrary model/identity strings',async()=>{
  const f=await fixture();f.journal.record(f.event({prompt:'private synthetic prompt',authorization:'secret synthetic header'}));
- f.journal.record(f.event({model:'private-synthetic-model'}));
+ for(const rejected of ['private-synthetic-model','gpt-5.4-private-secret','claude-opus-4-7-customer']) f.journal.record(f.event({model:rejected}));
  const rows=f.journal.snapshot().rows;
- expect(rows).toHaveLength(1);expect(JSON.stringify(rows)).not.toMatch(/private|secret|external-client/);
+ expect(rows).toHaveLength(1);expect(JSON.stringify(rows)).not.toMatch(/private|secret|customer|external-client/);
  const unknown=newTrace('codex','external-client-synthetic','private-project','private-thread','private-model','other');
  expect(unknown).toMatchObject({projectId:null,threadId:null,model:null});
  expect(unknown.clientHash).toBe(f.event().clientHash);
+ for(const allowed of ['gpt-6-astra','gpt-5.4-codex','claude-opus-4-7','claude-sonnet-4-7','claude-haiku-4-5-20251001','glm-4.7','kimi-k2.5','grok-4','gemini-2.5-pro','swe-1.5']) {
+  expect(newTrace('codex','external-client-synthetic','proj_abcdef1234','thr_abcdef1234',allowed,'other').model).toBe(allowed);
+ }
 });
 it('records only fixed typed quota fields and actual before/after evidence without retaining private text',async()=>{
  const f=await fixture(),id='11111111-1111-4111-8111-111111111111';
