@@ -264,6 +264,33 @@ export class PoolOperations {
     return summary;
   }
 
+  async validateGeminiReauthorization(id: string): Promise<void> {
+    const account = await this.accounts.get(id);
+    if (!account || account.provider !== "gemini" || account.kind !== "oauth")
+      throw new Error("Gemini OAuth account not found.");
+    if (!account.email) throw new Error("Account identity is unknown; sign-in cannot safely replace this account.");
+  }
+
+  async reauthorizeGemini(id: string, authenticated: GeminiSubscriptionCredentials): Promise<AccountSummary> {
+    if (!authenticated.email) throw new Error("Signed-in account identity is unknown.");
+    await this.hub.replaceAccountAuthorization(id, async () => {
+      const account = await this.accounts.replaceGeminiAuthorization(id, authenticated.email!, {
+        kind: "oauth", accessToken: authenticated.accessToken, refreshToken: authenticated.refreshToken,
+        expiresAt: authenticated.expiresAt, clientId: authenticated.clientId,
+      });
+      const quota = this.quotas.get(id);
+      // A verified replacement supersedes only the old credential's expiry.
+      // Subscription, quota and other provider access denials remain in force.
+      if (quota.error?.startsWith("[OAUTH_REAUTH_REQUIRED]") && !quota.error.includes("SUBSCRIPTION_REQUIRED"))
+        this.quotas.put({...quota, error: null});
+      return account;
+    });
+    this.onAccountsChanged();
+    const summary = (await this.list()).find(account => account.id === id);
+    if (!summary) throw new Error("Reauthorized Gemini account could not be read back.");
+    return summary;
+  }
+
   async list(): Promise<AccountSummary[]> {
     return (await this.status()).accounts;
   }

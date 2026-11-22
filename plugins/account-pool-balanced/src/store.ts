@@ -292,6 +292,26 @@ export class AccountStore {
     return accountSecretSchema.parse(parsed);
   }
 
+  async replaceGeminiAuthorization(id: string, email: string, secret: AccountSecret): Promise<Account> {
+    return this.serialized(async () => {
+      const account = (await this.list()).find(account => account.id === id);
+      if (!account || account.provider !== "gemini" || account.kind !== "oauth")
+        throw new Error("Gemini OAuth account no longer exists.");
+      if (!account.email || account.email.toLowerCase() !== email.toLowerCase())
+        throw new Error("Signed in to a different account. Authorize the selected subscription.");
+      if (secret.kind !== "oauth") throw new Error("Gemini OAuth authorization is required.");
+      const previous = await this.readSecret(id);
+      try { await this.writeSecret(id, secret); }
+      catch (error) {
+        try { await this.writeSecret(id, previous); }
+        catch { throw new Error("Could not save or restore authorization. Check storage and sign in again."); }
+        throw error;
+      }
+      // Account metadata and quota/access errors are deliberately unchanged.
+      return account;
+    });
+  }
+
   async replaceClaudeAuthorization(
     id: string,
     identity: { email: string | null; accountUuid: string | null; subscriptionType: string | null; rateLimitTier: string | null },

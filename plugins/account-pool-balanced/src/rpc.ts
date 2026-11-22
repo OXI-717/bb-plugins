@@ -174,6 +174,10 @@ export const accountPoolRpcContract = defineRpcContract({
     input: codexLoginPollInputSchema,
     output: codexLoginCancelSchema,
   },
+  "geminiLogin.reauthorize": {
+    input: z.object({accountId: z.string().uuid()}).strict(),
+    output: geminiLoginStartSchema,
+  },
   "geminiLogin.start": {
     input: z.null(),
     output: geminiLoginStartSchema,
@@ -290,6 +294,11 @@ export function createRpcHandlers(
     "grokLogin.cancel": (input) => ({
       cancelled: grokLogin === undefined ? false : grokLogin.cancel(input),
     }),
+    "geminiLogin.reauthorize": async ({accountId}) => {
+      if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
+      await operations.validateGeminiReauthorization(accountId);
+      return geminiLogin.start(accountId);
+    },
     "geminiLogin.start": () => {
       if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
       return geminiLogin.start();

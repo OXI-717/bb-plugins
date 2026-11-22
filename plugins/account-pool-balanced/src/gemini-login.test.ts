@@ -82,3 +82,22 @@ describe("gemini sign-in", () => {
     login.dispose();
   });
 });
+
+it('binds reauthentication to the selected account and uses explicit isolated CLI directories',async()=>{
+ let added=0;let replaced=0;
+ const login=new GeminiLogin({
+  spawnLogin:(env,home,args)=>{
+   expect(args).toContain('--gemini-dir');expect(args[args.indexOf('--gemini-dir')+1]).toBe(home);
+   expect(args).not.toContain('--app-data-dir');
+   return spawn(process.execPath,['-e',loginScript(0,true)],{env,stdio:['ignore','pipe','pipe']});
+  },
+  addAccount:async()=>{added++;return account;},
+  reauthorizeAccount:async(id,authenticated)=>{expect(id).toBe(account.id);expect(authenticated.email).toBe('pool@example.com');replaced++;return account;},
+ });
+ try{
+  const started=await login.start(account.id);let result=await login.poll({sessionId:started.sessionId});
+  const deadline=Date.now()+2000;
+  while(result.status==='pending'&&Date.now()<deadline){await new Promise(r=>setTimeout(r,40));result=await login.poll({sessionId:started.sessionId});}
+  expect(result).toEqual({status:'complete',account});expect(added).toBe(0);expect(replaced).toBe(1);
+ }finally{login.dispose();}
+});

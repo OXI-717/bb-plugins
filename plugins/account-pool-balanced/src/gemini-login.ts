@@ -30,13 +30,15 @@ export interface GeminiLoginOptions {
   now?: () => number;
   command?: string;
   args?: string[];
-  spawnLogin?: (env: NodeJS.ProcessEnv, home: string) => LoginChild;
+  spawnLogin?: (env: NodeJS.ProcessEnv, home: string, args: string[]) => LoginChild;
+  reauthorizeAccount?: (id: string, authenticated: GeminiSubscriptionCredentials) => Promise<AccountSummary>;
   addAccount: (authenticated: GeminiSubscriptionCredentials) => Promise<AccountSummary>;
 }
 
 type LoginChild = ChildProcessByStdio<null, Readable, Readable>;
 
 interface LoginSession {
+  targetAccountId?: string;
   sessionId: string;
   child: LoginChild;
   authFile: string;
@@ -66,17 +68,20 @@ export class GeminiLogin {
     this.spawnLogin = options.spawnLogin;
   }
 
-  async start(): Promise<GeminiLoginStart> {
+  async start(targetAccountId?: string): Promise<GeminiLoginStart> {
+    if (targetAccountId !== undefined && !this.options.reauthorizeAccount) throw new Error("Gemini reauthorization is unavailable.");
     const home = await mkdtemp(path.join(tmpdir(), "gemini-login-"));
     const env: NodeJS.ProcessEnv = { ...process.env, ANTIGRAVITY_GEMINI_DIR: home };
     delete env.GEMINI_API_KEY;
     delete env.GOOGLE_GEMINI_BASE_URL;
     delete env.CLOUD_CODE_URL;
     delete env.DBUS_SESSION_BUS_ADDRESS;
+    const args = [...this.args, "--gemini-dir", home];
     const child = this.spawnLogin
-      ? this.spawnLogin(env, home)
-      : spawn(this.command, this.args, { env, stdio: ["ignore", "pipe", "pipe"] as const });
+      ? this.spawnLogin(env, home, args)
+      : spawn(this.command, args, { env, stdio: ["ignore", "pipe", "pipe"] as const });
     const session: LoginSession = {
+      targetAccountId,
       sessionId: randomUUID(),
       child,
       authFile: geminiAuthFilePath(home),
@@ -135,7 +140,9 @@ export class GeminiLogin {
         return { status: "error", message: "Gemini sign-in did not finish. Start again." };
       }
       const authenticated = await importGeminiCredentials(session.authFile);
-      const account = await this.options.addAccount(authenticated);
+      const account = session.targetAccountId !== undefined
+        ? await this.options.reauthorizeAccount!(session.targetAccountId, authenticated)
+        : await this.options.addAccount(authenticated);
       await this.disposeSession(session);
       return { status: "complete", account };
     } catch {

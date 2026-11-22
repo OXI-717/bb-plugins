@@ -1398,11 +1398,14 @@ function AccountPoolSettings() {
       setPastedCode("");
     });
   }
-  async function startGemini(): Promise<void> {
+  async function startGemini(targetAccountId?: string): Promise<void> {
+    if (geminiStep) void rpc.call("geminiLogin.cancel", {sessionId: geminiStep.sessionId}).catch(() => undefined);
+    setGeminiStep(null);
+    setReauthorizeAccountId(targetAccountId ?? null);
     setDialog({ kind: "gemini-login" });
     setLoginDone(null);
     await run("gemini-login", async () => {
-      setGeminiStep(await rpc.call("geminiLogin.start", null));
+      setGeminiStep(targetAccountId ? await rpc.call("geminiLogin.reauthorize", {accountId: targetAccountId}) : await rpc.call("geminiLogin.start", null));
     });
   }
   async function startCodex(): Promise<void> {
@@ -2081,7 +2084,7 @@ function AccountPoolSettings() {
             }
             close={closeDialog}
             pending={pending !== null}
-            reauthorize={() => void startClaude(selectedAccount.id)}
+            reauthorize={() => void (selectedAccount.provider === "gemini" ? startGemini(selectedAccount.id) : startClaude(selectedAccount.id))}
             act={(action) => void accountAction(selectedAccount, action)}
           />
         ) : null}
@@ -2419,6 +2422,9 @@ function AccountPoolSettings() {
         {dialog?.kind === "gemini-login" ? (
           <LoginDialog
             provider="gemini"
+            reauthorizing={reauthorizeAccountId === null ? null : status?.accounts.find(account => account.id === reauthorizeAccountId)?.email ?? "this account"}
+            openAccountUrl={reauthorizeAccountId === null ? undefined : url => void openBrowser(reauthorizeAccountId, url)}
+            browserNotice={browserNotice?.accountId === reauthorizeAccountId ? browserNotice.text : null}
             loginStep={null}
             codexStep={null}
             geminiStep={geminiStep}
@@ -2426,12 +2432,12 @@ function AccountPoolSettings() {
             pending={pending !== null}
             pastedCode=""
             countdown={countdown}
-            error={error}
+            error={error ?? (browserError?.accountId === reauthorizeAccountId ? browserError.text : null)}
             close={closeDialog}
             openUrl={navigate.openUrl}
             setPastedCode={() => {}}
             complete={() => {}}
-            restart={() => void startGemini()}
+            restart={() => void startGemini(reauthorizeAccountId ?? undefined)}
           />
         ) : null}
       </Dialog>
@@ -2540,9 +2546,9 @@ function AccountDialog({
               <DropdownMenuItem disabled={pending} onSelect={() => act("toggle")}>
                 {account.enabled ? "Disable" : "Enable"}
               </DropdownMenuItem>
-              {account.provider === "claude" && account.kind === "oauth" && (
+              {(account.provider === "claude" || account.provider === "gemini") && account.kind === "oauth" && (
                 <DropdownMenuItem disabled={pending || projectsUnsaved || quotaUnsaved || emailUnsaved} onSelect={reauthorize}>
-                  Reauthorize
+                  {account.provider === "gemini" ? "Sign in again" : "Reauthorize"}
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />
@@ -2577,7 +2583,11 @@ function AccountDialog({
         </div>}
         {browserNotice === null ? null : <p role="status" className="pool-settings-help">{browserNotice}</p>}
       </section>
-      {account.error&&<p role="alert" className="text-sm text-destructive-text">{account.error}</p>}
+      {account.error&&<p role="alert" className="text-sm text-destructive-text">{account.provider === "gemini"
+        ? account.error.includes("SUBSCRIPTION_REQUIRED")
+          ? "Gemini requires a valid subscription for this service. Signing in again does not grant a licence. Confirm access with the provider."
+          : "Gemini access could not be verified. Refresh quotas or sign in again; provider access restrictions may still apply."
+        : account.error}</p>}
       {refreshError === null ? null : <p role="alert" className="text-sm text-destructive-text">{refreshError}</p>}
       <div className="flex flex-wrap items-center gap-2">
         <SettingsBadge>{tier(account)}</SettingsBadge>
@@ -2807,7 +2817,7 @@ function LoginDialog({
         : codexStep?.verificationUri;
   return (
     <DialogFrame
-      title={reauthorizing === null ? `Sign in to ${name}` : "Reauthorize Claude"}
+      title={reauthorizing === null ? `Sign in to ${name}` : `Reauthorize ${name}`}
       className="sm:max-w-xl"
       footer={
         loginDone !== null ? (

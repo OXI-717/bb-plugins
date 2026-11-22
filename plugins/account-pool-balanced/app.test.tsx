@@ -1414,3 +1414,19 @@ it('distinguishes Gemini token types without claiming a per-model routing thresh
  expect(details.textContent).toContain('gemini-fixture · WTUS');
  expect(details.textContent).not.toContain('skip at');
 });
+
+it('offers Gemini sign-in again for the selected account without adding a replacement or exposing provider JSON',async()=>{
+ const selected=account({provider:'gemini',enabled:false,status:'error',error:'{"reason":"SUBSCRIPTION_REQUIRED","message":"synthetic-private-marker"}'});
+ const slot=render([selected],{
+  'geminiLogin.reauthorize':()=>({sessionId:'fixture-session',verificationUri:'https://accounts.google.com/device',userCode:null,expiresAt:Date.now()+600000,intervalMs:1000}),
+  'geminiLogin.poll':()=>({status:'pending'}),
+ });
+ fireEvent.click(await slot.findByRole('button',{name:`Open ${selected.label}`}));
+ expect(slot.getByText(/Gemini requires a valid subscription/)).toBeTruthy();
+ expect(slot.queryByText(/synthetic-private-marker/)).toBeNull();
+ fireEvent.pointerDown(slot.getByRole('button',{name:'More account actions'}),{button:0,ctrlKey:false});
+ fireEvent.click(await slot.findByRole('menuitem',{name:'Sign in again'}));
+ await slot.findByRole('dialog',{name:'Reauthorize Gemini'});
+ expect(slot.rpcCalls).toContainEqual({method:'geminiLogin.reauthorize',input:{accountId:selected.id}});
+ expect(slot.rpcCalls.some(call=>call.method==='geminiLogin.start'||call.method==='account.add')).toBe(false);
+});

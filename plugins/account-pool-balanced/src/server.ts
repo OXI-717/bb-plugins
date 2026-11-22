@@ -334,6 +334,7 @@ export function createAccountPoolPlugin(
       command: options.geminiLoginCommand,
       args: options.geminiLoginArgs,
       addAccount: (authenticated) => operations.addGeminiOAuth(authenticated),
+      reauthorizeAccount: (id, authenticated) => operations.reauthorizeGemini(id, authenticated),
     });
     if ((await accounts.list()).every((account) => !account.enabled)) {
       bb.status.needsConfiguration(

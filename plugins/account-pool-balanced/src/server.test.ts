@@ -9097,3 +9097,43 @@ describe("cached provider readiness", () => {
     expect(result.stdout).not.toContain("sk-account");
   });
 });
+
+describe('Gemini account reauthorization',()=>{
+ function fixtureLogin(email:string){
+  return `const fs=require('node:fs'),path=require('node:path');
+   const i=process.argv.indexOf('--gemini-dir');if(i<0)process.exit(2);
+   const dir=path.join(process.argv[i+1],'antigravity-cli');fs.mkdirSync(dir,{recursive:true});
+   process.stdout.write('Open https://accounts.google.com/device\\n');
+   setTimeout(()=>{fs.writeFileSync(path.join(dir,'antigravity-oauth-token'),JSON.stringify({token:{access_token:'synthetic-new-access',refresh_token:'synthetic-new-refresh',expiry:'2099-01-01T00:00:00Z'},id_token_email:${JSON.stringify(email)}}));process.exit(0);},50);`;
+ }
+ async function reauthFixture(email='fixture@example.com'){
+  return createFixture({upstreamUrl:'https://fixture.example',provider:'gemini',source:'import',options:{
+   importGeminiCredentials:async()=>({label:'Synthetic',email:'fixture@example.com',accessToken:'synthetic-old-access',refreshToken:'synthetic-old-refresh',expiresAt:Date.parse('2099-01-01T00:00:00Z'),clientId:'synthetic-client'}),
+   geminiLoginCommand:process.execPath,geminiLoginArgs:['-e',fixtureLogin(email),'--'],
+   fetch:async()=>Response.json({buckets:[{modelId:'gemini-fixture',remainingFraction:0.75}]}),
+  }});
+ }
+ async function complete(fixture:Fixture){
+  const started=await fixture.host.harness.behavior.callRpc('geminiLogin.reauthorize',{accountId:fixture.account.id}) as {sessionId:string};
+  let result:{status:string;message?:string}={status:'pending'};const end=Date.now()+2000;
+  while(result.status==='pending'&&Date.now()<end){await new Promise(r=>setTimeout(r,40));result=await fixture.host.harness.behavior.callRpc('geminiLogin.poll',{sessionId:started.sessionId}) as typeof result;}
+  return result;
+ }
+ it.each([[true,'SUBSCRIPTION_REQUIRED'],[false,'SUBSCRIPTION_REQUIRED'],[true,'[OAUTH_REAUTH_REQUIRED] expired credential'],[false,'[OAUTH_REAUTH_REQUIRED] expired credential']] as const)('updates existing authorization with enabled=%s and error=%s',async(enabled,error)=>{
+  const f=await reauthFixture();
+  if(!enabled)await f.host.harness.behavior.callRpc('account.disable',{id:f.account.id});
+  await f.host.harness.behavior.callRpc('account.setRole',{accountId:f.account.id,role:'reserve'});
+  await f.host.harness.behavior.callRpc('account.setPriority',{accountId:f.account.id,priority:7});
+  const accounts=new AccountStore(f.host.bb.storage.kv,path.join(f.dataDir,'plugins',f.host.bb.pluginId,'secrets','accounts'));
+  const before=await accounts.get(f.account.id);const quotas=new QuotaStore(f.host.bb.storage.database());
+  quotas.put({...quotas.get(f.account.id),error});const previousQuota=quotas.get(f.account.id);
+  expect((await complete(f)).status).toBe('complete');
+  expect(await accounts.list()).toHaveLength(1);expect(await accounts.get(f.account.id)).toEqual(before);expect(quotas.get(f.account.id)).toEqual({...previousQuota,error:error.startsWith('[OAUTH_REAUTH_REQUIRED]')?null:error});
+  expect((await accounts.readSecret(f.account.id)) as {accessToken:string}).toMatchObject({accessToken:'synthetic-new-access'});
+ });
+ it('rejects another identity without replacing credentials',async()=>{
+  const f=await reauthFixture('other@example.com');
+  const accounts=new AccountStore(f.host.bb.storage.kv,path.join(f.dataDir,'plugins',f.host.bb.pluginId,'secrets','accounts'));
+  const before=await accounts.readSecret(f.account.id);expect((await complete(f)).status).toBe('error');expect(await accounts.readSecret(f.account.id)).toEqual(before);expect(await accounts.list()).toHaveLength(1);
+ });
+});

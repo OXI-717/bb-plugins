@@ -293,3 +293,19 @@ it('persists display-only Gemini metadata while preserving account identity and 
  expect(reloaded?.geminiUsage).toEqual(usage);
  const {geminiUsage:_usage,...rest}=reloaded!;expect(rest).toEqual(before);
 });
+
+it('replaces Gemini authorization only for the same existing identity, retaining metadata',async()=>{
+ const dataDir=await mkdtemp(path.join(tmpdir(),'bb-gemini-reauth-'));
+ const host=createFakePluginHost({pluginId:'account-pool',dataDir});
+ cleanups.push(async()=>{await host.harness.lifecycle.dispose();await fs.rm(dataDir,{recursive:true,force:true});});
+ const store=new AccountStore(host.bb.storage.kv,path.join(dataDir,'secrets'));
+ const old={kind:'oauth' as const,accessToken:'synthetic-old',refreshToken:'synthetic-refresh',expiresAt:null};
+ const a=await store.add({provider:'gemini',kind:'oauth',label:'Synthetic',email:'fixture@example.com',accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:false,priority:7},old);
+ const fresh={...old,accessToken:'synthetic-new'};
+ await expect(store.replaceGeminiAuthorization(a.id,'other@example.com',fresh)).rejects.toThrow('different account');
+ expect(await store.readSecret(a.id)).toEqual(old);
+ await store.replaceGeminiAuthorization(a.id,'FIXTURE@example.com',fresh);
+ expect(await store.get(a.id)).toEqual(a);expect(await store.readSecret(a.id)).toEqual(fresh);
+ await store.remove(a.id);
+ await expect(store.replaceGeminiAuthorization(a.id,'fixture@example.com',fresh)).rejects.toThrow('no longer exists');
+});
