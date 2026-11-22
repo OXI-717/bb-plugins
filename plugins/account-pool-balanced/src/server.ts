@@ -852,14 +852,18 @@ export function createAccountPoolPlugin(
         if (timer !== null) clearTimeout(timer);
       }
     });
-    for(const provider of ADDITIONAL_BUDGET_PROVIDERS)bb.http.route('GET',`/budget/${provider}`,async context=>
-      hub.providerBudget(context.req.raw,provider,await routing.isProviderEnabled(provider),threadId=>routing.isBypassed(threadId)),{auth:'none'});
-    bb.http.route("GET", "/budget/codex", async context => hub.codexBudget(
-      context.req.raw, await routing.isProviderEnabled("codex"), threadId => routing.isBypassed(threadId),
-    ), { auth: "none" });
+    const budgetUnavailable = () => Response.json({error:'Pool budget evidence unavailable.'},{status:503,headers:{'cache-control':'no-store'}});
+    for(const provider of ADDITIONAL_BUDGET_PROVIDERS)bb.http.route('GET',`/budget/${provider}`,async context=>{
+      try {return await hub.providerBudget(context.req.raw,provider,await routing.isProviderEnabled(provider),threadId=>routing.isBypassed(threadId));}
+      catch {return budgetUnavailable();}
+    },{auth:'none'});
+    bb.http.route("GET", "/budget/codex", async context => {
+      try {return await hub.codexBudget(context.req.raw, await routing.isProviderEnabled("codex"), threadId => routing.isBypassed(threadId));}
+      catch {return budgetUnavailable();}
+    }, { auth: "none" });
     bb.http.route("GET", "/budget/zai", async context => {
       try {return await hub.zaiBudget(context.req.raw,await routing.isProviderEnabled('zai'),threadId=>routing.isBypassed(threadId));}
-      catch {return Response.json({error:'Pool budget evidence unavailable.'},{status:503,headers:{'cache-control':'no-store'}});}
+      catch {return budgetUnavailable();}
     }, {auth:'none'});
     bb.http.route(
       "POST",
@@ -875,6 +879,7 @@ export function createAccountPoolPlugin(
     );
     for (const route of [
       "/v1/responses",
+      "/v1/responses/compact",
       "/v1/images/generations",
       "/v1/images/edits",
       "/v1/alpha/search",

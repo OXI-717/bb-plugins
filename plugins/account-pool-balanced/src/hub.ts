@@ -541,21 +541,24 @@ export class AccountPoolHub {
     account: Account,
     force: boolean,
   ): Promise<void> {
-    await this.assertNetworkAllowed(account.provider);
     const adapter = this.adapter(account.provider);
-    const route=await this.acquireRoute(account);
+    const interval = account.provider === "zai" ? ZAI_USAGE_REFRESH_INTERVAL_MS : DEFAULT_USAGE_REFRESH_INTERVAL_MS;
+    if (!force) {
+      if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) return;
+      const last = this.lastUsageRefreshAt.get(account.id);
+      if (last !== undefined && this.options.now() - last < interval) return;
+      const running = this.usageRefreshes.get(account.id);
+      if (running !== undefined) return running;
+    }
+    await this.assertNetworkAllowed(account.provider);
+    const route = await this.acquireRoute(account);
     if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) {
       if (force) throw new Error("Аккаунт занят запросом. Повторите обновление квот после его завершения.");
       return;
     }
     const now = this.options.now();
     const last = this.lastUsageRefreshAt.get(account.id);
-    if (
-      !force &&
-      last !== undefined &&
-      now - last < (account.provider === "zai" ? ZAI_USAGE_REFRESH_INTERVAL_MS : DEFAULT_USAGE_REFRESH_INTERVAL_MS)
-    )
-      return;
+    if (!force && last !== undefined && now - last < interval) return;
     const running = this.usageRefreshes.get(account.id);
     if (running !== undefined) return running;
     this.lastUsageRefreshAt.set(account.id, now);
@@ -1279,31 +1282,35 @@ export class AccountPoolHub {
 
   /** Read-only, project-bound evidence. No selection, quota refresh, credential read or model request. */
   async codexBudget(request: Request, routingEnabled: boolean, bypassed: (threadId: string) => Promise<boolean>): Promise<Response> {
-    const token = this.requestToken(request);
-    const context = await this.options.hubTokens.inspectContext?.(token);
     const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
-    if (!context) return reply({ error: 'Invalid pool token.' }, 401);
-    if (!context.projectId) return reply({ error: 'A project-bound pool client is required.' }, 403);
-    const expected = new URL(request.url).searchParams.get('projectId');
-    if (expected !== null && expected !== context.projectId) return reply({ error: 'Pool project binding mismatch.' }, 403);
-    const now = this.options.now();
-    let networkAllowed = true;
-    try { await this.assertNetworkAllowed('codex'); } catch { networkAllowed = false; }
-    const threadBypassed = context.threadId ? await bypassed(context.threadId) : false;
-    const routeReady = !context.accountScope && this.modelAdmissionOpen() && routingEnabled && networkAllowed && !threadBypassed;
-    const accounts = (await this.options.accounts.list()).filter(a => a.provider === 'codex' && inClientScope(a.id,context.accountScope) && projectTier(a, context.projectId) !== null);
-    const eligible = new Set(this.eligibleEntries('codex', context.projectId, accounts, 'other', now, context.purpose).eligible.map(({ account }) => account.id));
-    return reply({
-      schema: 'bb-account-pool/codex-budget/1', observedAt: now, maxAgeMs: CODEX_BUDGET_MAX_AGE_MS,
-      projectId: context.projectId,
-      ...(context.purpose ? {purpose:context.purpose} : {}),
-      route: { provider: 'codex', path: '/v1/responses', accepting: this.modelAdmissionOpen(), routingEnabled, networkAllowed, threadBypassed, ready: routeReady },
-      accounts: accounts.map(account => {
-        const quota = this.options.quotas.get(account.id);
-        const budget = codexBudgetQuota(quota, now);
-        return { accountId: account.id, eligible: routeReady && eligible.has(account.id), ...budget, heldUntil: quota.heldUntil, budgetReady: budget.budgetReady && (quota.heldUntil === null || quota.heldUntil <= now) };
-      }),
-    });
+    try {
+      const token = this.requestToken(request);
+      const context = await this.options.hubTokens.inspectContext?.(token);
+      if (!context) return reply({ error: 'Invalid pool token.' }, 401);
+      if (!context.projectId) return reply({ error: 'A project-bound pool client is required.' }, 403);
+      const expected = new URL(request.url).searchParams.get('projectId');
+      if (expected !== null && expected !== context.projectId) return reply({ error: 'Pool project binding mismatch.' }, 403);
+      const now = this.options.now();
+      let networkAllowed = true;
+      try { await this.assertNetworkAllowed('codex'); } catch { networkAllowed = false; }
+      const threadBypassed = context.threadId ? await bypassed(context.threadId) : false;
+      const routeReady = !context.accountScope && this.modelAdmissionOpen() && routingEnabled && networkAllowed && !threadBypassed;
+      const accounts = (await this.options.accounts.list()).filter(a => a.provider === 'codex' && inClientScope(a.id,context.accountScope) && projectTier(a, context.projectId) !== null);
+      const eligible = new Set(this.eligibleEntries('codex', context.projectId, accounts, 'other', now, context.purpose).eligible.map(({ account }) => account.id));
+      return reply({
+        schema: 'bb-account-pool/codex-budget/1', observedAt: now, maxAgeMs: CODEX_BUDGET_MAX_AGE_MS,
+        projectId: context.projectId,
+        ...(context.purpose ? {purpose:context.purpose} : {}),
+        route: { provider: 'codex', path: '/v1/responses', accepting: this.modelAdmissionOpen(), routingEnabled, networkAllowed, threadBypassed, ready: routeReady },
+        accounts: accounts.map(account => {
+          const quota = this.options.quotas.get(account.id);
+          const budget = codexBudgetQuota(quota, now);
+          return { accountId: account.id, eligible: routeReady && eligible.has(account.id), ...budget, heldUntil: quota.heldUntil, budgetReady: budget.budgetReady && (quota.heldUntil === null || quota.heldUntil <= now) };
+        }),
+      });
+    } catch {
+      return reply({ error: 'Pool budget evidence unavailable.' }, 503);
+    }
   }
 
   /** Cached ZAI proof using the same project/purpose admission as inference. */

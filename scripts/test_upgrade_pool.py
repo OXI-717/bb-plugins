@@ -345,3 +345,45 @@ class DurableManagementTests(unittest.TestCase):
                 self.assertEqual(u.main(),0)
             self.assertEqual(issued,['generation-0','generation-1'])
             self.assertEqual(revoked,issued)
+
+    def test_check_and_wait_idle_refuse_locked_pool_status_with_clear_error(self):
+        source = {'history': [{'version': 'b' * 40}]}
+        args = argparse.Namespace(check=True, version=None, interrupt_now=False)
+        with patch.object(u, 'installed', return_value={'version': '1.0.1'}), patch.object(u, 'source_info', return_value=source), patch.object(u, 'release_target', return_value=('1.0.1', 'b' * 40)), patch.object(u, 'bb', return_value={'management': 'locked'}):
+            with self.assertRaises(u.UpgradeError) as check_error:
+                u.perform(args, Path('/unused'), Path('/unused'), lambda _: None)
+            self.assertIn('--operator-key-file', str(check_error.exception))
+            self.assertIn('--grant-file', str(check_error.exception))
+            with self.assertRaises(u.UpgradeError) as idle_error:
+                u.wait_idle(lambda _: None, offer_interrupt=False)
+            self.assertIn('locked', str(idle_error.exception).lower())
+
+    def test_missing_or_symlink_explicit_management_files_fail_closed_in_main(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data = root / 'plugins' / u.PLUGIN
+            data.mkdir(parents=True)
+            (data / 'data.db').touch()
+            real_key = root / 'operator.env'
+            real_key.write_text('POOL_MANAGEMENT_KEY=' + 'K' * 43 + '\n')
+            real_key.chmod(0o600)
+            key_link = root / 'operator-link.env'
+            key_link.symlink_to(real_key)
+            real_grant = root / 'grant.json'
+            real_grant.write_text(json.dumps({'token': 'G' * 43}))
+            real_grant.chmod(0o600)
+            grant_link = root / 'grant-link.json'
+            grant_link.symlink_to(real_grant)
+            cases = [
+                (['upgrade', '--check', '--operator-key-file', str(root / 'missing.env')], 'not found'),
+                (['upgrade', '--check', '--operator-key-file', str(key_link)], 'Unsafe'),
+                (['upgrade', '--check', '--grant-file', str(root / 'missing.json')], 'not found'),
+                (['upgrade', '--check', '--grant-file', str(grant_link)], 'Unsafe'),
+            ]
+            for argv, expected in cases:
+                with self.subTest(argv=argv):
+                    stderr = io.StringIO()
+                    with patch.object(u.sys, 'argv', argv), patch.object(u, 'bb', return_value={'dataDir': temp}), patch.object(u, 'perform') as perform, patch.dict(u.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stderr(stderr):
+                        self.assertEqual(u.main(), 1)
+                    perform.assert_not_called()
+                    self.assertIn(expected, stderr.getvalue())
