@@ -13,6 +13,8 @@ An independent BB inventory and management-entry plugin. No BB fork or patched d
 
 The table puts blocked tasks and failed executions first. Needs attention includes missing tasks, connection problems, stale data and tasks without live monitoring. Paused schedules have their own view; a previous failure remains visible even when paused. An enabled schedule is not proof of a successful execution.
 
+Verified one-off systemd invocations appear in **Разовые исполнения** instead of the current schedules view. Their run history is retained, and unresolved failures remain visible in **Требуют внимания**.
+
 Create automation selects personal/team ownership and BB/local/server execution, then opens BB's native composer inside the panel with the corresponding setup request and a separate draft for each destination/ownership. Nothing is executed until the user sends that request. Diagnose and Edit use the same explicit handoff to the original scheduler. Optional local/server integrations require their creation skills or clients to be installed; the agent checks availability.
 
 Schedules are human-readable with timezone context. Next execution is shown only when supplied by the scheduler. An overdue indication requires a fresh source and a missed supplied next-run time beyond the source freshness window; it is not inferred from incomplete history. Execution history is compact; source observations are distinguished from execution timestamps. Technical data is expandable.

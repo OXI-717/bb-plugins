@@ -176,6 +176,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
       label: "Удалённые из источника",
       count: filteredTasks.filter((t) => t.missing).length,
     },
+    { id: "executions", label: "Разовые исполнения", count: filteredTasks.filter(t => category(t) === "executions").length },
     { id: "completed", label: "Завершённые", count: filteredTasks.filter(t => category(t) === "completed").length },
     { id: "reviewed", label: "Разобраны", count: filteredTasks.filter(t => ["Разобрано", "Устранено"].includes(states.get(t.key)!.label)).length },
     { id: "archive", label: "Архив источников", count: archiveTasks.length },
@@ -185,7 +186,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
     .filter(
       (t) =>
         !filters.state || filters.state === "archive" ||
-        (["current", "completed", "registry"].includes(filters.state)
+        (["current", "completed", "executions", "registry"].includes(filters.state)
           ? category(t) === filters.state && (filters.state !== "registry" || t.state === "blocked")
           : filters.state === "reviewed"
           ? ["Разобрано", "Устранено"].includes(states.get(t.key)!.label)
@@ -250,7 +251,7 @@ export function CatalogPage({ subPath = "" }: { subPath?: string }) {
           </details>
           {unavailableSources.map(s => <p className="text-sm text-destructive" key={s.id}>Проверьте подключение: {sourceLabel(s.name)}. Свежие сведения не получены; статусы ниже могут устареть.</p>)}
         </section>}
-        <p className="text-sm text-muted-foreground">{filters.state === "current" ? "Текущие задачи. Откройте название, чтобы посмотреть результаты или выбрать действие." : filters.state === "unmonitored" ? "Источник не подтвердил текущее состояние этих задач. Сохранённая история доступна в карточке; отсутствие живого состояния само по себе не означает сбой." : filters.state === "completed" ? "Одноразовые задачи уже выполнены; новые запуски не ожидаются." : filters.state === "registry" ? "Записи, которые нужно добавить или обновить, и источники без свежих данных." : filters.state === "missing" ? "Задачи отсутствуют в последнем списке планировщика. Сохранена только их история." : "Выберите задачу, чтобы посмотреть результаты и доступные действия."}</p>
+        <p className="text-sm text-muted-foreground">{filters.state === "current" ? "Текущие задачи. Откройте название, чтобы посмотреть результаты или выбрать действие." : filters.state === "unmonitored" ? "Источник не подтвердил текущее состояние этих задач. Сохранённая история доступна в карточке; отсутствие живого состояния само по себе не означает сбой." : filters.state === "executions" ? "Разовые запуски systemd и их результаты." : filters.state === "completed" ? "Одноразовые задачи уже выполнены; новые запуски не ожидаются." : filters.state === "registry" ? "Записи, которые нужно добавить или обновить, и источники без свежих данных." : filters.state === "missing" ? "Задачи отсутствуют в последнем списке планировщика. Сохранена только их история." : "Выберите задачу, чтобы посмотреть результаты и доступные действия."}</p>
         {refreshMessage && <p role="status" className="text-xs text-muted-foreground">{refreshMessage}</p>}
         {creating && (
           <section
