@@ -23,13 +23,127 @@ import {
   catalogDetailSchema,
 } from "./catalog-types.js";
 
+export const MAX_RUNS_PER_TASK = 500;
 export const catalogMigration = `
 CREATE TABLE automation_catalog_sources (id TEXT PRIMARY KEY, checked_at INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE automation_catalog_tasks (key TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES automation_catalog_sources(id), missing INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL);
 CREATE INDEX automation_catalog_tasks_source ON automation_catalog_tasks(source_id);
-CREATE TABLE automation_catalog_runs (task_key TEXT NOT NULL REFERENCES automation_catalog_tasks(key), id TEXT NOT NULL, started_at INTEGER, data TEXT NOT NULL, PRIMARY KEY(task_key, id));
-CREATE INDEX automation_catalog_runs_time ON automation_catalog_runs(task_key, started_at DESC, id);
+CREATE TABLE automation_catalog_runs (task_key TEXT NOT NULL REFERENCES automation_catalog_tasks(key), id TEXT NOT NULL, started_at INTEGER, evidence TEXT NOT NULL DEFAULT 'execution', sort_at INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL, PRIMARY KEY(task_key, id));
+CREATE INDEX automation_catalog_runs_sort ON automation_catalog_runs(task_key, sort_at DESC, id DESC);
+CREATE INDEX automation_catalog_runs_evidence_sort ON automation_catalog_runs(task_key, evidence, sort_at DESC, id DESC);
 `;
+const LAST_RUN_SUBQUERY = `CASE
+  WHEN json_extract(automation_catalog_tasks.data, '$.executionId') IS NOT NULL THEN (
+    SELECT data FROM automation_catalog_runs
+    WHERE task_key = automation_catalog_tasks.key
+      AND id = json_extract(automation_catalog_tasks.data, '$.executionId')
+      AND evidence = 'execution'
+    LIMIT 1
+  )
+  ELSE (
+    SELECT data FROM automation_catalog_runs
+    WHERE task_key = automation_catalog_tasks.key
+      AND evidence = 'execution'
+    ORDER BY sort_at DESC, id DESC
+    LIMIT 1
+  )
+END`;
+export function pruneTaskRuns(
+  db: Db,
+  taskKeyValue: string,
+  executionId: string | null,
+  maxRunsPerTask = MAX_RUNS_PER_TASK,
+): number {
+  const overflow = db
+    .prepare(
+      "SELECT 1 FROM automation_catalog_runs WHERE task_key = ? ORDER BY sort_at DESC, id DESC LIMIT 1 OFFSET ?",
+    )
+    .get(taskKeyValue, maxRunsPerTask);
+  if (!overflow) return 0;
+  const latestExecution = db
+    .prepare(
+      "SELECT id FROM automation_catalog_runs WHERE task_key = ? AND evidence = 'execution' ORDER BY sort_at DESC, id DESC LIMIT 1",
+    )
+    .get(taskKeyValue) as { id: string } | undefined;
+  const latestExecutionId = latestExecution?.id ?? null;
+  const result = db
+    .prepare(
+      `DELETE FROM automation_catalog_runs
+       WHERE task_key = ?
+         AND id NOT IN (
+           SELECT id FROM automation_catalog_runs
+           WHERE task_key = ?
+           ORDER BY sort_at DESC, id DESC
+           LIMIT ?
+         )
+         AND (? IS NULL OR id <> ?)
+         AND (? IS NULL OR id <> ?)`,
+    )
+    .run(
+      taskKeyValue,
+      taskKeyValue,
+      maxRunsPerTask,
+      executionId,
+      executionId,
+      latestExecutionId,
+      latestExecutionId,
+    );
+  return result.changes;
+}
+export function migrateCatalogRunsIndex(
+  db: Db,
+  maxRunsPerTask = MAX_RUNS_PER_TASK,
+): boolean {
+  const columns = new Set(
+    (
+      db
+        .prepare("PRAGMA table_info(automation_catalog_runs)")
+        .all() as Array<{ name: string }>
+    ).map((column) => column.name),
+  );
+  let altered = false;
+  if (!columns.has("evidence")) {
+    db.exec(
+      "ALTER TABLE automation_catalog_runs ADD COLUMN evidence TEXT NOT NULL DEFAULT 'execution'",
+    );
+    altered = true;
+  }
+  if (!columns.has("sort_at")) {
+    db.exec(
+      "ALTER TABLE automation_catalog_runs ADD COLUMN sort_at INTEGER NOT NULL DEFAULT 0",
+    );
+    altered = true;
+  }
+  if (altered) {
+    db.exec(
+      "UPDATE automation_catalog_runs SET evidence = COALESCE(json_extract(data, '$.evidence'), 'execution'), sort_at = COALESCE(started_at, json_extract(data, '$.finishedAt'), json_extract(data, '$.observedAt'), 0)",
+    );
+  }
+  db.exec("DROP INDEX IF EXISTS automation_catalog_runs_time");
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS automation_catalog_runs_sort ON automation_catalog_runs(task_key, sort_at DESC, id DESC)",
+  );
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS automation_catalog_runs_evidence_sort ON automation_catalog_runs(task_key, evidence, sort_at DESC, id DESC)",
+  );
+  const overflowing = db
+    .prepare(
+      "SELECT task_key FROM automation_catalog_runs GROUP BY task_key HAVING count(*) > ?",
+    )
+    .all(maxRunsPerTask) as Array<{ task_key: string }>;
+  let pruned = false;
+  for (const { task_key } of overflowing) {
+    const row = db
+      .prepare(
+        "SELECT json_extract(data, '$.executionId') AS execution_id FROM automation_catalog_tasks WHERE key = ?",
+      )
+      .get(task_key) as { execution_id: string | null } | undefined;
+    if (pruneTaskRuns(db, task_key, row?.execution_id ?? null, maxRunsPerTask) > 0) {
+      pruned = true;
+    }
+  }
+  return altered || pruned;
+}
 const stored = z.object({ data: z.string() });
 const execFileAsync = promisify(execFile);
 function envNodeEntrypoint(path: string) {
@@ -70,7 +184,22 @@ function sameLocalServer(configured?: string, actual?: string) {
       && !selected.search && !selected.hash;
   } catch { return false; }
 }
-export function createCatalog(db: Db) {
+export function createCatalog(db: Db, options?: { maxRunsPerTask?: number }) {
+  const maxRunsPerTask = options?.maxRunsPerTask ?? MAX_RUNS_PER_TASK;
+  function decodeTaskRow(row: unknown) {
+    return {
+      ...decode(row, catalogEntrySchema),
+      missing: z.object({ missing: z.number() }).parse(row).missing === 1,
+      lastRun: (() => {
+        const raw = z
+          .object({ last_run: z.string().nullable() })
+          .parse(row).last_run;
+        return raw === null
+          ? null
+          : catalogRunSchema.parse(JSON.parse(raw));
+      })(),
+    };
+  }
   function source(id: string) {
     return decode(
       db
@@ -211,8 +340,10 @@ export function createCatalog(db: Db) {
         db.prepare(
           "UPDATE automation_catalog_tasks SET missing = 1 WHERE source_id = ?",
         ).run(status.id);
+        const executionIdByKey = new Map<string, string | null>();
         for (const task of snapshot.tasks) {
           const key = identityKey(task.host, task.id);
+          executionIdByKey.set(key, task.executionId ?? null);
           const previousTask = db.prepare("SELECT data FROM automation_catalog_tasks WHERE key = ?").get(key);
           const review = previousTask ? decode(previousTask, catalogEntrySchema).review : null;
           const value = {
@@ -227,6 +358,7 @@ export function createCatalog(db: Db) {
             "INSERT INTO automation_catalog_tasks VALUES (?, ?, 0, ?) ON CONFLICT(key) DO UPDATE SET missing=0, data=excluded.data",
           ).run(key, status.id, JSON.stringify(value));
         }
+        const touchedRunTasks = new Set<string>();
         for (const run of snapshot.runs) {
           const key = identityKey(run.host, run.taskId);
           const previousRun = db
@@ -244,13 +376,32 @@ export function createCatalog(db: Db) {
             )
               continue;
           }
+          const sortAt = run.startedAt ?? run.finishedAt ?? run.observedAt ?? 0;
           db.prepare(
-            "INSERT INTO automation_catalog_runs VALUES (?, ?, ?, ?) ON CONFLICT(task_key,id) DO UPDATE SET started_at=excluded.started_at, data=excluded.data",
-          ).run(key, run.id, run.startedAt, JSON.stringify(run));
+            "INSERT INTO automation_catalog_runs (task_key, id, started_at, evidence, sort_at, data) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(task_key,id) DO UPDATE SET started_at=excluded.started_at, evidence=excluded.evidence, sort_at=excluded.sort_at, data=excluded.data",
+          ).run(key, run.id, run.startedAt, run.evidence, sortAt, JSON.stringify(run));
+          touchedRunTasks.add(key);
+        }
+        for (const key of touchedRunTasks) {
+          pruneTaskRuns(db, key, executionIdByKey.get(key) ?? null, maxRunsPerTask);
         }
         // Once the observed incident changes, an old review must never revive.
-        for (const task of this.list().tasks) {
-          if (task.sourceId === status.id && task.review && task.review.fingerprint !== attentionFingerprint(task)) {
+        const reviewedRows = db
+          .prepare(
+            `SELECT data, missing, ${LAST_RUN_SUBQUERY} AS last_run
+             FROM automation_catalog_tasks
+             WHERE source_id = ?
+               AND json_extract(data, '$.review') IS NOT NULL
+               AND EXISTS (
+                 SELECT 1 FROM automation_catalog_sources AS source
+                 WHERE source.id = automation_catalog_tasks.source_id
+                   AND (json_extract(source.data, '$.taskIds') IS NULL OR json_extract(automation_catalog_tasks.data, '$.id') IN (SELECT value FROM json_each(source.data, '$.taskIds')))
+               )`,
+          )
+          .all(status.id);
+        for (const row of reviewedRows) {
+          const task = decodeTaskRow(row);
+          if (task.review && task.review.fingerprint !== attentionFingerprint(task)) {
             db.prepare("UPDATE automation_catalog_tasks SET data = ? WHERE key = ?").run(
               JSON.stringify({ ...entry(task.key), review: null }), task.key);
           }
@@ -261,21 +412,17 @@ export function createCatalog(db: Db) {
     list() {
       const tasks = db
         .prepare(
-          "SELECT data, missing, (SELECT data FROM automation_catalog_runs WHERE task_key = automation_catalog_tasks.key AND COALESCE(json_extract(data, '$.evidence'), 'execution') = 'execution' AND (json_extract(automation_catalog_tasks.data, '$.executionId') IS NULL OR id = json_extract(automation_catalog_tasks.data, '$.executionId')) ORDER BY COALESCE(started_at, json_extract(data, '$.finishedAt'), json_extract(data, '$.observedAt'), 0) DESC, id DESC LIMIT 1) AS last_run FROM automation_catalog_tasks WHERE EXISTS (SELECT 1 FROM automation_catalog_sources AS source WHERE source.id = automation_catalog_tasks.source_id AND (json_extract(source.data, '$.taskIds') IS NULL OR json_extract(automation_catalog_tasks.data, '$.id') IN (SELECT value FROM json_each(source.data, '$.taskIds')))) ORDER BY key",
+          `SELECT data, missing, ${LAST_RUN_SUBQUERY} AS last_run
+           FROM automation_catalog_tasks
+           WHERE EXISTS (
+             SELECT 1 FROM automation_catalog_sources AS source
+             WHERE source.id = automation_catalog_tasks.source_id
+               AND (json_extract(source.data, '$.taskIds') IS NULL OR json_extract(automation_catalog_tasks.data, '$.id') IN (SELECT value FROM json_each(source.data, '$.taskIds')))
+           )
+           ORDER BY key`,
         )
         .all()
-        .map((row) => ({
-          ...decode(row, catalogEntrySchema),
-          missing: z.object({ missing: z.number() }).parse(row).missing === 1,
-          lastRun: (() => {
-            const raw = z
-              .object({ last_run: z.string().nullable() })
-              .parse(row).last_run;
-            return raw === null
-              ? null
-              : catalogRunSchema.parse(JSON.parse(raw));
-          })(),
-        }));
+        .map(decodeTaskRow);
       const sources = db
         .prepare("SELECT data FROM automation_catalog_sources ORDER BY id")
         .all()
@@ -287,7 +434,7 @@ export function createCatalog(db: Db) {
       const task = entry(key);
       const runs = db
         .prepare(
-          "SELECT data FROM automation_catalog_runs WHERE task_key = ? ORDER BY COALESCE(started_at, json_extract(data, '$.finishedAt'), json_extract(data, '$.observedAt'), 0) DESC, id DESC LIMIT ? OFFSET ?",
+          "SELECT data FROM automation_catalog_runs WHERE task_key = ? ORDER BY sort_at DESC, id DESC LIMIT ? OFFSET ?",
         )
         .all(key, limit, offset)
         .map((row) => decode(row, catalogRunSchema));
@@ -300,11 +447,17 @@ export function createCatalog(db: Db) {
             )
             .get(key),
         );
-      const latest = db
-        .prepare(
-          "SELECT data FROM automation_catalog_runs WHERE task_key = ? AND COALESCE(json_extract(data, '$.evidence'), 'execution') = 'execution' AND (? IS NULL OR id = ?) ORDER BY COALESCE(started_at, json_extract(data, '$.finishedAt'), json_extract(data, '$.observedAt'), 0) DESC, id DESC LIMIT 1",
-        )
-        .get(key, task.executionId ?? null, task.executionId ?? null);
+      const latest = task.executionId
+        ? db
+            .prepare(
+              "SELECT data FROM automation_catalog_runs WHERE task_key = ? AND id = ? AND evidence = 'execution' LIMIT 1",
+            )
+            .get(key, task.executionId)
+        : db
+            .prepare(
+              "SELECT data FROM automation_catalog_runs WHERE task_key = ? AND evidence = 'execution' ORDER BY sort_at DESC, id DESC LIMIT 1",
+            )
+            .get(key);
       return catalogDetailSchema.parse({
         task: {
           ...task,
