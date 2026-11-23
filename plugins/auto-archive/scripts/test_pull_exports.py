@@ -247,5 +247,28 @@ class PullExportsTests(unittest.TestCase):
             self.assertTrue(arc.is_file())
             self.assertTrue(sha.is_file())
 
+    def test_refuses_destination_outside_required_mount(self) -> None:
+        mounts = [Path(m) for m in ("/proc", "/dev", "/sys") if os.path.ismount(m)]
+        if not mounts:
+            self.skipTest("no well-known mount point available on this OS")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src"
+            dst = Path(tmp) / "dst"
+            src.mkdir()
+            dst.mkdir()
+            arc, _ = make_bundle(src, "2026-08", "thr_wrong_disk", [])
+            for candidate in (dst, Path(tmp) / "dst-link"):
+                if candidate.name == "dst-link":
+                    candidate.symlink_to(dst, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, "not on the required volume"):
+                    pull_exports.pull_and_verify(
+                        source=str(src),
+                        dest_dir=candidate,
+                        require_mount_root=str(mounts[0]),
+                        delete_remote=True,
+                    )
+            self.assertTrue(arc.is_file())
+            self.assertFalse((dst / "2026-08").exists())
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,17 @@ def check_destination_mounted(
             raise RuntimeError(f"Required external volume is not mounted: {mount_path}")
     if not dest_dir.exists() or not dest_dir.is_dir():
         raise RuntimeError(f"Destination directory does not exist: {dest_dir}")
+    if require_mount_root:
+        # The destination (after resolving symlinks) must live on that exact
+        # mount: its nearest enclosing mount point has to be the required root.
+        mount_real = Path(require_mount_root).resolve()
+        enclosing = dest_dir.resolve()
+        while not os.path.ismount(enclosing):
+            enclosing = enclosing.parent
+        if enclosing != mount_real:
+            raise RuntimeError(
+                f"Destination {dest_dir} is not on the required volume {mount_real}"
+            )
     if not os.access(dest_dir, os.W_OK):
         raise RuntimeError(f"Destination directory is not writable: {dest_dir}")
     if require_sentinel:
