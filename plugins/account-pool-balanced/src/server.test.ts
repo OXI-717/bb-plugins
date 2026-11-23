@@ -9167,6 +9167,27 @@ describe('Gemini account reauthorization',()=>{
   await f.host.harness.behavior.callRpc('account.refreshUsage',{accountId:f.account.id});
   expect(tokens).toBe(1);expect(quotasCalled).toBe(2);expect(quotas.get(f.account.id).error).toBeNull();
  });
+ it.each(['http403','invalid-json','no-quota'] as const)('keeps denial during and after token renewal when quota is %s',async failure=>{
+  let checking=false;let calls=0;let reached!:()=>void;let release!:()=>void;
+  const waiting=new Promise<void>(r=>{reached=r;});const barrier=new Promise<void>(r=>{release=r;});
+  const f=await reauthFixture('fixture@example.com',async(url)=>{
+   if(!checking)return Response.json({buckets:[{remainingFraction:0.75}]});
+   if(String(url).endsWith('/token'))return Response.json({access_token:'synthetic-refreshed-access',expires_in:3600});
+   calls++;if(calls===1)return new Response(null,{status:401});
+   reached();await barrier;
+   return failure==='http403'?new Response(null,{status:403}):failure==='invalid-json'?new Response('invalid'):Response.json({buckets:[]});
+  });
+  const quotas=new QuotaStore(f.host.bb.storage.database());
+  const denial=JSON.stringify({error:{code:403,status:'PERMISSION_DENIED',details:[{reason:'SUBSCRIPTION_REQUIRED'}]}});
+  quotas.put({...quotas.get(f.account.id),error:denial});expect((await complete(f)).status).toBe('complete');checking=true;
+  const result=f.host.harness.behavior.callRpc('account.refreshUsage',{accountId:f.account.id}).then(value=>({value,error:null}),error=>({value:null,error}));
+  await waiting;const during=quotas.get(f.account.id).error;
+  const status=await f.host.harness.behavior.callRpc('status.get',null) as {accounts:AccountSummary[]};
+  release();const finished=await result;
+  expect(during).toBe(denial);expect(status.accounts.find(a=>a.id===f.account.id)?.eligible).toBe(false);
+  expect(finished.error).toBeTruthy();expect(quotas.get(f.account.id).error).toBe(denial);
+  const after=await f.host.harness.behavior.callRpc('status.get',null) as {accounts:AccountSummary[]};expect(after.accounts.find(a=>a.id===f.account.id)?.eligible).toBe(false);
+ });
  it.each(['http403','http500','invalid-json','no-quota'] as const)('retains the Gemini denial and eligibility on %s',async failure=>{
   let checking=false;let calls=0;
   const f=await reauthFixture('fixture@example.com',async()=>{

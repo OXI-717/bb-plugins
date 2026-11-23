@@ -1401,7 +1401,7 @@ export class AccountPoolHub {
               });
               refreshObserved("succeeded");
               this.refreshBackoffs.delete(account.id);
-              if (result.refreshed) {
+              if (result.refreshed && !retryGeminiQuota) {
                 const quota = this.options.quotas.get(account.id);
                 this.options.quotas.put({ ...quota, error: null });
               }
