@@ -14,21 +14,36 @@ export function EgressControl({accountId,provider,state,pending,error,save}:{
  const ref=state?.bindings[accountId];
  const supported=provider==='claude'||provider==='codex';
  const selected=state?.profiles.find(p=>p.id===ref?.id&&p.version===ref?.version);
+ const latestProfiles = new Map<string, Snapshot['profiles'][number]>();
+ for (const profile of state?.profiles ?? []) {
+   const latest = latestProfiles.get(profile.id);
+   if (!latest || profile.version > latest.version) latestProfiles.set(profile.id, profile);
+ }
+ const latestSelected = ref && latestProfiles.get(ref.id);
  return <section className="pool-settings-section">
    <label className="pool-settings-field"><span>Выходной профиль</span>
      <select className="pool-settings-control pool-settings-wide" aria-label="Выходной профиль" disabled={!state||pending||!supported}
-       value={ref?`${ref.id}:${ref.version}`:''} onChange={event=>{
-         const profile=state?.profiles.find(p=>`${p.id}:${p.version}`===event.target.value);
-         save(profile?{id:profile.id,version:profile.version}:null);
+       value={latestSelected?.id ?? ''} onChange={event=>{
+         const {value} = event.currentTarget;
+         if (value === '') {
+           save(null);
+           return;
+         }
+         const profile = latestProfiles.get(value);
+         if (profile) save({id:profile.id,version:profile.version});
        }}>
        <option value="">Текущий маршрут Pooler</option>
-       {state?.profiles.map(p=>{
-         const key=`${p.id}:${p.version}`;
-         return <option key={key} value={key}>{state.displayNames?.[key]??p.label} · версия {p.version}</option>;
-       })}
+       {Array.from(latestProfiles.values(), profile=>
+         <option key={profile.id} value={profile.id}>
+           {state?.displayNames?.[`${profile.id}:${profile.version}`] ?? profile.label}
+         </option>
+       )}
      </select>
    </label>
-   <p className="pool-settings-help">{supported?'Изменение применяется к новым разговорам. Начатые сохраняют аккаунт и версию маршрута.':'Для официального клиента этого провайдера поддержка транспорта ещё не подтверждена.'}</p>
+   <p className="pool-settings-help">{supported?'Изменение применяется к новым разговорам. Начатые продолжают по прежнему маршруту.':'Для официального клиента этого провайдера поддержка транспорта ещё не подтверждена.'}</p>
+   {supported && selected && latestSelected && selected.version < latestSelected.version &&
+     <Button size="sm" type="button" disabled={pending}
+       onClick={()=>save({id:latestSelected.id,version:latestSelected.version})}>Применить актуальную конфигурацию</Button>}
    {selected?.transport==='http-connect'&&<p className="pool-settings-help">Прокси: {selected.endpoint}</p>}
    {selected&&<p className="pool-settings-help">Поддерживаемые хосты: {selected.hostIds.join(', ')}. При отказе запрос завершается. Фактический адрес и ответ провайдера не проверены.</p>}
    {error&&<p role="alert">{error}</p>}
