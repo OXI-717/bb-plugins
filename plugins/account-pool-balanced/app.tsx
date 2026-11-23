@@ -2645,7 +2645,7 @@ function AccountCard({
       <div className="space-y-3">
         {account.provider === "gemini" ? <div aria-label="Gemini model quotas">
           {geminiSummaryRows(account.geminiUsage, Date.now()).map(window =>
-            <QuotaDetail key={window.kind} label={window.label}
+            <QuotaDetail key={window.kind} label={<ModelQuotaLabel model={null}>{window.label}</ModelQuotaLabel>}
               quota={shared(window.usedPercent / 100, window.resetAt, null)} threshold={1} showSkipAt={false} />
           )}
           {account.geminiUsage?.models.length ? account.geminiUsage.models.map((model,index) =>

@@ -1878,7 +1878,8 @@ it("identifies individual model reports in both views and keeps groups distinct"
   const unknown = "gemini-example-long-unregistered-model-for-narrow-screens";
   const twin = "gemini-example-other";
   const selected = account({ provider: "gemini", geminiUsage: {
-    observedAt: 100, plan: null, credits: null, models: [
+    observedAt: 100, plan: null, credits: null,
+    windows: [{ kind: "weekly", usedPercent: 42, resetAt: null }], models: [
       { modelId: known, tokenType: "REQUESTS", usedPercent: 5, resetAt: null },
       { modelId: unknown, tokenType: "WTUS", usedPercent: 17, resetAt: null },
       { modelId: twin, tokenType: "WTUS", usedPercent: 17, resetAt: null },
@@ -1908,6 +1909,11 @@ it("identifies individual model reports in both views and keeps groups distinct"
   const details = await slot.findByLabelText("Gemini model quotas");
   expect(label(details, known + " · REQUESTS").querySelector('[data-provider-id="acp-antigravity"]')).toBeTruthy();
   expect(label(details, unknown + " · WTUS").querySelector('[data-icon="Bot"]')).toBeTruthy();
+  for (const view of [row, details]) {
+    const weekly = label(view, "Gemini · 7d");
+    expect(weekly.querySelector('[data-icon="Layers"]')).toBeTruthy();
+    expect(weekly.querySelector("[data-provider-id]")).toBeNull();
+  }
   expect(models).toHaveBeenCalledTimes(1);
 });
 
