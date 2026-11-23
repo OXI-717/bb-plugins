@@ -14,3 +14,20 @@ export function isRecoverableZaiQuotaNetworkError(error: string): boolean {
     /^Z\.AI quota collection failed: HTTP (?:429|5\d\d)\.$/u.test(error) ||
     /^Z\.AI quota collection failed: HTTP 200; (?:application rejected the request|no supported quota measurement); [A-Za-z0-9_=;(), -]+\.$/u.test(error);
 }
+
+
+/** A manual Gemini quota check may revalidate this stored licence refusal.
+ * This predicate never changes routing eligibility or clears the refusal. */
+export function isGeminiSubscriptionDenial(error: string): boolean {
+  if (error.length > 65536) return false;
+  try {
+    const root: unknown = JSON.parse(error);
+    if (!root || typeof root !== "object" || !("error" in root)) return false;
+    const detail = root.error;
+    if (!detail || typeof detail !== "object" || !("code" in detail) || detail.code !== 403 ||
+      !("status" in detail) || detail.status !== "PERMISSION_DENIED" ||
+      !("details" in detail) || !Array.isArray(detail.details)) return false;
+    return detail.details.some(item => item !== null && typeof item === "object" &&
+      "reason" in item && item.reason === "SUBSCRIPTION_REQUIRED");
+  } catch { return false; }
+}

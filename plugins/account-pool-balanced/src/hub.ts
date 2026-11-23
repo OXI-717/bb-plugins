@@ -10,7 +10,7 @@ import { NetworkFlights } from "./network-flights.js";
 import { observeUpstreamFetch } from "./transport-diagnostics.js";
 import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
 import { createVpnPolicy, VpnRequiredError } from "./vpn-policy.js";
-import { isRecoverableAccessError, isRecoverableZaiQuotaNetworkError } from "./recoverable-access.js";
+import { isGeminiSubscriptionDenial, isRecoverableAccessError, isRecoverableZaiQuotaNetworkError } from "./recoverable-access.js";
 import { projectTier, projectRole } from "./project-policy.js";
 import { policyThresholds, reserveHours, scheduleAllows } from "./account-policy.js";
 import type {
@@ -179,7 +179,7 @@ interface RefreshBackoff {
   error: TransientOAuthRefreshError;
 }
 
-type SecretUse = { kind: "normal"; zaiQuotaCollection?: boolean } | { kind: "rejected"; accessToken: string };
+type SecretUse = { kind: "normal"; zaiQuotaCollection?: boolean; geminiQuotaRecheck?: boolean } | { kind: "rejected"; accessToken: string; geminiQuotaRecheck?: boolean };
 
 type SecretFlight =
   | { kind: "refresh"; use: SecretUse; result: Promise<AccountSecret> }
@@ -413,8 +413,8 @@ export class AccountPoolHub {
         account,
         freshSecret: async (rejectedAccessToken) => {
           const secret = await this.freshSecret(account, adapter, rejectedAccessToken === undefined
-            ? { kind: "normal", zaiQuotaCollection: account.provider === "zai" && account.kind === "api-key" }
-            : { kind: "rejected", accessToken: rejectedAccessToken });
+            ? { kind: "normal", zaiQuotaCollection: account.provider === "zai" && account.kind === "api-key", geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" }
+            : { kind: "rejected", accessToken: rejectedAccessToken, geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" });
           usageSecret = secret;
           return secret;
         },
@@ -1355,7 +1355,10 @@ export class AccountPoolHub {
             const retryZaiQuota = use.kind === "normal" && use.zaiQuotaCollection === true &&
               account.provider === "zai" && secret.kind === "api-key" &&
               error !== null && isRecoverableZaiQuotaNetworkError(error);
-            if (error !== null && !isRecoverableAccessError(error) && !retryZaiQuota) throw new Error(error);
+            const retryGeminiQuota = use.geminiQuotaRecheck === true &&
+              account.provider === "gemini" && secret.kind === "oauth" &&
+              error !== null && isGeminiSubscriptionDenial(error);
+            if (error !== null && !isRecoverableAccessError(error) && !retryZaiQuota && !retryGeminiQuota) throw new Error(error);
             if (
               backoff !== undefined &&
               this.options.now() < backoff.retryAt &&

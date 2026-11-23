@@ -142,7 +142,7 @@ export function createGeminiAdapter(options: GeminiAdapterOptions): ProviderAdap
       }
       if (!response.ok) {
         await response.body?.cancel();
-        return;
+        throw new Error(`Gemini quota refresh failed with HTTP ${response.status}.`);
       }
       const payload: unknown = await response.json().catch(() => null);
       const quota = geminiQuotaFromUsages(
@@ -151,6 +151,7 @@ export function createGeminiAdapter(options: GeminiAdapterOptions): ProviderAdap
         context.quotas.get(context.account.id),
         context.now(),
       );
+      if (quota === null) throw new Error("Gemini quota refresh returned no valid measurement.");
       if (quota !== null) {
         context.quotas.put(quota);
         // Optional display metadata never invalidates a valid quota observation.

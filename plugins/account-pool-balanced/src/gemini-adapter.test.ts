@@ -140,7 +140,7 @@ describe('Gemini optional enrichment',()=>{
  });
  it('does not enrich or write metadata after rejected quota',async()=>{
   const fetch=vi.fn(async()=>new Response(null,{status:403}));const setGeminiUsage=vi.fn();const put=vi.fn();
-  await adapter().refreshUsage({account,freshSecret:async()=>oauth,accounts:{setGeminiUsage} as never,quotas:{get:previous,put} as never,fetch:fetch as never,now:()=>100});
+  await expect(adapter().refreshUsage({account,freshSecret:async()=>oauth,accounts:{setGeminiUsage} as never,quotas:{get:previous,put} as never,fetch:fetch as never,now:()=>100})).rejects.toThrow('HTTP 403');
   expect(fetch).toHaveBeenCalledOnce();expect(setGeminiUsage).not.toHaveBeenCalled();expect(put).not.toHaveBeenCalled();
  });
 });
