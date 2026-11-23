@@ -157,7 +157,6 @@ interface HubOptions {
   now: () => number;
   drainTimeoutMs: number;
   onAccountsChanged: () => void;
-  geminiSummaryDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"];
   onUpstreamError: (provider: PoolProvider, error: unknown, context: { elapsedMs: number; transport: "ipv4" | "default"; stage: "fetch_headers" | "response_body"; requestId?: string; bytesRead?: number; guardReason?: "timeout" | "invalid_decision" | "rpc_failed"; operation: "model" | "auxiliary" }) => void;
 }
 
@@ -498,7 +497,10 @@ export class AccountPoolHub {
     return this.options.affinity.observation(JSON.stringify([provider, projectId === null ? hostId : JSON.stringify([hostId, projectId]), `session:${sessionId}`]));
   }
 
-  async refreshUsage(accountId?: string, force = false, reportErrors = false): Promise<void> {
+  async refreshUsage(
+    accountId?: string, force = false, reportErrors = false,
+    geminiSummaryDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"],
+  ): Promise<void> {
     if(this.options.maintenance?.status().lease){if(reportErrors)this.options.maintenance.assertAllowed();return;}
     const accounts = (await this.options.accounts.list()).filter(
       (account) =>
@@ -509,7 +511,7 @@ export class AccountPoolHub {
         (accountId === undefined || account.id === accountId),
     );
     await Promise.all(
-      accounts.map((account) => this.refreshAccountUsage(account, force).catch((error: unknown) => { if (reportErrors) throw error; })),
+      accounts.map((account) => this.refreshAccountUsage(account, force, geminiSummaryDiagnostic).catch((error: unknown) => { if (reportErrors) throw error; })),
     );
   }
 
@@ -555,6 +557,7 @@ export class AccountPoolHub {
   private async refreshAccountUsage(
     account: Account,
     force: boolean,
+    geminiSummaryDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"],
   ): Promise<void> {
     const adapter = this.adapter(account.provider);
     const interval = account.provider === "zai" ? ZAI_USAGE_REFRESH_INTERVAL_MS : DEFAULT_USAGE_REFRESH_INTERVAL_MS;
@@ -581,7 +584,7 @@ export class AccountPoolHub {
     const refresh = adapter
       .refreshUsage({
         account,
-        geminiSummaryDiagnostic: force && account.provider === "gemini" ? this.options.geminiSummaryDiagnostic : undefined,
+        geminiSummaryDiagnostic: account.provider === "gemini" ? geminiSummaryDiagnostic : undefined,
         freshSecret: async (rejectedAccessToken) => {
           const secret = await this.freshSecret(account, adapter, rejectedAccessToken === undefined
             ? { kind: "normal", zaiQuotaCollection: account.provider === "zai" && account.kind === "api-key", geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" }
@@ -2175,7 +2178,6 @@ export function createHub(options: {
   drainTimeoutMs?: number;
   maxAffinityBindings?: number;
   onAccountsChanged?: () => void;
-  geminiSummaryDiagnostic?: HubOptions["geminiSummaryDiagnostic"];
   onUpstreamError?: HubOptions["onUpstreamError"];
   journal?: RequestJournal;
 }): AccountPoolHub {
@@ -2335,7 +2337,6 @@ export function createHub(options: {
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),
-    geminiSummaryDiagnostic: options.geminiSummaryDiagnostic,
     onUpstreamError: options.onUpstreamError ?? (() => {}),
   });
 }

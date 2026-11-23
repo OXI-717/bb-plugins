@@ -26,6 +26,7 @@ import type { ClaudeOAuthAccount } from "./oauth-login.js";
 import type { CodexDeviceAccount } from "./codex-device-login.js";
 import type { GrokSubscriptionCredentials } from "./grok-credentials.js";
 import type { GeminiSubscriptionCredentials } from "./gemini-credentials.js";
+import type { AdapterUsageContext } from "./provider-adapter.js";
 
 interface PoolHost {
   id: string;
@@ -58,6 +59,7 @@ export class PoolOperations {
     private readonly onAccountEnabled: (
       accountId: string,
     ) => Promise<void> = async () => {},
+    private readonly geminiSummaryDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"],
   ) {}
 
   async add(input: AccountAddInput): Promise<Account> {
@@ -397,7 +399,7 @@ export class PoolOperations {
   async refreshUsage(id: string): Promise<AccountSummary | null> {
     const account = await this.accounts.get(id);
     if (account === null) return null;
-    await this.hub.refreshUsage(id, true, true);
+    await this.hub.refreshUsage(id, true, true, this.geminiSummaryDiagnostic);
     this.onAccountsChanged();
     return (
       (await this.status()).accounts.find((account) => account.id === id) ??

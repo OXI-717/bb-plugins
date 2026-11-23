@@ -9414,6 +9414,27 @@ describe('Gemini account reauthorization',()=>{
    fetch:fetchOverride ?? (async()=>Response.json({buckets:[{modelId:'gemini-fixture',remainingFraction:0.75}]})),
   }});
  }
+ it('logs the Gemini quota diagnostic only on explicit account refresh', async () => {
+  const quotaReads = vi.fn();
+  const f = await reauthFixture(undefined, async url => {
+   if (String(url).includes('retrieveUserQuota')) quotaReads();
+   return Response.json({buckets:[{modelId:'gemini-fixture', remainingFraction:0.75}]});
+  });
+  const diagnostics = () => f.host.harness.inspection.logEntries.filter(
+   entry => entry.message.startsWith('Gemini quota summary '),
+  );
+  expect(quotaReads).toHaveBeenCalled();
+  expect(diagnostics()).toHaveLength(0);
+  quotaReads.mockClear();
+  const {callRpc} = f.host.harness.behavior;
+  await callRpc('account.disable', {id:f.account.id});
+  await callRpc('account.enable', {id:f.account.id});
+  expect(quotaReads).toHaveBeenCalledTimes(1);
+  expect(diagnostics()).toHaveLength(0);
+  await callRpc('account.refreshUsage', {accountId:f.account.id});
+  expect(quotaReads).toHaveBeenCalledTimes(2);
+  expect(diagnostics()).toHaveLength(1);
+ });
  async function complete(fixture:Fixture){
   const started=await fixture.host.harness.behavior.callRpc('geminiLogin.reauthorize',{accountId:fixture.account.id}) as {sessionId:string};
   let result:{status:string;message?:string}={status:'pending'};const end=Date.now()+2000;

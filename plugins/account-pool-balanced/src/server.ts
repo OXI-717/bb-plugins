@@ -309,7 +309,6 @@ export function createAccountPoolPlugin(
       importGeminiCredentials: options.importGeminiCredentials,
       drainTimeoutMs: options.drainTimeoutMs,
       maxAffinityBindings: options.maxAffinityBindings,
-      geminiSummaryDiagnostic: result => bb.log.info('Gemini quota summary ' + JSON.stringify(result)),
       onUpstreamError: (provider, error, context) => {
         const diagnostic = describeTransportError(error);
         bb.log.warn(
@@ -352,6 +351,7 @@ export function createAccountPoolPlugin(
       now,
       () => bb.realtime.publish(ACCOUNT_POOL_ACCOUNTS_CHANGED, {}),
       (accountId) => hub.refreshUsage(accountId, true),
+      result => bb.log.info('Gemini quota summary ' + JSON.stringify(result)),
     );
     const retryProviders:Readonly<Record<string,PoolProvider>>={
       codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor',
