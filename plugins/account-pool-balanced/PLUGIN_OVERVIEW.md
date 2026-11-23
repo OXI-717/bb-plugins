@@ -49,3 +49,7 @@ An automation controller is not required for Pooler or its VPN Guard linkage and
 Automatic recovery uses ordinary BB admission and preserves manual blocks and newer user activity. See the [recovery policy](../../docs/pool-errors.md).
 
 [Account in the thread header](docs/account-identities.md): shows the email or saved label of the subscription actually used for every provider. For API keys, enter an email in the account card; OAuth email comes from the provider.
+
+Project-bound Codex budget clients can use the [versioned budget evidence endpoint](docs/codex-budget.md).
+
+The native Update Pooler action pauses BB sessions and pooled model requests, verifies a state backup, installs a published release, checks settings and releases its own pause. The maintenance lease survives reloads and requests are not replayed automatically. See the [upgrade procedure](../../scripts/UPGRADE-POOL.md#update-from-the-pool-interface).

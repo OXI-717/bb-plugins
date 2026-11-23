@@ -177,8 +177,9 @@ export function blockingResetAt(
     status: string | null,
     resetAt: number | null,
     minutes?: number | null,
+    limit = thresholdFor(threshold, minutes),
   ) => {
-    if (!activeWindow(utilization, status, resetAt, thresholdFor(threshold, minutes), now)) return;
+    if (!activeWindow(utilization, status, resetAt, limit, now)) return;
     if (resetAt === null) unknown = true;
     else latest = Math.max(latest ?? resetAt, resetAt);
   };
@@ -199,7 +200,8 @@ export function blockingResetAt(
   if (family !== null) {
     const familyQuota = quota.familyWeekly[family];
     if (familyQuota !== null)
-      include(familyQuota.utilization, familyQuota.status, familyQuota.resetAt, 10080);
+      include(familyQuota.utilization, familyQuota.status, familyQuota.resetAt, 10080,
+        typeof threshold === "number" ? threshold : threshold.familyWeekly ?? threshold.weekly);
   }
   return unknown ? null : latest;
 }
@@ -258,7 +260,7 @@ export function isQuotaExhausted(
 ): boolean {
   return (
     isSharedQuotaExhausted(quota, threshold, now) ||
-    activeFamilyWindow(quota.familyWeekly[family], thresholdFor(threshold, 10080), now)
+    activeFamilyWindow(quota.familyWeekly[family], typeof threshold === "number" ? threshold : threshold.familyWeekly ?? threshold.weekly, now)
   );
 }
 

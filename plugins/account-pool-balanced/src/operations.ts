@@ -1,9 +1,12 @@
+import { changeWeeklyBudget } from "./weekly-budget.js";
+import type { WeeklyBudgetChange } from "./contracts.js";
+import { summarizeDiagnostics } from './diagnostics.js';
 import type {AgyAuthorization} from "./agy-oauth-login.js";
 import { createHash } from 'node:crypto';
 import type {
   Account,
-  AccountSecret,
   AccountSummary,
+  AccountSecret,
   HubTokenSummary,
   PoolProvider,
   PoolStatus,
@@ -38,6 +41,8 @@ interface PoolProviderState {
 const ROUTED_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 export class PoolOperations {
+  uncertainNativeLeases?: () => Promise<NonNullable<PoolStatus['uncertainNativeLeases']>>;
+  routeTracking?:()=>Promise<NonNullable<PoolStatus["routeTracking"]>>;
   constructor(
     private readonly accounts: AccountStore,
     private readonly quotas: QuotaStore,
@@ -58,6 +63,11 @@ export class PoolOperations {
   async add(input: AccountAddInput): Promise<Account> {
     if (input.provider === "agy") {
       throw new Error("Use Antigravity login in the Pooler UI; local credentials are not imported.");
+    }
+    if(input.source.kind==='draft'){
+      if(input.provider!=='claude')throw Error("Adding before sign-in is currently supported only for Claude.");
+      const account=await this.accounts.addDraft({email:input.source.email,label:input.label??input.source.email,priority:input.priority});
+      this.onAccountsChanged();return account;
     }
     if (input.source.kind === "api-key") {
       if (input.provider === "codex") {
@@ -163,34 +173,31 @@ export class PoolOperations {
 
   async addCodexOAuth(
     authenticated: CodexDeviceAccount,
+    targetAccountId?: string,
   ): Promise<AccountSummary> {
-    const account = await this.accounts.add(
-      {
-        provider: "codex",
-        kind: "oauth",
-        label: authenticated.label,
-        email: authenticated.email,
-        accountUuid: null,
-        codexAccountId: authenticated.accountId,
-        subscriptionType: null,
-        rateLimitTier: null,
-        enabled: true,
-        priority: 100,
-      },
-      {
-        kind: "oauth",
-        accessToken: authenticated.accessToken,
-        refreshToken: authenticated.refreshToken,
-        idToken: authenticated.idToken,
-        expiresAt: authenticated.expiresAt,
-      },
-    );
-    this.onAccountsChanged();
-    await this.onAccountEnabled(account.id);
-    const summary = (await this.list()).find((item) => item.id === account.id);
-    if (summary === undefined) {
-      throw new Error("Added Codex account could not be read back.");
+    const secret: AccountSecret = {
+      kind: "oauth",
+      accessToken: authenticated.accessToken,
+      refreshToken: authenticated.refreshToken,
+      idToken: authenticated.idToken,
+      expiresAt: authenticated.expiresAt,
+    };
+    const account = targetAccountId === undefined
+      ? await this.accounts.add({
+          provider: "codex", kind: "oauth", label: authenticated.label,
+          email: authenticated.email, accountUuid: null, codexAccountId: authenticated.accountId,
+          subscriptionType: null, rateLimitTier: null, enabled: true, priority: 100,
+        }, secret)
+      : await this.hub.replaceAccountAuthorization(targetAccountId,
+          () => this.accounts.replaceCodexAuthorization(targetAccountId, authenticated.accountId, secret));
+    if (targetAccountId !== undefined) {
+      const quota = this.quotas.get(account.id);
+      this.quotas.put({ ...quota, error: null, heldUntil: null });
     }
+    this.onAccountsChanged();
+    if (account.enabled) await this.onAccountEnabled(account.id);
+    const summary = (await this.list()).find(item => item.id === account.id);
+    if (summary === undefined) throw new Error("Codex account could not be read back.");
     return summary;
   }
 
@@ -350,6 +357,14 @@ export class PoolOperations {
     const account=await this.accounts.setEmail(id,email,expectedEmail);this.onAccountsChanged();return account;
   }
 
+  async setWeeklyBudget(input: WeeklyBudgetChange): Promise<Account | null> {
+    const account = await this.accounts.updateWeeklyBudget(input.accountId, current =>
+      changeWeeklyBudget(current, this.quotas.get(current.id), input, this.now()),
+    );
+    if (account !== null) this.onAccountsChanged();
+    return account;
+  }
+
   async setPriority(id: string, priority: number): Promise<Account | null> {
     const account = await this.accounts.setPriority(id, priority);
     if (account !== null) this.onAccountsChanged();
@@ -399,6 +414,33 @@ export class PoolOperations {
     return this.routing.isProviderEnabled(provider);
   }
 
+  async diagnostics(from:number,to:number) {
+    const first=this.hub.trafficDiagnostics(from,to);
+    const observations=this.hub.observations(2048);
+    const status=await this.hub.status();
+    return {
+      schema:'bb-account-pool/diagnostics/1',period:{from,to},
+      collectedAt:Date.now(),
+      historyCoverage:'history' in first?{
+        observedAt:first.observedAt,startedAt:first.startedAt,extendedCountersStartedAt:first.extendedCountersStartedAt,
+        retentionMs:first.retentionMs,maxRows:first.maxRows,maxBytes:first.maxBytes,totalRows:first.totalRows,
+        rowsRead:first.totalRows,truncated:first.truncated,capacityDroppedEvents:first.capacityDroppedEvents,
+        capacityEvictedBuckets:first.capacityEvictedBuckets,storageFailuresSinceStart:first.storageFailuresSinceStart,
+      }:{unavailable:true},
+      freshCoverage:'rows' in observations?{
+        observedAt:observations.observedAt,oldestAt:observations.oldestAt,
+        newestAt:observations.rows.at(-1)?.at??null,rowsRead:observations.rows.length,
+        totalRetainedRows:observations.totalRetainedRows,rowsTruncated:observations.rowsTruncated,
+        truncated:observations.truncated,evictedSinceStart:observations.evictedSinceStart,
+        retentionMs:observations.retentionMs,storageFailuresSinceStart:observations.storageFailuresSinceStart,
+      }:{unavailable:true},
+      accounts:status.accounts.map(a=>({id:a.id,provider:a.provider,enabled:a.enabled,status:a.status,
+        eligible:a.eligible,inFlight:a.inFlight,queuedRequests:a.queuedRequests,concurrencyLimit:a.concurrencyLimit})),
+      ...summarizeDiagnostics({from,to},[],'rows' in observations?observations.rows:[]),
+      history:'history' in first?first.history:[],
+    };
+  }
+
   observations() { return this.hub.observations(); }
   async trafficHistory(offset = 0, limit = 100) {
     const history = this.hub.trafficHistory(offset,limit);
@@ -422,6 +464,10 @@ export class PoolOperations {
     const hosts = await this.listHosts();
     await this.hubTokens.prune(hosts.map((host) => host.id));
     const status = await this.hub.status();
+    const [routeTracking, uncertainNativeLeases] = await Promise.all([
+      this.routeTracking?.(), this.uncertainNativeLeases?.(),
+    ]);
+    const history=this.hub.trafficHistory(0,1);
     const hostNames = new Map(hosts.map((host) => [host.id, host.name]));
     const [claude, codex, kimi, zai, opencodeGo, neuraldeep, nvidia, ifm, agy, cursor, devin, grok, gemini] = await Promise.all([
       this.routing.isProviderEnabled("claude"),
@@ -440,6 +486,9 @@ export class PoolOperations {
     ]);
     return {
       ...status,
+      routeTracking,
+      uncertainNativeLeases,
+      historyCapacity:"totalRows" in history?{rows:history.totalRows,maxRows:history.maxRows,maxBytes:history.maxBytes}:undefined,
       hosts: status.hosts.map((token) => ({
         ...token,
         hostName: hostNames.get(token.hostId) ?? null,

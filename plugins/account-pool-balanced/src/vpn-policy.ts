@@ -71,8 +71,28 @@ export function createVpnPolicy(
     } catch {return evaluateVpnEvidence(null,now());}
   };
   const state=async():Promise<VpnState>=>(await evidence()).state;
+  // What the last answered Guard read allowed for each provider. Kept only to judge a
+  // later unanswered read; it never admits a request by itself.
+  const lastGuardRoute=new Map<PoolProvider,'direct'|'allowed'>();
+  const assertEvidence=async(provider:PoolProvider)=>{
+    if (!settings().vpnOnlyProviders.some(value => value === provider)) return;
+    const current=await evidence();
+    if(current.state!=='connected'||current.assurance!=='verified_ipv4') throw new VpnRequiredError(provider);
+  };
   return {
     state, evidence,
+    /**
+     * The pool's own requirement while the Guard gives no answer. Fails unless the last
+     * answered read allowed this provider, and, when that read was not "direct", unless
+     * the local VPN evidence the provider requires still holds. Guard silence never
+     * suspends that evidence.
+     */
+    async assertWithoutGuard(provider: PoolProvider) {
+      const route=lastGuardRoute.get(provider);
+      if(route===undefined) throw new VpnRequiredError(provider);
+      if(route==='direct') return;
+      await assertEvidence(provider);
+    },
     async assert(provider: PoolProvider, observeGuard?:(result:GuardObservation)=>void) {
       if(settings().vpnGuardEnabled && requiresGuardCheck(provider)) {
         const started=performance.now();let outcome:GuardObservation['outcome']='unavailable';
@@ -80,15 +100,16 @@ export function createVpnPolicy(
         try {
           if(!guardCheck)throw new GuardRequiredError(provider,true);
           direct=await guardCheck(provider)==='direct';outcome=direct?'direct':'allowed';
+          lastGuardRoute.set(provider,direct?'direct':'allowed');
         }catch(error){
           if(error instanceof GuardRequiredError)outcome=error.code==='VPN_GUARD_BLOCKED'?'blocked':error.failureReason??'unavailable';
+          // Only an unanswered read keeps the previous answer; any decision replaces it.
+          if(!(error instanceof GuardRequiredError)||!(error.code==='VPN_GUARD_UNAVAILABLE'&&(error.failureReason==='timeout'||error.failureReason==='rpc_failed')))lastGuardRoute.delete(provider);
           throw error;
         }finally{try{observeGuard?.({durationMs:Math.max(0,performance.now()-started),outcome});}catch{/* telemetry cannot affect admission */}}
         if(direct)return;
       }
-      if (!settings().vpnOnlyProviders.some(value => value === provider)) return;
-      const current=await evidence();
-      if(current.state!=='connected'||current.assurance!=='verified_ipv4') throw new VpnRequiredError(provider);
+      await assertEvidence(provider);
     },
   };
 }

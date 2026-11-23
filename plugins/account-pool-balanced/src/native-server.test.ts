@@ -4,7 +4,33 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {it,expect,vi} from 'vitest';
-import {createAccountPoolPlugin} from './server.js';
+import {nativeAccountsSchema} from './native-accounts.js';
+import {createAccountPoolPlugin} from './management-test-fixture.js';
+
+it('authenticates prepared runtime grants against the server profile registry before a native task',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  const upstream=vi.fn(async()=>new Response('{}'));
+  try{
+    await createAccountPoolPlugin({fetch:upstream})(host.bb);
+    const execution={runtimeId:'runtime-one',gatewayId:'gateway-one',runtimeSha256:'a'.repeat(64),profile:{id:'fixture-exit',version:1}};
+    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true,execution};
+    const configure=()=>host.harness.behavior.runCli(['native','configure',JSON.stringify(executor)]);
+    expect((await configure()).exitCode).toBe(1);
+    const profile={id:'fixture-exit',version:1,label:'Fixture',node:'node-one',hostIds:['host-one'],transport:'ssh-connect',endpoint:'http://127.0.0.1:19081',dns:'remote',ipv4:true,ipv6:false,failure:'closed',expectedExit:['192.0.2.1'],assurance:'proxy-enforced'};
+    expect((await host.harness.behavior.runCli(['egress','configure',JSON.stringify(profile)])).exitCode).toBe(0);
+    expect((await configure()).exitCode).toBe(0);
+    expect((await host.harness.behavior.runCli(['native','mode','managed'])).exitCode).toBe(0);
+    const visible=await host.harness.behavior.callRpc('native.accounts',null);
+    expect(visible).toEqual({managed:true,selectionRevision:expect.any(String),accounts:[{accountId:'subscription-one',projects:{onlySelected:true,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:expect.any(String),mixedProjects:false,executors:[{id:'native-one',hostId:'host-one',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0}]});
+    const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
+    const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
+    const sessionId=randomUUID();
+    const response=await host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${token}`},body:JSON.stringify({action:'acquire',executorId:'native-one',sessionId})});
+    expect(response.status).toBe(200);
+    expect((await response.json()).binding).toMatchObject({...execution,schema:'bb-account-pool/native-execution/1',sessionId,accountId:'subscription-one',hostId:'host-one',kind:'task',caller:{hostId:'host-one',projectId:'project-one',threadId:'thread-one'}});
+    expect(upstream).not.toHaveBeenCalled();
+  }finally{await host.harness.lifecycle.dispose();}
+});
 
 it('real registration binds CLI, BB env, authenticated HTTP and forbids the old model/OAuth path',async()=>{
   const dataDir=await mkdtemp(path.join(tmpdir(),'native-pool-'));
@@ -46,4 +72,193 @@ it('real registration binds CLI, BB env, authenticated HTTP and forbids the old 
     const state=JSON.parse((await host.harness.behavior.runCli(['native','status','--json'])).stdout);
     expect(state.leases).toHaveLength(0);expect(state.events.map((e:{event:string})=>e.event)).toEqual(['queued','active','released']);
   }finally{await host.harness.lifecycle.dispose();await rm(dataDir,{recursive:true,force:true});}
+});
+
+
+it('saves native projects through RPC and contributes the executor for a future project',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  try{
+    await createAccountPoolPlugin({fetch:vi.fn(async()=>new Response('{}'))})(host.bb);
+    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+    expect((await host.harness.behavior.runCli(['native','configure',JSON.stringify(executor)])).exitCode).toBe(0);
+    await host.harness.behavior.runCli(['native','mode','managed']);
+    const context={hostId:'host-one',projectId:'future-project',threadId:'thread-new'};
+    const before=await host.harness.behavior.resolveProviderEnv('acp-agy',context);
+    expect(before.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('');
+    const account=nativeAccountsSchema.parse(await host.harness.behavior.callRpc('native.accounts',null)).accounts[0];
+    const input={accountId:account.accountId,projects:{onlySelected:false,rules:[]},expectedRevision:account.projectsRevision};
+    await host.harness.behavior.callRpc('native.setProjects',input);
+    const after=await host.harness.behavior.resolveProviderEnv('acp-agy',context);
+    expect(after.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('native-one');
+    await expect(host.harness.behavior.callRpc('native.setProjects',input)).rejects.toThrow();
+  }finally{await host.harness.lifecycle.dispose();}
+});
+
+
+it('maintenance denies native acquire and poll while allowing confirmed cleanup',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  try{
+    await createAccountPoolPlugin({fetch:vi.fn(async()=>new Response('{}'))})(host.bb);
+    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+    await host.harness.behavior.runCli(['native','configure',JSON.stringify(executor)]);
+    await host.harness.behavior.runCli(['native','mode','managed']);
+    const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
+    const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
+    const request=(input:object)=>host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${token}`},body:JSON.stringify(input)});
+    const acquired=await request({action:'acquire',executorId:'native-one',sessionId:randomUUID()});
+    const lease=await acquired.json();expect(acquired.status).toBe(200);
+    const owner='11111111-1111-4111-8111-111111111111';
+    expect((await host.harness.behavior.runCli(['maintenance','acquire','--owner',owner,'--json'])).exitCode).toBe(0);
+    for(const input of [{action:'poll',leaseId:lease.leaseId},{action:'acquire',executorId:'native-one',sessionId:randomUUID()}]){
+      const denied=await request(input);expect(denied.status).toBe(503);expect(await denied.json()).toEqual({error:'POOL_MAINTENANCE'});
+    }
+    expect(JSON.parse((await host.harness.behavior.runCli(['native','status','--json'])).stdout).leases).toHaveLength(1);
+    expect((await request({action:'release',leaseId:lease.leaseId,stopped:true})).status).toBe(200);
+    expect(JSON.parse((await host.harness.behavior.runCli(['native','status','--json'])).stdout).leases).toHaveLength(0);
+  }finally{await host.harness.lifecycle.dispose();}
+});
+
+it('applies native account settings through the real RPC contract and routes each project without widening caller authority',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  try{
+    await createAccountPoolPlugin({fetch:vi.fn(async()=>new Response('{}'))})(host.bb);
+    for(const [id,accountId] of [['native-one','subscription-one'],['native-two','subscription-two']]){
+      expect((await host.harness.behavior.runCli(['native','configure',JSON.stringify({id,accountId,hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true})])).exitCode).toBe(0);
+    }
+    await host.harness.behavior.runCli(['native','mode','managed']);
+    const update=async(input:Record<string,unknown>)=>{
+      const state=nativeAccountsSchema.parse(await host.harness.behavior.callRpc('native.accounts',null));
+      return host.harness.behavior.callRpc('native.updateAccount',{...input,expectedRevision:state.selectionRevision});
+    };
+    await update({accountId:'subscription-one',role:'primary',priority:1,projects:{onlySelected:false,rules:[]}});
+    await update({accountId:'subscription-two',role:'reserve',priority:2,projects:{onlySelected:true,rules:[{projectId:'project-two',role:'primary'}]}});
+    const context={hostId:'host-one',projectId:'project-two',threadId:'thread-one'};
+    const chosen=await host.harness.behavior.resolveProviderEnv('acp-agy',context);
+    expect(chosen.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('native-two');
+    const other=await host.harness.behavior.resolveProviderEnv('acp-agy',{...context,projectId:'other'});
+    expect(other.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('native-one');
+    const foreign=await host.harness.behavior.resolveProviderEnv('acp-agy',{...context,hostId:'foreign'});
+    expect(foreign.find(e=>e.name==='OXI_AGY_NATIVE_EXECUTOR')?.value).toBe('');
+    await expect(update({accountId:'subscription-two',callerIds:['foreign']})).rejects.toThrow();
+    await expect(update({accountId:'subscription-two',executor:{id:'native-one',enabled:false}})).rejects.toThrow();
+  }finally{await host.harness.lifecycle.dispose();}
+});
+
+it('targeted probe reports unavailable without enabling, acquiring or calling upstream',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  const upstream=vi.fn(async()=>new Response('{}'));
+  try{
+    await createAccountPoolPlugin({fetch:upstream})(host.bb);
+    const executor={id:'native-second',accountId:'subscription-two',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:false};
+    expect((await host.harness.behavior.runCli(['native','configure',JSON.stringify(executor)])).exitCode).toBe(0);
+    expect((await host.harness.behavior.runCli(['native','mode','managed'])).exitCode).toBe(0);
+    const before=await host.harness.behavior.runCli(['native','status','--json']);
+    expect(await host.harness.behavior.callRpc('native.probe',{accountId:'subscription-two',executorId:'native-second',hostId:'host-one',projectId:'project-one'})).toEqual({accountId:'subscription-two',executorId:'native-second',hostId:'host-one',projectId:'project-one',status:'runtime-unavailable',verified:false,observedAt:expect.any(Number),catalog:[]});
+    await expect(host.harness.behavior.callRpc('native.probe',{accountId:'other',executorId:'native-second',hostId:'host-one',projectId:'project-one'})).rejects.toThrow('native-diagnostic-denied');
+    expect(await host.harness.behavior.runCli(['native','status','--json'])).toEqual(before);
+    expect(upstream).not.toHaveBeenCalled();
+  }finally{await host.harness.lifecycle.dispose();}
+});
+
+it('reports expired native leases through pool status until the operator confirms the stop',async()=>{
+  const host=createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>[{id:'host-one',name:'One'}]}}});
+  let now=1_800_000_000_000;
+  try {
+    await createAccountPoolPlugin({now:()=>now})(host.bb);
+    const executor={id:'example-executor',accountId:'subscription-one',hostId:'host-one',
+      callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+    const cli=async(...args:string[])=>(await host.harness.behavior.runCli(args));
+    expect((await cli('native','configure',JSON.stringify(executor))).exitCode).toBe(0);
+    expect((await cli('native','mode','managed')).exitCode).toBe(0);
+    const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
+    const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
+    const response=await host.harness.behavior.fetchHttp('POST','/native/agy',{
+      headers:{authorization:`Bearer ${token}`},body:JSON.stringify({action:'acquire',executorId:executor.id,sessionId:randomUUID()}),
+    });
+    expect(response.status).toBe(200);
+    const {leaseId}=await response.json();
+    const status=async()=>JSON.parse((await cli('status','--json')).stdout);
+    expect((await status()).uncertainNativeLeases).toEqual([]);
+    now+=125_000;
+    const expected=[{leaseId,executorId:executor.id,kind:'task',ageMs:125_000}];
+    expect((await status()).uncertainNativeLeases).toEqual(expected);
+    expect(await host.harness.behavior.callRpc('status.get',null)).toMatchObject({uncertainNativeLeases:expected});
+    expect((await cli('status')).stdout).toContain(`bb pool native attest-stopped ${leaseId} --confirmed`);
+    expect((await status()).uncertainNativeLeases).toEqual(expected);
+    expect((await cli('native','attest-stopped',leaseId,'--confirmed')).exitCode).toBe(0);
+    expect((await status()).uncertainNativeLeases).toEqual([]);
+  } finally {await host.harness.lifecycle.dispose();}
+});
+
+it('shares in-flight native Guard checks per host without caching completed decisions and distinguishes block vs unavailability',async()=>{
+  let decision:{allowed:boolean;reason:string}={allowed:true,reason:'direct'};
+  let rpcMode:'resolve'|'deferred'|'fail'='resolve';
+  let rpcCalls=0;
+  let releaseDeferred:(()=>void)|undefined;
+  const host=createFakePluginHost({
+    pluginId:'account-pool',
+    sdk:{
+      hosts:{list:async()=>[{id:'host-one',name:'One'}]},
+      plugins:{
+        callRpc:async(request)=>{
+          if(request.pluginId==='vpn-guard'&&request.method==='networkDecisionV2'){
+            const input=request.input as {hostId:string;provider:string};
+            rpcCalls+=1;
+            if(rpcMode==='fail')throw Error('guard rpc failed');
+            if(rpcMode==='deferred'){
+              await new Promise<void>(resolve=>{releaseDeferred=resolve;});
+            }
+            return {schema:'bb-vpn-guard/network-decision/2',hostId:input.hostId,...decision};
+          }
+          throw Error(`unexpected rpc ${request.pluginId}.${request.method}`);
+        },
+      },
+    },
+  });
+  try {
+    await createAccountPoolPlugin({fetch:vi.fn(async()=>new Response('{}'))})(host.bb);
+    const cli=async(...args:string[])=>(await host.harness.behavior.runCli(args));
+    expect((await cli('config','set','vpnGuardEnabled','true')).exitCode).toBe(0);
+    const executor={id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+    expect((await cli('native','configure',JSON.stringify(executor))).exitCode).toBe(0);
+    expect((await cli('native','mode','managed')).exitCode).toBe(0);
+    const accounts=nativeAccountsSchema.parse(await host.harness.behavior.callRpc('native.accounts',null));
+    await host.harness.behavior.callRpc('native.updateAccount',{accountId:'subscription-one',maxConcurrentSessions:2,expectedRevision:accounts.selectionRevision});
+    const envA=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
+    const envB=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-two'});
+    const tokA=envA.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value as string;
+    const tokB=envB.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value as string;
+    const post=(tok:string,body:object)=>host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${tok}`},body:JSON.stringify(body)});
+    const leaseA=await (await post(tokA,{action:'acquire',executorId:'native-one',sessionId:randomUUID()})).json();
+    const leaseB=await (await post(tokB,{action:'acquire',executorId:'native-one',sessionId:randomUUID()})).json();
+    const beforeConcurrent=rpcCalls;
+    rpcMode='deferred';
+    const pendingA=post(tokA,{action:'poll',leaseId:leaseA.leaseId});
+    const pendingB=post(tokB,{action:'poll',leaseId:leaseB.leaseId});
+    while(!releaseDeferred)await new Promise(resolve=>setTimeout(resolve,5));
+    // Give second concurrent poll a tick to join the same in-flight Guard read.
+    await new Promise(resolve=>setTimeout(resolve,15));
+    (releaseDeferred as ()=>void)();
+    const [resA,resB]=await Promise.all([pendingA,pendingB]);
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+    expect(rpcCalls-beforeConcurrent).toBe(1);
+    // Completed decision is never cached: next poll triggers a fresh Guard read.
+    rpcMode='resolve';
+    expect((await post(tokA,{action:'poll',leaseId:leaseA.leaseId})).status).toBe(200);
+    expect(rpcCalls-beforeConcurrent).toBe(2);
+    // Explicit Guard block returns 403 native-guard-blocked.
+    decision={allowed:false,reason:'manual_block'};
+    const blocked=await post(tokA,{action:'poll',leaseId:leaseA.leaseId});
+    expect(blocked.status).toBe(403);
+    expect(await blocked.json()).toEqual({error:'native-guard-blocked'});
+    // Guard RPC unavailability returns 503 native-guard-unavailable.
+    rpcMode='fail';
+    const unavailable=await post(tokA,{action:'poll',leaseId:leaseA.leaseId});
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({error:'native-guard-unavailable'});
+    // Release still succeeds without Guard check.
+    expect((await post(tokA,{action:'release',leaseId:leaseA.leaseId,stopped:true})).status).toBe(200);
+    expect((await post(tokB,{action:'release',leaseId:leaseB.leaseId,stopped:true})).status).toBe(200);
+  } finally {await host.harness.lifecycle.dispose();}
 });

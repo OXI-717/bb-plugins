@@ -10,7 +10,7 @@ const sessionSchema = z
     refresh_token: z.string().min(1),
     expires_at: z.union([z.string().min(1), z.number()]).optional(),
     oidc_issuer: z.string().url().optional(),
-    oidc_client_id: z.string().min(1),
+    oidc_client_id: z.string().min(1).max(256),
   })
   .passthrough();
 

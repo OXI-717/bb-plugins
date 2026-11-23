@@ -62,3 +62,51 @@ Upgrade Pooler 0.4.21 and Guard 0.1.6 together when linked. A mixed-version pair
 When Follow VPN Guard is enabled, only Kimi and Z.ai bypass Guard admission. Codex, Claude, Cursor, Devin and OpenCode Go ask Guard before provider calls, including maintenance. Go therefore requires Guard with Go network-decision support; an older Guard refuses locally. The linked protected transport uses IPv4, matching the proof coverage. VPN-only provider settings still govern independent VPN checks; a connected VPN does not itself mean the manual Guard block is off.
 
 A timed-out state-file result is discarded before the next read. At most 16 underlying file operations may remain outstanding; timeouts never free an underlying operation's capacity until that operation settles. This prevents unbounded resource growth while allowing a later healthy read after an isolated stall.
+
+
+A Guard permission read that times out after four seconds is retried once with
+fresh server-host binding and a new abort signal, before any provider request.
+The total permission-read budget is eight seconds. An explicit denial, invalid
+decision or RPC failure is never retried. A second timeout still denies traffic;
+no previous permission is cached and no provider operation is replayed.
+
+
+## Guard refusal diagnostics and rehearsal
+
+Pooler logs every failed permission attempt and recovery on the second attempt
+with `Account Pooler Guard permission`. Fields contain a check ID shared by
+both attempts, provider, validated server host ID, current stage, per-stage
+milliseconds, outcome and deadline overrun. The overrun is a timing symptom,
+not proof of an event-loop stall. Normal first-attempt successes are not logged.
+Raw RPC errors, prompts, headers and credentials are never included. Use
+`bb plugin logs account-pool-balanced` to read these persistent BB logs;
+retention follows the server log rotation, independently of request observations.
+
+`bb pool guard-probe --provider cursor --json` reads the real Guard through the
+same server-host binding and retry path, without an upstream model request.
+To inject a delay into this probe only:
+
+```sh
+bb pool guard-probe --provider cursor --delay-stage guard-rpc --delay-ms 4100 --json
+bb pool guard-probe --provider cursor --delay-stage guard-rpc --delay-ms 4100 --delay-attempts all --json
+```
+
+Stages are `server-host`, `guard-rpc` and `server-host-recheck`. Delay is bounded
+to 4500 ms and aborts with that attempt. The default delays only the first read;
+`all` delays both reads and should refuse with a timeout. A healthy second read
+may still refuse if real Guard policy denies it. These probe results include
+all attempts in their own response; injected delays are never installed in the
+live Guard policy or used by other clients. This rehearses admission, not model
+availability. An aborted host lookup cannot proceed to a later SDK call even if
+its underlying operation returns late.
+
+## An unanswered Guard read and running responses (0.4.89)
+
+A Guard read that gets no answer (a timeout after both attempts, or a failed call) is not a refusal: nothing indicates that the network changed. From 0.4.89 it is handled by what it protects:
+
+- **New requests** are refused locally from the first unanswered read, exactly as before. Nothing is sent.
+- **Responses that were already admitted** by a successful read keep running for at most 30 seconds while the Guard stays unreadable. The repeat read after response headers and the periodic one-second check both follow this rule. If the Guard is still unreadable after 30 seconds they are cancelled with `VPN_GUARD_UNAVAILABLE`; one successful read restarts the allowance.
+- **The pool's own requirement is never suspended by Guard silence.** The allowance applies only when the last answered read allowed the provider. If that answer was not `direct`, the local VPN evidence required for the provider is read again on every check during the silence; missing, stale or unverified evidence cancels running responses at once with `VPN_REQUIRED`.
+- **An explicit refusal** (manual block, VPN unavailable, restore required) and an invalid decision cancel running responses at the next check, with no allowance, and discard the remembered answer: a later unanswered read is then not tolerated.
+
+Before this change one slow control call on a busy server cancelled healthy responses. The allowance narrows the fail-closed guarantee for running responses by at most 30 seconds of Guard silence; it never applies to a decision the Guard actually returned. A heartbeat remains not a packet-level firewall.

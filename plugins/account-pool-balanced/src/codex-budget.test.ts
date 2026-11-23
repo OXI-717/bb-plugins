@@ -8,7 +8,7 @@ import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
 import { codexQuotaFromUsage, createCodexAdapter } from './codex-adapter.js';
 import { codexBudgetQuota, CODEX_BUDGET_MAX_AGE_MS } from './codex-budget.js';
 import { AccountStore, QuotaStore, QUOTA_MIGRATIONS } from './store.js';
-import { createAccountPoolPlugin } from './server.js';
+import { createAccountPoolPlugin } from './management-test-fixture.js';
 
 const id = '11111111-1111-4111-8111-111111111111';
 const now = 1_900_000_000_000;
@@ -281,4 +281,25 @@ it.each([
   const observed=adapter.quotaFromHeaders(id,headers,quota(complete()),'other',now+1);
   expect(observed.codexUsageEvidence).toBeUndefined();
   expect(codexBudgetQuota(observed,now+1).budgetReady).toBe(false);
+});
+
+it('returns structured 503 when codex budget storage read fails', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'budget-503-'));
+  cleanup.push(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const upstream = vi.fn<typeof fetch>(async () => { throw new Error('Unexpected upstream call'); });
+  const host = createFakePluginHost({ pluginId: 'account-pool-balanced', dataDir, sdk: { hosts: { list: async () => [{ id: 'fixture-host', name: 'Fixture' }] }, system: { providerStates: async () => ({ providers: [] }) } } });
+  cleanup.push(() => host.harness.lifecycle.dispose());
+  await host.bb.storage.kv.set('config', { vpnOnlyProviders: [], vpnPolicyVersion: 2 });
+  await createAccountPoolPlugin({ fetch: upstream, fetchIpv4: upstream, now: () => now })(host.bb);
+  const env = await host.harness.behavior.resolveProviderEnv('codex', { hostId: 'fixture-host', threadId: null, projectId: 'project-one' } as never);
+  const token = env.find(item => item.name === 'CODEX_POOL_AUTH_TOKEN')!.value as string;
+  const spy = vi.spyOn(host.bb.storage.kv, 'get').mockRejectedValue(new Error('synthetic storage failure'));
+  try {
+    const response = await host.harness.behavior.fetchHttp('GET', '/budget/codex', { headers: { authorization: `Bearer ${token}` } });
+    expect(response.status).toBe(503);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({ error: 'Pool budget evidence unavailable.' });
+  } finally {
+    spy.mockRestore();
+  }
 });

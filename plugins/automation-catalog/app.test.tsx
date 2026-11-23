@@ -48,6 +48,7 @@ afterEach(() => {
 });
 async function mount() {
   const app = await loadPluginApp(() => import("./app"));
+  expect(app.navPanels[0]!.title).toBe("OXI Automation Catalog");
   return renderSlot(
     app.navPanels[0]!,
     { subPath: "" },
@@ -151,8 +152,8 @@ describe("automation workflows", () => {
     const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: { catalog_list: () => ({ tasks, sources: [source] }) } });
     await slot.findByRole("button", { name: "Daily report" });
     expect(slot.getByRole("button", { name: "Other report" })).toBeTruthy();
-    expect(slot.getByText(/Проект: Alpha/)).toBeTruthy();
-    expect(slot.getByText(/Проект: Beta/)).toBeTruthy();
+    expect(slot.getByText(/Alpha · Машина/)).toBeTruthy();
+    expect(slot.getByText(/Beta · Машина/)).toBeTruthy();
     expect(slot.queryByRole("option", { name: "BB-managed agent" })).toBeNull();
     fireEvent.change(slot.getByRole("combobox", { name: "Проект" }), { target: { value: "alpha" } });
     expect(slot.queryByRole("button", { name: "Other report" })).toBeNull();
@@ -188,6 +189,24 @@ describe("automation workflows", () => {
     expect(slot.queryByRole("button", { name: "Daily report" })).toBeNull();
     slot.lifecycle.unmount();
   });
+  it("keeps observed transient runs out of current schedules but retains failures", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const transient = { ...task, id: "demo-worker", key: "transient", name: "Temporary execution",
+      scheduler: "systemd", schedule: null, scheduleKind: "once", executionId: "systemd:example",
+      state: "failed", lastRun: { ...task.lastRun, taskId: "demo-worker", exitCode: 70 } };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+      catalog_list: () => ({ tasks: [task, transient], sources: [source] }),
+    } });
+    await slot.findByRole("button", { name: "Daily report" });
+    expect(slot.queryByRole("button", { name: "Temporary execution" })).toBeNull();
+    fireEvent.change(slot.getByRole("combobox", { name: "Раздел автоматизаций" }), { target: { value: "executions" } });
+    expect(slot.getByRole("button", { name: "Temporary execution" })).toBeTruthy();
+    expect(slot.queryByRole("button", { name: "Daily report" })).toBeNull();
+    fireEvent.click(slot.getByRole("button", { name: /Требуют внимания/ }));
+    expect(slot.getByRole("button", { name: "Temporary execution" })).toBeTruthy();
+    expect(slot.getByRole("button", { name: "Daily report" })).toBeTruthy();
+    slot.lifecycle.unmount();
+  });
   it("uses the scheduler refresh RPC before reloading the table", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");
@@ -220,7 +239,7 @@ describe("automation workflows", () => {
   it("shows the failed result, keeps filters on return and provides compact history", async () => {
     const slot = await mount();
     await slot.findByText("Daily report");
-    expect(slot.getByText(/Последний запуск завершился ошибкой/)).toBeTruthy();
+    expect(slot.getAllByText(/Последний запуск завершился ошибкой/)[0]).toBeTruthy();
     expect(slot.getAllByText("Каждые 15 минут · UTC")[0]).toBeTruthy();
     fireEvent.click(slot.getByRole("button", { name: /Требуют внимания/ }));
     fireEvent.click(slot.getByRole("button", { name: "Daily report" }));
@@ -249,7 +268,7 @@ describe("automation workflows", () => {
     ).toContain("личную автоматизацию");
     expect(
       slot.inspection.rpcCalls.every((call) =>
-        ["catalog_list", "catalog_detail", "catalog_compose_context"].includes(call.method),
+        ["catalog_list", "catalog_detail", "catalog_compose_context", "catalog_display_names"].includes(call.method),
       ),
     ).toBe(true);
     slot.lifecycle.unmount();
@@ -281,5 +300,79 @@ describe("automation workflows", () => {
       ),
     ).toBe(false);
     slot.lifecycle.unmount();
+  });
+});
+
+
+it("labels inventory findings with the affected automation, project and machine", async () => {
+  const app = await loadPluginApp(() => import("./app"));
+  const native = { ...task, id: "auto_example", key: "ext_native", host: "host_example",
+    projectId: "proj_example", projectName: null, lastRun: null };
+  const finding = { ...task, key: "ext_finding", name: "OXI · unregistered · host_example",
+    scheduler: "inventory-audit", sourceId: "inventory", host: "host_example", state: "blocked",
+    description: 'Observed scheduler entry has no registry record. Identity: ["host_example","bb","proj_example","auto_example"]. No automatic stop.' };
+  const inventory = { ...source, id: "inventory", name: "Registry comparison" };
+  const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+    catalog_display_names: () => ({ hosts: [{ id: "host_example", name: "Office Mac" }],
+      projects: [{ id: "proj_example", name: "Example project" }] }),
+    catalog_list: () => ({ tasks: [native, finding, { ...finding, key: "ext_resolved",
+      name: "OXI · resolved · host_example", state: "paused", lastRun: null }], sources: [{ ...source, managedHere: true }, inventory] }),
+    catalog_detail: () => ({ task: finding, source: inventory, runs: [finding.lastRun], total: 1 }),
+    catalog_audit_list: () => ({ records: [], total: 0 }),
+  } });
+  await slot.findByText(/Example project · Office Mac/);
+  expect(slot.getByRole("option", { name: "Отключены (0)" })).toBeTruthy();
+  fireEvent.change(slot.getByRole("combobox", { name: "Раздел автоматизаций" }), { target: { value: "registry" } });
+  expect(slot.getAllByText("Нет в реестре").length).toBeGreaterThan(0);
+  expect(slot.queryByText(/Заблокирована|host_example/)).toBeNull();
+  fireEvent.change(slot.getByRole("combobox", { name: "Проект" }), { target: { value: "proj_example" } });
+  fireEvent.click(slot.getByRole("button", { name: "Daily report" }));
+  expect(await slot.findByRole("heading", { name: "Daily report" })).toBeTruthy();
+  expect(slot.getByText(/Машина: Office Mac/)).toBeTruthy();
+  expect(slot.queryByText("История запусков")).toBeNull();
+  expect(slot.getByText(/История предупреждения/)).toBeTruthy();
+  slot.lifecycle.unmount();
+});
+
+it("keeps historical sources in the archive while warning about a stale live source", async () => {
+  const app = await loadPluginApp(() => import("./app"));
+  const historic = { ...source, id: "historic", name: "Past inspection", archivedAt: 23, lastSuccessAt: 1 };
+  const live = { ...source, id: "live", name: "Current connection", lastSuccessAt: 1 };
+  const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+    catalog_display_names: () => ({ hosts: [], projects: [] }),
+    catalog_list: () => ({
+      tasks: [{ ...task, sourceId: live.id }, { ...task, name: "Archived observation",
+        sourceId: historic.id, key: "ext_historic", state: "failed" }],
+      sources: [live, historic],
+    }),
+  } });
+  await slot.findByText(/Проверьте подключение: Current connection/);
+  expect(slot.queryByText(/Проверьте подключение: Past inspection/)).toBeNull();
+  expect(slot.queryByText("Archived observation")).toBeNull();
+  fireEvent.change(slot.getByRole("combobox", { name: "Раздел автоматизаций" }), { target: { value: "archive" } });
+  expect(slot.getByRole("button", { name: "Archived observation" })).toBeTruthy();
+  expect(slot.getAllByText("Архив источника").length).toBeGreaterThan(0);
+  slot.lifecycle.unmount();
+});
+
+describe("retained one-off observations", () => {
+  it("keeps a disappeared running observation out of the running view", async () => {
+    const app = await loadPluginApp(() => import("./app"));
+    const retained = { ...task, name: "Одноразовое исполнение · sample.service", scheduler: "systemd", scheduleKind: "once", executionId: "systemd:invocation-example", state: "unknown", schedule: "Одноразовый процесс · без собственного расписания", lastRun: { ...task.lastRun, status: "running", finishedAt: null, exitCode: null } };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc: {
+      catalog_list: () => ({ tasks: [retained], sources: [source] }),
+    } });
+    fireEvent.click(await slot.findByRole("button", { name: /Все записи/ }));
+    expect(await slot.findByRole("button", { name: retained.name })).toBeTruthy();
+    expect(slot.getAllByText("Состояние не подтверждено").length).toBeGreaterThan(0);
+    expect(slot.getAllByText(/Ранее наблюдался · текущий исход неизвестен/).length).toBeGreaterThan(0);
+    if (process.env.CATALOG_VISUAL_DIR) {
+      const fs = await import("node:fs/promises");
+      await fs.mkdir(process.env.CATALOG_VISUAL_DIR, { recursive: true });
+      const css = await fs.readFile(`${process.cwd()}/dist/app.css`, "utf8");
+      await fs.writeFile(`${process.env.CATALOG_VISUAL_DIR}/unknown.html`, `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style><body>${document.body.innerHTML}</body></html>`);
+    }
+    fireEvent.click(slot.getByRole("button", { name: /Выполняются \/ в очереди/ }));
+    expect(slot.queryByRole("button", { name: retained.name })).toBeNull();
   });
 });

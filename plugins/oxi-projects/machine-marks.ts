@@ -12,9 +12,9 @@ export const machineMarksConfigSchema=z.object({
 export type MachineMarksConfig=z.infer<typeof machineMarksConfigSchema>;
 export type MachineRole=z.infer<typeof machineRoleSchema>;
 export type MachineHost={id:string;name:string};
-export type MachineMark={icon:keyof typeof machineIcons;label:string;kind:MachineRole['kind']};
-export function machineMarkStyle(kind:MachineRole['kind']) {
- return {color:{local:'#6b93ac',primary:'#9a82a6',other:'#78998b'}[kind],backgroundColor:'transparent'};
+export type MachineMark={icon:keyof typeof machineIcons;label:string;kind:MachineRole['kind'];stopped?:boolean};
+export function machineMarkStyle(kind:MachineRole['kind'],stopped=false) {
+ return {color:stopped?'var(--destructive, #c33)':{local:'#6b93ac',primary:'#9a82a6',other:'#78998b'}[kind],backgroundColor:'transparent'};
 }
 export const defaultMachineMarksConfig:MachineMarksConfig={enabled:false,hosts:{}};
 export function parseMachineMarksConfig(value:unknown):MachineMarksConfig|null {

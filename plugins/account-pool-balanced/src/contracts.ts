@@ -1,12 +1,15 @@
 import {geminiUsageSchema} from './gemini-usage.js';
 import { z } from "zod";
 
+export const NATIVE_MAX_CONCURRENT_SESSIONS = 4;
+
 export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   anthropicUpstreamBaseUrl: "https://api.anthropic.com",
   codexUpstreamBaseUrl: "https://chatgpt.com/backend-api/codex",
   kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
   zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
   opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+  opencodeFreeUpstreamBaseUrl: "https://opencode.ai/inference/openai/v1",
   neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
   cursorUpstreamBaseUrl: "https://api2.cursor.sh",
   devinUpstreamBaseUrl: "https://server.codeium.com",
@@ -14,6 +17,8 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   maxConcurrentRequestsPerAccount: 2,
   claudeRequestStartIntervalMs: 0,
   geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
+  busyOverflow: true,
+  pinnedFailover: false,
   switchThreshold: 0.98,
   routingStrategy: "sequential" as const,
   reserveDrainHours: 24,
@@ -83,6 +88,9 @@ export const accountPoolConfigSchema = z
     opencodeGoUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.opencodeGoUpstreamBaseUrl,
     ),
+    opencodeFreeUpstreamBaseUrl: httpUrlSchema.default(
+      DEFAULT_ACCOUNT_POOL_CONFIG.opencodeFreeUpstreamBaseUrl,
+    ),
     neuraldeepUpstreamBaseUrl: httpUrlSchema.default(DEFAULT_ACCOUNT_POOL_CONFIG.neuraldeepUpstreamBaseUrl),
     cursorUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.cursorUpstreamBaseUrl,
@@ -98,6 +106,8 @@ export const accountPoolConfigSchema = z
     geminiUpstreamBaseUrl: httpUrlSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.geminiUpstreamBaseUrl,
     ),
+    pinnedFailover: z.boolean().default(false),
+    busyOverflow: z.boolean().default(DEFAULT_ACCOUNT_POOL_CONFIG.busyOverflow),
     switchThreshold: switchThresholdSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.switchThreshold,
     ),
@@ -125,6 +135,7 @@ export const accountPoolConfigSetInputSchema = z
     kimiUpstreamBaseUrl: httpUrlSchema.optional(),
     zaiUpstreamBaseUrl: httpUrlSchema.optional(),
     opencodeGoUpstreamBaseUrl: httpUrlSchema.optional(),
+    opencodeFreeUpstreamBaseUrl: httpUrlSchema.optional(),
     neuraldeepUpstreamBaseUrl: httpUrlSchema.optional(),
     cursorUpstreamBaseUrl: httpUrlSchema.optional(),
     devinUpstreamBaseUrl: httpUrlSchema.optional(),
@@ -132,6 +143,8 @@ export const accountPoolConfigSetInputSchema = z
     maxConcurrentRequestsPerAccount: z.number().int().min(1).max(32).optional(),
     claudeRequestStartIntervalMs: z.number().int().min(0).max(60_000).optional(),
     geminiUpstreamBaseUrl: httpUrlSchema.optional(),
+    busyOverflow: z.boolean().optional(),
+    pinnedFailover: z.boolean().optional(),
     switchThreshold: switchThresholdSchema.optional(),
     routingStrategy: routingStrategySchema.optional(),
     reserveDrainHours: reserveDrainHoursSchema.optional(),
@@ -267,6 +280,42 @@ export const accountPolicySchema = z.object({
 }).strict();
 export type AccountPolicy = z.infer<typeof accountPolicySchema>;
 
+const spendPercent = z.number().min(0).max(100);
+const weeklyStep = z.object({
+  hoursBeforeReset: z.number().int().min(1).max(167),
+  ceiling: spendPercent,
+}).strict();
+export const weeklyRuleSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("fixed"), ceiling: spendPercent }).strict(),
+  z.object({ mode: z.literal("scheduled"), ceiling: spendPercent, steps: z.array(weeklyStep).min(1).max(14) })
+    .strict().refine(({ ceiling, steps }) => steps.every((step, index) => {
+      const previous = steps[index - 1];
+      return step.ceiling >= (previous?.ceiling ?? ceiling) &&
+        (previous === undefined || step.hoursBeforeReset < previous.hoursBeforeReset);
+    }), "Steps must be ordered by decreasing hours and nondecreasing ceilings"),
+]);
+export type WeeklyRule = z.infer<typeof weeklyRuleSchema>;
+
+export const weeklyBudgetSchema = z.object({
+  rule: weeklyRuleSchema,
+  override: z.object({
+    ceiling: spendPercent,
+    until: z.number().int().positive(),
+    resetAt: z.number().int().positive(),
+  }).strict().refine(value => value.until <= value.resetAt).nullable(),
+}).strict();
+
+export const weeklyBudgetChangeSchema = z.object({
+  accountId: z.string().uuid(),
+  expected: weeklyBudgetSchema.nullable(),
+  change: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("rule"), rule: weeklyRuleSchema.nullable() }).strict(),
+    z.object({ kind: z.literal("override"), ceiling: spendPercent, until: z.enum(["next-step", "reset"]) }).strict(),
+    z.object({ kind: z.literal("clear-override") }).strict(),
+  ]),
+}).strict();
+export type WeeklyBudgetChange = z.infer<typeof weeklyBudgetChangeSchema>;
+
 export const accountProjectsSchema = z.object({
   onlySelected: z.boolean(),
   rules: z.array(z.object({
@@ -277,7 +326,7 @@ export const accountProjectsSchema = z.object({
   "Include each project only once");
 export type AccountProjects = z.infer<typeof accountProjectsSchema>;
 
-export const accountSchema = z
+export const accountMetadataSchema = z
   .object({
     id: z.string().uuid(),
     provider: providerSchema,
@@ -290,6 +339,7 @@ export const accountSchema = z
     subscriptionType: z.string().nullable(),
     rateLimitTier: z.string().nullable(),
     enabled: z.boolean(),
+    draft: z.literal(true).optional(),
     autopilotAllowed: z.boolean().default(false),
     priority: z.number().int(),
     createdAt: z.number().int().nonnegative(),
@@ -304,6 +354,7 @@ export const accountSchema = z
   })
   .strict();
 
+export const accountSchema = accountMetadataSchema.extend({ weeklyBudget: weeklyBudgetSchema.optional() });
 export type Account = z.infer<typeof accountSchema>;
 
 export const oauthSecretSchema = z
@@ -396,6 +447,13 @@ export const accountSummarySchema = accountSchema.extend({
   queuedRequests: z.number().int().nonnegative().default(0),
   concurrencyLimit: z.number().int().positive().default(2),
   capLimit: z.number().nullable(),
+  weeklySpending: z.object({
+    mode: z.enum(["pool", "fixed", "scheduled", "override", "drain"]),
+    ceiling: z.number(),
+    utilization: z.number().nullable(),
+    resetAt: z.number().int().nullable(),
+    nextChangeAt: z.number().int().nullable(),
+  }).strict().optional(),
   eligible: z.boolean(),
   capReached: z.boolean(),
   drainOpensAt: z.number().int().nullable(),
@@ -436,10 +494,22 @@ export const providerReadinessSchema = z.object({
 }).strict();
 export type ProviderReadiness = z.infer<typeof providerReadinessSchema>;
 
+export const nativeLeaseKindSchema = z.enum(['task', 'catalog', 'diagnostic']);
+export const uncertainNativeLeaseSchema = z.object({
+  leaseId: z.uuid(),
+  executorId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
+  kind: nativeLeaseKindSchema,
+  ageMs: z.number().int().nonnegative(),
+}).strict();
+export const attestNativeLeaseCommand = (leaseId: string) => `bb pool native attest-stopped ${leaseId} --confirmed`;
+
 export const statusSchema = z
   .object({
     route: z.string(),
+    routeTracking:z.object({decisions:z.number(),maxDecisions:z.number(),bytes:z.number(),maxBytes:z.number(),retentionMs:z.number(),trackedKeys:z.number().optional(),cachedRoutes:z.number().optional()}).optional(),
+    historyCapacity:z.object({rows:z.number(),maxRows:z.number(),maxBytes:z.number()}).optional(),
     vpn: z.object({ state: z.enum(["connected", "disconnected", "unknown"]), blockedProviders: z.array(providerSchema), guardEnabled:z.boolean().default(false), assurance:z.enum(["verified_ipv4","unverified","invalid"]).optional(),reason:z.string().optional() }).strict().optional(),
+    uncertainNativeLeases: z.array(uncertainNativeLeaseSchema).max(128).optional(),
     enabledAccountCount: z.number().int().nonnegative(),
     inFlight: z.number().int().nonnegative(),
     accepting: z.boolean(),
@@ -497,6 +567,7 @@ export const accountAddInputSchema = z
     provider: providerSchema,
     source: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("import") }).strict(),
+      z.object({ kind: z.literal("draft"), email: z.string().trim().email().max(254) }).strict(),
       z
         .object({ kind: z.literal("api-key"), apiKey: z.string().min(1) })
         .strict(),

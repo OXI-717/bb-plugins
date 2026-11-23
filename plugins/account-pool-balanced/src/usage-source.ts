@@ -1,5 +1,6 @@
 import {geminiPlanLabel, geminiCreditLabel} from './gemini-usage.js';
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
+import { PoolManagementLocked } from './management-access.js';
 import type { AccountSummary, PoolProvider } from "./contracts.js";
 import type { AccountPoolHub } from "./hub.js";
 import {
@@ -109,19 +110,21 @@ function isExpiredAuthorizationError(error: string | null): boolean {
 // Devin, NeuralDeep and Antigravity have no quota collector here. Do not
 // advertise an unmeasurable resource as a failed collection; the account
 // remains available for routing.
-function reportsUsage(account: Pick<AccountSummary, "provider">): boolean {
-  return account.provider !== "ifm" && account.provider !== "nvidia" && account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy";
+function reportsUsage(account: Pick<AccountSummary, "provider" | "kind">): boolean {
+  return !(account.provider === "grok" && account.kind === "api-key") && account.provider !== "ifm" && account.provider !== "nvidia" && account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy";
 }
 
 export function registerUsageSource(
   bb: BbPluginApi,
   hub: AccountPoolHub,
+  privateInventory = true,
   now?: () => number,
 ) {
   bb.rpc.register(
     usageSourceRpcContract,
     {
       async [usageListMethod]() {
+        if (privateInventory) return { label: 'Provider access', resources: [] };
         const { accounts } = await hub.status();
         return {
           label: "Account Pooler",
@@ -135,6 +138,7 @@ export function registerUsageSource(
         };
       },
       async [usageFetchMethod]({ resourceId, refresh }) {
+        if (privateInventory) throw new PoolManagementLocked();
         const account = (await hub.status()).accounts.find(account => account.id === resourceId);
         if (!account) throw new Error("Usage resource no longer exists.");
         if (!reportsUsage(account)) {

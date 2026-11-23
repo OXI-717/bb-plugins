@@ -6,7 +6,7 @@ Run on the BB server host, from a checkout of this repository:
 git pull --ff-only
 bash scripts/upgrade-pool.sh --sandbox
 bash scripts/upgrade-pool.sh --check
-bash scripts/upgrade-pool.sh
+bash scripts/upgrade-pool.sh --pause-sessions
 ```
 
 Requirements: `bb`, `git`, Python 3.9+ and a local BB connection. The entrypoint
@@ -42,7 +42,9 @@ Before update, a private directory under BB's backups contains an online SQLite
 backup, copied secrets, account/routing inventory, configuration and previous
 source metadata. A process lock prevents simultaneous updater runs. Source,
 release, configuration and idle state are rechecked immediately before update.
-New traffic can still arrive after that check; BB owns reload and draining.
+The session-pause mode also holds a persisted all-client admission barrier through
+backup, reload and verification. The idle-only mode has no such barrier; BB owns
+reload and draining if new traffic arrives after its final check.
 A release published between final validation and BB's resolution cannot be pinned
 with the current CLI; a different resulting SHA fails post-update verification.
 
@@ -76,22 +78,37 @@ independent plugin holds the session queue while the pool itself is reloaded.
 Use `bash scripts/upgrade-pool.sh --pause-sessions --version X.Y.Z` from a separate
 BB machine terminal. Stopping the initiating session must not kill the executor.
 
-After release/server preflight, acquire an exclusive 30-minute hold on new BB
-dispatches across **all projects and hosts**, then snapshot active/starting
-sessions through the unpaginated public threads.listRunning API. Stop current
-turns with history/provider settings retained. The hook queues starts, follow-ups,
-steers and retries, instead of rejecting them. Queue cards and sidebar clocks
-show the reason. No concurrency limits change.
+After release/server preflight and model-pause API validation, hold new BB
+dispatches across **all projects and hosts** and acquire the model upgrade hold.
+Snapshot active/starting sessions through the unpaginated public threads.listRunning
+API and stop current turns with history and provider settings retained. The
+dispatch hook queues starts, follow-ups, steers and retries. Queue cards and
+sidebar clocks show the reason. No concurrency limits change.
 
 The existing upgrade lock, verified backup, immutable release/source verification,
 settings and post-update checks remain mandatory. Forced pool interruption stays
 disabled; drain is bounded to 90 seconds. Before wait, backup and update, the owned
 hold must have 15 minutes remaining. Missing/foreign/expiring hold refuses update.
-External HTTP clients are outside the BB queue and can still cause a guarded abort.
+The model hold parks new authenticated HTTP requests before they start their
+account queue deadline. Requests already admitted can drain. Once model work
+drains, the updater seals admission before backup, preventing new auxiliary
+transport. Budget and readiness routes report paused. Native acquisition, poll
+and unlock admission refuse, and confirmed release or cancellation remains
+available. If an unconfirmed native process prevents the update, the failure
+lists the executor, lease kind, age and operator confirmation command.
+The model hold is persisted and loaded before new routes are exposed after
+reload. The updater never resends a request that reached its provider.
+
 Do not unload this plugin during an operation: core may clear orphaned waits.
 
-On success or ordinary failure, queue continuations for unchanged stopped sessions
-without provider/model overrides, then release the owned hold and recheck the queue.
+On failure, release both owned holds before verifying or sending session
+continuations. Parked HTTP requests can then enter the account queue with
+their full wait budget. On success, release the model hold, queue continuations
+for unchanged stopped sessions without provider or model overrides and then
+release the dispatch hold. The updater verifies
+that each continuation is queued or running. It retries once if the thread still
+matches its stopped snapshot and no work was queued. The private session receipt
+and update log list uncontinued threads and their reasons.
 Previously idle sessions do not start unless they have real queued user work.
 Already queued user work is preserved without adding a redundant continuation.
 An ended operation does not imply a successful update; read the result separately.
@@ -109,3 +126,65 @@ Queued messages carry the finite deadline; core re-attempts after expiry without
 a daemon, cron or watchdog. Stopped sessions without queued work need explicit
 recovery. Lease state survives plugin restart and expiry is checked at startup.
 No recovery is promised while BB is not running. No prompts or credentials in receipts.
+
+
+## Update from the pool interface
+
+Pooler 0.4.79+ includes **Обновить Pooler** in its settings. It launches the same
+accepted `--pause-sessions` updater in a BB machine terminal on the server host.
+The terminal survives pool reload and does not belong to a stopped agent thread.
+Before launch, a private operation directory receives a fixed copy of the updater
+and its Python modules. Its working directory is outside the managed Git cache,
+so removal of the previous checkout cannot break verification or recovery.
+The browser supplies no command, host, version or file path. The installed Git
+source must retain this repository's scripts, and `pool-maintenance` must be enabled.
+An unchanged immutable release performs only preflight and leaves work running.
+
+A durable operation receipt prevents double-clicks and survives reopening the UI.
+After an uncertain terminal-create response, the controller searches only the
+operation UUID title on its recorded host; it never automatically starts a second
+updater. Missing/ambiguous terminal evidence remains `unknown`, requiring inspection
+of the BB machine terminal and private recovery receipt. A failed or disconnected
+terminal is not reported as a successful update.
+
+Bootstrapping from an older pool without the model-admission API requires its
+previously accepted updater and a coordinated idle window once. The new updater
+refuses the missing API before stopping sessions; it never claims that old external
+clients were paused. Subsequent CLI and interface updates use both barriers.
+
+## Natural completion without interruption
+
+Use `--drain-sessions --grant-file "$GRANT_FILE"` in an independent machine
+terminal. The grant is operator-issued JSON, mode 0600; it is read privately and
+sent through stdin. The updater no longer discovers a management root key.
+The coordinator revokes the grant when the operation finishes. Short-lived grants
+do not survive plugin reload: use `--operator-key-file "$OPERATOR_KEY_FILE"` for
+a durable update. This explicit private file is never discovered automatically;
+the existing management client issues and revokes a fresh 60-second grant for
+each command, including post-reload validation and hold release. The interface
+passes only a fixed server-owned file path, never its contents; the browser
+cannot choose a path or command. The two credential flags are mutually exclusive.
+The dispatch queue is held for at most 30 minutes; natural completion waits up
+to 600 seconds (`--drain-timeout`). No thread stop, continuation, model interrupt
+or concurrency change occurs. Three complete empty inventories are required.
+The owned all-client barrier uses `acquire-graceful`, which blocks admission
+without aborting existing transport. The usual backup, idle checks and source,
+account, routing and integrity validation still run. Release and recovery retain
+ownership checks; the private receipt has no stopped sessions to restart.
+
+Bootstrap: installations without `acquire-graceful` cannot use that API. There is
+no fallback to cancelling `acquire`. Coordinate a separately proven idle window
+with external admission controlled before first installation. Active external
+requests are a blocker, even when BB sessions have finished.
+
+## Candidate preflight before publication or installation
+
+`--candidate-preflight "$MANIFEST" --receipt-output "$RECEIPT"` performs no
+installation or production writes. The JSON manifest contains `artifacts` (map
+of repository-relative paths to SHA256), explicit `tests` (existing relative
+`src/*.test.ts` or `.tsx` paths), and optional credential-free HTTPS `network`
+endpoints. It runs typecheck, those suites and the plugin build. Private receipt
+and command log record UTC timestamps. DNS/TCP/TLS is separate from provider
+inference. Missing host bundle, policy preservation, protocol, eligibility and
+live provider receipts remain `unknown`; exit 2 means the aggregate is not ready.
+A successful fixture suite never establishes live subscription or billing state.

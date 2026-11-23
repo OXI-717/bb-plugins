@@ -1,10 +1,11 @@
 import { PLUGIN_CLI_OUTPUT_MAX_BYTES, type BbPluginApi } from "@get-bb/plugin-sdk";
-import { catalogMigration, registerCatalog } from "./src/catalog";
+import { catalogMigration, migrateCatalogRunsIndex, registerCatalog } from "./src/catalog";
 import { auditMigration } from "./src/audit";
 
 export default function plugin(bb: BbPluginApi) {
   const db = bb.storage.database();
   db.exec("PRAGMA foreign_keys = ON");
+  let reclaimSpace = false;
   db.transaction(() => {
     db.exec("CREATE TABLE IF NOT EXISTS catalog_migrations (version INTEGER PRIMARY KEY)");
     if (!db.prepare("SELECT version FROM catalog_migrations WHERE version = 1").get()) {
@@ -15,7 +16,19 @@ export default function plugin(bb: BbPluginApi) {
       db.exec(auditMigration);
       db.prepare("INSERT INTO catalog_migrations(version) VALUES (2)").run();
     }
+    if (!db.prepare("SELECT version FROM catalog_migrations WHERE version = 3").get()) {
+      reclaimSpace = migrateCatalogRunsIndex(db);
+      db.prepare("INSERT INTO catalog_migrations(version) VALUES (3)").run();
+    }
   })();
+  if (reclaimSpace) {
+    try {
+      db.exec("PRAGMA auto_vacuum = INCREMENTAL");
+      db.exec("VACUUM");
+    } catch {
+      /* best-effort space reclamation after v3 prune */
+    }
+  }
   const catalog = registerCatalog(bb, db);
   function reply(value: unknown) {
     const stdout = JSON.stringify(value);

@@ -13,3 +13,6 @@ Interactive Google code entry uses a masked input in the Gemini login dialog. Su
 
 
 An explicit Gemini OAuth quota refresh may revalidate a stored, structurally recognised Google subscription refusal (403 PERMISSION_DENIED with SUBSCRIPTION_REQUIRED). This permission applies only to quota collection, never model requests or account eligibility. Periodic refreshes and other stored errors retain their guard. The account stays unavailable until a valid quota observation; non-success HTTP responses, malformed JSON and missing quota data fail visibly without clearing the stored denial. Reauthentication alone still grants no subscription.
+
+
+The upstream reconciliation keeps API-key-only Grok accounts available for routing, while omitting their unsupported quota collector from Provider Usage. Grok OAuth accounts retain the existing subscription collector. This avoids presenting an unavailable API-key quota endpoint as a failed measurement; no missing value becomes zero. Both legacy and versioned Grok Pooler URLs remain accepted for existing sessions. The upstream native thread-account selection controls are retained in the host header action and shared overlay.

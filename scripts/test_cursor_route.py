@@ -19,6 +19,56 @@ spec.loader.exec_module(route)
 
 
 class CursorRouteTest(unittest.TestCase):
+    def test_completed_prompt_releases_open_streams_before_cli_exits(self):
+        import select
+        closed=[]; released=threading.Event()
+        class Hub(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length',0)))
+                self.send_response(200);self.send_header('Transfer-Encoding','chunked')
+                self.send_header('Content-Type','application/connect+proto');self.end_headers()
+                self.wfile.write(b'6\r\n\x00\x00\x00\x00\x01x\r\n');self.wfile.flush()
+                if select.select([self.connection],[],[],5)[0] and self.connection.recv(1)==b'':
+                    closed.append(True)
+                    if len(closed)==2:released.set()
+        hub=http.server.ThreadingHTTPServer(('127.0.0.1',0),Hub)
+        worker=threading.Thread(target=hub.serve_forever,daemon=True);worker.start()
+        process=None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cli=Path(tmp)/'cursor-agent'
+                cli.write_text('#!'+sys.executable+'\n'+"""import http.client,json,os,sys
+from urllib.parse import urlsplit
+r=json.loads(sys.stdin.readline());url=urlsplit(os.environ['CURSOR_API_ENDPOINT']);connections=[]
+for _ in range(2):
+ c=http.client.HTTPConnection(url.hostname,url.port,timeout=5)
+ c.request('POST','/agent.v1.AgentService/RunSSE',body=b'probe');response=c.getresponse()
+ assert response.read1(6)==b'\\x00\\x00\\x00\\x00\\x01x'
+ connections.append((c,response))
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'}}),flush=True)
+sys.stdin.readline()
+""")
+                cli.chmod(0o755)
+                env=dict(os.environ,HOME=tmp,PATH=tmp+os.pathsep+os.environ['PATH'],CURSOR_API_ENDPOINT=f'http://127.0.0.1:{hub.server_port}/cursor',CURSOR_POOL_RPC_GATEWAY='1')
+                process=subprocess.Popen([sys.executable,str(WRAPPER),'--model','synthetic-model','acp'],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                process.stdin.write(json.dumps({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})+'\n');process.stdin.flush()
+                self.assertTrue(select.select([process.stdout],[],[],60)[0],'ACP reply did not arrive')
+                reply=json.loads(process.stdout.readline());self.assertEqual(reply['result']['stopReason'],'end_turn')
+                self.assertTrue(released.wait(3),'Completed prompt retained its upstream streams')
+                self.assertIsNone(process.poll(),'CLI must stay available for the next prompt')
+        finally:
+            try:
+                if process:
+                    try:
+                        process.communicate(input='\n',timeout=60)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate(timeout=10)
+                        raise
+            finally:
+                hub.shutdown();hub.server_close();worker.join(timeout=2)
+
     def test_direct_environment_is_unchanged(self):
         env = {"AGENT_CLI_CREDENTIAL_STORE": "system"}
         self.assertEqual(route.build_env(env), env)
@@ -89,6 +139,106 @@ print("PROBE_OK")
             hub.server_close()
             thread.join()
 
+    def gateway_stream_case(self, mode, *, close_response=False, idle_seconds=0.7, header_deadline=0.3):
+        import time
+        import socket
+        disconnected = []
+        class Hub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                if mode == 'headers':
+                    time.sleep(0.7)
+                self.send_response(200)
+                self.send_header('Transfer-Encoding', 'chunked')
+                self.send_header('Connection', 'close' if close_response else 'keep-alive')
+                self.end_headers()
+                try:
+                    self.wfile.write(b'3\r\nabc\r\n')
+                    self.wfile.flush()
+                    if mode == 'cancel':
+                        started = time.monotonic()
+                        self.connection.settimeout(3)
+                        disconnected.append((self.connection.recv(1), time.monotonic() - started))
+                        return
+                    time.sleep(idle_seconds if mode == 'quiet' else 0)
+                    payload = bytes(range(256)) * 12288 if mode == 'large' else b'def'
+                    for offset in range(0, len(payload), 8191):
+                        chunk = payload[offset:offset + 8191]
+                        self.wfile.write(('%x\r\n' % len(chunk)).encode() + chunk + b'\r\n')
+                    self.wfile.write(b'0\r\n\r\n')
+                    self.wfile.flush()
+                except (OSError, TimeoutError):
+                    pass
+
+        hub = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Hub)
+        worker = threading.Thread(target=hub.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cli = Path(tmp) / 'cursor-agent'
+                cli.write_text('#!' + sys.executable + '\n' + '''import http.client, os, time
+from urllib.parse import urlsplit
+u = urlsplit(os.environ['CURSOR_API_ENDPOINT'])
+c = http.client.HTTPConnection(u.hostname, u.port, timeout=float(os.environ['STREAM_TIMEOUT']))
+c.request('POST', '/agent.v1.AgentService/RunSSE', body=b'probe')
+mode = os.environ['STREAM_CASE']
+if mode == 'headers':
+    try:
+        c.getresponse()
+    except http.client.RemoteDisconnected:
+        print('HEADER_TIMEOUT_OK')
+    else:
+        raise AssertionError('Header deadline was removed')
+else:
+    r = c.getresponse()
+    if mode == 'cancel':
+        assert r.read(3) == b'abc'
+        r.close()
+        c.close()
+        # Keep the process alive: process exit must not be what cancels upstream.
+        time.sleep(2)
+    else:
+        expected = b'abc' + (bytes(range(256)) * 12288 if mode == 'large' else b'def')
+        assert r.read() == expected
+    print('STREAM_OK')
+''')
+                cli.chmod(0o755)
+                env = dict(os.environ, HOME=tmp, PATH=tmp + os.pathsep + os.environ['PATH'],
+                    CURSOR_API_ENDPOINT=f'http://127.0.0.1:{hub.server_port}/cursor',
+                    CURSOR_POOL_RPC_GATEWAY='1', STREAM_CASE=mode, STREAM_TIMEOUT=str(idle_seconds + 10))
+                # Scale only the wrapper's real socket deadline; the CLI keeps its own.
+                bootstrap = "import http.client,runpy,sys; original=http.client.HTTPConnection; http.client.HTTPConnection=lambda *a,**kw:original(*a,**{**kw,'timeout':" + repr(header_deadline) + "}); path=sys.argv[1];sys.argv=sys.argv[1:];runpy.run_path(path,run_name='__main__')"
+                command = [sys.executable, str(WRAPPER), 'acp'] if mode == 'cancel' else [sys.executable, '-c', bootstrap, str(WRAPPER), 'acp']
+                result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=idle_seconds + 60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), 'HEADER_TIMEOUT_OK' if mode == 'headers' else 'STREAM_OK')
+                if mode == 'cancel':
+                    self.assertEqual(len(disconnected), 1)
+                    self.assertEqual(disconnected[0][0], b'')
+                    self.assertLess(disconnected[0][1], 1.5)
+        finally:
+            hub.shutdown()
+            hub.server_close()
+            worker.join()
+
+    def test_quiet_stream_survives_header_deadline(self):
+        self.gateway_stream_case('quiet')
+
+    def test_quiet_connection_close_stream_survives_header_deadline(self):
+        self.gateway_stream_case('quiet', close_response=True)
+
+    def test_header_deadline_is_still_enforced(self):
+        self.gateway_stream_case('headers')
+
+    def test_client_disconnect_cancels_quiet_upstream(self):
+        self.gateway_stream_case('cancel')
+
+    def test_large_response_preserves_every_byte(self):
+        self.gateway_stream_case('large')
+
     def test_jsonl_failure_roundtrip_through_gateway(self):
         class Hub(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -133,6 +283,101 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end
             hub.shutdown();hub.server_close();thread.join()
 
 
+    def gateway_body_failure_case(self, mode):
+        # A real socket cut, HTTP-clean partial Connect frame, or valid end frame.
+        class Hub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream' if mode=='cursor-sse' else 'application/connect+proto')
+                self.send_header('Transfer-Encoding', 'chunked')
+                self.end_headers()
+                payload = b'\x00\x00\x00\x00\x03abc'
+                if mode in ('complete', 'after-end'):
+                    payload += b'\x02\x00\x00\x00\x02{}'
+                elif mode == 'partial':
+                    payload += b'\x00\x00\x00'
+                self.wfile.write(('%x\r\n' % len(payload)).encode() + payload + b'\r\n')
+                self.wfile.flush()
+                if mode == 'cancel':
+                    self.connection.settimeout(5)
+                    self.connection.recv(1)
+                elif mode not in ('socket', 'after-end'):
+                    self.wfile.write(b'0\r\n\r\n')
+                    self.wfile.flush()
+                self.close_connection = True
+        hub = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Hub)
+        worker = threading.Thread(target=hub.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cli = Path(tmp) / 'cursor-agent'
+                cli.write_text('#!' + sys.executable + '\n' + """import http.client,json,os,sys,time
+from urllib.parse import urlsplit
+r=json.loads(sys.stdin.readline())
+u=urlsplit(os.environ['CURSOR_API_ENDPOINT'])
+def update(text):
+ print(json.dumps({'method':'session/update','params':{'sessionId':r['params']['sessionId'],'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}}),flush=True)
+update('Earlier normal output. ' * 40)
+c=http.client.HTTPConnection(u.hostname,u.port,timeout=5)
+c.request('POST','/agent.v1.AgentService/RunSSE',body=b'probe')
+try:
+ response=c.getresponse()
+ if os.environ['BODY_MODE']=='cancel':
+  response.read(3);response.close();c.close();time.sleep(0.6)
+ else:
+  response.read()
+except (OSError,http.client.HTTPException):
+ pass
+c.close()
+update('\\n\\nError: RetriableError: [invalid_argument] protocol error: incomplete envelope')
+reply={'error':{'code':-32603,'message':'[aborted] socket hang up'}} if os.environ['BODY_MODE']=='rpc-error' else {'result':{'stopReason':'end_turn'}}
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],**reply}),flush=True)
+""")
+                cli.chmod(0o755)
+                env = dict(os.environ, HOME=tmp, PATH=tmp+os.pathsep+os.environ['PATH'],
+                    CURSOR_API_ENDPOINT=f'http://127.0.0.1:{hub.server_port}/cursor', CURSOR_POOL_RPC_GATEWAY='1', BODY_MODE=mode)
+                result = subprocess.run([sys.executable, str(WRAPPER), '--model', 'synthetic-model', 'acp'],
+                    input=json.dumps({'id':7,'method':'session/prompt','params':{'sessionId':'synthetic'}})+'\n',
+                    env=env,capture_output=True,text=True,timeout=60)
+                self.assertEqual(result.returncode,0,result.stderr)
+                messages=[json.loads(line) for line in result.stdout.splitlines()]
+                self.assertEqual(len(messages),3)
+                if mode in ('complete', 'after-end', 'cancel'):
+                    # Error-like assistant text alone cannot turn success into failure.
+                    self.assertEqual(messages[-1],{'jsonrpc':'2.0','id':7,'result':{'stopReason':'end_turn'}})
+                else:
+                    self.assertEqual(messages[-1],{'jsonrpc':'2.0','id':7,'error':{'code':-32603,'message':'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.'}})
+        finally:
+            hub.shutdown();hub.server_close();worker.join()
+
+    def test_cursor_binary_frames_under_event_stream_recover_on_partial_eof(self):
+        self.gateway_body_failure_case('cursor-sse')
+
+    def test_confirmed_body_failure_normalizes_actual_acp_rpc_error(self):
+        self.gateway_body_failure_case('rpc-error')
+
+    def test_socket_cut_becomes_failed_prompt_after_normal_output(self):
+        self.gateway_body_failure_case('socket')
+
+    def test_http_clean_partial_connect_frame_becomes_failed_prompt(self):
+        self.gateway_body_failure_case('partial')
+
+    def test_http_clean_missing_connect_end_becomes_failed_prompt(self):
+        self.gateway_body_failure_case('missing-end')
+
+    def test_complete_connect_stream_keeps_success(self):
+        self.gateway_body_failure_case('complete')
+
+    def test_client_disconnect_does_not_become_a_retryable_model_failure(self):
+        self.gateway_body_failure_case('cancel')
+
+    def test_socket_cut_after_complete_connect_end_keeps_success(self):
+        self.gateway_body_failure_case('after-end')
+
+
 
 class AcpFailureNormalizationTest(unittest.TestCase):
     def test_child_eof_stops_reader_while_parent_input_remains_open(self):
@@ -172,6 +417,67 @@ class AcpFailureNormalizationTest(unittest.TestCase):
         result={"id":2,"result":{"stopReason":"end_turn"}}
         self.assertEqual(state.child(result),result)
 
+    def test_interrupted_request_is_not_carried_into_a_fresh_model_request(self):
+        state=route.AcpPoolFailures()
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+        old=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.model_interrupted(old)
+        fresh=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.model_interrupted(old)  # A late old read cannot fail the fresh request.
+        state.model_response('agent.v1.AgentService/RunSSE',None,fresh)
+        original={'id':1,'result':{'stopReason':'end_turn'}}
+        self.assertEqual(state.child(original),original)
+
+    def test_interruption_is_not_carried_across_ambiguous_prompts_or_reused_ids(self):
+        state=route.AcpPoolFailures()
+        state.client({'id':1,'method':'session/prompt','params':{}})
+        old=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.client({'id':2,'method':'session/prompt','params':{}})
+        state.model_interrupted(old)
+        for identifier in (2,1):
+            original={'id':identifier,'result':{'stopReason':'end_turn'}}
+            self.assertEqual(state.child(original),original)
+        state.client({'id':1,'method':'session/prompt','params':{}})
+        state.model_interrupted(old)
+        original={'id':1,'result':{'stopReason':'end_turn'}}
+        self.assertEqual(state.child(original),original)
+
+    def test_interruption_does_not_replace_cancellation_or_existing_rpc_errors(self):
+        for result in ({'result':{'stopReason':'cancelled'}},{'error':{'code':-1,'message':'synthetic'}}):
+            state=route.AcpPoolFailures()
+            state.client({'id':1,'method':'session/prompt','params':{}})
+            state.model_interrupted(state.begin_model_request('agent.v1.AgentService/RunPoll'))
+            original={'id':1,**result}
+            self.assertEqual(state.child(original),original)
+
+    def test_connect_completion_observes_fragmented_headers_and_large_payload_without_retaining_it(self):
+        state=route.ConnectCompletion()
+        payload=b'x'*(3*1024*1024)
+        wire=b'\x01'+len(payload).to_bytes(4,'big')+payload+b'\x02\x00\x00\x00\x02{}'
+        for offset in range(0,len(wire),8191):
+            state.feed(wire[offset:offset+8191])
+            self.assertLessEqual(len(state.header),4)
+        self.assertTrue(state.complete)
+        for boundary in range(1,12):
+            state=route.ConnectCompletion()
+            terminal=b'\x02\x00\x00\x00\x02{}'
+            for byte in terminal[:boundary]:
+                state.feed(bytes([byte]))
+            self.assertEqual(state.complete,boundary>=len(terminal))
+
+    def test_confirmed_interruption_normalizes_cursor_rpc_incomplete_envelope(self):
+        for prefix in ('','RetriableError: ','Internal error: '):
+            state=route.AcpPoolFailures();state.client({'id':1,'method':'session/prompt','params':{}})
+            state.model_interrupted(state.begin_model_request('agent.v1.AgentService/RunSSE'))
+            original={'jsonrpc':'2.0','id':1,'error':{'code':-32603,'message':prefix+'[invalid_argument] protocol error: incomplete envelope'}}
+            result=state.child(original)
+            self.assertEqual(result['error']['message'],'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.')
+
+    def test_rpc_envelope_text_without_local_interruption_is_unchanged(self):
+        state=route.AcpPoolFailures();state.client({'id':1,'method':'session/prompt','params':{}})
+        original={'id':1,'error':{'code':-32603,'message':'[invalid_argument] protocol error: incomplete envelope'}}
+        self.assertEqual(state.child(original),original)
+
     def test_no_cross_session_guessing_or_arbitrary_error_propagation(self):
         state=route.AcpPoolFailures()
         for identifier in [1,2]:state.client({"id":identifier,"method":"session/prompt","params":{}})
@@ -181,6 +487,180 @@ class AcpFailureNormalizationTest(unittest.TestCase):
         state.model_response('agent.v1.AgentService/Run','private-secret')
         original={"id":2,"result":{"stopReason":"end_turn"}}
         self.assertEqual(state.child(original),original)
+
+class CursorGlobalOptionsTest(unittest.TestCase):
+    def test_global_model_option_enables_acp_without_rewriting_arguments(self):
+        for args in ([],['acp'],['--model','synthetic-model','acp'],['--model=synthetic-model','acp'],['--agent-endpoint','https://synthetic.example','--model','synthetic','acp'],['--use-system-ca','--model','synthetic','acp']):
+            argv=['cursor-route',*args]
+            self.assertTrue(route.is_acp_invocation(argv),args)
+            self.assertEqual(argv,['cursor-route',*args])
+
+    def test_option_values_or_print_commands_do_not_enable_acp(self):
+        for args in (['--model','acp'],['--model=acp'],['--agent-endpoint','acp'],['--model','synthetic','--print','acp'],['--unknown','acp'],['--help'],['--model']):
+            self.assertFalse(route.is_acp_invocation(['cursor-route',*args]),args)
+
+    def test_actual_stream_ended_rpc_error_needs_current_local_interruption(self):
+        for prefix in ('','Internal error: ','RetriableError: ','Error: RetriableError: '):
+            for local in (False,True):
+                state=route.AcpPoolFailures();state.client({'id':1,'method':'session/prompt','params':{}})
+                token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+                if local:state.model_interrupted(token)
+                original={'id':1,'error':{'code':-32603,'message':prefix+'Stream ended without turnEnded — connection likely dropped mid-stream'}}
+                result=state.child(original)
+                if local:self.assertEqual(result['error']['message'],'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.')
+                else:self.assertIs(result,original)
+
+    def test_stream_ended_error_does_not_cross_cancellation_new_requests_or_rpc_codes(self):
+        text='Stream ended without turnEnded — connection likely dropped mid-stream'
+        for mode in ('cancel','new-request','reused-id','wrong-code','different-message'):
+            state=route.AcpPoolFailures()
+            state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+            token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+            state.model_interrupted(token)
+            if mode=='cancel':state.client({'method':'session/cancel','params':{'sessionId':'synthetic'}})
+            if mode=='new-request':state.begin_model_request('agent.v1.AgentService/RunSSE')
+            if mode=='reused-id':state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+            original={'id':1,'error':{'code':-1 if mode=='wrong-code' else -32603,'message':'unrelated' if mode=='different-message' else text}}
+            self.assertIs(state.child(original),original,mode)
+
+class CursorPromptStreamReleaseTest(unittest.TestCase):
+    def test_terminal_reply_releases_all_streams_of_its_prompt(self):
+        state=route.AcpPoolFailures(); closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        for n in range(2):
+            token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+            state.register_model_stream(token,lambda n=n:closed.append(n))
+        original={'id':1,'result':{'stopReason':'end_turn'}}
+        self.assertIs(state.child(original),original); self.assertEqual(closed,[0,1])
+        self.assertEqual(len(state.model_streams),0)
+
+    def test_late_registration_cannot_survive_its_completed_prompt(self):
+        state=route.AcpPoolFailures(); closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        old=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.child({'id':1,'result':{'stopReason':'end_turn'}})
+        state.client({'id':2,'method':'session/prompt','params':{'sessionId':'one'}})
+        current=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.register_model_stream(current,lambda:closed.append('new'))
+        state.register_model_stream(old,lambda:closed.append('old'))
+        self.assertEqual(closed,['old'])
+        state.child({'id':1,'result':{}});self.assertEqual(closed,['old'])
+        state.child({'id':2,'result':{}});self.assertEqual(closed,['old','new'])
+
+    def test_cancel_and_unrelated_messages_are_scoped(self):
+        state=route.AcpPoolFailures();closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        token=state.begin_model_request('agent.v1.AgentService/RunSSE');state.register_model_stream(token,lambda:closed.append(1))
+        state.client({'method':'session/cancel','params':{'sessionId':'other'}})
+        state.child({'method':'session/update','params':{}});state.child({'id':99,'result':{}})
+        self.assertEqual(closed,[])
+        state.client({'method':'session/cancel','params':{'sessionId':'one'}});self.assertEqual(closed,[1])
+
+    def test_reused_live_id_and_unattributed_streams_do_not_abort_new_work(self):
+        state=route.AcpPoolFailures();closed=[]
+        prompt={'id':1,'method':'session/prompt','params':{'sessionId':'one'}}
+        state.client(prompt);old=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.register_model_stream(old,lambda:closed.append('old'))
+        state.client(prompt);new=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.register_model_stream(new,lambda:closed.append('new'))
+        state.register_model_stream(None,lambda:closed.append('unknown'))
+        state.child({'id':1,'result':{}});self.assertEqual(closed,[])
+
+    def test_socket_registry_is_bounded_and_cleanup_failure_preserves_reply(self):
+        state=route.AcpPoolFailures();closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        def broken(): raise OSError('synthetic')
+        state.register_model_stream(token,broken)
+        for _ in range(100):state.register_model_stream(token,lambda:closed.append(1))
+        self.assertLessEqual(len(state.model_streams),64)
+        original={'id':1,'result':{'stopReason':'end_turn'}}
+        self.assertIs(state.child(original),original)
+        self.assertEqual(len(closed),63);self.assertFalse(state.model_streams)
+
+    def test_finished_body_unregisters_without_closing_or_retry(self):
+        state=route.AcpPoolFailures();closed=[]
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'one'}})
+        key=state.register_model_stream(state.begin_model_request('agent.v1.AgentService/RunSSE'),lambda:closed.append(1))
+        state.unregister_model_stream(key);state.child({'id':1,'error':{'code':-1,'message':'synthetic'}})
+        self.assertEqual(closed,[])
+
+class CursorAbortedRpcTest(unittest.TestCase):
+    def test_exact_aborted_rpc_requires_current_interruption(self):
+        for prefix in ('','Internal error: ','RetriableError: ','Error: RetriableError: '):
+            for mode in ('current','no-evidence','cancel','stale','reused-id','wrong-code','other-aborted'):
+                state=route.AcpPoolFailures()
+                state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+                token=state.begin_model_request('agent.v1.AgentService/RunSSE')
+                if mode!='no-evidence':state.model_interrupted(token)
+                if mode=='cancel':state.client({'method':'session/cancel','params':{'sessionId':'synthetic'}})
+                if mode=='stale':state.begin_model_request('agent.v1.AgentService/RunSSE')
+                if mode=='reused-id':state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+                original={'id':1,'error':{'code':-1 if mode=='wrong-code' else -32603,'message':prefix+('[aborted] user cancelled' if mode=='other-aborted' else '[aborted] socket hang up')}}
+                result=state.child(original)
+                if mode=='current':self.assertEqual(result['error']['message'],'[POOL_UPSTREAM_UNAVAILABLE] Pooler connection temporarily unavailable.')
+                else:self.assertIs(result,original,mode)
+
+class CursorDiagnosticTest(unittest.TestCase):
+    def test_success_is_silent_and_ring_is_bounded(self):
+        state=route.AcpPoolFailures()
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as output:
+            for i in range(100):
+                state.client({'id':i,'method':'session/prompt','params':{}})
+                state.child({'id':i,'result':{'stopReason':'end_turn'}})
+            self.assertEqual(output.getvalue(), '')
+        self.assertEqual(len(state.trace),64)
+        self.assertGreater(state.trace[-1]['seq'],64)
+
+    def test_missing_and_stale_tokens_are_distinguishable_without_payload(self):
+        state=route.AcpPoolFailures()
+        state.client({'id':'synthetic-private-id','method':'session/prompt','params':{'sessionId':'synthetic-private-session'}})
+        old=state.begin_model_request('agent.v1.AgentService/RunSSE')
+        state.begin_model_request('agent.v1.AgentService/RunSSE')
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as output:
+            state.body_trace(None,None,'read_error',route.ConnectCompletion(),3)
+            state.body_trace(old,None,'read_error',route.ConnectCompletion(),4)
+        records=[json.loads(x.removeprefix('Cursor pool diagnostic ')) for x in output.getvalue().splitlines()]
+        first=records[0]['events'][-1];last=records[1]['events'][-1]
+        self.assertFalse(first['tokenPresent'])
+        self.assertTrue(last['tokenPresent']);self.assertFalse(last['currentMatch'])
+        self.assertNotIn('synthetic-private',output.getvalue())
+
+    def test_dumps_have_a_process_lifetime_limit(self):
+        state=route.AcpPoolFailures()
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as output:
+            for _ in range(8):state.body_trace(None,None,'read_error',None,0)
+        self.assertEqual(len(output.getvalue().splitlines()),3)
+
+    @unittest.skipUnless(os.name == 'posix', 'Private diagnostic files use POSIX directory descriptors')
+    def test_private_storage_is_bounded_and_symlinks_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {'BB_THREAD_STORAGE':tmp}), mock.patch('sys.stderr', new_callable=io.StringIO):
+            target=Path(tmp)/'cursor-pool-diagnostics.jsonl'
+            state=route.AcpPoolFailures();state.body_trace(None,None,'read_error',None,0)
+            self.assertEqual(target.stat().st_mode & 0o777,0o600)
+            self.assertEqual(json.loads(target.read_text())['trigger'],'read_error')
+            target.write_bytes(b'x'*(1024*1024));state.dump_trace('read_error')
+            self.assertEqual(target.stat().st_size,1024*1024)
+            target.unlink();victim=Path(tmp)/'synthetic-victim';victim.write_text('preserve')
+            target.symlink_to(victim);state.dump_trace('read_error')
+            self.assertEqual(victim.read_text(),'preserve')
+
+    def test_missing_or_closed_stderr_does_not_write_acp_stdout(self):
+        for sink in (None, mock.Mock(write=mock.Mock(side_effect=OSError('synthetic closed sink')))):
+            with mock.patch('sys.stderr',sink), mock.patch('sys.stdout',new_callable=io.StringIO) as output, mock.patch.dict(os.environ,{'BB_THREAD_STORAGE':''}):
+                route.AcpPoolFailures().dump_trace('read_error')
+                self.assertEqual(output.getvalue(),'')
+
+    def test_known_error_observation_does_not_enable_retries_by_text(self):
+        state=route.AcpPoolFailures()
+        state.client({'id':1,'method':'session/prompt','params':{'sessionId':'synthetic'}})
+        chunk={'method':'session/update','params':{'sessionId':'synthetic','update':{'sessionUpdate':'agent_message_chunk','content':{'text':'Error: RetriableError: Stream ended without turnEnded — connection likely dropped mid-stream'}}}}
+        self.assertIs(state.child(chunk),chunk)
+        reply={'id':1,'result':{'stopReason':'end_turn'}}
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as output:
+            self.assertIs(state.child(reply),reply)
+        self.assertIn('known_transport_text',output.getvalue())
+        self.assertNotIn('connection likely',output.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

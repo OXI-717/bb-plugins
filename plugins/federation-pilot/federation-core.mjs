@@ -135,7 +135,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   // ---------- row status ----------
   function currentRowStatus(peer) {
     const label=peer.label;
-    if (peer.state === "open") return { icon: "Network", label, tone: "default" };
+    if (peer.state === "open") return null;
     return { icon: "Network", label: `${label}: ${peer.state === "offline" ? "offline" : "connecting"}`, tone: peer.state === "offline" ? "error" : "default" };
   }
   function applyRowStatus(id) {
@@ -279,6 +279,33 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     return json(isBootstrap?{...a,projects:[...(a.projects??[]),...extra]}:[...(Array.isArray(a)?a:[]),...extra]);
   }
 
+  // Short thread URLs in BB 0.49 omit the project. Resolve only the current
+  // navigation target, using a primary 404 and server-validated bridge reads.
+  const resolvingThreads = new Map();
+  async function resolveShortThread(threadId) {
+    if(primaryIds.has(threadId)||owners.has(threadId)||conflicts.has(threadId))return;
+    if(resolvingThreads.has(threadId))return resolvingThreads.get(threadId);
+    const task=(async()=>{
+      const path=`/api/v1/threads/${threadId}`;
+      const local=await nativeFetch.call(win,path);
+      if(local.ok){learnPrimary(path,await local.json());return;}
+      if(local.status!==404)throw new FederationError('federation_owner_unavailable',503,'Cannot establish thread ownership on the primary server.');
+      for(const peer of peers){
+        const response=await viaBridge(peer,'GET',path,null);
+        if(response.ok){
+          const thread=await response.clone().json();
+          if(thread.id!==threadId||thread.projectId!==peer.projectId)throw new FederationError('federation_owner_invalid',409,'Invalid remote thread identity.');
+          // The bridge checks collisions across all configured servers.
+          return;
+        }
+        if(primaryIds.has(threadId))return;
+      }
+      throw new FederationError('federation_owner_unavailable',503,'Thread ownership could not be established on the configured servers.');
+    })();
+    resolvingThreads.set(threadId,task);
+    try{await task;}finally{resolvingThreads.delete(threadId);}
+  }
+
   async function route(input, init, ctx) {
     const req = input instanceof win.Request ? input : null;
     let url;
@@ -293,6 +320,8 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
     const currentRoute=/^\/projects\/(proj_[a-z0-9]+)\/threads\/(thr_[a-z0-9]+)/u.exec(new URL(win.location.href).pathname);
     const currentPeer=peers.find(p=>p.projectId===currentRoute?.[1]);
     if(currentPeer && !primaryIds.has(currentRoute[2]))addRemote(currentRoute[2],currentPeer);
+    const shortRoute=/^\/threads\/(thr_[a-z0-9]+)(?:\/|$)/u.exec(new URL(win.location.href).pathname);
+    if(shortRoute && url.pathname.startsWith(`/api/v1/threads/${shortRoute[1]}`))await resolveShortThread(shortRoute[1]);
     const pathIds = url.pathname.split("/").filter((s) => ID_RE.test(s));
     const queryIds = [];
     for (const [k, v] of url.searchParams) if (SCOPE_PARAMS.includes(k) || ID_RE.test(v)) queryIds.push(v);
@@ -411,6 +440,7 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
   const coreUrl = `${wsProto}//${win.location.host}/ws`;
   const remoteUrl = `${wsProto}//${win.location.host}${BRIDGE}/remote-ws`;
   function acceptRemote(m,peer){
+    if(m?.type==="thread-timeline")return m.target?.kind==="thread-timeline"&&owners.get(m.target.threadId)===peer&&!conflicts.has(m.target.threadId);
     return m?.type==="changed" && ["thread","project","environment","host"].includes(m.entity) && owners.get(m.id)===peer && !conflicts.has(m.id);
   }
   class FederatedSocket extends win.EventTarget {
@@ -443,26 +473,37 @@ export function createFederation({ win, config, pluginId, setRowStatus = null, l
         if(acceptRemote(m,c.peer)){state.counters.wsAccepted++;this._emit(new win.MessageEvent("message",{data:String(e.data)}));}
         else {state.counters.wsDropped++;log("ws-remote-dropped",{serverId:c.peer.serverId,type:m?.type,entity:m?.entity});}
       });
-      r.addEventListener("close",()=>{if(c.ws!==r)return;c.ws=null;c.ready=false;if(this._closed)return;setRemoteState(c.peer,"offline");state.needsCatchUp=true;const delay=Math.min(RETRY_MAX_MS,RETRY_MIN_MS*2**c.attempt++);c.timer=win.setTimeout(()=>{c.timer=null;this._openRemote(c);},delay);});
+      r.addEventListener("close",()=>{if(c.ws!==r)return;c.ws=null;c.ready=false;if(this._closed)return;setRemoteState(c.peer,"offline");state.needsCatchUp=true;const delay=Math.round(Math.min(RETRY_MAX_MS,RETRY_MIN_MS*2**Math.min(c.attempt++,6))*(0.8+0.2*Math.random()));c.timer=win.setTimeout(()=>{c.timer=null;this._openRemote(c);},delay);});
     }
     _catchUp(peer){for(const id of peer.ids)if(isRemote(id)){if(id.startsWith("thr_"))this._refreshThread(id);if(id.startsWith("host_"))this._refreshHost(id);}this._emitJson({type:"changed",entity:"project",id:peer.projectId,changes:["threads-changed","project-updated"]});}
     _refreshHost(id){this._emitJson({type:'changed',entity:'host',id,changes:['host-connected']});}
     _refreshThread(id){this._emitJson({type:"changed",entity:"thread",id,changes:["events-appended","interactions-changed","status-changed","queue-changed"]});}
     _restorePrimaryId(id){
-      for(const [key,raw]of this._allSubs){const t=JSON.parse(raw).target;if((t.threadId??t.projectId??t.environmentId??t.hostId)!==id)continue;
+      for(const [key,raw]of this._allSubs){const t=JSON.parse(raw).target??{};if((t.threadId??t.projectId??t.environmentId??t.hostId)!==id)continue;
         for(const c of this._channels.values())if(c.subs.delete(key)&&c.ws?.readyState===1)c.ws.send(JSON.stringify({type:"unsubscribe",target:t}));
         if(this._primary.readyState===1)this._primary.send(raw);
       }
     }
     _adoptRemoteId(id,peer,notify){
       const c=this._channels.get(peer);if(!c)return;
-      for(const [key,raw]of this._allSubs){const target=JSON.parse(raw).target;if((target.threadId??target.projectId??target.environmentId??target.hostId)!==id||c.subs.has(key))continue;c.subs.set(key,raw);if(this._primary.readyState===1)this._primary.send(JSON.stringify({type:"unsubscribe",target}));if(c.ws?.readyState===1)c.ws.send(raw);}
+      for(const [key,raw]of this._allSubs){const target=JSON.parse(raw).target??{};if((target.threadId??target.projectId??target.environmentId??target.hostId)!==id||c.subs.has(key))continue;c.subs.set(key,raw);if(this._primary.readyState===1)this._primary.send(JSON.stringify({type:"unsubscribe",target}));if(c.ws?.readyState===1)c.ws.send(raw);}
       if(notify&&c.ready&&id.startsWith("thr_"))this._refreshThread(id);
       if(notify&&c.ready&&id.startsWith('host_'))this._refreshHost(id);
     }
     send(data){
       let m;try{m=JSON.parse(data);}catch{this._primary.send(data);return;}
+      if((m?.type==="subscribe"||m?.type==="unsubscribe")&&Array.isArray(m.targets)){
+        for(const target of m.targets){
+          if(!target||typeof target!=="object"||typeof target.kind!=="string")continue;
+          const {targets,timelineTags,...single}=m;
+          // Timeline tags belong only to their matching subscription, not other peers.
+          const tags=timelineTags&&Object.fromEntries(Object.entries(timelineTags).filter(([key])=>key===`thread-timeline:${target.threadId}:${target.segmentLimit??"default"}:${target.deferContent?"deferred":"inline"}`));
+          this.send(JSON.stringify({...single,target,...(tags&&Object.keys(tags).length?{timelineTags:tags}:{})}));
+        }
+        return;
+      }
       if(m?.type==="subscribe"||m?.type==="unsubscribe"){
+        if(!m.target||typeof m.target!=="object"||typeof m.target.kind!=="string")return;
         const t=m.target??{},key=JSON.stringify(t),id=t.threadId??t.projectId??t.environmentId??t.hostId;
         if(m.type==="subscribe")this._allSubs.set(key,data);else this._allSubs.delete(key);
         if(conflicts.has(id))return;

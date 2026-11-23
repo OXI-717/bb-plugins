@@ -116,7 +116,7 @@ describe("Z.AI native Provider usage consumer", () => {
         accountUuid: null }] }),
       assertNetworkAllowed: async () => {}, refreshUsage,
     };
-    registerUsageSource(bb as unknown as BbPluginApi, hub as unknown as AccountPoolHub);
+    registerUsageSource(bb as unknown as BbPluginApi, hub as unknown as AccountPoolHub, false);
     return { call: (method: string) => handlers[method]!({ resourceId: "synthetic-account", refresh: true }), refreshUsage };
   }
   it("lists cheaply, then exposes consumed percent, observation and unknown plan/reset", async () => {

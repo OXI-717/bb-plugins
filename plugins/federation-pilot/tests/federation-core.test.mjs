@@ -263,7 +263,7 @@ test("federated socket: routing, readiness, policy, row status, backoff, catch-u
   assert.equal(t.fed.state.remoteState, "connecting", "open bridge socket is not readiness");
   remote.serverSend({ type: "fedprobe-remote-ready" });
   assert.equal(t.fed.state.remoteState, "open");
-  assert.deepEqual(t.rows.get("thr_remote01"), { icon: "Network", label: "Remote Alpha", tone: "default" });
+  assert.equal(t.rows.has("thr_remote01"), false, "healthy link must not replace native unread/activity indicator");
   assert.ok(got.some(m=>m.id==='thr_remote01'), 'initial readiness invalidates pre-plugin errors');
   got.length=0;
   // policy
@@ -286,7 +286,7 @@ test("federated socket: routing, readiness, policy, row status, backoff, catch-u
     r.serverOpen(); // bridge reachable, upstream still down
     r.close(4001);
   }
-  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+  for(const [i,cap]of [1000,2000,4000,8000,16000,30000,30000].entries())assert.ok(delays[i]>=0.8*cap&&delays[i]<=cap);
   for (let i = 0; i < 3; i++) t.env.runTimers(); // exhaust bounded nudges; next retry fires
   const back = t.env.FakeWS.all.at(-1);
   back.serverOpen();
@@ -311,7 +311,9 @@ test("dispose: ordinary changed for remote rows, statuses cleared, globals resto
   outer.addEventListener("message", (e) => got.push(JSON.parse(e.data)));
   const [primary, remote] = t.env.FakeWS.all.slice(-2);
   primary.serverOpen(); remote.serverOpen(); remote.serverSend({ type: "fedprobe-remote-ready" });
-  assert.ok(t.rows.size > 0);
+  assert.equal(t.rows.size, 0, "healthy connection preserves native indicators");
+  remote.close(4001, "offline");
+  assert.ok(t.rows.size > 0, "offline override is cleaned up on dispose");
   // someone else wraps fetch after us: we must not remove their wrapper
   const theirs = async (...a) => "theirs";
   t.env.win.fetch = theirs;
@@ -384,4 +386,76 @@ test('only explicit remote handoff RPCs reach primary; legacy machine operations
   const r=await t.fetch(`/api/v1/plugins/handoff/rpc/${method}`,{method:'POST',body});assert.equal(r.status,409);
  }
  assert.equal(t.env.calls.length,count);
+});
+
+
+test('short thread route resolves cold remote ownership before timeline requests',async()=>{
+ const t=setup({primary:{'GET /api/v1/threads/thr_cold01':R({},404)},remote:{'GET /api/v1/threads/thr_cold01':{id:'thr_cold01',projectId:'proj_remote01'},'GET /api/v1/threads/thr_cold01/timeline':{items:[]}}});
+ t.env.win.location.href='http://primary.invalid/threads/thr_cold01';
+ const response=await t.fetch('/api/v1/threads/thr_cold01/timeline');
+ assert.equal(response.status,200);assert.equal(t.fed.isRemote('thr_cold01'),true);
+ assert.equal(t.env.primaryCalls().some(c=>c.path.endsWith('/timeline')),false);
+ t.fed.dispose();
+});
+test('short route preserves a primary thread and refuses primary failures',async()=>{
+ for(const status of [200,503]){
+ const t=setup({primary:{'GET /api/v1/threads/thr_cold01':R({id:'thr_cold01',projectId:'proj_local01'},status)}});
+ t.env.win.location.href='http://primary.invalid/threads/thr_cold01';
+ await t.fetch('/api/v1/threads/thr_cold01');
+ assert.equal(t.fed.isRemote('thr_cold01'),false);
+ assert.equal(t.env.calls.some(c=>c.to==='bridge'),false);
+ t.fed.dispose();
+ }
+});
+
+test('unavailable remote discovery never forwards reads or mutations to primary',async()=>{
+ for(const method of ['GET','POST']){
+ const t=setup({primary:{'GET /api/v1/threads/thr_cold01':R({},404)},remote:{'GET /api/v1/threads/thr_cold01':R({},503)}});
+ t.env.win.location.href='http://primary.invalid/threads/thr_cold01';
+ const response=await t.fetch('/api/v1/threads/thr_cold01/messages',{method});
+ assert.equal(response.status,503);
+ assert.equal(t.env.primaryCalls().some(c=>c.path.endsWith('/messages')),false);
+ t.fed.dispose();
+ }
+});
+
+ test("batch subscriptions survive reconnect and late ownership discovery", async()=>{
+ const t=setup();const socket=new t.env.win.WebSocket("ws://primary.invalid/ws");
+ const [primary,remote]=t.env.FakeWS.all.slice(-2);primary.serverOpen();remote.serverOpen();
+ socket.send(JSON.stringify({type:"subscribe",targets:[{kind:"thread-list"},{kind:"thread-detail",threadId:"thr_remote01"},{kind:"thread-detail",threadId:"thr_local01"}]}));
+ await boot(t);
+ assert.equal(t.log.some(e=>e.kind==="fetch-internal-error"),false);
+ assert.ok(remote.sent.map(JSON.parse).some(m=>m.target?.threadId==="thr_remote01"));
+ assert.ok(!remote.sent.map(JSON.parse).some(m=>m.target?.threadId==="thr_local01"));
+ assert.ok(remote.sent.map(JSON.parse).some(m=>m.target?.kind==="thread-list"));
+ remote.serverSend({type:"fedprobe-remote-ready"});assert.equal(t.rows.has("thr_remote01"),false);
+ socket.send(JSON.stringify({type:"unsubscribe",targets:[{kind:"thread-detail",threadId:"thr_remote01"}]}));
+ assert.ok(remote.sent.map(JSON.parse).some(m=>m.type==="unsubscribe"&&m.target?.threadId==="thr_remote01"));
+ t.fed.dispose();
+ });
+
+test('timeline frames keep verified ownership and batch tags stay with their target',async()=>{
+ const t=wsSetup();await boot(t);
+ const outer=new t.env.win.WebSocket('ws://primary.invalid/ws');const got=[];
+ outer.addEventListener('message',e=>got.push(JSON.parse(e.data)));
+ const [primary,remote]=t.env.FakeWS.all.slice(-2);primary.serverOpen();remote.serverOpen();
+ const target={kind:'thread-timeline',threadId:'thr_remote01',segmentLimit:null,deferContent:true};
+ const local={...target,threadId:'thr_local01'};
+ const key='thread-timeline:thr_remote01:default:deferred',localKey='thread-timeline:thr_local01:default:deferred';
+ outer.send(JSON.stringify({type:'subscribe',targets:[target,local],timelineTags:{[key]:'remote-tag',[localKey]:'local-tag'}}));
+ assert.deepEqual(JSON.parse(remote.sent.at(-1)).timelineTags,{[key]:'remote-tag'});
+ assert.deepEqual(JSON.parse(primary.sent.at(-1)).timelineTags,{[localKey]:'local-tag'});
+ remote.serverSend({type:'thread-timeline',target:local,timeline:{tag:'foreign',rows:[]}});assert.equal(got.length,0);
+ remote.serverSend({type:'thread-timeline',target,timeline:{tag:'remote',rows:[]}});assert.equal(got.length,1);
+ t.fed.dispose();
+});
+
+test('bootstrap preserves native unread, interaction and running fields without inventing completion',async()=>{
+ const fields={status:'idle',runtime:{displayStatus:'idle'},latestAttentionAt:200,lastReadAt:100,hasPendingInteraction:true,queuedWork:'waiting',activity:{activeBackgroundAgentCount:1}};
+ const b=structuredClone(REMOTE_BOOTSTRAP);Object.assign(b.projects[0].threads[0],fields);
+ const t=setup({remote:{'GET /api/v1/sidebar-bootstrap':b}});
+ const merged=await boot(t);const row=merged.projects.find(p=>p.id==='proj_remote01').threads[0];
+ for(const [key,value]of Object.entries(fields))assert.deepEqual(row[key],value);
+ assert.equal(t.env.calls.some(c=>c.method==='POST'),false,'loading does not mark threads read');
+ t.fed.dispose();
 });

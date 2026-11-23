@@ -1,4 +1,4 @@
-# Models and connections
+# OXI Model Connections
 
 A separate model chooser for BB. It adds a **Модели** button to a thread header, a side panel and a navigation page. It does not replace, patch or hide BB's native model menu.
 

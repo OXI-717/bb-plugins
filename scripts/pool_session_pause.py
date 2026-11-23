@@ -9,6 +9,10 @@ import urllib.parse
 import urllib.request
 
 
+MAX_RESUME_ATTEMPTS = 2
+RESUME_OBSERVATIONS = 4
+
+
 def running_threads():
     """Public SDK threads.listRunning endpoint: unpaginated, includes hidden work."""
     base = os.environ.get('BB_SERVER_URL', 'http://127.0.0.1:38886')
@@ -85,6 +89,59 @@ class SessionPause:
             self.state['admission'] = 'not-owned-or-expired'
         self.save()
 
+    def acquire_model_hold(self, action='acquire'):
+        self.state['modelAdmission'] = 'acquire-intent'
+        self.save()
+        value = self.bb('pool', 'maintenance', action, '--owner', self.state['operationId'])
+        verify_model_hold(value, self.state['operationId'])
+        self.state['modelAdmission'] = 'held'
+        self.save()
+        if action == 'acquire-upgrade' and value['lease'].get('upgrade') != 'draining':
+            raise RuntimeError('Upgrade model admission unavailable; update refused')
+        self.say('New model clients paused, including external automation workers.')
+
+    def interrupt_model_requests(self):
+        value = self.bb('pool', 'maintenance', 'interrupt', '--owner', self.state['operationId'])
+        verify_model_hold(value, self.state['operationId'])
+
+    def release_model_hold(self):
+        if 'modelAdmission' not in self.state:
+            return
+        value = self.bb('pool', 'maintenance', 'status')
+        lease = value.get('lease')
+        if lease is not None and lease.get('owner') == self.state['operationId']:
+            self.bb('pool', 'maintenance', 'release', '--owner', self.state['operationId'])
+            self.state['modelAdmission'] = 'released'
+        else:
+            self.state['modelAdmission'] = 'not-owned-or-expired'
+        self.save()
+
+    def drain(self, idle, deadline_seconds=600):
+        """Hold dispatch, wait for natural completion; never stop or continue turns."""
+        self.state['mode'] = 'graceful'
+        self.state['phase'] = 'draining'
+        self.save()
+        deadline = self.clock() + deadline_seconds
+        stable = 0
+        while self.clock() < deadline:
+            verify_hold(self.bb('pool-maintenance', 'status'), self.state['operationId'])
+            rows = self.running()
+            stable = stable + 1 if not rows and idle() else 0
+            if stable == 3:
+                self.state['phase'] = 'drained'
+                self.save()
+                return
+            self.sleep(3)
+        raise RuntimeError('Natural session drain expired; no sessions interrupted, nothing updated')
+
+    def acquire_graceful_model_hold(self):
+        self.state['modelAdmission'] = 'acquire-intent'
+        self.save()
+        value = self.bb('pool', 'maintenance', 'acquire-graceful', '--owner', self.state['operationId'])
+        verify_model_hold(value, self.state['operationId'])
+        self.state['modelAdmission'] = 'held'
+        self.save()
+
     def stop(self):
         # The CLI thread list is paginated; never use it as a complete inventory.
         rows = self.running()
@@ -138,48 +195,82 @@ class SessionPause:
         self.state['phase'] = 'stopped'
         self.save()
 
-    def resume(self):
+    def observe_resume(self, stopped, *, settle=False, accept_running=False):
+        for observation in range(RESUME_OBSERVATIONS if settle else 1):
+            if observation:
+                self.sleep(1)
+            current = self.show(stopped['id'])
+            if any(current[key] != stopped[key] for key in ('id', 'projectId', 'environmentId', 'providerId')):
+                return 'changed-after-stop'
+            if (settle or accept_running) and (current['status'] in ('starting', 'active') or current['queuedMessageCount']):
+                return 'resumed'
+            if current != stopped:
+                return 'changed-after-stop'
+        return 'unchanged'
+
+    def resume_session(self, entry, *, admission_released=False):
+        stopped = self.identity(entry['stopped'])
+        attempts = entry.get('resumeAttempts', int(entry['action'] == 'resume-intent'))
+        outcome = self.observe_resume(stopped, settle=attempts > 0, accept_running=admission_released)
+        if outcome != 'unchanged':
+            return outcome
+        if stopped['queuedMessageCount']:
+            return 'queued-work-preserved'
+
+        while attempts < MAX_RESUME_ATTEMPTS:
+            attempts += 1
+            entry.update(action='resume-intent', resumeAttempts=attempts)
+            self.save()
+            try:
+                self.bb('thread', 'tell', stopped['id'],
+                        'Please continue the interrupted task.', '--mode', 'auto')
+            except Exception:
+                # The command may have reached BB despite a missing response.
+                # Observe before deciding whether another send is safe.
+                pass
+            outcome = self.observe_resume(stopped, settle=True)
+            if outcome != 'unchanged':
+                return outcome
+        return 'resume-unconfirmed'
+
+    def resume(self, *, admission_released=False):
         self.state['phase'] = 'resuming'
         self.save()
-        failures = 0
+        uncertain = {'stop-intent', 'stop-returned', 'resume-intent', 'resume-unconfirmed'}
+        skipped = {'changed-after-stop', 'changed-during-stop'}
         for entry in self.state['sessions']:
-            if entry['action'] in ('stop-intent', 'stop-returned', 'resume-intent'):
-                failures += 1
-                continue
-            if entry['action'] != 'stopped':
+            if entry['action'] not in ('stopped', 'resume-intent'):
                 continue
             try:
-                if self.show(entry['before']['id']) != self.identity(entry['stopped']):
-                    entry['action'] = 'changed-after-stop'
-                    self.save()
-                    continue
-                if entry['stopped'].get('queuedMessageCount', 0):
-                    entry['action'] = 'queued-work-preserved'
-                    self.save()
-                    continue
-                entry['action'] = 'resume-intent'
-                self.save()
-                self.bb('thread', 'tell', entry['before']['id'],
-                        'Please continue the interrupted task.')
-                entry['action'] = 'resumed'
-                self.save()
+                entry['action'] = self.resume_session(entry, admission_released=admission_released)
             except Exception:
-                # A timed-out send may have succeeded. Never send it twice on recovery.
-                failures += 1
+                # Could not verify the current thread. Keep the intent for recovery.
+                pass
+            self.save()
+        unresolved = [
+            {'id': entry['before']['id'], 'reason': entry['action']}
+            for entry in self.state['sessions'] if entry['action'] in uncertain | skipped | {'stopped'}
+        ]
+        self.state['uncontinuedThreads'] = unresolved
+        failures = any(item['reason'] not in skipped for item in unresolved)
         self.state['phase'] = 'needs-inspection' if failures else 'finished'
         self.save()
         self.say(f'Session continuation: {self.state["phase"]}. Receipt: {self.path}')
+        self.say('Uncontinued threads: ' + json.dumps(unresolved))
         if failures:
-            raise RuntimeError('Some session command outcomes are uncertain; inspect receipt, do not blindly retry')
+            raise RuntimeError('Some session command outcomes are uncertain; inspect receipt')
 
     def recover(self):
         self.state = json.loads(self.path.read_text())
         if self.state.get('schemaVersion') != 1 or not isinstance(self.state.get('sessions'), list):
             raise ValueError('Unsupported session operation receipt')
         try:
-            self.resume()
+            self.release_model_hold()
         finally:
-            self.release_hold()
+            try:
+                self.resume()
+            finally:
+                self.release_hold()
 
 
 def verify_hold(value, owner, now=None):
@@ -191,3 +282,11 @@ def verify_hold(value, owner, now=None):
             or not math.isfinite(lease['expiresAt'])
             or lease['expiresAt'] - now < 900_000):
         raise RuntimeError('Maintenance dispatch pause is missing, foreign or expiring; update refused')
+
+
+def verify_model_hold(value, owner, now=None):
+    # Reuse the strict owner and remaining-time validation with a distinct scope.
+    if (not isinstance(value, dict) or value.get('scope') != 'all-model-clients'
+            or type(value.get('transportInFlight')) is not int or value['transportInFlight'] < 0):
+        raise RuntimeError('All-client model pause is unavailable; nothing updated')
+    verify_hold({**value, 'scope': 'all-hosts-all-projects'}, owner, now=now)

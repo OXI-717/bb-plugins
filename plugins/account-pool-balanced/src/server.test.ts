@@ -1,3 +1,5 @@
+import {GUARD_UNREADABLE_GRACE_MS} from './network-flights.js';
+import {PoolMaintenance} from './maintenance.js';
 import {vpnProof} from './vpn-test-fixture.js';
 import fs from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -34,7 +36,7 @@ import {
   createAccountPoolPlugin as createAccountPoolPluginImpl,
   helloResponse,
   type AccountPoolPluginOptions,
-} from "./server.js";
+} from "./management-test-fixture.js";
 
 // These fake upstreams do not resolve DNS. Explicitly provide the same mock
 // for the IPv4 path; production must never fall back to its ordinary fetch.
@@ -323,6 +325,7 @@ async function createFixture(args: {
     kimiUpstreamBaseUrl: args.upstreamUrl,
     zaiUpstreamBaseUrl: args.upstreamUrl,
     opencodeGoUpstreamBaseUrl: args.upstreamUrl,
+    opencodeFreeUpstreamBaseUrl: "https://free-upstream.example",
     neuraldeepUpstreamBaseUrl: args.upstreamUrl,
     nvidiaUpstreamBaseUrl: args.upstreamUrl,
     cursorUpstreamBaseUrl: args.upstreamUrl,
@@ -548,12 +551,15 @@ describe("Account Pool config schema", () => {
       kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+      opencodeFreeUpstreamBaseUrl: "https://opencode.ai/inference/openai/v1",
       neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
       devinUpstreamBaseUrl: "https://server.codeium.com",
       maxConcurrentRequestsPerAccount: 2,
       claudeRequestStartIntervalMs: 0,
       geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
+      busyOverflow: true,
+      pinnedFailover: false,
       switchThreshold: 0.98,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -661,12 +667,15 @@ describe("Account Pool plugin", () => {
       kimiUpstreamBaseUrl: "https://api.kimi.com/coding/v1",
       zaiUpstreamBaseUrl: "https://api.z.ai/api/coding/paas/v4",
       opencodeGoUpstreamBaseUrl: "https://opencode.ai/zen/go/v1",
+      opencodeFreeUpstreamBaseUrl: "https://opencode.ai/inference/openai/v1",
       neuraldeepUpstreamBaseUrl: "https://api.neuraldeep.ru/v1",
       cursorUpstreamBaseUrl: "https://api2.cursor.sh",
       devinUpstreamBaseUrl: "https://server.codeium.com",
       maxConcurrentRequestsPerAccount: 2,
       claudeRequestStartIntervalMs: 0,
       geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
+      busyOverflow: true,
+      pinnedFailover: false,
       switchThreshold: 0.75,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
@@ -886,11 +895,11 @@ describe("Account Pool plugin", () => {
     expect(exchanged.accessToken).not.toBe("cursor-subscription-key");
   });
 
-  it("omits unsupported Devin quota resources without removing the pooled account", async () => {
+  it.each(["devin", "grok"] as const)("omits unsupported %s quota resources without removing the pooled account", async (provider) => {
     const outbound = vi.fn(async () => Response.json({}));
     const fixture = await createFixture({
       upstreamUrl: "https://upstream.example",
-      provider: "devin",
+      provider,
       apiKey: "cog_test_pat",
       options: { fetch: outbound },
     });
@@ -901,19 +910,19 @@ describe("Account Pool plugin", () => {
       priority: 100,
     }));
     const inventory = await fixture.host.harness.behavior.callRpc("provider-usage.v1.listResources", {});
-    expect(inventory).toMatchObject({ label: "Account Pooler", resources: [{ id: supported.id }] });
+    expect(inventory).toMatchObject({label:"Account Pooler",resources:[{id:supported.id}]});
     const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
     expect(accounts.some(account => account.id === fixture.account.id && account.enabled)).toBe(true);
     outbound.mockClear(); // Ignore the supported account's initial quota collection.
     for (const refresh of [false, true]) {
       await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
         resourceId: fixture.account.id, refresh,
-      })).rejects.toThrow("Quota reporting is not available for Devin.");
+      })).rejects.toThrow(`Quota reporting is not available for ${provider === "grok" ? "Grok" : "Devin"}`);
     }
     expect(outbound).not.toHaveBeenCalled();
   });
 
-  it("lists a Grok API key and reports that usage has not been observed", async () => {
+  it("keeps a Grok API key available without advertising an unsupported quota collector", async () => {
     const outbound = vi.fn(async () => Response.json({}));
     const fixture = await createFixture({
       upstreamUrl: "https://upstream.example",
@@ -922,16 +931,14 @@ describe("Account Pool plugin", () => {
       options: { fetch: outbound },
     });
     const inventory = await fixture.host.harness.behavior.callRpc("provider-usage.v1.listResources", {});
-    expect(inventory).toMatchObject({ label: "Account Pooler", resources: [{ id: fixture.account.id }] });
+    expect(inventory).toMatchObject({ label: "Account Pooler", resources: [] });
     const accounts = z.array(accountSummarySchema).parse(await fixture.host.harness.behavior.callRpc("account.list", null));
     expect(accounts.some(account => account.id === fixture.account.id && account.enabled)).toBe(true);
-    const resource = await fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
-      resourceId: fixture.account.id,
-      refresh: true,
-    });
-    expect(resource).toMatchObject({
-      usage: { status: "error", message: "Usage has not been observed for this account." },
-    });
+    for (const refresh of [false, true]) {
+      await expect(fixture.host.harness.behavior.callRpc("provider-usage.v1.getResource", {
+        resourceId: fixture.account.id, refresh,
+      })).rejects.toThrow("Quota reporting is not available for Grok");
+    }
     expect(outbound).not.toHaveBeenCalled();
   });
 
@@ -1008,6 +1015,32 @@ describe("Account Pool plugin", () => {
     } finally {
       first.resolve();
     }
+  });
+
+  it.each([true,false])("admits Cursor control RPCs alongside streams (dynamic=%s)", async dynamic => {
+    const seen:string[]=[];
+    const fixture=await createFixture({upstreamUrl:"https://upstream.example",provider:"cursor",source:"api-key",options:{cursorExchangeUrl:"https://exchange.example/token",cursorUsageUrl:"https://usage.example/usage",fetch:async(input,init)=>{
+      const r=new Request(input,init);
+      if(r.url.startsWith("https://exchange.example/"))return Response.json({accessToken:"synthetic-access"});
+      if(r.url.startsWith("https://usage.example/"))return Response.json({planUsage:{totalPercentUsed:10}});
+      seen.push(new URL(r.url).pathname);
+      return r.url.endsWith("/RunSSE")?new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array([1]));}})):Response.json({ok:true});
+    }}});
+    await fixture.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:4});
+    const recoveryQuota=new QuotaStore(fixture.host.bb.storage.database());
+    recoveryQuota.put({...recoveryQuota.get(fixture.account.id),heldUntil:Date.now()-1});
+    const call=(rpc:string)=>fixture.host.harness.behavior.fetchHttp("POST",dynamic?"/cursor/rpc":`/cursor/${rpc}`,{headers:{authorization:`Bearer ${fixture.key}`,"content-type":"application/connect+proto",...(dynamic?{"x-bb-cursor-rpc-path":rpc}:{})},body:"synthetic"});
+    const streams=await Promise.all([call("agent.v1.AgentService/RunSSE"),call("agent.v1.AgentService/RunSSE")]);
+    try {
+      const append=call("aiserver.v1.BidiService/BidiAppend"),metadata=call("aiserver.v1.AiService/GetUsableModels");
+      await vi.waitFor(()=>{expect(seen).toContain("/aiserver.v1.BidiService/BidiAppend");expect(seen).toContain("/aiserver.v1.AiService/GetUsableModels");},{timeout:500});
+      await(await append).json();await(await metadata).json();
+      let extraStarted=false;
+      const extra=call("agent.v1.AgentService/RunSSE").then(r=>{extraStarted=true;return r;});
+      await new Promise(r=>setTimeout(r,30));expect(extraStarted).toBe(false);
+      await streams[0]!.body?.cancel();
+      await (await extra).body?.cancel();
+    }finally{for(const stream of streams)await stream.body?.cancel();}
   });
 
   it.each(["agent.v1.AgentService/RunSSE", "aiserver.v2.FutureService/NewToolPermission"])("mints and isolates Cursor authorization for %s", async (rpcPath) => {
@@ -1232,10 +1265,12 @@ describe("Account Pool plugin", () => {
     expect(new Date(account.heldUntil!).toISOString()).toBe(status===429?'2026-09-18T09:00:00.000Z':'2026-09-17T09:01:00.000Z');
     expect(calls).toBe(1);
   });
-  it('shows all three Go quota windows in the BB usage resource',async()=>{
+  it('keeps all three Go quota windows available to an authorized operator',async()=>{
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'opencode-go',source:'api-key',apiKey:'synthetic-go-key',options:{opencodeGoUsagesUrl:'https://usages.example/zen/go/v1/usage',fetch:async()=>Response.json({usage:{rolling:{percent:0},weekly:{percent:0},monthly:{percent:100,status:'rate-limited',resetsAt:'2099-01-01T00:00:00Z'}}})}});
-    const resource=z.object({usage:z.object({windows:z.array(z.object({label:z.string()}))})}).parse(await fixture.host.harness.behavior.callRpc('provider-usage.v1.getResource',{resourceId:fixture.account.id,refresh:true}));
-    expect(resource.usage.windows.map(w=>w.label).sort()).toEqual(['Five-hour limit','Monthly limit','Weekly limit']);
+    const refreshed=await fixture.host.harness.behavior.callRpc('account.refreshUsage',{accountId:fixture.account.id}) as {account:AccountSummary};
+    expect(refreshed.account.fiveHourUtilization).toBe(0);
+    expect(refreshed.account.sevenDayUtilization).toBe(0);
+    expect(refreshed.account.limitWindows).toEqual(expect.arrayContaining([expect.objectContaining({windowMinutes:43200,utilization:1,status:'rejected'})]));
   });
 
   it("refuses outright when the pooled subscription is spent for days", async () => {
@@ -1772,11 +1807,11 @@ describe("Account Pool plugin", () => {
       expect(requests[0]?.headers.has("x-unrelated-header")).toBe(false);
     });
 
-    it("I6: Responses body on /responses is refused with 400 unsupported_wire_protocol and never forwarded", async () => {
+    it("I6: genuine Responses body keeps the native /responses wire upstream", async () => {
       const requests: Request[] = [];
       const fixture = await opencodeGoFixture(async (input, init) => {
         requests.push(new Request(input, init));
-        return Response.json({ id: "must-not-happen" });
+        return Response.json({ id: "responses-one" });
       });
       const response = await fixture.host.harness.behavior.fetchHttp(
         "POST",
@@ -1789,21 +1824,17 @@ describe("Account Pool plugin", () => {
           body: RESPONSES_BODY,
         },
       );
-      expect(response.status).toBe(400);
-      const payload = (await response.json()) as {
-        error: { type: string; code: string; message: string };
-      };
-      expect(payload.error.code).toBe("unsupported_wire_protocol");
-      expect(payload.error.type).toBe("invalid_request_error");
-      expect(payload.error.message).toContain("chat/completions");
-      expect(requests).toHaveLength(0);
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/responses");
+      expect(await requests[0]?.text()).toBe(RESPONSES_BODY);
     });
 
-    it("I7: ambiguous body on /responses fails closed (400, never forwarded)", async () => {
+    it("I7: ambiguous body on /responses is forwarded to the Responses wire", async () => {
       const requests: Request[] = [];
       const fixture = await opencodeGoFixture(async (input, init) => {
         requests.push(new Request(input, init));
-        return Response.json({ id: "must-not-happen" });
+        return Response.json({ id: "responses-two" });
       });
       const response = await fixture.host.harness.behavior.fetchHttp(
         "POST",
@@ -1816,12 +1847,168 @@ describe("Account Pool plugin", () => {
           body: AMBIGUOUS_BODY,
         },
       );
-      expect(response.status).toBe(400);
-      const payload = (await response.json()) as {
-        error: { code: string };
-      };
-      expect(payload.error.code).toBe("unsupported_wire_protocol");
-      expect(requests).toHaveLength(0);
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/responses");
+    });
+
+    it("I7b: Anthropic Messages wire reaches the upstream /messages path", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "msg-one", type: "message" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/messages",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: JSON.stringify({
+            model: "minimax-m3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/messages");
+    });
+
+    it("I7c: an Anthropic client token in x-api-key authenticates /messages", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "msg-two", type: "message" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/messages",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": fixture.key,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model: "minimax-m3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://upstream.example/messages");
+      // The subscription key reaches upstream as x-api-key (the Messages
+      // wire's auth scheme) — never the inbound pool token.
+      expect(requests[0]?.headers.get("x-api-key")).toBe("sk-go-subscription");
+      expect(requests[0]?.headers.get("authorization")).toBe(
+        "Bearer sk-go-subscription",
+      );
+      expect(requests[0]?.headers.get("anthropic-version")).toBe("2023-06-01");
+    });
+
+    it("I7d: free-tier model IDs route to the free upstream", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "free-one" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": fixture.key,
+          },
+          body: JSON.stringify({
+            model: "flint-40b-free",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://free-upstream.example/chat/completions",
+      );
+    });
+
+    it("I7e: subscription models stay on the Go upstream", async () => {
+      const requests: Request[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "sub-one" });
+      });
+      const response = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: JSON.stringify({
+            model: "glm-5.3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe(
+        "https://upstream.example/chat/completions",
+      );
+    });
+
+    it("I7f: a free-tier 429 does not hold the account for paid models", async () => {
+      const urls: string[] = [];
+      const fixture = await opencodeGoFixture(async (input, init) => {
+        const request = new Request(input, init);
+        urls.push(request.url);
+        if (request.url.includes("free-upstream")) {
+          return new Response("free quota", {
+            status: 429,
+            headers: { "retry-after": "120" },
+          });
+        }
+        return Response.json({ id: "paid-one" });
+      });
+      const freeResponse = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": fixture.key,
+          },
+          body: JSON.stringify({
+            model: "flint-40b-free",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(freeResponse.status).toBe(429);
+      const paidResponse = await fixture.host.harness.behavior.fetchHttp(
+        "POST",
+        "/opencode-go/v1/chat/completions",
+        {
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${fixture.key}`,
+          },
+          body: JSON.stringify({
+            model: "glm-5.3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(paidResponse.status).toBe(200);
+      expect(urls[0]).toBe("https://free-upstream.example/chat/completions");
+      expect(urls[1]).toBe("https://upstream.example/chat/completions");
     });
 
     it("I8: zai /responses is never rewritten to chat/completions", async () => {
@@ -2076,8 +2263,8 @@ describe("Account Pool plugin", () => {
         hostId: "host-one",
       }),
     ).resolves.toEqual({
-      label: "Proxied",
-      statusMessage: "Credentials are provided by the Account Pooler hub.",
+      label: "Ready",
+      statusMessage: "Provider access is ready.",
     });
     const httpResponse = await host.harness.behavior.fetchHttp(
       "POST",
@@ -2508,7 +2695,7 @@ describe("Account Pool plugin", () => {
         grokLoginCommand: process.execPath,
         grokLoginArgs: ["-e", grokDeviceLoginStub],
         geminiLoginCommand: process.execPath,
-        geminiLoginArgs: ["-e", geminiDeviceLoginStub],
+        geminiLoginArgs: ["-e", geminiDeviceLoginStub, "--"],
       },
     });
     const help = await fixture.host.harness.behavior.runCli([
@@ -3024,8 +3211,8 @@ describe("Account Pool plugin", () => {
         hostId: "host-one",
       }),
     ).resolves.toEqual({
-      label: "Proxied",
-      statusMessage: "Credentials are provided by the Account Pooler hub.",
+      label: "Ready",
+      statusMessage: "Provider access is ready.",
     });
     const secondToken = await resolveToken(
       fixture.host,
@@ -7312,6 +7499,82 @@ describe("sequential pool recovery", () => {
     await expect(rpc("account.setDrainOnce", { accountId: fixture.account.id, enabled: "yes" })).rejects.toThrow();
   });
 
+  it("uses weekly steps and temporary overrides for dispatch while preserving independent limits", async () => {
+    const hour = 3_600_000;
+    let now = Date.now();
+    let reset = Math.floor(now / 1_000) * 1_000 + 72 * hour;
+    let usage = 0.6;
+    let fiveHour = 0.2;
+    let modelCalls = 0;
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      options: { now: () => now, fetch: async () => {
+        modelCalls++;
+        return Response.json({}, { headers: {
+          "anthropic-ratelimit-unified-7d-utilization": String(usage),
+          "anthropic-ratelimit-unified-7d-reset": String(reset / 1000),
+          "anthropic-ratelimit-unified-5h-utilization": String(fiveHour),
+          ...(modelCalls === 1 ? {
+            "anthropic-ratelimit-unified-7d_fable-utilization": "0.6",
+            "anthropic-ratelimit-unified-7d_fable-reset": String(reset / 1000),
+          } : {}),
+        } });
+      } },
+    });
+    const rpc = fixture.host.harness.behavior.callRpc;
+    const accountId = fixture.account.id;
+    const current = async () => statusSchema.parse(await rpc("status.get", null)).accounts[0]!;
+    const send = async (model = "claude-sonnet") => {
+      const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/messages", {
+        headers: authHeaders(fixture.key), body: JSON.stringify({ model }),
+      });
+      const detail = await response.text();
+      return { status: response.status, detail };
+    };
+    expect(await send("claude-fable")).toMatchObject({ status: 200 });
+    await rpc("account.setPolicy", { accountId, policy: { enabled: true, weeklyKeep: 50, fiveHourKeep: 50 } });
+    await rpc("account.setCap", { accountId, cap: { early: 0.1, late: 0.3 } });
+    const rule = { mode: "scheduled", ceiling: 50, steps: [
+      { hoursBeforeReset: 48, ceiling: 65 }, { hoursBeforeReset: 24, ceiling: 80 },
+    ] };
+    const change = async (change: unknown) => rpc("account.setWeeklyBudget", {
+      accountId, expected: (await current()).weeklyBudget ?? null, change,
+    });
+    await change({ kind: "rule", rule });
+    expect(await current()).toMatchObject({ eligible: false, weeklySpending: { mode: "scheduled", ceiling: .5, resetAt: reset } });
+    expect(await send()).toMatchObject({ status: 403 });
+    expect(modelCalls).toBe(1);
+    await change({ kind: "override", ceiling: 68, until: "next-step" });
+    expect(await current()).toMatchObject({
+      eligible: true, weeklyBudget: { rule, override: { ceiling: 68, until: reset - 48 * hour, resetAt: reset } },
+      weeklySpending: { mode: "override", ceiling: .68 },
+    });
+    expect(await send()).toMatchObject({ status: 200 });
+    expect(await send("claude-fable")).toMatchObject({ status: 403 });
+    now = reset - 48 * hour;
+    expect(await current()).toMatchObject({ eligible: true, weeklySpending: { mode: "scheduled", ceiling: .65 } });
+    fiveHour = 0.5;
+    expect(await send()).toMatchObject({ status: 200 });
+    expect(await send()).toMatchObject({ status: 403 });
+    expect(modelCalls).toBe(3);
+    const oldReset = reset;
+    now = oldReset + 1000;
+    reset += 7 * 24 * hour;
+    usage = 0.05;
+    // Seed the next week without changing the persistent rule.
+    await rpc("account.setDrainOnce", { accountId, enabled: true });
+    fiveHour = .2;
+    expect(await send()).toMatchObject({ status: 200 });
+    await rpc("account.setDrainOnce", { accountId, enabled: false });
+    expect(await current()).toMatchObject({ eligible: true, weeklyBudget: { rule }, weeklySpending: { mode: "scheduled", ceiling: .5, resetAt: reset } });
+    const raw = await fixture.host.bb.storage.kv.get("accounts:v1");
+    expect(raw).not.toEqual(expect.arrayContaining([expect.objectContaining({ weeklyBudget: expect.anything() })]));
+    await expect(rpc("account.setWeeklyBudget", { accountId, expected: null, change: { kind: "rule", rule: null } })).rejects.toThrow(/changed/);
+    await change({ kind: "rule", rule: null });
+    expect(await current()).toMatchObject({ cap: { early: .1, late: .3 }, policy: { weeklyKeep: 50 } });
+    expect((await current()).weeklyBudget).toBeUndefined();
+  });
+
   it("applies account policy to sticky sessions and overrides schedule during drain", async () => {
     const attempts: Array<string | null> = [];
     const fixture = await createFixture({ upstreamUrl: "https://upstream.example", apiKey: "sk-work", priority: 0,
@@ -7785,7 +8048,7 @@ describe('project subscription routing', () => {
     const edited=await fixture.host.harness.behavior.runCli(['account','projects',fixture.account.id,'off']);expect(edited.exitCode).toBe(0);const all=await request(unknown);expect(all.status).toBe(200);await all.text();
   });
 });
-it('retains authenticated project identity if a client is revoked while reading its body',async()=>{
+it('denies a project-bound client revoked while reading its body',async()=>{
  const attempts:Array<string|null>=[];
  const fixture=await createFixture({upstreamUrl:'https://upstream.example',apiKey:'sk-global',options:{fetch:async(_input,init)=>{attempts.push(new Headers(init?.headers).get('x-api-key'));return Response.json({});}}});
  const assigned=await addApiAccount(fixture,'sk-assigned',200);
@@ -7800,7 +8063,7 @@ it('retains authenticated project identity if a client is revoked while reading 
  });
  try {
   const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(token),body:'{}'});
-  expect(response.status).toBe(200);await response.text();expect(attempts).toEqual(['sk-assigned']);
+  expect(response.status).toBe(403);await response.text();expect(attempts).toEqual([]);
   const revoked=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(token),body:'{}'});expect(revoked.status).toBe(401);
  }finally{body.mockRestore();}
 });
@@ -8421,10 +8684,11 @@ describe('bounded request metadata observations',()=>{
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockImplementation(async()=>Response.json({}))}});
     const now=Date.now(), trace=newTrace('codex','host-synthetic','proj_abcdef1234',null,null,'other');
     const event={...trace,at:now,event:'request',attempt:0,accountId:null,status:null,durationMs:null,inFlight:0,accountInFlight:0,retryAfterMs:null,retryAfterSupplied:null,quotaEvidence:null,holdSource:null,heldUntil:null,outcome:null,failover:null,errorClass:null};
-    for(let i=0;i<HISTORY_MAX_ROWS-1;i++)journal.record({...event,clientHash:i.toString(16).padStart(24,'0')});
-    journal.record({...event,clientHash:'f'.repeat(24),event:'upstream',status:429});
+    const accountId=(i:number)=>`00000000-0000-4000-8000-${i.toString().padStart(12,'0')}`;
+    for(let i=0;i<HISTORY_MAX_ROWS-1;i++)journal.record({...event,accountId:accountId(i)});
+    journal.record({...event,accountId:accountId(HISTORY_MAX_ROWS-1),event:'upstream',status:429});
     // Evict even this last raw failure, while retaining its long-term bucket outside the first detail page.
-    for(let i=0;i<2049;i++)journal.record({...event,clientHash:'0'.repeat(24),event:'hold'});
+    for(let i=0;i<2049;i++)journal.record({...event,accountId:accountId(0),event:'hold'});
     const maxCliBytes:Record<string,number>={};
     const read=async(args:string[])=>{
       const reply=await fixture.host.harness.behavior.runCli(args);
@@ -8444,15 +8708,18 @@ describe('bounded request metadata observations',()=>{
     const seen=new Set<string>();let offset:number|null=0;
     while(offset!==null){
       const page=await read(['history','--offset',String(offset),'--limit','200','--json']);
-      for(const row of page.rows)seen.add(row.clientHash);
+      for(const row of page.rows){
+        expect(row.clientHash).toBeNull();expect(row.projectId).toBeNull();
+        expect(seen.has(row.accountId)).toBe(false);seen.add(row.accountId);
+      }
       offset=page.nextOffset;
     }
-    expect(seen.size).toBe(HISTORY_MAX_ROWS);expect(seen.has('f'.repeat(24))).toBe(true);
+    expect(seen.size).toBe(HISTORY_MAX_ROWS);expect(seen.has(accountId(HISTORY_MAX_ROWS-1))).toBe(true);
     console.info(JSON.stringify({trafficHistoryCapacity:HISTORY_MAX_ROWS,maxCliBytes,BB_MAX_BYTES:1048576}));
-    for(const args of [['--limit','201'],['--limit','0'],['--limit','1.5'],['--offset','-1'],['--offset','8193']])
+    for(const args of [['--limit','201'],['--limit','0'],['--limit','1.5'],['--offset','-1'],['--offset',String(HISTORY_MAX_ROWS+1)]])
       expect((await fixture.host.harness.behavior.runCli(['history',...args,'--json'])).exitCode).not.toBe(0);
-  });
-  it('inspects persisted hourly traffic through the authorized CLI and resolves only trusted machine identities',async()=>{
+  },120000);
+  it('keeps historical totals unattributed while recent diagnostics retain only token-bound machine identity',async()=>{
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:vi.fn().mockImplementation(async()=>Response.json({}))}});
     const env=await fixture.host.harness.behavior.resolveProviderEnv('claude-code',{hostId:'host-one',projectId:'proj_abcdef1234',threadId:'thr_abcdef1234'});
     const key=env.find(e=>e.name==='ANTHROPIC_AUTH_TOKEN')!.value as string;
@@ -8461,7 +8728,14 @@ describe('bounded request metadata observations',()=>{
     const reply=await fixture.host.harness.behavior.runCli(['history','--json']);expect(reply.exitCode).toBe(0);
     const result=JSON.parse(reply.stdout);
     expect(result).toMatchObject({schema:'bb-account-pool/traffic-history/1',identitiesAvailable:true,truncated:false});
-    expect(result.clients).toEqual([{clientHash:expect.any(String),hostId:'host-one',hostName:'One'}]);
+    expect(result.clients).toEqual([]);
+    expect(result.rows.every((row:{clientHash:string|null;projectId:string|null})=>row.clientHash===null&&row.projectId===null)).toBe(true);
+    const {newTrace}=await import('./request-journal.js');
+    const trustedHash=newTrace('claude','host-one',null,null,null,'other').clientHash;
+    const recent=await records(fixture);
+    expect(recent.rows.length).toBeGreaterThan(0);
+    expect(recent.rows.every(row=>row.clientHash===trustedHash&&row.projectId==='proj_abcdef1234'&&row.threadId==='thr_abcdef1234')).toBe(true);
+    expect(JSON.stringify(recent)).not.toMatch(/synthetic private prompt|forged-machine|ANTHROPIC_AUTH_TOKEN/);
     expect(result.rows).toEqual(expect.arrayContaining([expect.objectContaining({accountId:null,requests:1,attempts:0}),expect.objectContaining({accountId:fixture.account.id,requests:0,firstDispatches:1,attempts:1,upstreamResponses:1,streamEnds:1,peakAccountInFlight:1})]));
     expect(JSON.stringify(result)).not.toMatch(/synthetic|forged-machine|ANTHROPIC|threadId|requestId/);
     fixture.host.harness.sdk.stub('hosts.list',async()=>{throw Error('synthetic private failure');});
@@ -8578,13 +8852,40 @@ describe('trusted automation account admission', () => {
   }
   const routes = {
     claude:['/v1/messages','/v1/messages/count_tokens'],
-    codex:['/v1/responses','/v1/images/generations','/v1/images/edits','/v1/alpha/search','/v1/models'],
+    codex:['/v1/responses','/v1/responses/compact','/v1/images/generations','/v1/images/edits','/v1/alpha/search','/v1/models'],
     kimi:['/kimi/v1/messages','/kimi/v1/messages/count_tokens'],
     zai:['/zai/v1/chat/completions','/zai/v1/responses','/zai/v1/models'],
-    'opencode-go':['/opencode-go/v1/chat/completions','/opencode-go/v1/responses','/opencode-go/v1/models'],
+    'opencode-go':['/opencode-go/v1/chat/completions','/opencode-go/v1/responses','/opencode-go/v1/messages','/opencode-go/v1/models'],
     cursor:CURSOR_PROXIED_PATHS.filter(p=>p!=='auth/exchange_user_api_key').map(p=>`/cursor/${p}`),
     devin:DEVIN_PROXIED_PATHS.map(p=>`/devin/${p}`),
   };
+  it.each(['claude','codex','kimi','zai','opencode-go','cursor','devin'] as const)('maintenance fences external %s clients on every route without changing routing',async provider=>{
+    const outbound=vi.fn(async()=>Response.json({accessToken:'synthetic-minted',refreshToken:'synthetic-renewal'}));
+    const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider,source:provider==='codex'?'import':undefined,options:{fetch:outbound,importCodexCredentials:async()=>({accessToken:'synthetic',refreshToken:'refresh',idToken:null,accountId:'fixture',email:'fixture@example.com',expiresAt:Date.now()+3600000})}});
+    const token=await issued(fixture);
+    await allow(fixture);
+    const owner='11111111-1111-4111-8111-111111111111';
+    const pause=await fixture.host.harness.behavior.runCli(['maintenance','acquire','--owner',owner,'--json']);
+    expect(pause.exitCode).toBe(0);
+    const snapshot=JSON.parse(pause.stdout);
+    expect(snapshot).toMatchObject({scope:'all-model-clients',lease:{owner}});
+    outbound.mockClear();
+    for(const route of routes[provider]){
+      const response=await fixture.host.harness.behavior.fetchHttp(route==='/v1/models'?'GET':'POST',route,{headers:{...authHeaders(token),authorization:`${provider==='devin'?'Basic':'Bearer'} ${token}`,'x-api-key':token},...(route==='/v1/models'?{}:{body:'{}'})});
+      expect(response.status,route).toBe(503);
+      expect(response.headers.get('x-bb-pool-error'),route).toBe('POOL_MAINTENANCE');
+      expect(response.headers.get('retry-after')).toBe('30');
+      await response.text();
+    }
+    expect(outbound).not.toHaveBeenCalled();
+    const readiness=await fixture.host.harness.behavior.callRpc('readiness.get',{projectId:'project-one'}) as Array<{provider:string;reason:string}>;
+    expect(readiness.find(row=>row.provider===provider)?.reason).toBe('paused');
+    expect((await fixture.host.harness.behavior.runCli(['maintenance','release','--owner','22222222-2222-4222-8222-222222222222','--json'])).exitCode).toBe(1);
+    expect(await fixture.host.harness.behavior.callRpc('maintenance.status',null)).toEqual(snapshot);
+    expect((await fixture.host.harness.behavior.runCli(['maintenance','release','--owner',owner,'--json'])).exitCode).toBe(0);
+    const restored=await fixture.host.harness.behavior.callRpc('status.get',null) as {routing:Record<string,boolean>};
+    expect(restored.routing[provider]).toBe(true);
+  });
   it.each(['claude','codex','kimi','zai','opencode-go','cursor','devin'] as const)('enforces opt-in on reachable %s routes and retains ordinary requests',async provider=>{
     const outbound=vi.fn(async()=>Response.json({accessToken:'synthetic-minted',refreshToken:'synthetic-renewal'}));
     const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider,source:provider==='codex'?'import':undefined,options:{fetch:outbound,importCodexCredentials:async()=>({accessToken:'synthetic',refreshToken:'refresh',idToken:null,accountId:'fixture',email:'fixture@example.com',expiresAt:Date.now()+3600000})}});
@@ -8600,7 +8901,6 @@ describe('trusted automation account admission', () => {
     outbound.mockClear();
     for(const route of routes[provider]) {
       const response=await request(token,route);
-      if(provider==='opencode-go' && route.endsWith('/responses')) {expect(response.status).toBe(400);await response.text();continue;}
       expect(response.status,route).toBe(403);
       expect(response.headers.get('x-bb-pool-error')).toBe('POOL_ACCOUNT_POLICY');
       await response.text();
@@ -9066,7 +9366,7 @@ describe("cached provider readiness", () => {
     expect(env.length).toBeGreaterThan(0);
     expect(JSON.stringify(env)).toContain("/api/v1/plugins/account-pool/http");
     expect(JSON.stringify(env)).not.toContain("sk-account");
-    await expect(f.host.harness.behavior.resolveProviderEnvHealth(providerId,scope)).resolves.toMatchObject({status:"unavailable",statusMessage:expect.stringContaining("no-enabled-account")});
+    await expect(f.host.harness.behavior.resolveProviderEnvHealth(providerId,scope)).resolves.toMatchObject({status:"unavailable",statusMessage:"Provider access is unavailable."});
     await expect(f.host.harness.behavior.resolveProviderEnvHealth(providerId,{hostId:"host-one"})).resolves.toBeNull();
   });
   it("keeps the native Devin gateway managed without an account and preserves explicit bypass", async () => {
@@ -9078,7 +9378,7 @@ describe("cached provider readiness", () => {
     await f.host.harness.behavior.callRpc("account.disable",{id:f.account.id});
     const env=await f.host.harness.behavior.resolveProviderEnv("acp-oxi-devin-pool",scope);
     expect(env).toEqual(expect.arrayContaining([expect.objectContaining({name:"OXI_DEVIN_POOL_URL"}),expect.objectContaining({name:"OXI_DEVIN_POOL_TOKEN"})]));
-    await expect(f.host.harness.behavior.resolveProviderEnvHealth("acp-oxi-devin-pool",scope)).resolves.toMatchObject({status:"unavailable",statusMessage:expect.stringContaining("no-enabled-account")});
+    await expect(f.host.harness.behavior.resolveProviderEnvHealth("acp-oxi-devin-pool",scope)).resolves.toMatchObject({status:"unavailable",statusMessage:"Provider access is unavailable."});
     await f.host.harness.behavior.callRpc("bypass.set",{threadId:scope.threadId,bypassed:true});
     await expect(f.host.harness.behavior.resolveProviderEnv("acp-oxi-devin-pool",scope)).resolves.toEqual([]);
     await f.host.harness.behavior.callRpc("bypass.set",{threadId:scope.threadId,bypassed:false});
@@ -9219,4 +9519,540 @@ describe('Gemini account reauthorization',()=>{
   const accounts=new AccountStore(f.host.bb.storage.kv,path.join(f.dataDir,'plugins',f.host.bb.pluginId,'secrets','accounts'));
   const before=await accounts.readSecret(f.account.id);expect((await complete(f)).status).toBe('error');expect(await accounts.readSecret(f.account.id)).toEqual(before);expect(await accounts.list()).toHaveLength(1);
  });
+});
+describe('server-owned account egress dispatch',()=>{
+  const routeProfile={id:'exit-one',version:1,label:'Test exit',node:'node-one',hostIds:['host-one'],transport:'ssh-connect',endpoint:'http://127.0.0.1:19081',dns:'remote',ipv4:true,ipv6:false,failure:'closed',expectedExit:['192.0.2.1'],assurance:'proxy-enforced'};
+  it('wires persisted assigned pins into selection before expired affinity with a different active account',async()=>{
+    let clock=1900000000000;
+    const direct=vi.fn(async()=>Response.json({id:'fixture-direct'}));
+    const fixture=await createFixture({upstreamUrl:'https://model.example',apiKey:'fixture-a',options:{now:()=>clock,fetch:direct}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}));
+    await addApiAccount(fixture,'fixture-b',200);
+    await fixture.host.harness.behavior.callRpc('egress.configure',routeProfile);
+    await fixture.host.harness.behavior.callRpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
+    const routed=vi.spyOn(globalThis,'fetch').mockImplementation(async(_input,init)=>{
+      expect(new Headers(init?.headers).get('x-api-key')).toBe('fixture-a');
+      expect((init as any).dispatcher).toBeDefined(); return Response.json({id:'fixture-assigned'});
+    });
+    const send=async(token:string)=>{
+      const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{
+        headers:authHeaders(token),body:JSON.stringify({model:'claude-supported-fixture',messages:[],metadata:{user_id:JSON.stringify({session_id:token===fixture.key?'original':'ordinary'})}}),
+      });
+      await response.text(); expect(response.status).toBe(200);
+    };
+    await send(fixture.key);
+    await fixture.host.harness.behavior.callRpc('account.disable',{id:fixture.account.id});
+    await send(await resolveToken(fixture.host,'host-one','other-thread'));
+    await fixture.host.harness.behavior.callRpc('account.enable',{id:fixture.account.id});
+    expect(direct).toHaveBeenCalledOnce(); direct.mockClear();
+    clock+=30*60*1000+1; await send(fixture.key);
+    expect(routed).toHaveBeenCalledTimes(2); expect(direct).not.toHaveBeenCalled();
+  });
+  it('binds model and usage after account selection, ignores client profile headers, and never replays 429',async()=>{
+    const direct=vi.fn(async()=>Response.json({direct:true}));
+    const fixture=await createFixture({upstreamUrl:'https://model.example',source:'import',options:{fetch:direct,importCredentials:async()=>importedCredentials(),usageUrl:'https://usage.example'}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}));
+    const rpc=fixture.host.harness.behavior.callRpc;
+    await rpc('egress.configure',routeProfile);
+    await rpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
+    const routed=vi.spyOn(globalThis,'fetch').mockImplementation(async(_input,init)=>{
+      expect((init as any).dispatcher).toBeDefined();
+      if(init?.body)expect(JSON.parse(Buffer.from(init.body as ArrayBuffer).toString()).model).toBe('claude-any-supported-model');
+      return Response.json({error:'synthetic quota'},{status:429});
+    });
+    direct.mockClear();
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{...authHeaders(fixture.key),'x-bb-egress-profile':'untrusted'},body:JSON.stringify({model:'claude-any-supported-model',messages:[]})});
+    expect(response.status).toBe(429);await response.text();expect(routed).toHaveBeenCalledTimes(1);expect(direct).not.toHaveBeenCalled();
+    const after429=(await rpc('account.list',null) as any[]).find(a=>a.id===fixture.account.id);
+    expect(after429.heldUntil).not.toBeNull();
+    await expect(rpc('account.refreshUsage',{accountId:fixture.account.id})).rejects.toThrow('HTTP 429');
+    expect(routed.mock.calls.length).toBeGreaterThan(1);expect(direct).not.toHaveBeenCalled();
+    const status=await rpc('egress.status',null) as any;
+    expect(status.bindings[fixture.account.id]).toEqual({id:'exit-one',version:1});
+    expect((await rpc('account.list',null) as any[])[0].autopilotAllowed).toBe(false);
+  });
+  it.each([
+    { name: "refresh succeeds", refreshStatus: 200, retryStatus: 200, status: 200 },
+    { name: "refresh is rejected", refreshStatus: 401, retryStatus: null, status: 401 },
+    { name: "refresh service is unavailable", refreshStatus: 503, retryStatus: null, status: 503 },
+    { name: "refreshed token is rejected", refreshStatus: 200, retryStatus: 401, status: 401 },
+  ])("recovers Codex on its assigned route without fallback when $name", async ({
+    refreshStatus, retryStatus, status,
+  }) => {
+    const clock = 1_900_000_000_000;
+    const nextToken = testJwt({ exp: clock / 1000 + 3600 });
+    const direct = vi.fn(async () => Response.json({ unexpected: true }));
+    const fixture = await createOAuthRequestFixture("codex", direct, () => clock);
+    fixture.host.harness.sdk.stub("system.config", async () => ({ primaryHostId: "host-one" }));
+    const rpc = fixture.host.harness.behavior.callRpc;
+    await rpc("account.add", { provider: "codex", source: { kind: "import" }, label: null, priority: 200 });
+    await rpc("egress.configure", routeProfile);
+    await rpc("egress.bind", { accountId: fixture.account.id, ref: { id: "exit-one", version: 1 } });
+
+    const dispatchers: unknown[] = [];
+    const calls: string[] = [];
+    const routed = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      dispatchers.push((init as RequestInit & { dispatcher?: unknown })?.dispatcher);
+      if (String(input).endsWith("/oauth/token")) {
+        calls.push("refresh");
+        expect(JSON.parse(String(init?.body))).toMatchObject({ refresh_token: "oauth-refresh" });
+        return refreshStatus === 200
+          ? Response.json({ access_token: nextToken, refresh_token: "oauth-rotated" })
+          : Response.json({ error: "invalid_grant" }, { status: refreshStatus });
+      }
+      const headers = new Headers(init?.headers);
+      expect(headers.get("chatgpt-account-id")).toBe("chatgpt-account");
+      const authorization = headers.get("authorization");
+      if (authorization === "Bearer oauth-old") {
+        calls.push("old");
+        return Response.json({ error: { code: "token_expired" } }, { status: 401 });
+      }
+      calls.push("updated");
+      expect(authorization).toBe(`Bearer ${nextToken}`);
+      return Response.json({ id: "synthetic" }, { status: retryStatus! });
+    });
+    try {
+      const response = await fixture.host.harness.behavior.fetchHttp("POST", "/v1/responses", {
+        headers: authHeaders(fixture.key),
+        body: JSON.stringify({ model: "synthetic-model", input: "fixture" }),
+      });
+      expect(response.status).toBe(status);
+      await response.text();
+      expect(calls).toEqual(retryStatus === null ? ["old", "refresh"] : ["old", "refresh", "updated"]);
+      expect(direct).not.toHaveBeenCalled();
+      expect(dispatchers[0]).toBeDefined();
+      expect(new Set(dispatchers).size).toBe(1);
+      if (retryStatus === 401) {
+        expect(await rpc("account.list", null)).toContainEqual(expect.objectContaining({
+          id: fixture.account.id,
+          eligible: false,
+          error: "OpenAI returned HTTP 401 after OAuth refresh.",
+        }));
+      }
+    } finally {
+      routed.mockRestore();
+    }
+  });
+
+  it('returns a route failure without a second account, direct request or model rewrite',async()=>{
+    const direct=vi.fn(async()=>Response.json({direct:true}));
+    const fixture=await createFixture({upstreamUrl:'https://model.example',options:{fetch:direct}});
+    fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}));
+    await addApiAccount(fixture,'synthetic-other-account-key',200);
+    await fixture.host.harness.behavior.callRpc('egress.configure',routeProfile);
+    await fixture.host.harness.behavior.callRpc('egress.bind',{accountId:fixture.account.id,ref:{id:'exit-one',version:1}});
+    direct.mockClear();
+    const routed=vi.spyOn(globalThis,'fetch').mockRejectedValue(new Error('transport down'));
+    const response=await fixture.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(fixture.key),body:JSON.stringify({model:'claude-any-supported-model',messages:[]})});
+    expect(response.status).toBe(503);expect(response.headers.get('x-bb-pool-error')).toBe('POOL_EGRESS_UNAVAILABLE');
+    await response.text();expect(routed).toHaveBeenCalledOnce();expect(direct).not.toHaveBeenCalled();
+  });
+});
+
+
+it('correlates a mid-frame Cursor policy abort without leaking payload or RPC errors',async()=>{
+ let unavailable=false,skew=0;
+ const outbound=vi.fn(async(input:RequestInfo|URL)=>{
+  const url=input instanceof Request?input.url:String(input);
+  if(url.startsWith('https://exchange.example/'))return Response.json({accessToken:'synthetic-access'});
+  if(url.startsWith('https://usage.example/'))return Response.json({planUsage:{totalPercentUsed:10}});
+  if(!url.endsWith('/RunSSE'))return Response.json({});
+  return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}}),{headers:{'content-type':'application/connect+proto'}});
+ });
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example/token',cursorUsageUrl:'https://usage.example/usage',fetch:outbound,now:()=>Date.now()+skew}});
+ fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'pool-host'}));
+ fixture.host.harness.sdk.stub('plugins.callRpc',async()=>{
+  if(unavailable)throw Error('private RPC payload');
+  return {schema:'bb-vpn-guard/network-decision/2',hostId:'pool-host',allowed:true,reason:'direct'};
+ });
+ await fixture.host.harness.behavior.callRpc('config.set',{vpnGuardEnabled:true,vpnOnlyProviders:[]});
+ const response=await fixture.host.harness.behavior.fetchHttp('POST','/cursor/agent.v1.AgentService/RunSSE',{
+  headers:{authorization:`Bearer ${fixture.key}`,'content-type':'application/connect+proto'},body:'private prompt',
+ });
+ expect(response.status).toBe(200);const reader=response.body!.getReader();expect((await reader.read()).value).toEqual(new Uint8Array([0,0,0]));
+ unavailable=true;let settled=false;const reading=reader.read().finally(()=>{settled=true;});
+ const failed=expect(reading).rejects.toThrow('VPN_GUARD_UNAVAILABLE');
+ const policy=fixture.host.harness.behavior.runService('network-policy');
+ try {
+  // An unanswered Guard read does not cancel the admitted stream inside the grace...
+  await new Promise(resolve=>setTimeout(resolve,200));expect(settled).toBe(false);
+  expect(fixture.host.harness.inspection.logEntries.filter(e=>e.message.startsWith('Account Pooler cursor transport failed:'))).toHaveLength(0);
+  // ...and fails closed once the Guard has stayed unreadable past it.
+  skew=GUARD_UNREADABLE_GRACE_MS+1_000;await failed;
+ }finally{policy.controller.abort();await policy.done;}
+ const logs=fixture.host.harness.inspection.logEntries.filter(e=>e.message.startsWith('Account Pooler cursor transport failed:'));
+ expect(logs).toHaveLength(1);
+ const prefix='Account Pooler cursor transport failed: VPN_GUARD_UNAVAILABLE. ';
+ expect(logs[0]!.message.startsWith(prefix)).toBe(true);
+ const diagnostic=JSON.parse(logs[0]!.message.slice(prefix.length));
+ expect(diagnostic).toEqual({code:'VPN_GUARD_UNAVAILABLE',category:'policy',elapsedMs:expect.any(Number),
+  stage:'response_body',transport:'ipv4',operation:'model',requestId:expect.stringMatching(/^[a-f0-9-]{36}$/),bytesRead:3,guardReason:'rpc_failed'});
+ expect(JSON.stringify(logs)).not.toMatch(/private|authorization|upstream.example/);
+ expect(outbound.mock.calls.filter(([input])=>(input instanceof Request?input.url:String(input)).endsWith('/RunSSE'))).toHaveLength(1);
+});
+
+
+it('requires exact thread/request and explicit confirmation for Cursor stream probes',async()=>{
+ const f=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example',cursorUsageUrl:'https://usage.example'}});
+ for(const args of [[],['--thread','*'],['--thread','thr_one','--confirm'],['--thread','thr_one','--interrupt-request','00000000-0000-4000-8000-000000000001'],['--thread','thr_one','--interrupt-request','*','--confirm']]){
+  expect((await f.host.harness.behavior.runCli(['stream-probe',...args])).exitCode).not.toBe(0);
+ }
+ const read=await f.host.harness.behavior.runCli(['stream-probe','--thread','thr_one','--json']);
+ expect(read.exitCode).toBe(0);expect(JSON.parse(read.stdout)).toEqual({streams:[]});
+ const stale=await f.host.harness.behavior.runCli(['stream-probe','--thread','thr_one','--interrupt-request','00000000-0000-4000-8000-000000000001','--confirm','--json']);
+ expect(stale.exitCode).toBe(0);expect(JSON.parse(stale.stdout)).toEqual({streams:[],interrupted:false});
+});
+
+it.each(['application/connect+proto','text/event-stream'])('wires an exact authenticated Cursor stream probe without touching a neighbour or append (%s)',async(contentType)=>{
+ const outbound=vi.fn(async(input:RequestInfo|URL)=>{
+  const url=input instanceof Request?input.url:String(input);
+  if(url.startsWith('https://exchange.example/'))return Response.json({accessToken:'synthetic-access'});
+  if(url.startsWith('https://usage.example/'))return Response.json({planUsage:{totalPercentUsed:10}});
+  return new Response(new ReadableStream<Uint8Array>({start(c){c.enqueue(new Uint8Array([0,0,0]));}}),{headers:{'content-type':contentType,'x-bb-pool-request-id':'synthetic-untrusted-upstream-id'}});
+ });
+ const f=await createFixture({upstreamUrl:'https://upstream.example',provider:'cursor',options:{cursorExchangeUrl:'https://exchange.example/token',cursorUsageUrl:'https://usage.example/usage',fetch:outbound}});
+ const call=async(threadId:string,rpc:string)=>{
+  const env=await f.host.harness.behavior.resolveProviderEnv('acp-oxi-cursor',{threadId,projectId:'proj_abcdef',hostId:'host-one'});
+  const token=env.find(e=>e.name==='CURSOR_API_KEY')!.value as string;
+  return f.host.harness.behavior.fetchHttp('POST','/cursor/rpc',{headers:{authorization:`Bearer ${token}`,'content-type':contentType,'x-bb-cursor-rpc-path':rpc},body:'synthetic'});
+ };
+ const one=await call('thr_abcdef','agent.v1.AgentService/RunSSE'),two=await call('thr_ghijkl','agent.v1.AgentService/RunSSE'),append=await call('thr_abcdef','aiserver.v1.BidiService/BidiAppend');
+ expect(one.status).toBe(200);expect(two.status).toBe(200);expect(append.status).toBe(200);
+ const reader=one.body!.getReader();await reader.read();
+ const probe=async(...args:string[])=>JSON.parse((await f.host.harness.behavior.runCli(['stream-probe','--thread','thr_abcdef',...args,'--json'])).stdout);
+ const streams=(await probe()).streams;expect(streams).toHaveLength(1);expect(streams[0]).toMatchObject({threadId:'thr_abcdef',bytesRead:3,contentType});
+ expect(one.headers.get('x-bb-pool-request-id')).toBe(streams[0].requestId);
+ expect(two.headers.get('x-bb-pool-request-id')).not.toBe(streams[0].requestId);
+ expect(append.headers.get('x-bb-pool-request-id')).toBeNull();
+ const rejected=expect(reader.read()).rejects.toThrow('Controlled Cursor stream interruption');
+ expect((await probe('--interrupt-request',streams[0].requestId,'--confirm')).interrupted).toBe(true);await rejected;
+ expect((await probe('--interrupt-request',streams[0].requestId,'--confirm')).interrupted).toBe(false);
+ expect((await two.body!.getReader().read()).value).toEqual(new Uint8Array([0,0,0]));
+ expect((await append.body!.getReader().read()).value).toEqual(new Uint8Array([0,0,0]));
+ expect(outbound.mock.calls.filter(([r])=>(r instanceof Request?r.url:String(r)).endsWith('/RunSSE'))).toHaveLength(2);
+});
+
+
+describe('maintenance races and existing streams',()=>{
+  const owner='11111111-1111-4111-8111-111111111111';
+  const pause=(f:Fixture)=>f.host.harness.behavior.runCli(['maintenance','acquire','--owner',owner,'--json']);
+  const resume=(f:Fixture)=>f.host.harness.behavior.runCli(['maintenance','release','--owner',owner,'--json']);
+  it('keeps Claude requests through a refused upgrade, with a fresh queue budget for held arrivals',async()=>{
+    let now=1_800_000_000_000;
+    let finishFirst!:()=>void;
+    const firstBody = new ReadableStream<Uint8Array>({
+      start(controller){finishFirst=()=>controller.close();},
+    });
+    const outbound=vi.fn(async()=>Response.json({ok:true}));
+    const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound,now:()=>now}});
+    await f.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:1});
+    outbound.mockClear().mockImplementationOnce(async()=>new Response(firstBody));
+    const request=()=>f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    const first=await request();
+    const existing=request();
+    await vi.waitFor(async()=>{
+      const accounts=await f.host.harness.behavior.callRpc('account.list',null) as AccountSummary[];
+      expect(accounts[0]?.queuedRequests).toBe(1);
+    });
+    const maintenance=(action:string)=>f.host.harness.behavior.runCli(['maintenance',action,'--owner',owner,'--json']);
+    expect((await maintenance('acquire-upgrade')).exitCode).toBe(0);
+    const waitForUpgrade=vi.spyOn(PoolMaintenance.prototype,'waitForUpgrade');
+    const held=request();
+    await vi.waitFor(()=>expect(waitForUpgrade.mock.results[0]?.value).toBeInstanceOf(Promise));
+    expect(outbound).toHaveBeenCalledTimes(1);
+    expect((await maintenance('seal-upgrade')).exitCode).toBe(1);
+    finishFirst();await first.text();
+    const drained=await existing;
+    expect(drained.status).toBe(200);await drained.text();
+    // Simulate an idle refusal caused by a blocker outside the HTTP path.
+    now+=16*60_000;
+    expect((await maintenance('release')).exitCode).toBe(0);
+    const continued=await held;
+    expect(continued.status).toBe(200);await continued.text();
+    expect(outbound).toHaveBeenCalledTimes(3);
+  });
+  it('does not dispatch a request admitted before a pause after the pause is released',async()=>{
+    let hold=false,entered=false;
+    let release!:()=>void;
+    const waiting=new Promise<void>(resolve=>{release=resolve;});
+    const outbound=vi.fn(async()=>Response.json({ok:true}));
+    const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound,vpnPayload:async timestamp=>{if(hold){entered=true;await waiting;}return vpnProof(timestamp,'connected');}}});
+    outbound.mockClear();hold=true;
+    const pending=f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    await vi.waitFor(()=>expect(entered).toBe(true));
+    expect((await pause(f)).exitCode).toBe(0);
+    expect((await resume(f)).exitCode).toBe(0);
+    hold=false;release();
+    const response=await pending;
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-bb-pool-error')).toBe('POOL_MAINTENANCE');
+    expect(outbound).not.toHaveBeenCalled();
+    const fresh=await f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    expect(fresh.status).toBe(200);await fresh.text();
+    expect(outbound).toHaveBeenCalledTimes(1);
+  });
+  it('cancels active streams and queued work without replaying inference',async()=>{
+    const canceled=vi.fn();
+    const outbound=vi.fn(async()=>new Response(new ReadableStream({cancel:canceled})));
+    const f=await createFixture({upstreamUrl:'https://upstream.example',options:{fetch:outbound}});
+    await f.host.harness.behavior.callRpc('config.set',{maxConcurrentRequestsPerAccount:1});
+    outbound.mockClear();
+    const first=await f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    const reader=first.body!.getReader();
+    const reading=reader.read().catch(()=>({done:true,value:undefined}));
+    const queued=f.host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:authHeaders(f.key),body:'{}'});
+    await vi.waitFor(async()=>{
+      const accounts=await f.host.harness.behavior.callRpc('account.list',null) as AccountSummary[];
+      expect(accounts[0]?.queuedRequests).toBeGreaterThan(0);
+    });
+    expect((await pause(f)).exitCode).toBe(0);
+    const denied=await queued;
+    expect(denied.status).toBe(503);
+    expect(denied.headers.get('x-bb-pool-error')).toBe('POOL_MAINTENANCE');
+    await reading;
+    await vi.waitFor(()=>expect(canceled).toHaveBeenCalledTimes(1));
+    expect(outbound).toHaveBeenCalledTimes(1);
+    const status=await f.host.harness.behavior.callRpc('status.get',null) as {inFlight:number};
+    expect(status.inFlight).toBe(0);
+    await resume(f);
+    expect(outbound).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('account HTTP proxy operator wiring',()=>{
+ it('creates a metadata-only draft through CLI and refuses OAuth through a rejecting assigned proxy',async()=>{
+  const outbound=vi.fn(async()=>Response.json({}));
+  const fixture=await createFixture({upstreamUrl:'https://fixture.example',options:{fetch:outbound,oauthTokenUrl:'https://login.example/token'}});
+  outbound.mockClear();
+  const added=await fixture.host.harness.behavior.runCli(['account','add','--provider','claude','--draft','--email','new@example.test','--label','Prepared account']);
+  expect(added.exitCode).toBe(0);
+  const accounts=await fixture.host.harness.behavior.callRpc('account.list',null) as AccountSummary[];
+  const draft=accounts.find(a=>a.email==='new@example.test')!;
+  expect(draft).toMatchObject({draft:true,enabled:false,label:'Prepared account',eligible:false});
+  const store=new AccountStore(fixture.host.bb.storage.kv,path.join(fixture.dataDir,'plugins',fixture.host.bb.pluginId,'secrets','accounts'));
+  await expect(store.readSecret(draft.id)).rejects.toThrow();
+  expect(outbound).not.toHaveBeenCalled();
+  let connects=0;
+  const proxy=http.createServer();
+  proxy.on('connect',(_req,socket)=>{connects++;socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');});
+  await new Promise<void>(resolve=>proxy.listen(0,'127.0.0.1',resolve));
+  cleanups.push(()=>new Promise<void>((resolve,reject)=>proxy.close(error=>error?reject(error):resolve())));
+  const address=proxy.address();if(!address||typeof address==='string')throw Error('Proxy did not bind');
+  fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}) as never);
+  await fixture.host.harness.behavior.callRpc('egress.proxy',{accountId:draft.id,url:`http://127.0.0.1:${address.port}`});
+  const login=await fixture.host.harness.behavior.callRpc('login.reauthorize',{accountId:draft.id}) as {sessionId:string;authorizeUrl:string};
+  await expect(fixture.host.harness.behavior.callRpc('login.complete',{sessionId:login.sessionId,pasted:`fixture-code#${new URL(login.authorizeUrl).searchParams.get('state')}`})).rejects.toThrow('Assigned account egress unavailable');
+  expect(connects).toBe(1);expect(outbound).not.toHaveBeenCalled();
+  expect(await store.get(draft.id)).toMatchObject({draft:true,enabled:false});
+  await expect(store.readSecret(draft.id)).rejects.toThrow();
+ });
+ it('keeps proxy secrets off status and local provider environments on every host and invocation',async()=>{
+  const fixture=await createFixture({upstreamUrl:'https://upstream.example'});
+  fixture.host.harness.sdk.stub('system.config',async()=>({primaryHostId:'host-one'}) as never);
+  await fixture.host.harness.behavior.callRpc('egress.proxy',{accountId:fixture.account.id,url:'http://fixture-user:fixture-password@proxy.example:8080'});
+  const state=await fixture.host.harness.behavior.callRpc('egress.status',null);
+  expect(JSON.stringify(state)).not.toContain('fixture-password');
+  expect(JSON.stringify(state)).not.toContain('fixture-user');
+  for(const hostId of ['host-one','host-two'])for(const threadId of ['start-thread','resume-thread','fork-thread',null]){
+   const env=await fixture.host.harness.behavior.resolveProviderEnv('claude-code',{hostId,threadId:threadId as string,projectId:'project-one'});
+   expect(env).toEqual(expect.arrayContaining([
+    expect.objectContaining({name:'ANTHROPIC_BASE_URL',value:{serverPath:'/api/v1/plugins/account-pool/http'}}),
+    expect.objectContaining({name:'ANTHROPIC_AUTH_TOKEN'}),
+   ]));
+   expect(JSON.stringify(env)).not.toContain('fixture-password');
+   expect(JSON.stringify(env)).not.toContain('proxy.example');
+  }
+ });
+});
+
+it('exposes route and history capacity through pool status',async()=>{
+ const fixture=await createFixture({upstreamUrl:'https://upstream.example'});
+ const status=statusSchema.parse(await fixture.host.harness.behavior.callRpc('status.get',null));
+ expect(status.routeTracking).toMatchObject({decisions:0,maxDecisions:4096,maxBytes:240*1024,retentionMs:30*86400000});
+ expect(status.historyCapacity).toEqual({rows:0,maxRows:65536,maxBytes:64*1024*1024});
+});
+
+describe('Grok device login admission', () => {
+  it.each(['guard', 'manual block', 'maintenance', 'shutdown'] as const)('refuses %s before launching the CLI', async reason => {
+    const fixture = await createFixture({
+      upstreamUrl: 'https://upstream.example',
+      options: {
+        fetch: async () => Response.json({}),
+        grokLoginCommand: process.execPath,
+        grokLoginArgs: ['-e', 'console.log("https://login.example code: TEST")'],
+      },
+    });
+    const { behavior, sdk } = fixture.host.harness;
+    let message: string;
+    if (reason === 'maintenance') {
+      const result = await behavior.runCli(['maintenance', 'acquire', '--owner', '11111111-1111-4111-8111-111111111111', '--json']);
+      expect(result.exitCode).toBe(0);
+      message = 'paused for maintenance';
+    } else if (reason === 'shutdown') {
+      fixture.service.controller.abort();
+      await fixture.service.done;
+      message = 'not accepting requests';
+    } else {
+      sdk.stub('system.config', async () => ({primaryHostId: 'pool-host'}));
+      sdk.stub('plugins.callRpc', async () => ({
+        schema: 'bb-vpn-guard/network-decision/2', hostId: 'pool-host',
+        allowed: false, reason: reason === 'guard' ? 'vpn_unavailable' : 'manual_block',
+      }));
+      await behavior.callRpc('config.set', {vpnGuardEnabled: true});
+      message = 'VPN_GUARD_BLOCKED';
+    }
+    await expect(behavior.callRpc('grokLogin.start', null)).rejects.toThrow(message);
+  });
+});
+
+it('uses the selected Codex account proxy for login and refuses a missing route', async () => {
+  const outbound = vi.fn(async () => Response.json({
+    device_auth_id: 'fixture-device', user_code: 'TEST-CODE', interval: 10,
+  }));
+  const fixture = await createFixture({
+    provider: 'codex', source: 'import', upstreamUrl: 'https://upstream.example',
+    options: {
+      fetch: outbound, codexAuthBaseUrl: 'https://login.example',
+      importCodexCredentials: async () => ({
+        accessToken: 'fixture-access', refreshToken: 'fixture-refresh', idToken: null,
+        accountId: 'fixture-account', email: null, expiresAt: Date.now() + 3600000,
+      }),
+    },
+  });
+  const { behavior, sdk } = fixture.host.harness;
+  sdk.stub('system.config', async () => ({primaryHostId: 'host-one'}));
+  let connects = 0;
+  const proxy = http.createServer();
+  proxy.on('connect', (_request, socket) => {
+    connects++;
+    socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+  });
+  await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  cleanups.push(() => new Promise<void>((resolve, reject) => proxy.close(error => error ? reject(error) : resolve())));
+  const address = proxy.address();
+  if (!address || typeof address === 'string') throw new Error('Proxy did not bind');
+  await behavior.callRpc('egress.proxy', {accountId: fixture.account.id, url: `http://127.0.0.1:${address.port}`});
+  outbound.mockClear();
+  const start = () => behavior.callRpc('codexLogin.start', {accountId: fixture.account.id});
+  await expect(start()).rejects.toThrow('Assigned account egress unavailable');
+  expect(connects).toBe(1);
+  sdk.stub('system.config', async () => ({primaryHostId: 'other-host'}));
+  await expect(start()).rejects.toThrow('Assigned account egress unavailable');
+  expect(connects).toBe(1);
+  expect(outbound).not.toHaveBeenCalled();
+  await expect(behavior.callRpc('codexLogin.start', null)).resolves.toMatchObject({userCode: 'TEST-CODE'});
+  expect(outbound).toHaveBeenCalledTimes(1);
+});
+
+it('routes POST /v1/responses/compact to the Codex upstream', async () => {
+  const seenUrls: string[] = [];
+  const outbound = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : String(input);
+    seenUrls.push(url);
+    if (url.includes('/usage')) return Response.json({ rate_limit: { allowed: true, limit_reached: false, primary_window: null, secondary_window: null } });
+    return Response.json({ id: 'compact-fixture', object: 'response.compaction' });
+  });
+  const fixture = await createFixture({
+    provider: 'codex',
+    source: 'import',
+    upstreamUrl: 'https://upstream.example/backend-api/codex',
+    options: {
+      fetch: outbound,
+      importCodexCredentials: async () => ({
+        accessToken: 'fixture-access',
+        refreshToken: 'fixture-refresh',
+        idToken: null,
+        accountId: 'fixture-account',
+        email: null,
+        expiresAt: Date.now() + 3_600_000,
+      }),
+    },
+  });
+  const response = await fixture.host.harness.behavior.fetchHttp('POST', '/v1/responses/compact', {
+    headers: authHeaders(fixture.key),
+    body: JSON.stringify({ model: 'gpt-5.4', input: [] }),
+  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ id: 'compact-fixture', object: 'response.compaction' });
+  expect(seenUrls).toContain('https://upstream.example/backend-api/codex/responses/compact');
+});
+
+it('skips Guard RPC checks on background usage ticks while accounts are not due', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  try {
+    const dataDir = await fs.mkdtemp(path.join(tmpdir(), 'usage-tick-guard-'));
+    cleanups.push(() => fs.rm(dataDir, { recursive: true, force: true }));
+    let blocked = false;
+    const guardCalls = vi.fn(async () => ({
+      schema: 'bb-vpn-guard/network-decision/2',
+      hostId: 'pool-host',
+      allowed: !blocked,
+      reason: blocked ? 'manual_block' : 'observe',
+    }));
+    const usageCalls = vi.fn(async () => Response.json({
+      rate_limit: { allowed: true, limit_reached: false, primary_window: null, secondary_window: null },
+    }));
+    const host = createFakePluginHost({
+      pluginId: 'account-pool-balanced',
+      dataDir,
+      sdk: {
+        hosts: { list: async () => [{ id: 'pool-host', name: 'Fixture' }] },
+        system: { config: async () => ({ primaryHostId: 'pool-host' }), providerStates: async () => ({ providers: [] }) },
+        plugins: { callRpc: guardCalls },
+      },
+    });
+    cleanups.push(() => host.harness.lifecycle.dispose());
+    await host.bb.storage.kv.set('config', { vpnGuardEnabled: true, vpnOnlyProviders: [], vpnPolicyVersion: 2 });
+    await createAccountPoolPlugin({
+      fetch: usageCalls,
+      fetchIpv4: usageCalls,
+      now: () => Date.now(),
+      importCodexCredentials: async () => ({
+        accessToken: 'fixture-access',
+        refreshToken: 'fixture-refresh',
+        idToken: null,
+        accountId: 'fixture-account',
+        email: null,
+        expiresAt: Date.now() + 3_600_000,
+      }),
+    })(host.bb);
+    const account = await host.harness.behavior.callRpc('account.add', {
+      provider: 'codex',
+      source: { kind: 'import' },
+      label: 'Fixture',
+      priority: 100,
+    }) as AccountSummary;
+    expect(guardCalls.mock.calls.length).toBeGreaterThan(0);
+    expect(usageCalls).toHaveBeenCalledTimes(1);
+    guardCalls.mockClear();
+    usageCalls.mockClear();
+    const service = host.harness.behavior.runService('hub');
+    try {
+      // Initial hub tick + four 60-second ticks inside the 5-minute refresh interval must not invoke Guard or upstream.
+      await vi.advanceTimersByTimeAsync(4 * 60_000 + 10);
+      expect(guardCalls).not.toHaveBeenCalled();
+      expect(usageCalls).not.toHaveBeenCalled();
+
+      // Once the 5-minute interval elapses, Guard and usage refresh run again.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => expect(usageCalls).toHaveBeenCalledTimes(1));
+      const afterDueGuardCalls = guardCalls.mock.calls.length;
+      expect(afterDueGuardCalls).toBeGreaterThan(0);
+
+      // Subsequent ticks inside the new 5-minute window stay silent as well.
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(guardCalls.mock.calls.length).toBe(afterDueGuardCalls);
+      expect(usageCalls).toHaveBeenCalledTimes(1);
+
+      // Explicit forced refresh still enforces Guard immediately even inside the interval.
+      blocked = true;
+      await expect(host.harness.behavior.callRpc('account.refreshUsage', { accountId: account.id })).rejects.toThrow('VPN_GUARD_BLOCKED');
+    } finally {
+      service.controller.abort();
+      await service.done;
+    }
+  } finally {
+    vi.useRealTimers();
+  }
 });

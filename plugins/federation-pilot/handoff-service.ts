@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
-import {handoffBeginSchema,handoffTargetSchema,handoffAttachmentSchema,handoffResultSchema} from './handoff-contract.ts';
+import {handoffSourceSchema,handoffBeginSchema,handoffTargetSchema,handoffAttachmentSchema,handoffResultSchema} from './handoff-contract.ts';
 import {handoffBytes} from './handoff-upload.ts';
 import type {RemoteConfig} from './configuration.ts';
 
@@ -61,6 +61,31 @@ export function createHandoffs(d:HandoffDeps){
   return {providers,models};
  }
  return {
+  async source(raw:unknown){
+   const input=handoffSourceSchema.parse(raw),c=await d.selected(input.serverId);
+   if(!c.allowWrites||c.projectId!==input.projectId)throw Error('Remote handoff source is not permitted');
+   const member=async()=>{
+    if(fingerprint(await d.selected(c.serverId))!==fingerprint(c))throw Error('Source connection changed');
+    await d.exclusive(c,[input.projectId,input.threadId]);
+    const thread=await d.get(c,`/api/v1/threads/${input.threadId}`);
+    if(thread.id!==input.threadId||thread.projectId!==input.projectId)throw Error('Source thread outside selected project');
+    return thread;
+   };
+   await member();
+   const query=new URLSearchParams({limit:String(input.limit),order:input.order});
+   if(input.afterSeq!==undefined)query.set('afterSeq',String(input.afterSeq));
+   const events=await d.get(c,`/api/v1/threads/${input.threadId}/events?${query}`);
+   if(!Array.isArray(events)||events.length>input.limit)throw Error('Invalid source event page');
+   let previous=input.order==='asc'?(input.afterSeq??0):Infinity;
+   for(const event of events){
+    if(event.threadId!==input.threadId||!Number.isSafeInteger(event.seq)||event.seq<1||
+     (input.order==='asc'?event.seq<=previous:event.seq>=previous))throw Error('Invalid source event sequence');
+    previous=event.seq;
+   }
+   const thread=await member();
+   if(fingerprint(await d.selected(c.serverId))!==fingerprint(c))throw Error('Source connection changed');
+   return {thread,events};
+  },
   async targets(){
    const all=await d.configurations();if(!all.enabled)return [];
    return Promise.all(all.servers.map(async c=>{

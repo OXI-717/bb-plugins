@@ -79,7 +79,7 @@ export function createGeminiAdapter(options: GeminiAdapterOptions): ProviderAdap
         forAccount: () => body,
       };
     },
-    upstreamUrl(request, settings, _account, secret) {
+    upstreamUrl(request, settings, _body, _account, secret) {
       const suffix = mountedPathSuffix(request, GEMINI_MOUNT_PREFIX);
       const base = secret?.kind === "api-key"
         ? options.apiBaseUrl(settings)

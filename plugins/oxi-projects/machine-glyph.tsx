@@ -16,10 +16,16 @@ const shapes:Record<MachineMark['icon'],Shape[]>={
 export function MachineGlyph({icon}:{icon:MachineMark['icon']}) {
  return <svg data-machine-glyph={icon} aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{display:'block',flexShrink:0}}>{shapes[icon].map((shape,i)=>React.createElement(shape.tag,{...shape.attrs,key:i}))}</svg>;
 }
-export function createMachineGlyph(doc:Document,icon:MachineMark['icon']) {
+export function createMachineGlyph(doc:Document,icon:MachineMark['icon'],stopped=false) {
  const ns='http://www.w3.org/2000/svg';const svg=doc.createElementNS(ns,'svg');
  for(const [key,value] of Object.entries({'data-machine-glyph':icon,'aria-hidden':'true',viewBox:'0 0 24 24',width:'16',height:'16',fill:'none',stroke:'currentColor','stroke-width':'1.6','stroke-linecap':'round','stroke-linejoin':'round'}))svg.setAttribute(key,value);
  svg.style.display='block';
  for(const shape of shapes[icon]){const node=doc.createElementNS(ns,shape.tag);for(const [key,value] of Object.entries(shape.attrs))node.setAttribute(key==='fillOpacity'?'fill-opacity':key,value);svg.append(node);}
+ if(stopped){
+  const badge=doc.createElementNS(ns,'g');badge.setAttribute('data-machine-stop','');
+  const circle=doc.createElementNS(ns,'circle');for(const [key,value] of Object.entries({cx:'18',cy:'18',r:'5',fill:'var(--background, white)'}))circle.setAttribute(key,value);
+  const square=doc.createElementNS(ns,'rect');for(const [key,value] of Object.entries({x:'16',y:'16',width:'4',height:'4',rx:'.3',fill:'currentColor',stroke:'none'}))square.setAttribute(key,value);
+  badge.append(circle,square);svg.append(badge);
+ }
  return svg;
 }

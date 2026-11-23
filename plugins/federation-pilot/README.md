@@ -1,4 +1,4 @@
-# BB Federation (experimental)
+# OXI Federation (experimental)
 
 Work with independent BB servers in one ordinary BB thread tree. Each configured remote project keeps its original threads, provider and execution environment. The plugin merges lists, routes HTTP to the owning server, and forwards change notifications into BB's native client. It does not modify BB core, copy conversations or enroll the primary machine on a remote server.
 
@@ -59,7 +59,7 @@ The legacy single-server fields remain readable for existing pilot installations
 
 ## Working in the native client
 
-Remote project names include their configured label. Thread rows show the standard Network icon, neutral while connected and red while offline. Open and send messages in the ordinary chat. Permission responses use the original remote interaction API.
+Remote project names include their configured label. Healthy connections leave native BB thread indicators unchanged: running, pending interaction and unread attention remain visible. A connection override appears only while connecting or offline; idle alone does not mean the task is complete. Open and send messages in the ordinary chat. Permission responses use the original remote interaction API.
 
 Remote machine names carry a globe and their remote server label/ID in native selectors. Machine settings show separate **Machines on remote BB servers** groups, without local machine management controls. **Permissions on remote server: Full Access** describes execution permissions on that remote machine, not a grant to primary. Remote machine detail links return to these read-only groups. No machine records, provider IDs or host types are fabricated. Host mutations are refused by both the client transport and backend policy.
 
@@ -119,3 +119,71 @@ See [the bridge contract](CONTRACT.md) and [review and validation](REVIEW.md). T
 The matching Handoff plugin can copy a user-selected saved snapshot and selected
 attachments to a ready remote environment. See [contract and limits](HANDOFF.md).
 This does not enroll remote machines or enable agent consumers.
+
+BB 0.49 short thread links (`/threads/<id>`) are resolved through validated remote reads after the primary server confirms absence. Local threads retain priority; failures are not treated as absence.
+
+### Same-server continuation source
+
+`handoffSource` is a bounded read RPC for the companion Handoff plugin. It requires
+an explicit server/project/thread tuple, configured project membership, enabled
+writes for this user-initiated flow, and no primary identity collision. Membership
+and connection configuration are checked before and after each ordered event page.
+Invalid identity, ordering or page size fails closed. It performs no create,
+archive, deletion, activation or source-agent wake. Remote attachment bytes are
+not exposed. Continuation creation is a separate authorized action; existing
+one-attempt commit and saved-status reconciliation rules remain in force.
+
+### Connection recovery
+
+The configured bridge machine remains the only SSH origin. The plugin never
+moves a bridge to another host, changes authentication or network settings, or
+starts an agent to repair connectivity.
+
+Connection status stays in the existing session indicator; no floating panel
+is added over the conversation or composer (including mobile screens).
+`GET /connections` exposes bridge machine offline, bridge worker unavailable,
+SSH unavailable, or remote BB unavailable, plus last successful probe, outage
+duration, and next check. A successful probe verifies the configured project identity.
+Health probes are single-flight per configured server. Failed probes back off
+from one second to a 60-second cap with jitter; healthy connections are checked
+every 30 seconds. Pending recovery deadlines are not postponed by user traffic.
+
+A safe GET/HEAD can run at most twice, with a successful health probe before its
+one retry. Writes, messages, creates and uploads are never retransmitted after
+an ambiguous result. Realtime subscriptions reconnect independently with capped
+jitter and catch up via reads; outbound user messages are not queued for replay.
+
+Tunnel reuse checks the SSH child and loopback listener. Broken resources are
+replaced at most once per acquisition; concurrent callers share establishment.
+The SSH child owns a worker retention lease. Idle cleanup preserves active
+WebSockets; idle expiry after socket closure, configuration reconciliation and plugin disposal
+release resources. Configuration is inspected every five seconds; reconciliation
+only runs when the destination set changes, with at most five attempts after
+failure. Socket cleanup and child exits address the exact tunnel generation,
+so late cleanup cannot close its replacement. Configuration is revalidated
+after waiting for a probe, immediately before any request or upload.
+
+After two minutes of continuous outage, the plugin attempts one standard BB
+push notification. Successful delivery suppresses further notices until recovery;
+failed delivery can be retried on a later health check. Notification settings
+and availability remain owned by the installed push-notifications plugin.
+Diagnostics expose categories, never raw SSH stderr.
+
+Synthetic tests cover outage/recovery, single-flight backoff, safe-read retry
+bounds, once-only mutation attempts, notification deduplication, pinned tunnels,
+and timer disposal. Live bridge failure injection is deliberately excluded.
+
+### BB realtime compatibility
+
+Both single-target and batched subscriptions are routed per verified owner, including
+reconnects before sidebar bootstrap. Timeline resume tags stay with their target.
+The bridge supports current BB thread-timeline subscriptions and only forwards frames
+for a subscribed thread in the configured project. Opening a thread retains native
+read/unread behavior; the bridge does not manufacture completion or mark rows read.
+
+Acceptance covers cold load, reconnect, late ownership discovery, native attention
+fields, and remote timeline updates. No status overlay is mounted.
+
+Server and host share the request-path guard, including the bounded stop-boundary
+metadata read used by BB. Encoded event-name separators are permitted only for that
+read; encoded route separators and unrelated query values remain rejected.

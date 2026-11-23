@@ -26,6 +26,7 @@ export const catalogTaskSchema = z
     }).strict().nullable().optional(),
     schedule: text.nullable(),
     scheduleKind: z.enum(["once", "recurring"]).optional(),
+    executionId: id.optional(),
     nextRunAt: time.nullable().optional(),
     state: z.enum(["active", "paused", "blocked", "failed", "unknown"]),
     declaredState: text.nullable().optional(),
@@ -102,6 +103,7 @@ export const catalogEntrySchema = catalogTaskSchema.extend({
 });
 export const catalogSourceStatusSchema = catalogSourceSchema.omit({ bbServerUrl: true }).extend({
   managedHere: z.boolean().optional(),
+  archivedAt: time.optional(),
   checkedAt: time,
   lastSuccessAt: time.nullable(),
   error: text.nullable(),

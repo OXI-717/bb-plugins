@@ -41,6 +41,24 @@ def main():
                 state['results'].append(dict(source=identifier, exitCode=result.returncode))
             except (OSError, subprocess.TimeoutExpired) as error:
                 state['results'].append(dict(source=identifier, error=type(error).__name__))
+        # One optional compliance pass inside this same publisher cycle; no extra timer.
+        if config.get('auditConfig'):
+            try:
+                audit = subprocess.run([sys.executable, str(Path(__file__).with_name('catalog_audit.py')),
+                                        '--config', config['auditConfig'], '--publish'],
+                                       env=dict(os.environ, BB_SERVER_URL=config['serverUrl']),
+                                       capture_output=True, text=True, timeout=220)
+                record = dict(source='inventory-audit', exitCode=audit.returncode)
+                if audit.returncode == 0:
+                    try:
+                        report = json.loads(audit.stdout)
+                        if isinstance(report, dict) and 'notification' in report:
+                            record['notification'] = report['notification']
+                    except ValueError:
+                        pass
+                state['results'].append(record)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                state['results'].append(dict(source='inventory-audit', error=type(error).__name__))
         state['finishedAt'] = time.time()
         temporary = state_path.with_suffix('.tmp')
         temporary.write_text(json.dumps(state))

@@ -1,4 +1,4 @@
-# Pool Maintenance
+# OXI Pool Maintenance
 
 Install the accepted release with `bb plugin install pool-maintenance@oxi-public`.
 Run the accepted updater with `--pause-sessions` in a separate BB terminal.

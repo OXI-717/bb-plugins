@@ -1,0 +1,261 @@
+import { randomUUID } from 'node:crypto';
+import { ProxySecrets, parseProxyUrl } from './proxy-secrets.js';
+import { HttpScopeAcceptances, httpScopeAcceptInputSchema, profileFingerprint, type HttpScopeEnforcementSource } from './http-scope-acceptance.js';
+import { z } from 'zod';
+import { ProxyAgent, buildConnector } from 'undici';
+import type { PoolKvStorage } from './core-storage.js';
+
+const id = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/);
+const sshProfileSchema = z.object({
+  id, version: z.number().int().positive(), label: z.string().min(1).max(120),
+  node: id, hostIds: z.array(id).min(1).max(32),
+  transport: z.literal('ssh-connect'),
+  // A fleet-owned SSH LocalForward. Never a credential-bearing public proxy.
+  endpoint: z.string().url().refine(value => {
+    const u = new URL(value);
+    return u.protocol === 'http:' && u.hostname === '127.0.0.1' && !!u.port &&
+      !u.username && !u.password && u.pathname === '/' && !u.search && !u.hash;
+  }),
+  dns: z.literal('remote'), ipv4: z.literal(true), ipv6: z.literal(false),
+  failure: z.literal('closed'),
+  expectedExit: z.array(z.ipv4()).min(1).max(16),
+  assurance: z.literal('proxy-enforced'),
+}).strict();
+const httpProfileSchema = z.object({
+  id, version:z.number().int().positive(),label:z.string().min(1).max(120),
+  hostIds:z.array(id).min(1).max(32),transport:z.literal('http-connect'),
+  endpoint:z.string().max(2048).refine(value=>{try{const u=parseProxyUrl(value);return !u.username&&!u.password;}catch{return false;}}),
+  secretRef:z.string().uuid(), failure:z.literal('closed'),
+}).strict();
+export const egressProfileSchema=z.discriminatedUnion('transport',[sshProfileSchema,httpProfileSchema]);
+export const accountProxyInputSchema=z.object({accountId:z.string().uuid(),url:z.string().min(1).max(4096)}).strict();
+export type EgressProfile = z.infer<typeof egressProfileSchema>;
+const refSchema = z.object({id, version:z.number().int().positive()}).strict();
+export const egressStateSchema = z.object({schema:z.literal(1),profiles:z.array(egressProfileSchema).max(128),
+  bindings:z.record(z.string().uuid(),refSchema),
+  pins:z.record(z.string().max(2048),z.object({accountId:z.string().uuid(),ref:refSchema}).strict()).default({}),
+  // Historical unassigned decisions prevent creating a later home pin.
+  // Routing always follows the selected account binding.
+  unassigned:z.record(z.string().max(2048),z.array(z.string().uuid()).min(1).max(128)).default({}),
+  assignmentBlocked:z.boolean().default(false),
+}).strict();
+export const ROUTE_RETENTION_MS=30*86400000;
+const MAX_REGISTRY_BYTES=240*1024; // Reserve space below the SDK's 256 KiB value bound.
+const registryBytes=(state:unknown)=>Buffer.byteLength(JSON.stringify(state),'utf8');
+const decisionCount=(state:z.infer<typeof egressStateSchema>)=>Object.keys(state.pins).length+
+  Object.values(state.unassigned).reduce((n,accounts)=>n+accounts.length,0);
+function requireRegistrySpace(state:unknown){
+  if(registryBytes(state)>MAX_REGISTRY_BYTES)throw Error('Egress registry byte capacity reached.');
+}
+export class EgressUnavailable extends Error {
+  readonly code = 'POOL_EGRESS_UNAVAILABLE';
+  constructor(){super('Assigned account egress unavailable; no fallback or replay.');}
+}
+export interface AccountRoute {
+  assigned:boolean;
+  profile:Readonly<EgressProfile>|null;
+  /** Implementations must invoke beforeSend with the actual transport start after all awaits. */
+  fetch(ipv4:boolean,beforeSend?:(send:()=>Promise<Response>)=>Promise<Response>):typeof fetch|undefined;
+  scopeAccepted?(accountId:string,now:number):boolean;
+  assertScope?():void;
+  prepareScope?():Promise<void>;
+}
+
+/** Server-owned selection, never read from client headers or model names. */
+export class AccountEgress {
+  private state:z.infer<typeof egressStateSchema> = {schema:1,profiles:[],bindings:{},pins:{},unassigned:{},assignmentBlocked:false};
+  private readonly agents = new Map<string,ProxyAgent>();
+  private readonly sessions = new Map<string,{accountId:string;route:AccountRoute}>();
+  private readonly lastSeen=new Map<string,number>();
+  private lastCleanup=Number.NEGATIVE_INFINITY;
+  private mutation:Promise<unknown> = Promise.resolve();
+  private readonly scopeAcceptances:HttpScopeAcceptances;
+  constructor(private readonly kv:PoolKvStorage,private readonly hostId:()=>Promise<string>,
+    private readonly accountExists:(id:string)=>Promise<boolean>,private readonly proxySecrets?:ProxySecrets,
+    private readonly now:()=>number=Date.now,enforcement?:HttpScopeEnforcementSource,
+    private readonly observedAt:(key:string)=>number|null=()=>null){
+      this.scopeAcceptances=new HttpScopeAcceptances(kv,now,enforcement);
+    }
+  async initialize(){
+    const stored=await this.kv.get('account-egress-v1');if(stored!==undefined)this.state=egressStateSchema.parse(stored);
+    await this.scopeAcceptances.initialize();
+    await this.cleanup();
+    if(decisionCount(this.state)>=4096 || registryBytes(this.state)>=MAX_REGISTRY_BYTES)this.state.assignmentBlocked=true;
+  }
+  capacity(){return {decisions:decisionCount(this.state),maxDecisions:4096,bytes:registryBytes(this.state),maxBytes:MAX_REGISTRY_BYTES,retentionMs:ROUTE_RETENTION_MS,trackedKeys:this.lastSeen.size,cachedRoutes:this.sessions.size};}
+  cleanup(){return this.update(async()=>{
+    const now=this.now();if(now-this.lastCleanup<3600000)return;
+    const next=structuredClone(this.state),known=new Map<string,boolean>();
+    const exists=async(id:string)=>{if(!known.has(id))known.set(id,await this.accountExists(id));return known.get(id)!;};
+    for(const key of new Set([...Object.keys(next.pins),...Object.keys(next.unassigned)])){
+      const observed=this.observedAt(key);
+      const last=Math.max(this.lastSeen.get(key)??observed??now,observed??0);
+      this.lastSeen.set(key,last);
+      if(now-last>ROUTE_RETENTION_MS){delete next.pins[key];delete next.unassigned[key];this.sessions.delete(key);this.lastSeen.delete(key);continue;}
+      const pin=next.pins[key];
+      if(pin&&!await exists(pin.accountId)){delete next.pins[key];this.sessions.delete(key);}
+      if(next.unassigned[key]){
+        const retained=[];for(const id of next.unassigned[key])if(await exists(id))retained.push(id);
+        if(retained.length)next.unassigned[key]=retained;else delete next.unassigned[key];
+      }
+    }
+    // Only cleanup that actually frees decisions may reopen bookkeeping.
+    if(decisionCount(next)<decisionCount(this.state)&&decisionCount(next)<4096&&registryBytes(next)<MAX_REGISTRY_BYTES)next.assignmentBlocked=false;
+    if(JSON.stringify(next)!==JSON.stringify(this.state)){await this.kv.set('account-egress-v1',next);this.state=next;}
+    for(const key of this.lastSeen.keys())if(!next.pins[key]&&!next.unassigned[key]){this.lastSeen.delete(key);this.sessions.delete(key);}
+    for(const key of this.sessions.keys())if(!next.pins[key]&&!next.unassigned[key])this.sessions.delete(key);
+    this.lastCleanup=now;
+  });}
+  snapshot(){return structuredClone(this.state);}
+  async acceptScope(value:unknown){
+    const input=httpScopeAcceptInputSchema.parse(value);
+    const profile=this.state.profiles.find(p=>p.id===input.profile.id&&p.version===input.profile.version);
+    if(!profile||profile.transport!=='http-connect'||profileFingerprint(profile)!==input.profileFingerprint||
+      !profile.hostIds.includes(input.hostId)||await this.hostId()!==input.hostId||!await this.accountExists(input.accountId))
+      throw new EgressUnavailable();
+    return this.scopeAcceptances.accept(input);
+  }
+  revokeScope(value:unknown){return this.scopeAcceptances.revoke(value);}
+  /** Saved home preference; eligibility is checked by the selector. */
+  pinnedAccount(sessionKey:string):string|null{return this.state.pins[sessionKey]?.accountId??null;}
+  /** Placement preference only: keep eligible home accounts despite load. */
+  compatible(accountId:string,sessionKey:string|null):boolean{
+    if(!sessionKey)return true;
+    const pinned=this.sessions.get(sessionKey)?.accountId??this.state.pins[sessionKey]?.accountId;
+    if(pinned!==undefined)return pinned===accountId;
+    return true;
+  }
+  validateNativeProfile(ref:{id:string;version:number},hostId:string):void{
+    const profile=this.state.profiles.find(p=>p.id===ref.id&&p.version===ref.version);
+    if(!profile||profile.transport!=='ssh-connect'||!profile.hostIds.includes(hostId))throw new EgressUnavailable();
+  }
+  private update(change:()=>Promise<void>){
+    const next=this.mutation.then(change);this.mutation=next.catch(()=>undefined);return next;
+  }
+  configure(input:unknown){return this.update(async()=>{
+    const profile=egressProfileSchema.parse(input);
+    const old=this.state.profiles.find(p=>p.id===profile.id&&p.version===profile.version);
+    if(old && JSON.stringify(old)!==JSON.stringify(profile))throw new Error('Egress versions are immutable.');
+    if(old)return;
+    const next=egressStateSchema.parse({...this.state,profiles:[...this.state.profiles,profile]});
+    requireRegistrySpace(next);
+    await this.kv.set('account-egress-v1',next);this.state=next;
+  });}
+  /** Raw URLs enter only through the private operator RPC, never provider env. */
+  async configureProxy(input:unknown){
+    const parsed=accountProxyInputSchema.safeParse(input);
+    if(!parsed.success)throw Error('Invalid account proxy settings.');
+    const {accountId,url}=parsed.data;
+    const u=parseProxyUrl(url);
+    if(!this.proxySecrets || !await this.accountExists(accountId))throw Error('Account proxy unavailable.');
+    const host=await this.hostId(),secretRef=randomUUID();
+    await this.proxySecrets.write(secretRef,u.href);
+    u.username='';u.password='';
+    const ref={id:'proxy-'+secretRef,version:1};
+    await this.configure({...ref,label:("Proxy "+u.hostname).slice(0,120),hostIds:[host],transport:'http-connect',endpoint:u.href,secretRef,failure:'closed'});
+    await this.bind(accountId,ref);
+  }
+  bind(accountId:string,ref:z.infer<typeof refSchema>|null){return this.update(async()=>{
+    z.string().uuid().parse(accountId);
+    if(!await this.accountExists(accountId))throw Error('Account unavailable or its native transport is not supported.');
+    const bindings={...this.state.bindings};
+    if(ref===null)delete bindings[accountId];else{
+      if(this.state.assignmentBlocked)throw Error('Egress tracking capacity reached; new assignments require a coordinated drain/reset.');
+      const parsed=refSchema.parse(ref);
+      if(!this.state.profiles.some(p=>p.id===parsed.id&&p.version===parsed.version))throw Error('Configure the egress version first.');
+      bindings[accountId]=parsed;
+    }
+    const next=egressStateSchema.parse({...this.state,bindings});
+    // An old larger snapshot may still be safely reduced during rollback.
+    if(ref!==null || registryBytes(next)>=registryBytes(this.state) || registryBytes(next)>256*1024)requireRegistrySpace(next);
+    await this.kv.set('account-egress-v1',next);this.state=next;
+  });}
+  async acquire(accountId:string,sessionKey?:string|null):Promise<AccountRoute>{
+    if(sessionKey&&(this.state.pins[sessionKey]||this.state.unassigned[sessionKey]))this.lastSeen.set(sessionKey,this.now());
+    await this.cleanup();
+    const old=sessionKey?this.sessions.get(sessionKey):undefined;
+    if(old?.accountId===accountId){if( old.route.profile && !old.route.profile.hostIds.includes(await this.hostId()))throw new EgressUnavailable();return old.route;}
+    const pin=sessionKey?this.state.pins[sessionKey]:undefined;
+    const ref=pin?.accountId===accountId?pin.ref:this.state.bindings[accountId];
+    let route:AccountRoute={assigned:false,profile:null,fetch:()=>undefined};
+    if(ref){
+      const value=this.state.profiles.find(p=>p.id===ref.id&&p.version===ref.version);
+      const routeHost=await this.hostId();
+      if(!value || !value.hostIds.includes(routeHost))throw new EgressUnavailable();
+      const profile=Object.freeze(structuredClone(value));
+      const key=JSON.stringify(profile);
+      let agent=this.agents.get(key);
+      if(!agent){
+        let uri=profile.endpoint,token:string|undefined;
+        if(profile.transport==='http-connect'){
+          try{
+            if(!this.proxySecrets)throw new EgressUnavailable();
+            const u=parseProxyUrl(await this.proxySecrets.read(profile.secretRef));
+            if(u.username||u.password)token='Basic '+Buffer.from(decodeURIComponent(u.username)+':'+decodeURIComponent(u.password)).toString('base64');
+            u.username='';u.password='';
+            if(u.href!==profile.endpoint)throw new EgressUnavailable();
+          }catch{throw new EgressUnavailable();}
+        }
+        try{agent=new ProxyAgent({uri,token,allowH2:false,connect:{family:4},proxyTls:{family:4} as Parameters<typeof buildConnector>[0],requestTls:{family:4} as Parameters<typeof buildConnector>[0]});}
+        catch{throw new EgressUnavailable();}
+        this.agents.set(key,agent);
+      }
+      const dispatcher=agent;
+      const send=(beforeSend?:(send:()=>Promise<Response>)=>Promise<Response>):typeof fetch=>async(input,init)=>{
+        const url=new URL(input instanceof Request?input.url:String(input));
+        const currentHost=await this.hostId();
+        if(!profile.hostIds.includes(currentHost) || beforeSend&&currentHost!==routeHost || url.protocol!=='https:' || url.hostname.includes(':'))throw new EgressUnavailable();
+        const start=async()=>{
+          try{return await fetch(input,{...init,redirect:'error',dispatcher} as RequestInit);}
+          catch{throw new EgressUnavailable();}
+        };
+        // Admission owns the synchronous fence and starts transport in the same turn.
+        return beforeSend ? beforeSend(start) : start();
+      };
+      route={assigned:true,profile,fetch:(_ipv4,beforeSend)=>send(beforeSend),
+        prepareScope:()=>this.scopeAcceptances.prepare({accountId,hostId:routeHost,
+          profile:{id:profile.id,version:profile.version},profileFingerprint:profileFingerprint(profile)}),
+        scopeAccepted:(id,now)=>id===accountId&&profile.transport==='http-connect'&&this.scopeAcceptances.allowed({
+          accountId,hostId:routeHost,profile:{id:profile.id,version:profile.version},profileFingerprint:profileFingerprint(profile),
+        },now)};
+    }
+    // Pins survive settings edits. Capacity only limits new bookkeeping.
+    // Providers outside central egress retain their policy even at capacity.
+    if(sessionKey && (ref || await this.accountExists(accountId))){
+      await this.update(async()=>{
+        const prior=this.state.pins[sessionKey];
+        if(prior)return;
+        const unassigned=this.state.unassigned[sessionKey]??[];
+        if(this.state.assignmentBlocked)return;
+        if(!prior && (ref ? this.state.unassigned[sessionKey]===undefined : !unassigned.includes(accountId))){
+          const next=ref
+            ? {...this.state,pins:{...this.state.pins,[sessionKey]:{accountId,ref}}}
+            : {...this.state,unassigned:{...this.state.unassigned,[sessionKey]:[...unassigned,accountId]}};
+          if(decisionCount(this.state)>=4096 || !ref && unassigned.length>=128 || registryBytes(next)>MAX_REGISTRY_BYTES){
+            if(ref)return;
+            // Preserve ordinary service. Stop new bindings before forgetting
+            // an unassigned route, rather than evicting a warm decision.
+            const blocked={...this.state,assignmentBlocked:true};
+            await this.kv.set('account-egress-v1',blocked);this.state=blocked;return;
+          }
+          await this.kv.set('account-egress-v1',next);this.state=next;
+        }
+        if(ref && this.state.pins[sessionKey]?.accountId===accountId)this.sessions.set(sessionKey,{accountId,route});
+      });
+    }
+    return route;
+  }
+  async browserProxy(accountId:string):Promise<string|undefined>{
+    const route=await this.acquire(accountId);
+    if(!route.assigned)return undefined;
+    const profile=route.profile;
+    if(!profile||profile.transport!=='http-connect'||!this.proxySecrets)throw new EgressUnavailable();
+    try{
+      const u=parseProxyUrl(await this.proxySecrets.read(profile.secretRef));
+      const clean=new URL(u);clean.username='';clean.password='';
+      if(clean.href!==profile.endpoint)throw new EgressUnavailable();
+      return u.href;
+    }catch{throw new EgressUnavailable();}
+  }
+  async close(){await Promise.all([...this.agents.values()].map(a=>a.destroy()));}
+}

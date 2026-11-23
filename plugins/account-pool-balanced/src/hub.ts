@@ -1,5 +1,10 @@
+import { inClientScope, clientRouteAllowed, requiresClientVpn, type ClientAccountScope } from "./client-scope.js";
+import {PoolMaintenanceError, type PoolMaintenance} from './maintenance.js';
+import {GuardRequiredError} from './network-errors.js';
+import {CURSOR_RPC_PATH_HEADER} from './cursor-rpc.js';
+import { EgressUnavailable, type AccountRoute } from "./account-egress.js";
 import { providerBudgetQuota, providerEvidenceFromUsage, PROVIDER_BUDGET_MAX_AGE_MS, NUMERIC_BUDGET_PROVIDERS } from './provider-budget.js';
-import {AccountStartPacing} from "./account-start-pacing.js";
+import {AccountStartPacing, RECOVERY_WINDOW_MS} from "./account-start-pacing.js";
 import { AccountAdmission, AdmissionUnavailable, ACCOUNT_QUEUE_MAX_WAIT_MS } from "./account-admission.js";
 import {createAgyAdapter} from "./agy-adapter.js";
 import { observeCodexQuotaHeaders } from './codex-quota-observation.js';
@@ -12,6 +17,7 @@ import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
 import { createVpnPolicy, VpnRequiredError } from "./vpn-policy.js";
 import { isGeminiSubscriptionDenial, isRecoverableAccessError, isRecoverableZaiQuotaNetworkError } from "./recoverable-access.js";
 import { projectTier, projectRole } from "./project-policy.js";
+import { currentWeeklyBudget, observedWeek } from "./weekly-budget.js";
 import { policyThresholds, reserveHours, scheduleAllows } from "./account-policy.js";
 import type {
   Account,
@@ -30,15 +36,15 @@ import {
   DEFAULT_CODEX_REFRESH_URL,
   DEFAULT_CODEX_USAGE_URL,
 } from "./codex-adapter.js";
-import { createCursorAdapter } from "./cursor-adapter.js";
+import { CURSOR_PROXIED_PATHS, createCursorAdapter } from "./cursor-adapter.js";
 import { createDevinAdapter } from "./devin-adapter.js";
 import { createKimiAdapter } from "./kimi-adapter.js";
 import {
   createOpenAiCompatibleAdapter,
-  guardOpencodeGoRequestBody,
-  normalizeOpencodeGoUpstreamPathSuffix,
   isChatCompletionsBody,
   GROK_MOUNT_PREFIX,
+  opencodeGoUpstreamPathSuffix,
+  isOpenCodeGoFreeModelBody,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
@@ -109,6 +115,10 @@ const MAX_FAILURE_DETAIL_BYTES = 1_024;
 const FAILURE_DISPOSAL_TIMEOUT_MS = 250;
 const AFFINITY_IDLE_TTL_MS = 30 * 60 * 1_000;
 const MAX_AFFINITY_BINDINGS = 4_096;
+// While an account recovers from a provider hold it keeps the former default pressure.
+const RECOVERY_CONCURRENCY = 2;
+// A selected request counts toward its account before it reaches the admission lane.
+const PLACEMENT_TTL_MS = 5_000;
 const DROPPED_RESPONSE_HEADERS = new Set([
   "content-encoding",
   "content-length",
@@ -123,6 +133,12 @@ const DROPPED_RESPONSE_HEADERS = new Set([
 ]);
 
 interface HubOptions {
+  maintenance?: PoolMaintenance;
+  accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  manualRouteAccount?: (sessionKey:string)=>Promise<string|null>;
+  pinnedRouteAccount?: (sessionKey:string)=>string|null;
+  /** Placement preference only: load must not move an eligible home account. */
+  routeCompatible?: (accountId:string,sessionKey:string|null)=>boolean;
   nativeAgyManaged?:()=>boolean;
   journal?: RequestJournal;
   route: string;
@@ -131,7 +147,7 @@ interface HubOptions {
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
   maxAffinityBindings: number;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext" | "validatesCredential" | "validatesAccountScope">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;
@@ -141,7 +157,7 @@ interface HubOptions {
   now: () => number;
   drainTimeoutMs: number;
   onAccountsChanged: () => void;
-  onUpstreamError: (provider: PoolProvider, error: unknown, context: { elapsedMs: number; transport: "ipv4" | "default"; stage: "fetch_headers"; operation: "model" | "auxiliary" }) => void;
+  onUpstreamError: (provider: PoolProvider, error: unknown, context: { elapsedMs: number; transport: "ipv4" | "default"; stage: "fetch_headers" | "response_body"; requestId?: string; bytesRead?: number; guardReason?: "timeout" | "invalid_decision" | "rpc_failed"; operation: "model" | "auxiliary" }) => void;
 }
 
 interface SelectedAccount {
@@ -149,6 +165,8 @@ interface SelectedAccount {
   quota: AccountQuota;
   keepAffinity: boolean;
   accept: () => void;
+  /** The request reached this account's admission lane (or gave up): drop its placement. */
+  placed: () => void;
 }
 
 interface ActiveAccount {
@@ -166,6 +184,7 @@ interface RoutingAttempt {
   pinnedAccountId: string | null;
 }
 interface UpstreamResult {
+  poolRequestId?: string;
   response: Response;
   controller: AbortController;
   release: (outcome?: "complete"|"error"|"canceled") => void;
@@ -182,7 +201,7 @@ interface RefreshBackoff {
 type SecretUse = { kind: "normal"; zaiQuotaCollection?: boolean; geminiQuotaRecheck?: boolean } | { kind: "rejected"; accessToken: string; geminiQuotaRecheck?: boolean };
 
 type SecretFlight =
-  | { kind: "refresh"; use: SecretUse; result: Promise<AccountSecret> }
+  | { kind: "refresh"; use: SecretUse; routeKey?: string; result: Promise<AccountSecret> }
   | { kind: "rejection-check"; result: Promise<void> };
 
 interface FailureSummary {
@@ -199,6 +218,7 @@ export class AccountPoolHub {
   private accepting = false;
   private stopped = new AbortController();
   private readonly inFlightByAccount = new Map<string, number>();
+  private admittedModelRequests = 0;
   private readonly activeControllers = new Set<AbortController>();
   private readonly refreshes = new Map<string, SecretFlight>();
   // Internal binding only: rejected tokens must never become error properties
@@ -216,10 +236,20 @@ export class AccountPoolHub {
   private readonly vpn;
   private readonly networkFlights:NetworkFlights;
   private readonly admission: AccountAdmission;
+  private readonly cursorControlAdmission: AccountAdmission;
   private readonly claudeStarts: AccountStartPacing;
+  private recoveryWake: ReturnType<typeof setTimeout> | null = null;
+  private recoveryWakeAt = 0;
+  private readonly placementsByAccount = new Map<string, number[]>();
+  /** Requests actually sent upstream and not finished yet (a slot may be held before that). */
+  private readonly dispatchedByAccount = new Map<string, number>();
   constructor(private readonly options: HubOptions) {
-    this.claudeStarts = new AccountStartPacing(() => options.getSettings().claudeRequestStartIntervalMs, options.now);
-    this.admission = new AccountAdmission(() => options.getSettings().maxConcurrentRequestsPerAccount, options.now);
+    // A burst no larger than the account's own concurrency may start together; the
+    // interval then bounds the sustained start rate.
+    this.claudeStarts = new AccountStartPacing(() => options.getSettings().claudeRequestStartIntervalMs, options.now,
+      () => options.getSettings().maxConcurrentRequestsPerAccount);
+    this.admission = new AccountAdmission(id => this.accountLimit(id), options.now);
+    this.cursorControlAdmission = new AccountAdmission(id => this.accountLimit(id), options.now);
     this.vpn = createVpnPolicy(options.getSettings, options.now, options.vpnPayload,options.guardCheck);
     this.networkFlights = new NetworkFlights(options.fetch, () => this.stopped.signal,
       provider => this.assertNetworkAllowed(provider), (provider, drainable) => {
@@ -229,18 +259,131 @@ export class AccountPoolHub {
             elapsedMs, transport: ipv4 ? "ipv4" : "default", stage: "fetch_headers",
             operation: drainable ? "model" : "auxiliary",
           }));
-      });
+      },options.maintenance,options.now,provider=>this.vpn.assertWithoutGuard(provider));
+  }
+
+  /**
+   * Concurrent requests one account may carry now. For a minute after a provider hold the
+   * account keeps the former conservative pressure, whatever the configured limit is.
+   */
+  private accountLimit(accountId: string): number {
+    const limit = this.options.getSettings().maxConcurrentRequestsPerAccount;
+    if (limit <= RECOVERY_CONCURRENCY) return limit;
+    const heldUntil = this.options.quotas.get(accountId).heldUntil;
+    if (heldUntil === null) return limit;
+    const recoveredAt = heldUntil + RECOVERY_WINDOW_MS;
+    if (this.options.now() >= recoveredAt) return limit;
+    this.wakeAdmissionAt(recoveredAt);
+    return RECOVERY_CONCURRENCY;
+  }
+
+  /** End of the account's recovery window, or null when it is not recovering. */
+  private recoveryEndsAt(accountId: string): number | null {
+    const heldUntil = this.options.quotas.get(accountId).heldUntil;
+    if (heldUntil === null) return null;
+    const recoveredAt = heldUntil + RECOVERY_WINDOW_MS;
+    return this.options.now() < recoveredAt ? recoveredAt : null;
+  }
+
+  /**
+   * The recovery cap also binds requests that took a slot before the hold arrived: they
+   * may not start while the account already has that many requests upstream.
+   */
+  private recoveryFullUntil(accountId: string): number | null {
+    if (this.options.getSettings().maxConcurrentRequestsPerAccount <= RECOVERY_CONCURRENCY) return null;
+    const recoveredAt = this.recoveryEndsAt(accountId);
+    if (recoveredAt === null || (this.dispatchedByAccount.get(accountId) ?? 0) < RECOVERY_CONCURRENCY) return null;
+    this.wakeAdmissionAt(recoveredAt);
+    return recoveredAt;
+  }
+
+  /** Waiting requests are re-evaluated when a recovery window ends, not only on the next release. */
+  private wakeAdmissionAt(at: number): void {
+    if (this.recoveryWake !== null && this.recoveryWakeAt <= at) return;
+    if (this.recoveryWake !== null) clearTimeout(this.recoveryWake);
+    this.recoveryWakeAt = at;
+    this.recoveryWake = setTimeout(() => {
+      this.recoveryWake = null;
+      this.admissionLimitsChanged();
+    }, Math.min(Math.max(0, at - this.options.now()) + 1, 2_147_483_647));
+    this.recoveryWake.unref?.();
+  }
+
+  /**
+   * Requests holding or waiting for a slot on the ordinary lane of this account, plus
+   * requests already placed on it that have not reached the lane yet. Without the latter
+   * a simultaneous burst would see one free account and pile onto it.
+   */
+  private accountLoad(accountId: string): number {
+    return this.admission.reserved(accountId) + this.admission.waiting(accountId) + this.placements(accountId).length;
+  }
+
+  private placements(accountId: string): number[] {
+    const now = this.options.now();
+    const live = (this.placementsByAccount.get(accountId) ?? []).filter(expiresAt => expiresAt > now);
+    if (live.length === 0) this.placementsByAccount.delete(accountId);
+    else this.placementsByAccount.set(accountId, live);
+    return live;
+  }
+
+  /** Bounded by its expiry even if a caller never reports reaching the lane. */
+  private place(accountId: string): () => void {
+    const expiresAt = this.options.now() + PLACEMENT_TTL_MS;
+    this.placementsByAccount.set(accountId, [...this.placements(accountId), expiresAt]);
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      const live = this.placementsByAccount.get(accountId);
+      const index = live?.indexOf(expiresAt) ?? -1;
+      if (live === undefined || index < 0) return;
+      live.splice(index, 1);
+      if (live.length === 0) this.placementsByAccount.delete(accountId);
+    };
   }
 
   private requiresIpv4(provider:PoolProvider):boolean {const settings=this.options.getSettings();return settings.vpnOnlyProviders.some(value=>value===provider)||(settings.vpnGuardEnabled&&provider!=="kimi"&&provider!=="zai");}
   async assertNetworkAllowed(provider: PoolProvider, observeGuard?: (result:import("./vpn-policy.js").GuardObservation)=>void): Promise<void> { await this.vpn.assert(provider,observeGuard);if(this.requiresIpv4(provider)&&!this.options.fetchIpv4)throw new VpnRequiredError(provider); }
 
-  outboundFetch(provider: PoolProvider): typeof fetch {
-    return (input,init)=>this.networkFlights.fetch(provider,input,init);
+  private admissionRefusal(): PoolMaintenanceError | Error | undefined {
+    if (this.options.maintenance?.status().lease) return new PoolMaintenanceError();
+    if (!this.accepting) return new Error("Account Pooler is not accepting requests.");
   }
 
-  admissionLimitsChanged(): void { this.admission.limitsChanged(); }
+  async assertLoginAllowed(provider: PoolProvider): Promise<void> {
+    const refusal = this.admissionRefusal();
+    if (refusal) throw refusal;
+    await this.assertNetworkAllowed(provider);
+    const current = this.admissionRefusal();
+    if (current) throw current;
+  }
+
+  private async acquireRoute(account:Account,sessionKey?:string|null):Promise<AccountRoute>{
+    return this.options.accountRoute?.(account.id,sessionKey) ?? {assigned:false,profile:null,fetch:()=>undefined};
+  }
+
+  private accountFetch(account: Account, route: AccountRoute, beforeSend?: (send: () => Promise<Response>) => Promise<Response>): typeof fetch {
+    return (input, init) => this.networkFlights.fetch(account.provider, input, init, false,
+      route.assigned ? undefined : beforeSend, undefined, route.fetch(this.requiresIpv4(account.provider), beforeSend));
+  }
+
+  private assertClientCredential(credential: string | null, scope?: ClientAccountScope): void {
+    const tokens = this.options.hubTokens;
+    if (scope ? !tokens.validatesAccountScope?.(credential, scope) : tokens.validatesCredential?.(credential) === false) {
+      throw new ClientPolicyDenied();
+    }
+  }
+
+  outboundFetch(provider: PoolProvider, accountFetch?:typeof fetch): typeof fetch {
+    return (input,init)=>this.networkFlights.fetch(provider,input,init,false,undefined,undefined,accountFetch);
+  }
+
+  admissionLimitsChanged(): void { this.admission.limitsChanged(); this.cursorControlAdmission.limitsChanged(); }
   async enforceNetworkPolicy():Promise<void>{await this.networkFlights.enforce();}
+  cursorStreamProbe(threadId:string,requestId?:string){
+    const interrupted=requestId===undefined?undefined:this.networkFlights.interruptCursorStream(requestId,threadId);
+    return {streams:this.networkFlights.cursorStreams(threadId),...(interrupted===undefined?{}:{interrupted})};
+  }
 
   async start(signal: AbortSignal): Promise<void> {
     this.affinityBindings = this.options.affinity.loadBindings(
@@ -285,7 +428,8 @@ export class AccountPoolHub {
     return this.adapter(provider).importAccount();
   }
 
-  observations() { return this.options.journal?.snapshot(100) ?? { unavailable:true }; }
+  observations(limit=100) { return this.options.journal?.snapshot(limit) ?? { unavailable:true }; }
+  trafficDiagnostics(from:number,to:number){return this.options.journal?.historySummary(from,to)??{unavailable:true as const};}
   trafficHistory(offset = 0, limit = 100) { return this.options.journal?.historySnapshot(offset,limit) ?? { unavailable:true as const }; }
   private observe(trace: Trace, fields: Partial<Observation>): void {
     try {
@@ -299,6 +443,7 @@ export class AccountPoolHub {
     provider: PoolProvider,
     options: { accountKind?: Account["kind"] } = {},
   ): Promise<Response> {
+    const maintenanceSignal = this.options.maintenance?.signal;
     const adapter = this.adapter(provider);
     if(provider==='agy'&&this.options.nativeAgyManaged?.())return this.errorResponse(adapter,request,410,'Use the managed official Antigravity executor.');
     const token = this.requestToken(request, adapter);
@@ -308,21 +453,40 @@ export class AccountPoolHub {
     if (context === null || context.hostId === null) {
       return this.errorResponse(adapter, request, 401, "Invalid Account Pooler bearer token.");
     }
+    const admissionSignal = AbortSignal.any([request.signal, this.stopped.signal, ...(maintenanceSignal ? [maintenanceSignal] : [])]);
+    const maintenanceRefusal = () => this.errorResponse(adapter, request, 503,
+      "Account Pooler is paused for maintenance.", {"x-bb-pool-error":"POOL_MAINTENANCE","retry-after":"30"});
+    try {
+      for (let held = this.options.maintenance?.waitForUpgrade(admissionSignal); held; held = this.options.maintenance?.waitForUpgrade(admissionSignal)) {
+        await held;
+      }
+    } catch (error) {
+      if (error instanceof PoolMaintenanceError) return maintenanceRefusal();
+      if (!admissionSignal.aborted) throw error;
+    }
+    if (request.signal.aborted)
+      return this.errorResponse(adapter, request, 499, "Account Pooler request was canceled.", {"x-bb-pool-error":"POOL_REQUEST_CANCELED"});
+    if (maintenanceSignal?.aborted || this.options.maintenance?.status().lease) return maintenanceRefusal();
     if (!this.accepting)
       return this.errorResponse(adapter, request,
         503,
         "Account Pooler is not accepting requests.",
         {"x-bb-pool-error":"POOL_SHUTTING_DOWN"},
       );
-    try { await this.assertNetworkAllowed(provider); }
-    catch (error) {
-      if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 503, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
-      throw error;
+    this.admittedModelRequests++;
+    try {
+      try { await this.assertNetworkAllowed(provider); }
+      catch (error) {
+        if (error instanceof VpnRequiredError) return this.errorResponse(adapter, request, 503, error.message, { 'x-bb-pool-error': error.code, 'retry-after': '10' });
+        throw error;
+      }
+      const body = new Uint8Array(await request.arrayBuffer());
+      const refusal = adapter.guardRequest?.(request, body);
+      if (refusal !== null && refusal !== undefined) return refusal;
+      return await this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null, "purpose" in context ? context.purpose : undefined, maintenanceSignal, "accountScope" in context ? context.accountScope : undefined, token, options.accountKind);
+    } finally {
+      this.admittedModelRequests--;
     }
-    const body = new Uint8Array(await request.arrayBuffer());
-    const refusal = adapter.guardRequest?.(request, body);
-    if (refusal !== null && refusal !== undefined) return refusal;
-    return this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null, "purpose" in context ? context.purpose : undefined, options.accountKind);
   }
 
   threadObservation(provider:PoolProvider,hostId:string,threadId:string,projectId:string|null):AccountBinding|null {
@@ -334,6 +498,7 @@ export class AccountPoolHub {
   }
 
   async refreshUsage(accountId?: string, force = false, reportErrors = false): Promise<void> {
+    if(this.options.maintenance?.status().lease){if(reportErrors)this.options.maintenance.assertAllowed();return;}
     const accounts = (await this.options.accounts.list()).filter(
       (account) =>
         !(account.provider==='agy'&&this.options.nativeAgyManaged?.())&&
@@ -390,20 +555,24 @@ export class AccountPoolHub {
     account: Account,
     force: boolean,
   ): Promise<void> {
-    await this.assertNetworkAllowed(account.provider);
     const adapter = this.adapter(account.provider);
+    const interval = account.provider === "zai" ? ZAI_USAGE_REFRESH_INTERVAL_MS : DEFAULT_USAGE_REFRESH_INTERVAL_MS;
+    if (!force) {
+      if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) return;
+      const last = this.lastUsageRefreshAt.get(account.id);
+      if (last !== undefined && this.options.now() - last < interval) return;
+      const running = this.usageRefreshes.get(account.id);
+      if (running !== undefined) return running;
+    }
+    await this.assertNetworkAllowed(account.provider);
+    const route = await this.acquireRoute(account);
     if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) {
       if (force) throw new Error("The account has an active request. Refresh quotas after it finishes.");
       return;
     }
     const now = this.options.now();
     const last = this.lastUsageRefreshAt.get(account.id);
-    if (
-      !force &&
-      last !== undefined &&
-      now - last < (account.provider === "zai" ? ZAI_USAGE_REFRESH_INTERVAL_MS : DEFAULT_USAGE_REFRESH_INTERVAL_MS)
-    )
-      return;
+    if (!force && last !== undefined && now - last < interval) return;
     const running = this.usageRefreshes.get(account.id);
     if (running !== undefined) return running;
     this.lastUsageRefreshAt.set(account.id, now);
@@ -414,13 +583,13 @@ export class AccountPoolHub {
         freshSecret: async (rejectedAccessToken) => {
           const secret = await this.freshSecret(account, adapter, rejectedAccessToken === undefined
             ? { kind: "normal", zaiQuotaCollection: account.provider === "zai" && account.kind === "api-key", geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" }
-            : { kind: "rejected", accessToken: rejectedAccessToken, geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" });
+            : { kind: "rejected", accessToken: rejectedAccessToken, geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" }, route);
           usageSecret = secret;
           return secret;
         },
         accounts: this.options.accounts,
         quotas: this.options.quotas,
-        fetch: (input, init) => this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
+        fetch: (input, init) => this.accountFetch(account,route)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
         now: this.options.now,
       })
       .then(async () => { await this.settleDrain(account); })
@@ -445,6 +614,7 @@ export class AccountPoolHub {
   }
 
   private async drainAndStop(): Promise<void> {
+    if (this.recoveryWake !== null) { clearTimeout(this.recoveryWake); this.recoveryWake = null; }
     this.accepting = false;
     this.stopped.abort(new Error("Account Pooler stopped accepting requests."));
     if (this.inFlightCount() === 0) return;
@@ -487,7 +657,7 @@ export class AccountPoolHub {
   async providerReadiness(provider: PoolProvider, projectId: string | null): Promise<ProviderReadiness> {
     const now = this.options.now();
     const result = (reason: ProviderReadiness["reason"]): ProviderReadiness => ({provider, projectId, checkedAt: now, ready: reason === "ready", reason});
-    if (!this.accepting) return result("paused");
+    if (!this.modelAdmissionOpen()) return result("paused");
     const accounts = await this.options.accounts.list();
     if (!accounts.some(account => account.provider === provider && account.enabled)) return result("no-enabled-account");
     const inspectable = accounts.filter(account => !this.drainExhausted(account));
@@ -533,7 +703,7 @@ export class AccountPoolHub {
         .filter(({ quota }) => quota.error === null)
         .filter(
           ({ account, quota }) =>
-            !isSharedQuotaExhausted(quota, policyThresholds(account, settings.switchThreshold), now),
+            !isSharedQuotaExhausted(quota, policyThresholds(account, settings.switchThreshold, quota, now), now),
         );
       for (const entry of gateMembership(entries, now, drainMs, workWeek))
         eligibleIds.add(entry.account.id);
@@ -566,7 +736,11 @@ export class AccountPoolHub {
       accounts: accounts.map((account) => {
         const quota = this.options.quotas.get(account.id);
         const { accountId: _accountId, ...quotaFields } = quota;
+        const budget = currentWeeklyBudget(account, quota, now);
+        const limits = policyThresholds(account, settings.switchThreshold, quota, now);
         const limit = capLimit(account, quota, now, workWeek);
+        const weekly = observedWeek(quota, now);
+        const ceiling = budget?.ceiling ?? Math.min(limits.weekly, limit ?? 1);
         return {
           ...account,
           lastUsedHostName: null,
@@ -574,17 +748,43 @@ export class AccountPoolHub {
           successfulRequests: this.options.quotas.successfulRequests(account.id),
           resetCredits: account.provider === "codex" || account.provider === "claude" ? this.options.quotas.resetCredits(account.id) : null,
           inFlight: this.inFlightByAccount.get(account.id) ?? 0,
-          queuedRequests: this.admission.waiting(account.id) + Math.max(0, this.admission.reserved(account.id) - (this.inFlightByAccount.get(account.id) ?? 0)),
+          queuedRequests: this.admission.waiting(account.id) + this.cursorControlAdmission.waiting(account.id) + Math.max(0, this.admission.reserved(account.id) + this.cursorControlAdmission.reserved(account.id) - (this.inFlightByAccount.get(account.id) ?? 0)),
           concurrencyLimit: settings.maxConcurrentRequestsPerAccount,
           capLimit: limit,
+          weeklySpending: {
+            mode: account.drainOnce ? "drain" : budget?.mode ?? (account.policy?.enabled && account.policy.weeklyKeep != null && (limit === null || limits.weekly <= limit) ? "fixed" : "pool"),
+            ceiling,
+            utilization: weekly?.utilization ?? null,
+            resetAt: weekly?.resetAt ?? null,
+            nextChangeAt: budget?.nextChangeAt ?? null,
+          },
           eligible: eligibleIds.has(account.id),
           drainOpensAt: drainOpensAt(quota, now, reserveHours(account, settings.reserveDrainHours) * 3600000, workWeek),
           capReached:
-            limit !== null && (weeklyUtilization(quota, now) ?? 0) >= limit,
-          status: accountStatus(account, quota, policyThresholds(account, settings.switchThreshold), now),
+            limit !== null && (weeklyUtilization(quota, now, account) ?? 0) >= limit,
+          status: accountStatus(account, quota, limits, now),
         };
       }),
     };
+  }
+
+  maintenanceActivity():number { return this.admittedModelRequests + this.networkFlights.size + this.refreshes.size + this.usageRefreshes.size; }
+
+  /**
+   * Accounts of this provider that a request from this project could use now, by the same
+   * project-scoped predicates as routing (project role, purpose, schedule, shared quota,
+   * reserve gate). Family-specific quota is not applied: the caller's model is unknown here.
+   */
+  async projectAvailability(provider: PoolProvider, projectId: string | null): Promise<Set<string>> {
+    const accounts = await this.options.accounts.list();
+    return new Set(this.eligibleEntries(provider, projectId, accounts, "other", this.options.now()).available.map(({ account }) => account.id));
+  }
+
+  private modelAdmissionOpen(): boolean { return this.accepting && !this.options.maintenance?.status().lease; }
+
+  interruptForMaintenance(owner: string): void {
+    if (this.options.maintenance?.status().lease?.owner !== owner) throw Error('Maintenance pause is not owned');
+    for (const controller of this.activeControllers) controller.abort(new PoolMaintenanceError());
   }
 
   private async forward(
@@ -595,9 +795,13 @@ export class AccountPoolHub {
     projectId: string | null,
     threadId: string | null = null,
     purpose?: "autopilot",
+    maintenanceSignal?: AbortSignal,
+    accountScope?:ClientAccountScope,
+    credential?:string|null,
     accountKind?: Account["kind"],
   ): Promise<Response> {
-    const signal = AbortSignal.any([request.signal, this.stopped.signal]);
+    const requestLifetime = AbortSignal.any([request.signal,...(maintenanceSignal?[maintenanceSignal]:[])]);
+    const signal = AbortSignal.any([requestLifetime, this.stopped.signal]);
     const attempted = new Set<string>();
     const routing: RoutingAttempt = {
       binding: null,
@@ -608,15 +812,16 @@ export class AccountPoolHub {
     let lastDispatchedAccount: string | null = null;
     let failure: FailureSummary | null = null;
     const accounts = (await this.options.accounts.list()).filter(
-      (account) =>
-        account.provider === adapter.provider &&
+      (account) => account.provider === adapter.provider && inClientScope(account.id, accountScope) &&
         (accountKind === undefined || account.kind === accountKind),
     );
     const candidateIds = new Set(accounts.map((account) => account.id));
     const legacyAffinityHost = projectId === null ? hostId : JSON.stringify([hostId, projectId]);
-    const affinityHost = purpose ? JSON.stringify([legacyAffinityHost, "purpose", purpose]) : legacyAffinityHost;
+    const purposeHost = purpose ? JSON.stringify([legacyAffinityHost, "purpose", purpose]) : legacyAffinityHost;
+    const affinityHost = accountScope ? JSON.stringify([purposeHost,"account-scope",accountScope]) : purposeHost;
     const parsed = adapter.parseRequest(body, request.headers, request);
     const family = parsed.family;
+    const freeTier = adapter.provider === "opencode-go" && isOpenCodeGoFreeModelBody(body);
     const trace = newTrace(adapter.provider, hostId, projectId, threadId, parsed.model, family, request.headers.get("user-agent"));
     const startedAt = this.options.now();
     let attempt = 0;
@@ -636,9 +841,15 @@ export class AccountPoolHub {
       affinityKey === null || parsed.parentAffinityId === null
         ? null
         : JSON.stringify([adapter.provider, affinityHost, parsed.parentAffinityId]);
+    const routeSessionKey=threadId===null?affinityKey:JSON.stringify([accountScope?affinityHost:hostId,projectId,threadId,adapter.provider]);
     try {
+      // A manual choice of an account this caller can no longer use (removed, other scope) is ignored.
+      const manualAccountId=routeSessionKey===null?null:(await this.options.manualRouteAccount?.(routeSessionKey))??null;
+      const pinnedRouteAccountId=routeSessionKey===null?null:(manualAccountId!==null&&candidateIds.has(manualAccountId)?manualAccountId:null)??this.options.pinnedRouteAccount?.(routeSessionKey)??null;
+      if(pinnedRouteAccountId && !this.options.getSettings().pinnedFailover && !candidateIds.has(pinnedRouteAccountId))return result(this.noEligibleResponse(accounts.filter(a=>a.id===pinnedRouteAccountId),family,adapter,projectId,request,purpose));
       while (attempted.size < candidateIds.size) {
         signal.throwIfAborted();
+        this.options.maintenance?.assertAllowed();
         const selected = await this.select(
           adapter.provider,
           candidateIds,
@@ -651,8 +862,46 @@ export class AccountPoolHub {
           projectId,
           signal,
           purpose,
+          freeTier,
+          pinnedRouteAccountId,
+          accountScope ? affinityHost : undefined,
+          routeSessionKey,
         );
         if (selected === null) break;
+        const acquired=await this.acquireRoute(selected.account,routeSessionKey);
+        const assertScope=()=>{
+          if(!clientRouteAllowed(acquired,accountScope,selected.account.id,this.options.now()))throw new EgressUnavailable();
+        };
+        if(requiresClientVpn(accountScope))await acquired.prepareScope?.();
+        assertScope();
+        // Root observation and host validation can both yield. Reacquire current
+        // metadata after each boundary; the final callback starts transport without
+        // yielding after credential, scope, account and project admission.
+        const admitScoped=async(send:()=>Promise<Response>)=>{
+          const started=await this.options.accounts.withSnapshot(accounts=>{
+            signal.throwIfAborted();
+            this.options.maintenance?.assertAllowed();
+            this.assertClientCredential(credential ?? null, accountScope);
+            assertScope();
+            const current=this.eligibleEntries(adapter.provider,projectId,
+              accounts.filter(a=>inClientScope(a.id,accountScope)),family,this.options.now(),purpose,freeTier).eligible;
+            if(!current.some(entry=>entry.account.id===selected.account.id))throw new ClientPolicyDenied();
+            if(this.options.now()>=startedAt+ACCOUNT_QUEUE_MAX_WAIT_MS)throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
+            return {response:send()};
+          });
+          return started.value.response;
+        };
+        const recheckCredential = async (send: () => Promise<Response>) => {
+          this.assertClientCredential(credential ?? null, accountScope);
+          return send();
+        };
+        const route:AccountRoute=accountScope?{...acquired,prepareScope:requiresClientVpn(accountScope)?acquired.prepareScope:undefined,assertScope,fetch:(ipv4,beforeSend)=>{
+          const send=acquired.fetch(ipv4,beforeSend??admitScoped);
+          return send===undefined?undefined:async(...args)=>{
+            if(requiresClientVpn(accountScope))await acquired.prepareScope?.();
+            return send(...args);
+          };
+        }}:acquired;
         lastAccount=selected.account.id;
         let pacing: PacingFlight | null = null;
         previousAccountId = selected.account.id;
@@ -667,11 +916,13 @@ export class AccountPoolHub {
         try {
           signal.throwIfAborted();
           secret = await abortable(
-            this.freshSecret(selected.account, adapter, { kind: "normal" }),
+            this.freshSecret(selected.account, adapter, { kind: "normal" }, route, accountScope ? undefined : recheckCredential),
             signal,
           );
         } catch (error) {
-          if (error instanceof VpnRequiredError) throw error;
+          selected.placed();
+          if (error instanceof EgressUnavailable || error instanceof VpnRequiredError || error instanceof ClientPolicyDenied || error instanceof AdmissionUnavailable) throw error;
+          if(route.assigned)throw new EgressUnavailable();
           if (pacing !== null) {
             this.releasePacing(selected.account.id, pacing);
             pacing = null;
@@ -694,8 +945,8 @@ export class AccountPoolHub {
           signal.throwIfAborted();
           if (purpose === "autopilot") {
             const current = this.eligibleEntries(adapter.provider, projectId,
-              await this.options.accounts.list(), family, this.options.now(), purpose).eligible;
-            if (!current.some(entry => entry.account.id === selected.account.id)) break;
+              await this.options.accounts.list(), family, this.options.now(), purpose, freeTier).eligible;
+            if (!current.some(entry => entry.account.id === selected.account.id)) { selected.placed(); break; }
           }
           let upstream: UpstreamResult;
           attempt++;
@@ -708,13 +959,14 @@ export class AccountPoolHub {
               selected.account,
               secret,
               adapter,
-              trace, attempt,
-              {purpose,projectId,family,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onDispatch:()=>{
+              trace, attempt, route,
+              {purpose,projectId,family,freeTier,accountScope,credential,deadline:startedAt + ACCOUNT_QUEUE_MAX_WAIT_MS,onQueued:selected.placed,onDispatch:()=>{
                 switched = lastDispatchedAccount !== null && lastDispatchedAccount !== selected.account.id;
                 if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'dispatched'});
                 lastDispatchedAccount = selected.account.id;
                 distinctAccounts.add(selected.account.id);
               }},
+              signal, requestLifetime,
             );
           } catch (error) {
             if (pacing !== null) {
@@ -760,6 +1012,19 @@ export class AccountPoolHub {
             this.releasePacing(selected.account.id, pacing);
             pacing = null;
           }
+          const rejectedAuthorization =
+            response.status === 401 && secret.kind === "oauth" && !authRetried ? secret : null;
+          const retryAssignedCodex = adapter.provider === "codex" && rejectedAuthorization !== null;
+          if (route.assigned && !response.ok && !retryAssignedCodex) {
+            if (adapter.provider === "codex" && response.status === 401 && authRetried) {
+              await this.markAuthError(selected.account, secret, "OpenAI returned HTTP 401 after OAuth refresh.", signal);
+            }
+            if(response.status===429 && !adapter.isQuotaRejection(response.headers)){
+              const heldUntil=this.options.now()+retryAfterMilliseconds(response.headers.get('retry-after'),this.options.now());
+              this.options.quotas.put({...observed,heldUntil});
+            }
+            return result(this.clientResponse(upstream, adapter.provider !== 'cursor'));
+          }
           if (response.status === 429) {
             if (adapter.isQuotaRejection(response.headers)) {
               await this.discardUpstream(upstream, false);
@@ -771,11 +1036,11 @@ export class AccountPoolHub {
             );
             const heldUntil = this.options.now() + waitMs;
             this.observe(trace,{event:'hold',attempt,accountId:selected.account.id,status:429,holdSource:'upstream429',heldUntil,retryAfterMs:waitMs,retryAfterSupplied:response.headers.has('retry-after'),quotaEvidence:false});
-            this.options.quotas.put({
+            if (!freeTier) this.options.quotas.put({
               ...observed,
               heldUntil,
             });
-            if (!paced && waitMs <= MAX_INLINE_HOLD_MS) {
+            if (!freeTier && !paced && waitMs <= MAX_INLINE_HOLD_MS) {
               paced = true;
               pacing = {
                 heldUntil,
@@ -822,22 +1087,18 @@ export class AccountPoolHub {
             // Return it to the client, whose existing retry remains subject to shared admission.
             if (adapter.provider === "claude" && response.status === 503)
               return result(this.errorResponse(adapter, request, failure.status, failure.message, failure.headers));
-            if (
-              response.status === 401 &&
-              secret.kind === "oauth" &&
-              !authRetried
-            ) {
+            if (rejectedAuthorization !== null) {
               authRetried = true;
               try {
                 secret = await abortable(
                   this.freshSecret(selected.account, adapter, {
                     kind: "rejected",
-                    accessToken: secret.accessToken,
-                  }),
+                    accessToken: rejectedAuthorization.accessToken,
+                  }, route, accountScope ? undefined : recheckCredential),
                   signal,
                 );
               } catch (error) {
-                if (error instanceof VpnRequiredError) throw error;
+                if (error instanceof VpnRequiredError || error instanceof EgressUnavailable || error instanceof ClientPolicyDenied || error instanceof AdmissionUnavailable) throw error;
                 signal.throwIfAborted();
                 if (error instanceof TransientOAuthRefreshError) {
                   failure = {
@@ -861,7 +1122,7 @@ export class AccountPoolHub {
               const quota = this.options.quotas.get(selected.account.id);
               const heldUntil=Math.max(quota.heldUntil ?? 0, this.options.now() + 60_000);
               this.observe(trace,{event:'hold',attempt,accountId:selected.account.id,status:403,holdSource:'upstream403',errorClass:'upstream403-hold',heldUntil});
-              this.options.quotas.put({ ...quota, error: null, heldUntil });
+              if (!freeTier) this.options.quotas.put({ ...quota, error: null, heldUntil });
             } else if (response.status === 401 || response.status === 403) {
               await this.markAuthError(
                 selected.account,
@@ -878,18 +1139,24 @@ export class AccountPoolHub {
             if (switched) this.observe(trace,{event:'account-switch',attempt,accountId:selected.account.id,switchOutcome:'accepted'});
             this.options.quotas.recordSuccessfulRequest(selected.account.id);
           }
-          return result(this.clientResponse(upstream));
+          return result(this.clientResponse(upstream, adapter.provider !== 'cursor'));
         }
+        // OAuth recovery may retry only the selected account on its assigned route.
+        if (route.assigned && authRetried) break;
       }
       signal.throwIfAborted();
       return result(failure === null
-        ? this.noEligibleResponse(accounts, family, adapter, projectId, request, purpose)
+        ? this.noEligibleResponse(!this.options.getSettings().pinnedFailover && pinnedRouteAccountId ? accounts.filter(a=>a.id===pinnedRouteAccountId) : accounts, family, adapter, projectId, request, purpose)
         : this.errorResponse(adapter, request,
             failure.status,
             failure.message,
             failure.headers,
           ));
     } catch (error) {
+      if (maintenanceSignal?.aborted) return result(this.errorResponse(adapter,request,503,"Account Pooler is paused for maintenance.",{"x-bb-pool-error":"POOL_MAINTENANCE","retry-after":"30"}));
+      if (error instanceof PoolMaintenanceError) return result(this.errorResponse(adapter,request,503,error.message,{"x-bb-pool-error":error.code,"retry-after":"30"}));
+      if (error instanceof EgressUnavailable)return result(this.errorResponse(adapter,request,503,error.message,{"x-bb-pool-error":error.code}));
+      if (error instanceof ClientPolicyDenied)return result(this.errorResponse(adapter,request,403,"No enabled account is allowed for this client purpose.",{"x-bb-pool-error":"POOL_ACCOUNT_POLICY"}));
       if (error instanceof AdmissionUnavailable) {
         this.observe(trace,{event:'queue-wait',attempt,accountId:lastAccount,status:503,errorClass:error.code==='POOL_QUEUE_FULL'?'queue-full':'queue-timeout',durationMs:Math.max(0,this.options.now()-startedAt)});
         return result(this.errorResponse(adapter, request, 503, error.message, {"x-bb-pool-error":error.code,"retry-after":"1"}));
@@ -1006,7 +1273,7 @@ export class AccountPoolHub {
     }
   }
 
-  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number, purpose?: "autopilot") {
+  private eligibleEntries(provider: PoolProvider, projectId: string | null, accounts: Account[], family: ModelFamily, now: number, purpose?: "autopilot", freeTier?: boolean) {
     const settings = this.options.getSettings();
     const threshold = settings.switchThreshold;
     const workWeek = { restDays: settings.restDays, offsetMinutes: -new Date(now).getTimezoneOffset() };
@@ -1021,44 +1288,48 @@ export class AccountPoolHub {
           quota: this.options.quotas.get(account.id),
         }))
         .filter(({ quota }) => quota.error === null)
-        .filter(({ account, quota }) => !isSharedQuotaExhausted(quota, policyThresholds(account, threshold), now))
+        .filter(({ account, quota }) => freeTier || !isSharedQuotaExhausted(quota, policyThresholds(account, threshold, quota, now), now))
     );
     const available = scopedEntries.flatMap(entry => gateMembership(
       [entry], now, settings.reserveDrainHours * 3600000, workWeek,
     ));
     const eligible = available.filter(
-      ({ account, quota }) => !isQuotaExhausted(quota, family, policyThresholds(account, threshold), now),
+      ({ account, quota }) => freeTier || !isQuotaExhausted(quota, family, policyThresholds(account, threshold, quota, now), now),
     );
     return { available, eligible };
   }
 
   /** Read-only, project-bound evidence. No selection, quota refresh, credential read or model request. */
   async codexBudget(request: Request, routingEnabled: boolean, bypassed: (threadId: string) => Promise<boolean>): Promise<Response> {
-    const token = this.requestToken(request);
-    const context = await this.options.hubTokens.inspectContext?.(token);
     const reply = (body: unknown, status = 200) => Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
-    if (!context) return reply({ error: 'Invalid pool token.' }, 401);
-    if (!context.projectId) return reply({ error: 'A project-bound pool client is required.' }, 403);
-    const expected = new URL(request.url).searchParams.get('projectId');
-    if (expected !== null && expected !== context.projectId) return reply({ error: 'Pool project binding mismatch.' }, 403);
-    const now = this.options.now();
-    let networkAllowed = true;
-    try { await this.assertNetworkAllowed('codex'); } catch { networkAllowed = false; }
-    const threadBypassed = context.threadId ? await bypassed(context.threadId) : false;
-    const routeReady = this.accepting && routingEnabled && networkAllowed && !threadBypassed;
-    const accounts = (await this.options.accounts.list()).filter(a => a.provider === 'codex' && projectTier(a, context.projectId) !== null);
-    const eligible = new Set(this.eligibleEntries('codex', context.projectId, accounts, 'other', now, context.purpose).eligible.map(({ account }) => account.id));
-    return reply({
-      schema: 'bb-account-pool/codex-budget/1', observedAt: now, maxAgeMs: CODEX_BUDGET_MAX_AGE_MS,
-      projectId: context.projectId,
-      ...(context.purpose ? {purpose:context.purpose} : {}),
-      route: { provider: 'codex', path: '/v1/responses', accepting: this.accepting, routingEnabled, networkAllowed, threadBypassed, ready: routeReady },
-      accounts: accounts.map(account => {
-        const quota = this.options.quotas.get(account.id);
-        const budget = codexBudgetQuota(quota, now);
-        return { accountId: account.id, eligible: routeReady && eligible.has(account.id), ...budget, heldUntil: quota.heldUntil, budgetReady: budget.budgetReady && (quota.heldUntil === null || quota.heldUntil <= now) };
-      }),
-    });
+    try {
+      const token = this.requestToken(request);
+      const context = await this.options.hubTokens.inspectContext?.(token);
+      if (!context) return reply({ error: 'Invalid pool token.' }, 401);
+      if (!context.projectId) return reply({ error: 'A project-bound pool client is required.' }, 403);
+      const expected = new URL(request.url).searchParams.get('projectId');
+      if (expected !== null && expected !== context.projectId) return reply({ error: 'Pool project binding mismatch.' }, 403);
+      const now = this.options.now();
+      let networkAllowed = true;
+      try { await this.assertNetworkAllowed('codex'); } catch { networkAllowed = false; }
+      const threadBypassed = context.threadId ? await bypassed(context.threadId) : false;
+      const routeReady = !context.accountScope && this.modelAdmissionOpen() && routingEnabled && networkAllowed && !threadBypassed;
+      const accounts = (await this.options.accounts.list()).filter(a => a.provider === 'codex' && inClientScope(a.id,context.accountScope) && projectTier(a, context.projectId) !== null);
+      const eligible = new Set(this.eligibleEntries('codex', context.projectId, accounts, 'other', now, context.purpose).eligible.map(({ account }) => account.id));
+      return reply({
+        schema: 'bb-account-pool/codex-budget/1', observedAt: now, maxAgeMs: CODEX_BUDGET_MAX_AGE_MS,
+        projectId: context.projectId,
+        ...(context.purpose ? {purpose:context.purpose} : {}),
+        route: { provider: 'codex', path: '/v1/responses', accepting: this.modelAdmissionOpen(), routingEnabled, networkAllowed, threadBypassed, ready: routeReady },
+        accounts: accounts.map(account => {
+          const quota = this.options.quotas.get(account.id);
+          const budget = codexBudgetQuota(quota, now);
+          return { accountId: account.id, eligible: routeReady && eligible.has(account.id), ...budget, heldUntil: quota.heldUntil, budgetReady: budget.budgetReady && (quota.heldUntil === null || quota.heldUntil <= now) };
+        }),
+      });
+    } catch {
+      return reply({ error: 'Pool budget evidence unavailable.' }, 503);
+    }
   }
 
   /** Cached ZAI proof using the same project/purpose admission as inference. */
@@ -1074,12 +1345,12 @@ export class AccountPoolHub {
     let networkAllowed=true;
     try {await this.assertNetworkAllowed('zai');} catch {networkAllowed=false;}
     const threadBypassed=context.threadId?await bypassed(context.threadId):false;
-    const routeReady=this.accepting && routingEnabled && networkAllowed && !threadBypassed;
-    const accounts=(await this.options.accounts.list()).filter(a=>a.provider==='zai' && projectTier(a,context.projectId)!==null);
+    const routeReady=!context.accountScope && this.modelAdmissionOpen() && routingEnabled && networkAllowed && !threadBypassed;
+    const accounts=(await this.options.accounts.list()).filter(a=>a.provider==='zai' && inClientScope(a.id,context.accountScope) && projectTier(a,context.projectId)!==null);
     const eligible=new Set(this.eligibleEntries('zai',context.projectId,accounts,'other',now,context.purpose).eligible.map(({account})=>account.id));
     return reply({schema:'bb-account-pool/zai-budget/1',observedAt:now,maxAgeMs:ZAI_BUDGET_MAX_AGE_MS,projectId:context.projectId,
       ...(context.purpose?{purpose:context.purpose}:{}),
-      route:{provider:'zai',path:'/zai/v1/chat/completions',accepting:this.accepting,routingEnabled,networkAllowed,threadBypassed,ready:routeReady},
+      route:{provider:'zai',path:'/zai/v1/chat/completions',accepting:this.modelAdmissionOpen(),routingEnabled,networkAllowed,threadBypassed,ready:routeReady},
       accounts:accounts.map(account=>{
         const quota=this.options.quotas.get(account.id),budget=zaiBudgetQuota(quota,now);
         return {accountId:account.id,eligible:routeReady && eligible.has(account.id),heldUntil:quota.heldUntil,...budget,
@@ -1101,14 +1372,14 @@ export class AccountPoolHub {
       const now=this.options.now();
       let networkAllowed=true;try{await this.assertNetworkAllowed(provider);}catch{networkAllowed=false;}
       const threadBypassed=context.threadId?await bypassed(context.threadId):false;
-      const ready=this.accepting&&routingEnabled&&networkAllowed&&!threadBypassed;
-      const accounts=(await this.options.accounts.list()).filter(a=>a.provider===provider&&projectTier(a,context.projectId)!==null);
+      const ready=!context.accountScope&&this.modelAdmissionOpen()&&routingEnabled&&networkAllowed&&!threadBypassed;
+      const accounts=(await this.options.accounts.list()).filter(a=>a.provider===provider&&inClientScope(a.id,context.accountScope)&&projectTier(a,context.projectId)!==null);
       // Available applies shared project/purpose/policy gates before any family filter.
       // A blocked 'other' family must not hide an account selectable by Sonnet.
       const eligible=new Set(this.eligibleEntries(provider,context.projectId,accounts,'other',now,context.purpose).available.map(e=>e.account.id));
       return reply({schema:'bb-account-pool/provider-budget/1',eligibilityScope:'shared-policy-superset',provider,supported:NUMERIC_BUDGET_PROVIDERS.some(p=>p===provider),projectId:context.projectId,
         ...(context.purpose?{purpose:context.purpose}:{}),observedAt:now,maxAgeMs:PROVIDER_BUDGET_MAX_AGE_MS,
-        route:{provider,accepting:this.accepting,routingEnabled,networkAllowed,threadBypassed,ready},
+        route:{provider,accepting:this.modelAdmissionOpen(),routingEnabled,networkAllowed,threadBypassed,ready},
         accounts:accounts.map(a=>{const quota=this.options.quotas.get(a.id);return {accountId:a.id,eligible:ready&&eligible.has(a.id),heldUntil:quota.heldUntil,...providerBudgetQuota(provider,quota,now)};}),
       });
     }catch{return reply({error:'Pool budget evidence unavailable.'},503);}
@@ -1126,8 +1397,12 @@ export class AccountPoolHub {
     projectId: string | null,
     signal: AbortSignal,
     purpose?: "autopilot",
+    freeTier?: boolean,
+    pinnedRouteAccountId: string | null = null,
+    scopeNamespace?: string,
+    routeSessionKey: string | null = null,
   ): Promise<SelectedAccount | null> {
-    const accounts = (await this.routingAccounts()).sort(
+    const accounts = (await this.routingAccounts()).filter(account=>scopeNamespace === undefined || candidateIds.has(account.id)).sort(
       (left, right) => left.priority - right.priority,
     );
     signal.throwIfAborted();
@@ -1139,13 +1414,17 @@ export class AccountPoolHub {
       restDays: settings.restDays,
       offsetMinutes: -new Date(now).getTimezoneOffset(),
     };
-    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose);
+    const { available, eligible } = this.eligibleEntries(provider, projectId, accounts, family, now, purpose, freeTier);
     const unattempted = eligible.filter(
       ({ account }) =>
-        candidateIds.has(account.id) && !attempted.has(account.id),
+        candidateIds.has(account.id) && !attempted.has(account.id) && (settings.pinnedFailover || pinnedRouteAccountId===null || account.id===pinnedRouteAccountId),
     );
-    const ready = unattempted.filter(({ quota }) => quota.heldUntil === null || quota.heldUntil <= now);
-    const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (a.quota.heldUntil ?? 0) - (b.quota.heldUntil ?? 0)).slice(0,1);
+    // The persisted route pin outlives ordinary affinity. Reuse the same policy
+    // predicate, never an arbitrary account lookup or a different candidate.
+    const pinned=pinnedRouteAccountId===null?undefined:unattempted.find(({account})=>account.id===pinnedRouteAccountId);
+    const requestHold = (accountId: string) => freeTier ? null : unattempted.find(e => e.account.id === accountId)?.quota.heldUntil ?? null;
+    const ready = unattempted.filter(({ account }) => { const hold = requestHold(account.id); return hold === null || hold <= now; });
+    const candidates = ready.length ? ready : [...unattempted].sort((a,b) => (requestHold(a.account.id) ?? 0) - (requestHold(b.account.id) ?? 0)).slice(0,1);
     let binding =
       affinityKey === null ? undefined : this.affinityBindings.get(affinityKey);
     const boundAccountId =
@@ -1169,7 +1448,8 @@ export class AccountPoolHub {
       }
     }
     const legacyActiveKey = projectId === null ? provider : `${provider}:${projectId}`;
-    const activeKey = purpose ? JSON.stringify([legacyActiveKey, "purpose", purpose]) : legacyActiveKey;
+    const purposeKey = purpose ? JSON.stringify([legacyActiveKey, "purpose", purpose]) : legacyActiveKey;
+    const activeKey = scopeNamespace === undefined ? purposeKey : JSON.stringify([purposeKey, "client", scopeNamespace]);
     let active = this.activeAccounts.get(activeKey);
     const activeAccount = eligible.find(
       ({ account }) => account.id === active?.accountId,
@@ -1188,24 +1468,57 @@ export class AccountPoolHub {
       return base;
     };
     const bestTier = Math.min(...candidates.map(tier));
-    const preferredCandidates = candidates.filter(entry => tier(entry) === bestTier);
-    const draining = preferredCandidates.filter(({ account }) => account.drainOnce);
-    const next = balanced
+    const tierCandidates = candidates.filter(entry => tier(entry) === bestTier);
+    const draining = tierCandidates.filter(({ account }) => account.drainOnce);
+    // Load-aware placement (balanced strategy). A request should not wait behind a full
+    // account while another account this caller may already use can start it now. Only
+    // accounts the existing project, purpose, quota and schedule policy already admits
+    // are considered; placement preferences keep eligible home accounts in place.
+    const overflow = balanced && settings.busyOverflow;
+    const startsNow = (entry: (typeof eligible)[number]) =>
+      this.accountLoad(entry.account.id) < this.accountLimit(entry.account.id);
+    const placeable = (entry: (typeof eligible)[number]) =>
+      startsNow(entry) && (this.options.routeCompatible?.(entry.account.id, routeSessionKey) ?? true);
+    let preferredCandidates = tierCandidates;
+    if (overflow && !tierCandidates.some(placeable)) {
+      // Every preferred account is busy: admit the nearest less preferred tier that can
+      // start now. Their own caps and reserve rules were applied when they became eligible.
+      for (const level of [...new Set(candidates.map(tier))].sort((left, right) => left - right)) {
+        if (level <= bestTier) continue;
+        const spare = candidates.filter(entry => tier(entry) === level && placeable(entry));
+        if (spare.length > 0) { preferredCandidates = [...tierCandidates, ...spare]; break; }
+      }
+    }
+    const ranked = balanced
       ? rankByBalance(
           preferredCandidates,
-          (accountId) => this.inFlightByAccount.get(accountId) ?? 0,
+          (accountId) => overflow ? this.accountLoad(accountId) : this.inFlightByAccount.get(accountId) ?? 0,
           now,
           workWeek,
-        )[0]
+        )
+      : [];
+    // With nothing free, prefer the shortest line among the preferred tier (stable on rank).
+    const leastLoaded = (entries: typeof ranked) => entries
+      .map((entry, index) => ({ entry, index, load: this.accountLoad(entry.account.id) / this.accountLimit(entry.account.id) }))
+      .sort((left, right) => left.load - right.load || left.index - right.index)[0]?.entry;
+    const next = balanced
+      ? (overflow ? ranked.find(placeable) ?? leastLoaded(ranked.filter(entry => tierCandidates.includes(entry))) : ranked[0])
       : ordered
           .map((account) =>
             preferredCandidates.find((candidate) => candidate.account.id === account.id),
           )
           .find((candidate) => candidate !== undefined);
-    const selected =
-      bound !== undefined && unattempted.includes(bound) && (candidates.length === 0 || tier(bound) <= bestTier)
+    // A warm conversation keeps its account unless that account cannot start the request
+    // now and another one can. The binding is kept, so later requests return to it.
+    // A provider hold is not "busy": a held home account is waited for in place, however
+    // many requests are already waiting behind that hold.
+    const held = (entry: (typeof eligible)[number]) => !freeTier && (entry.quota.heldUntil ?? 0) > now;
+    const detour = (home: (typeof eligible)[number]) =>
+      overflow && next !== undefined && next !== home && !held(home) && !startsNow(home) && placeable(next);
+    const selected = pinned ?? (
+      bound !== undefined && unattempted.includes(bound) && (candidates.length === 0 || tier(bound) <= bestTier) && !detour(bound)
         ? bound
-        : ((inherited && (candidates.length === 0 || tier(inherited) <= bestTier) ? inherited : undefined) ??
+        : ((inherited && (candidates.length === 0 || tier(inherited) <= bestTier) && !detour(inherited) ? inherited : undefined) ??
           (draining.length === 0 && !balanced &&
           boundAccountId === null &&
           previousAccountId === null &&
@@ -1213,10 +1526,10 @@ export class AccountPoolHub {
           candidates.includes(activeAccount) && tier(activeAccount) <= bestTier
             ? activeAccount
             : next) ??
-          null);
+          null));
     if (selected === null) return null;
     if (routing.active === null)
-      routing.pinnedAccountId = boundAccountId ?? inherited?.account.id ?? null;
+      routing.pinnedAccountId = pinnedRouteAccountId ?? boundAccountId ?? inherited?.account.id ?? null;
     if (affinityKey !== null && binding === undefined) {
       binding = { accountId: selected.account.id, lastUsedAt: now };
       this.affinityBindings.set(affinityKey, binding);
@@ -1263,6 +1576,7 @@ export class AccountPoolHub {
     return {
       ...selected,
       keepAffinity: selected.account.id === routing.pinnedAccountId,
+      placed: this.place(selected.account.id),
       accept: () => {
         if (affinityKey !== null) this.options.affinity.recordObservation(affinityKey, selected.account.id, this.options.now());
         if (rebind && this.affinityBindings.get(affinityKey) === binding) {
@@ -1275,7 +1589,7 @@ export class AccountPoolHub {
           this.affinityBindings.set(affinityKey, accepted);
         }
         if (advance && this.activeAccounts.get(activeKey) === active) {
-          if (purpose === undefined) {
+          if (purpose === undefined && scopeNamespace === undefined) {
             if (projectId === null) this.options.affinity.putActiveAccount(provider, selected.account.id);
             else this.options.affinity.putProjectActiveAccount(provider, projectId, selected.account.id);
           }
@@ -1289,14 +1603,22 @@ export class AccountPoolHub {
     account: Account,
     adapter: ProviderAdapter,
     use: SecretUse,
+    route?:AccountRoute,
+    beforeSend?: (send: () => Promise<Response>) => Promise<Response>,
   ): Promise<AccountSecret> {
+    route ??= await this.acquireRoute(account);
     while (true) {
+      if(route.assertScope)await route.prepareScope?.();
+      route.assertScope?.();
       const existing = this.refreshes.get(account.id);
       if (existing !== undefined) {
         if (existing.kind === "rejection-check") {
           await existing.result;
           continue;
         }
+        // Never join credential refresh started through another egress (or an
+        // operator authorization replacement). Refuse until that flight ends.
+        if (route.assigned && existing.routeKey !== JSON.stringify(route.profile)) throw new EgressUnavailable();
         let secret: AccountSecret;
         try {
           secret = await existing.result;
@@ -1328,6 +1650,7 @@ export class AccountPoolHub {
       const flight: Extract<SecretFlight, { kind: "refresh" }> = {
         kind: "refresh",
         use,
+        routeKey: JSON.stringify(route.profile),
         result: this.options.accounts
           .readSecret(account.id)
           .then(async (secret) => {
@@ -1392,7 +1715,7 @@ export class AccountPoolHub {
                 quotas: this.options.quotas,
                 fetch: async (input, init) => {
                   refreshStarted = true;
-                  const response = await this.outboundFetch(account.provider)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) });
+                  const response = await this.accountFetch(account, route, beforeSend)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) });
                   refreshStatus = response.status;
                   return response;
                 },
@@ -1463,49 +1786,84 @@ export class AccountPoolHub {
     account: Account,
     secret: AccountSecret,
     adapter: ProviderAdapter,
-    trace: Trace, attempt: number,
-    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;deadline:number;onDispatch?:()=>void},
+    trace: Trace, attempt: number, route:AccountRoute,
+    admission: {purpose?:"autopilot";projectId:string|null;family:ModelFamily;freeTier?:boolean;accountScope?:ClientAccountScope;credential?:string|null;deadline:number;onQueued?:()=>void;onDispatch?:()=>void},
+    signal: AbortSignal, requestLifetime: AbortSignal,
   ): Promise<UpstreamResult> {
-    const admissionSignal = AbortSignal.any([request.signal, this.stopped.signal]);
+    const admissionSignal = signal;
     const deadline = admission.deadline;
     const cooldown = () => {
-      const hold = this.options.quotas.get(account.id).heldUntil;
-      const spaced = account.provider === "claude" ? this.claudeStarts.readyAt(account.id) : null;
-      return hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
+      const hold = admission.freeTier
+        ? null
+        : this.options.quotas.get(account.id).heldUntil;
+      const spaced = account.provider === "claude" && !counting ? this.claudeStarts.readyAt(account.id, hold) : null;
+      const ready = hold === null ? spaced : spaced === null ? hold : Math.max(hold, spaced);
+      // Woken by the release of a running request or by the end of the recovery window.
+      const full = admission.freeTier || auxiliary ? null : this.recoveryFullUntil(account.id);
+      return full === null ? ready : Math.max(ready ?? 0, full);
     };
+    // Cursor streams depend on append and startup RPCs. Sharing their capacity
+    // lets two open streams prevent the requests needed to make either finish.
+    // Only known control methods use the separate bounded lane; unknown RPCs
+    // retain ordinary admission, and every lane shares policy/cooldown checks.
+    const rpc = request.headers.get(CURSOR_RPC_PATH_HEADER)
+      ?? new URL(request.url).pathname.split('/cursor/')[1];
+    const control = account.provider === 'cursor' && rpc !== undefined && rpc !== null
+      && CURSOR_PROXIED_PATHS.includes(rpc)
+      && !['agent.v1.AgentService/Run','agent.v1.AgentService/RunSSE','agent.v1.AgentService/RunPoll'].includes(rpc);
+    // Token counting produces no inference. Claude clients send it in bursts of dozens when
+    // a session starts; on the inference lane those bursts delayed real requests, were
+    // paced like inference starts and timed out on the client. They share the auxiliary
+    // lane with Cursor control calls: bounded by the same per-account limit, still subject
+    // to provider holds and network policy, but outside start pacing and inference slots.
+    const counting = /\/v1\/messages\/count_tokens$/u.test(new URL(request.url).pathname);
+    const auxiliary = control || counting;
+    const gate = auxiliary ? this.cursorControlAdmission : this.admission;
     const queuedAt = this.options.now();
-    const waiting = this.admission.waiting(account.id)>0 || this.admission.reserved(account.id)>=this.options.getSettings().maxConcurrentRequestsPerAccount || (cooldown() ?? 0)>queuedAt;
-    const slotRelease = await this.admission.acquire(account.id, admissionSignal, cooldown, deadline);
+    const waiting = gate.waiting(account.id)>0 || gate.reserved(account.id)>=this.accountLimit(account.id) || (cooldown() ?? 0)>queuedAt;
+    this.options.maintenance?.assertAllowed();
+    // acquire() enters the lane synchronously: from here the lane itself carries the load.
+    const entering = gate.acquire(account.id, admissionSignal, cooldown, deadline);
+    admission.onQueued?.();
+    const slotRelease = await entering;
     if (waiting) this.observe(trace,{event:'queue-wait',attempt,accountId:account.id,durationMs:Math.max(0,this.options.now()-queuedAt)});
     const controller = new AbortController();
-    const abortFromRequest = () => controller.abort(request.signal.reason);
+    const abortFromRequest = () => controller.abort(requestLifetime.reason);
     this.activeControllers.add(controller);
     this.increment(account.id);
     let released = false;
+    let upstreamStarted = false;
     const openedAt=this.options.now();
     let upstreamStatus:number|null=null;
     const release = (outcome: "complete"|"error"|"canceled" = "complete") => {
       if (released) return;
       released = true;
-      request.signal.removeEventListener("abort", abortFromRequest);
+      requestLifetime.removeEventListener("abort", abortFromRequest);
       controller.signal.removeEventListener("abort", abortRelease);
       this.activeControllers.delete(controller);
       this.decrement(account.id);
+      if (upstreamStarted && !auxiliary) {
+        const running = (this.dispatchedByAccount.get(account.id) ?? 1) - 1;
+        if (running <= 0) this.dispatchedByAccount.delete(account.id); else this.dispatchedByAccount.set(account.id, running);
+      }
       slotRelease();
+      // A request held back by the recovery cap can start now.
+      if (upstreamStarted && this.recoveryEndsAt(account.id) !== null) this.admissionLimitsChanged();
       this.observe(trace,{event:'stream-end',attempt,accountId:account.id,status:upstreamStatus,durationMs:Math.max(0,this.options.now()-openedAt),outcome:controller.signal.aborted?'canceled':upstreamStatus===null?'error':outcome,errorClass:controller.signal.aborted?'canceled':(upstreamStatus===null||outcome==='error')?'stream-error':null});
     };
     // A queued downstream chunk can stop pull() indefinitely after disconnect.
     // Abort is terminal even when nobody reads or cancels the response body.
     const abortRelease=()=>release("canceled");
     controller.signal.addEventListener("abort", abortRelease, { once: true });
-    if (request.signal.aborted) abortFromRequest();
-    else request.signal.addEventListener("abort", abortFromRequest, { once: true });
+    if (requestLifetime.aborted) abortFromRequest();
+    else requestLifetime.addEventListener("abort", abortFromRequest, { once: true });
     try {
       const upstreamBody = new ArrayBuffer(body.byteLength);
       new Uint8Array(upstreamBody).set(body);
       const url = adapter.upstreamUrl(
         request,
         this.options.getSettings(),
+        body,
         account,
         secret,
       );
@@ -1513,6 +1871,39 @@ export class AccountPoolHub {
       const method=adapter.upstreamMethod?.(request)??request.method;
       let phase:'before-dispatch'|'after-headers'|'cooldown'='before-dispatch';
       const check=()=>this.assertNetworkAllowed(account.provider,result=>this.observe(trace,{event:'guard-check',attempt,accountId:account.id,durationMs:result.durationMs,guardOutcome:result.outcome,guardPhase:phase}));
+      // For scoped routes this continuation runs after root/host preparation,
+      // so cooldown and Claude pacing describe the actual transport start.
+      const admit= async (send:()=>Promise<Response>) => {
+          while (true) {
+            const waited = await this.admission.waitCooldown(AbortSignal.any([controller.signal, this.stopped.signal]), cooldown, deadline);
+            if (waited) {const previous=phase;phase='cooldown';try{await check();}finally{phase=previous;}}
+            const started = await this.options.accounts.withSnapshot(accounts => {
+              this.assertClientCredential(admission.credential ?? null, admission.accountScope);
+              if (admission.accountScope) {
+                if (!clientRouteAllowed(route, admission.accountScope,account.id,this.options.now())) throw new EgressUnavailable();
+              }
+              const current = this.eligibleEntries(adapter.provider, admission.projectId,
+                accounts.filter(a=>inClientScope(a.id,admission.accountScope)), admission.family, this.options.now(), admission.purpose, admission.freeTier).eligible;
+              if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
+              // Metadata serialization can outlast admission: never start new work after its deadline.
+              if (this.options.now() >= deadline) throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
+              // Snapshot acquisition is asynchronous: another response may have set a hold.
+              if ((cooldown() ?? 0) > this.options.now()) return null;
+              this.stopped.signal.throwIfAborted();
+              this.options.maintenance?.assertAllowed();
+              admission.onDispatch?.();
+              if (!upstreamStarted) { upstreamStarted = true; if (!auxiliary) this.dispatchedByAccount.set(account.id, (this.dispatchedByAccount.get(account.id) ?? 0) + 1); }
+              this.observe(trace,{event:'attempt',attempt,accountId:account.id});
+              if (account.provider === 'claude' && !counting) this.claudeStarts.dispatched(account.id, admission.freeTier ? null : this.options.quotas.get(account.id).heldUntil);
+              phase='after-headers';return {response: send()};
+            });
+            if (started.value !== null) return started.value.response;
+          }
+        };
+      const routeAdmission = admission.accountScope ? admit : async (send: () => Promise<Response>) => {
+        this.assertClientCredential(admission.credential ?? null);
+        return send();
+      };
       const response = await this.networkFlights.fetch(account.provider,url, {
           method,
           headers,
@@ -1520,29 +1911,15 @@ export class AccountPoolHub {
             ? {}
             : { body: upstreamBody }),
           signal: controller.signal,
-        },true, async send => {
-          while (true) {
-            const waited = await this.admission.waitCooldown(AbortSignal.any([controller.signal, this.stopped.signal]), cooldown, deadline);
-            if (waited) {const previous=phase;phase='cooldown';try{await check();}finally{phase=previous;}}
-            const started = await this.options.accounts.withSnapshot(accounts => {
-              const current = this.eligibleEntries(adapter.provider, admission.projectId,
-                accounts, admission.family, this.options.now(), admission.purpose).eligible;
-              if (!current.some(entry => entry.account.id === account.id)) throw new ClientPolicyDenied();
-              // Metadata serialization can outlast admission: never start new work after its deadline.
-              if (this.options.now() >= deadline) throw new AdmissionUnavailable("POOL_QUEUE_TIMEOUT");
-              // Snapshot acquisition is asynchronous: another response may have set a hold.
-              if ((cooldown() ?? 0) > this.options.now()) return null;
-              this.stopped.signal.throwIfAborted();
-              admission.onDispatch?.();
-              this.observe(trace,{event:'attempt',attempt,accountId:account.id});
-              if (account.provider === 'claude') this.claudeStarts.dispatched(account.id);
-              phase='after-headers';return {response: send()};
-            });
-            if (started.value !== null) return started.value.response;
-          }
-        },check)
+        },true, admission.accountScope?undefined:admit,check,route.fetch(this.requiresIpv4(account.provider), routeAdmission),(error,bytesRead)=>{
+          this.options.onUpstreamError(account.provider,error,{
+            elapsedMs:Math.max(0,this.options.now()-openedAt),transport:this.requiresIpv4(account.provider)?"ipv4":"default",
+            stage:"response_body",operation:"model",requestId:trace.requestId,bytesRead,
+            ...(error instanceof GuardRequiredError && error.failureReason ? {guardReason:error.failureReason}:{}),
+          });
+        },account.provider==='cursor'&&/^agent\.v[0-9]+\.AgentService\/Run(?:SSE|Poll)?$/.test(rpc??'')?{requestId:trace.requestId,threadId:trace.threadId}:undefined)
         .catch((cause: unknown) => {
-          if (cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
+          if (cause instanceof PoolMaintenanceError || cause instanceof EgressUnavailable || cause instanceof VpnRequiredError || cause instanceof ClientPolicyDenied || cause instanceof AdmissionUnavailable) throw cause;
           throw new UpstreamConnectionError("Upstream connection failed.", {
             cause,
           });
@@ -1553,19 +1930,21 @@ export class AccountPoolHub {
         try{forwarded=adapter.transformResponse(request,response,controller.signal);}
         catch{controller.abort();void response.body?.cancel().catch(()=>undefined);throw new UpstreamConnectionError('Invalid provider response');}
       }
-      return { response:forwarded, controller, release };
+      return { response:forwarded, controller, release, ...(adapter.provider === 'cursor' && /^agent\.v[0-9]+\.AgentService\/Run(?:SSE|Poll)?$/.test(rpc ?? '') ? {poolRequestId:trace.requestId} : {}) };
     } catch (error) {
       release();
       throw error;
     }
   }
 
-  private clientResponse(upstream: UpstreamResult): Response {
+  private clientResponse(upstream: UpstreamResult, allowSseError: boolean): Response {
     const headers = new Headers();
     for (const [name, value] of upstream.response.headers) {
       if (!DROPPED_RESPONSE_HEADERS.has(name.toLowerCase()))
         headers.append(name, value);
     }
+    headers.delete("x-bb-pool-request-id");
+    if (upstream.poolRequestId) headers.set("x-bb-pool-request-id", upstream.poolRequestId);
     if (upstream.response.body === null) {
       upstream.release();
       return new Response(null, {
@@ -1575,7 +1954,7 @@ export class AccountPoolHub {
       });
     }
     const reader = upstream.response.body.getReader();
-    const eventStream =
+    const eventStream = allowSseError &&
       upstream.response.headers
         .get("content-type")
         ?.split(";", 1)[0]
@@ -1662,7 +2041,7 @@ export class AccountPoolHub {
       .flatMap((account) => {
         const quota = this.options.quotas.get(account.id);
         if (quota.error !== null) return [];
-        const effectiveThreshold = policyThresholds(account, threshold);
+        const effectiveThreshold = policyThresholds(account, threshold, quota, now);
         const quotaResetAt = blockingResetAt(quota, family, effectiveThreshold, now);
         if (
           quotaResetAt === null &&
@@ -1679,7 +2058,10 @@ export class AccountPoolHub {
     // silence, and an exhausted weekly quota looked like a hang with no error at all.
     const resetAt = next === undefined ? null : new Date(next).toISOString();
     const usable = accounts.filter(account => this.options.quotas.get(account.id).error === null);
-    const quotaBlocked = usable.every(account => isQuotaExhausted(this.options.quotas.get(account.id), family, policyThresholds(account, threshold), now));
+    const quotaBlocked = usable.every(account => {
+      const quota = this.options.quotas.get(account.id);
+      return isQuotaExhausted(quota, family, policyThresholds(account, threshold, quota, now), now);
+    });
     const providerSpent = quotaBlocked && usable.every(account => isQuotaExhausted(this.options.quotas.get(account.id), family, 1, now));
     const upstreamHeld = !quotaBlocked && usable.length>0 && usable.every(account => (this.options.quotas.get(account.id).heldUntil??0)>now);
     const reason = providerSpent ? "POOL_QUOTA_EXHAUSTED" : quotaBlocked ? "POOL_QUOTA_THRESHOLD" : upstreamHeld ? "POOL_ACCOUNT_HELD" : "POOL_ACCOUNT_POLICY";
@@ -1693,11 +2075,11 @@ export class AccountPoolHub {
       const account = usable.find(account => !isQuotaExhausted(this.options.quotas.get(account.id), family, 1, now));
       if (account) {
         const q = this.options.quotas.get(account.id);
-        const limits = policyThresholds(account, threshold);
+        const limits = policyThresholds(account, threshold, q, now);
         const windows = [
           {used:q.fiveHourUtilization,reset:q.fiveHourResetAt,limit:limits.fiveHour},
           {used:q.sevenDayUtilization,reset:q.sevenDayResetAt,limit:limits.weekly},
-          {used:q.familyWeekly[family]?.utilization??null,reset:q.familyWeekly[family]?.resetAt??null,limit:limits.weekly},
+          {used:q.familyWeekly[family]?.utilization??null,reset:q.familyWeekly[family]?.resetAt??null,limit:limits.familyWeekly??limits.weekly},
           ...q.limitWindows.map(w=>({used:w.utilization,reset:w.resetAt,limit:w.windowMinutes===300?limits.fiveHour:w.windowMinutes===10080?limits.weekly:limits.other})),
         ];
         const window = windows.find(w=>w.used!==null&&w.used>=w.limit&&(w.reset===null||w.reset>now));
@@ -1741,7 +2123,7 @@ export class AccountPoolHub {
     this.drainWaiters.clear();
   }
 
-  private inFlightCount(): number {
+  inFlightCount(): number {
     let total = 0;
     for (const count of this.inFlightByAccount.values()) total += count;
     return total;
@@ -1749,13 +2131,18 @@ export class AccountPoolHub {
 }
 
 export function createHub(options: {
+  maintenance?: PoolMaintenance;
+  accountRoute?: (accountId:string,sessionKey?:string|null)=>Promise<AccountRoute>;
+  manualRouteAccount?: (sessionKey:string)=>Promise<string|null>;
+  pinnedRouteAccount?: (sessionKey:string)=>string|null;
+  routeCompatible?: (accountId:string,sessionKey:string|null)=>boolean;
   nativeAgyManaged?:()=>boolean;
   route: string;
   agyModels?:(ids:string[])=>Promise<void>;
   accounts: AccountStore;
   quotas: QuotaStore;
   affinity: PoolAffinityStore;
-  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext">>;
+  hubTokens: Pick<HubTokenStore, "authenticate" | "list"> & Partial<Pick<HubTokenStore, "projectForToken" | "authenticateContext" | "inspectContext" | "validatesCredential" | "validatesAccountScope">>;
   getSettings: () => AccountPoolConfig;
   vpnPayload?: (nowMs:number) => Promise<unknown>;
   guardCheck?: (provider:PoolProvider)=>Promise<void|'direct'>;
@@ -1832,11 +2219,16 @@ export function createHub(options: {
         upstreamName: "OpenCode Go",
         mountPrefix: OPENCODE_GO_MOUNT_PREFIX,
         upstreamBaseUrl: (settings) => settings.opencodeGoUpstreamBaseUrl,
+        freeUpstreamBaseUrl: (settings) => settings.opencodeFreeUpstreamBaseUrl,
+        freeUpstreamBody: isOpenCodeGoFreeModelBody,
         usagesUrl:
           options.opencodeGoUsagesUrl ?? DEFAULT_OPENCODE_GO_USAGES_URL,
-        allowedHeaderPrefixes: ["x-opencode-"],
-        normalizeUpstreamPathSuffix: normalizeOpencodeGoUpstreamPathSuffix,
-        guardRequestBody: guardOpencodeGoRequestBody,
+        allowedHeaderPrefixes: ["x-opencode-", "anthropic-"],
+        normalizeUpstreamPathSuffix: opencodeGoUpstreamPathSuffix,
+        // Anthropic clients authenticate with x-api-key, not Bearer.
+        inboundToken: (headers) => headers.get("x-api-key"),
+        // The Go Messages wire authenticates upstream the Anthropic way too.
+        upstreamApiKeyHeader: "x-api-key",
         parseUsages: opencodeGoQuotaFromUsages,
       }),
     ],
@@ -1889,6 +2281,7 @@ export function createHub(options: {
         provider: "grok",
         upstreamName: "xAI",
         mountPrefix: GROK_MOUNT_PREFIX,
+        normalizeUpstreamPathSuffix: suffix => suffix.replace(/^v1\//u, ""),
         upstreamBaseUrl: (settings) => settings.grokUpstreamBaseUrl,
         usagesUrl: "https://api.x.ai/v1/models",
         collectUsage: true,
@@ -1922,6 +2315,7 @@ export function createHub(options: {
     ["devin", createDevinAdapter()],
   ]);
   return new AccountPoolHub({
+    maintenance: options.maintenance,
     nativeAgyManaged: options.nativeAgyManaged,
     route: options.route,
     accounts: options.accounts,
@@ -1934,7 +2328,7 @@ export function createHub(options: {
     vpnPayload: options.vpnPayload,
     guardCheck: options.guardCheck,
     adapters,
-    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,
+    fetch: options.fetch ?? fetch,fetchIpv4:options.fetchIpv4,accountRoute:options.accountRoute,manualRouteAccount:options.manualRouteAccount,pinnedRouteAccount:options.pinnedRouteAccount,routeCompatible:options.routeCompatible,
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),

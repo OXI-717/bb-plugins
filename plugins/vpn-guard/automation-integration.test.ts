@@ -79,3 +79,31 @@ it('strict mode rejects an old host response and controller failures remain visi
  expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.error).toContain('offline');
  expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).coordinateAutomations).toBe(true);
 });
+
+it('only coordinates a machine block on the pinned controller host',async()=>{
+ const actions:string[]=[];
+ const fake=createFakePluginHost({pluginId:'vpn-guard',sdk:{
+  system:{config:async()=>({primaryHostId:'server'}) as never},
+  hosts:{list:async()=>['server','laptop'].map(id=>makeHostResponse({id}))},
+  threads:{listRunning:async()=>[]},
+ },experimental_callHostRpc:async({method,hostId,input})=>{
+  if(method==='readState')return verifiedHostResult('connected');
+  const args=input as {action:string;instanceId:string};actions.push(`${hostId}:${args.action}`);
+  return {schema:'oxi-auto/protection-status/1',blocked:args.action==='hold',restoreRevision:'a'.repeat(64),holds:args.action==='hold'?[{owner:`vpn-guard:${args.instanceId}`,reason:'Protection'}]:[],recoveryPending:false,pausedCount:0,activeRuns:[],errors:[],legacyBlocked:false};
+ }});
+ await plugin(fake.bb);
+ try {
+  await fake.harness.behavior.callRpc('setHosts',{hostIds:['server','laptop']});
+  await fake.harness.behavior.callRpc('setAutomationHost',{hostId:'server'});
+  await fake.harness.behavior.callRpc('setAutomationCoordination',{enabled:true,executable:'/controller/oxi-auto'});
+  await vi.waitFor(async()=>expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.busy).toBe(false));
+  await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'laptop',blocked:true});
+  await vi.waitFor(async()=>expect(statusSchema.parse(await fake.harness.behavior.callRpc('status',null)).automations.busy).toBe(false));
+  expect(actions).not.toContain('server:hold');
+  await fake.harness.behavior.callRpc('automationAction',{action:'resume'});
+  expect(actions).toContain('server:resume');
+  await fake.harness.behavior.callRpc('setHostManualBlock',{hostId:'server',blocked:true});
+  await vi.waitFor(()=>expect(actions).toContain('server:hold'));
+  await expect(fake.harness.behavior.callRpc('automationAction',{action:'resume'})).rejects.toThrow('blocks');
+ } finally {await fake.harness.lifecycle.dispose();}
+});

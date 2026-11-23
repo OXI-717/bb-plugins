@@ -31,7 +31,7 @@ it('retains logical starts and selected-account dispatch metrics independently o
  await j.flush();const restored=new RequestJournal(path.join(f.dir,'recent.json'),f.clock);await restored.initialize();cleanups.push(()=>restored.close());
  expect(restored.historySnapshot().rows).toEqual(j.historySnapshot().rows);
 });
-it('separates provider/account/client/project buckets, retries, auth errors, queue failures and canceled streams',async()=>{
+it('aggregates clients/projects and separates provider/account buckets, retries, auth errors, queue failures and canceled streams',async()=>{
  const f=await fixture();
  for(const fields of [{},{event:'attempt',accountId:account},{event:'upstream',accountId:account,status:429},
   {event:'attempt',accountId:account},{event:'upstream',accountId:account,status:403},{event:'upstream',accountId:account,status:502},
@@ -42,8 +42,8 @@ it('separates provider/account/client/project buckets, retries, auth errors, que
  f.history.record(f.event({provider:'claude',accountId:account}));
  f.history.record(f.event({accountId:account,clientHash:'a'.repeat(24)}));
  f.history.record(f.event({accountId:account,projectId:'proj_other123'}));
- const rows=f.history.snapshot().rows;expect(rows).toHaveLength(5);
- expect(rows.find(r=>r.provider==='codex'&&r.accountId===account&&r.clientHash===f.event().clientHash&&r.projectId===f.event().projectId)).toMatchObject({requests:0,attempts:2,upstreamResponses:3,upstream429:1,upstreamAuthErrors:1,upstream5xx:1,localHeld429:1,queueWaits:1,queueFailures:1,queueWaitMs:900,streamEnds:1,streamCanceled:1,streamMs:1000});
+ const rows=f.history.snapshot().rows;expect(rows).toHaveLength(3);
+ expect(rows.find(r=>r.provider==='codex'&&r.accountId===account&&r.clientHash===null&&r.projectId===null)).toMatchObject({requests:2,attempts:2,upstreamResponses:3,upstream429:1,upstreamAuthErrors:1,upstream5xx:1,localHeld429:1,queueWaits:1,queueFailures:1,queueWaitMs:900,streamEnds:1,streamCanceled:1,streamMs:1000});
 });
 it('expires full hour buckets without traffic and rejects future/backfilled events',async()=>{
  const f=await fixture();f.history.record(f.event());await f.history.flush();
@@ -53,8 +53,8 @@ it('expires full hour buckets without traffic and rejects future/backfilled even
 });
 it('bounds high-cardinality data, discloses omissions and keeps already admitted buckets accurate',async()=>{
  const f=await fixture();
- for(let i=0;i<HISTORY_MAX_ROWS+9;i++)f.history.record(f.event({clientHash:i.toString(16).padStart(24,'0')}));
- f.history.record(f.event({clientHash:'0'.repeat(24)}));
+ for(let i=0;i<HISTORY_MAX_ROWS+9;i++)f.history.record(f.event({accountId:`00000000-0000-4000-8000-${i.toString().padStart(12,'0')}`}));
+ f.history.record(f.event({accountId:'00000000-0000-4000-8000-000000000000'}));
  expect(f.history.snapshot()).toMatchObject({truncated:true,capacityDroppedEvents:9});
  expect(f.history.snapshot()).toMatchObject({totalRows:HISTORY_MAX_ROWS,rowsTruncated:true,nextOffset:100});
  expect(f.history.snapshot().rows).toHaveLength(100);
@@ -129,4 +129,22 @@ it('reads older snapshots with new counters zero and explicit newer coverage, th
  old.record(f.event({at:now,event:'upstream',status:503}));await old.flush();
  const restored=new TrafficHistory(f.file,()=>now+1000);await restored.initialize();expect(restored.snapshot().extendedCountersStartedAt).toBe(now);
  expect(restored.snapshot().rows[0].upstream503).toBe(1);
+});
+it('fits fourteen days of 128 synthetic accounts with spare rows despite client churn',async()=>{
+ const f=await fixture();const start=Math.floor(f.now/HOUR_MS)*HOUR_MS;
+ for(let h=0;h<336;h++){
+  f.setNow(start+h*HOUR_MS);
+  for(let a=0;a<128;a++)for(let c=0;c<2;c++)f.history.record(f.event({at:f.clock(),accountId:`00000000-0000-4000-8000-${a.toString().padStart(12,'0')}`,clientHash:c.toString().repeat(24)}));
+ }
+ expect(f.history.summary()).toMatchObject({totalRows:336*128,truncated:false});
+ expect(f.history.summary().maxRows).toBeGreaterThan(336*128*1.25);
+});
+it('merges legacy client/project buckets without losing sums or pressure maxima',async()=>{
+ const f=await fixture();f.history.record(f.event({event:'upstream',accountId:account,status:429,accountInFlight:2}));await f.history.flush();
+ const data=JSON.parse(await fs.readFile(f.file,'utf8'));
+ data.rows=[{...data.rows[0],clientHash:'a'.repeat(24)},{...data.rows[0],clientHash:'b'.repeat(24),peakAccountInFlight:5}];
+ await fs.writeFile(f.file,JSON.stringify(data));const restored=new TrafficHistory(f.file,f.clock);await restored.initialize();
+ expect(restored.snapshot().rows).toHaveLength(1);
+ expect(restored.snapshot().rows[0]).toMatchObject({clientHash:null,projectId:null,upstream429:2,peakAccountInFlight:5,lastUpstream429At:f.now});
+ await restored.flush();const again=new TrafficHistory(f.file,f.clock);await again.initialize();expect(again.snapshot().rows).toEqual(restored.snapshot().rows);
 });

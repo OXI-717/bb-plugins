@@ -79,7 +79,8 @@ it.each([400, 404, 422])("falls back once on unsupported usage query (HTTP %s)",
 it.each([403, 429, 503])("does not retry HTTP %s as a query compatibility failure", async (status) => {
   const f = await fixture();
   let requests = 0;
-  await f.refresh(async () => { requests++; return new Response(null, { status }); });
+  await expect(f.refresh(async () => { requests++; return new Response("private upstream body", { status }); }))
+    .rejects.toThrow(`Claude usage refresh failed with HTTP ${status}.`);
   expect(requests).toBe(1);
 });
 

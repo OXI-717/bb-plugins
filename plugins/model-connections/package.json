@@ -1,17 +1,17 @@
 {
   "name": "bb-plugin-model-connections",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "license": "MIT",
   "private": true,
-  "description": "A grouped model chooser for local and pooled connections without changing BB core.",
+  "description": "Choose local and pooled model connections with search and per-machine visibility settings.",
   "engines": {
     "bb": ">=0.46.1",
     "bbPluginSdk": ">=0.6.49"
   },
   "bb": {
-    "name": "Model Connections",
-    "description": "Local and pooled model connections",
+    "name": "OXI Model Connections",
+    "description": "Choose local and pooled model connections with search and per-machine visibility settings.",
     "branding": {
       "icon": "Layers"
     },

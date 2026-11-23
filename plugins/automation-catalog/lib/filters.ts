@@ -19,10 +19,12 @@ export function readFilters(): Filters {
   } catch {}
   return { ...emptyFilters, state: "current" };
 }
-export function matchesFilters(t: CatalogTask, f: Filters, discovered?: ReadonlySet<string>) {
-  return (!f.query || discovered?.has(t.key) || [t.name, t.id, t.description, t.agent?.targetThreadId, t.host, t.hostLabel, t.projectName, t.agent?.model, t.agent?.provider, t.owner, t.team].some(v => v?.toLowerCase().includes(f.query.trim().toLowerCase()))) &&
+export function matchesFilters(t: CatalogTask, f: Filters, discovered?: ReadonlySet<string>,
+  display?: { title: string; host: string | null; project: string; projectId: string | null }) {
+  const projectId = display?.projectId ?? t.projectId;
+  return (!f.query || discovered?.has(t.key) || [display?.title, display?.host, display?.project, t.name, t.id, t.description, t.agent?.targetThreadId, t.host, t.hostLabel, t.projectName, t.agent?.model, t.agent?.provider, t.owner, t.team].some(v => v?.toLowerCase().includes(f.query.trim().toLowerCase()))) &&
     (!f.source || t.sourceId === f.source || (f.source === "bb" && t.scheduler === "bb")) &&
-    (!f.scope || t.scope === f.scope) && (!f.host || hostName(t) === f.host) && (!f.state || t.state === f.state) && (!f.project || (f.project === unlinkedProject ? !t.projectId : t.projectId === f.project));
+    (!f.scope || t.scope === f.scope) && (!f.host || hostName(t) === f.host || display?.host === f.host) && (!f.state || t.state === f.state) && (!f.project || (f.project === unlinkedProject ? !projectId : projectId === f.project));
 }
 export function stateLabel(t: CatalogTask) {
   return t.missing ? "Отсутствует в источнике" : t.state === "unknown" ? "Состояние не подключено" : t.state;

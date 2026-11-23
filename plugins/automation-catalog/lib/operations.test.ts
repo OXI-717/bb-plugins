@@ -1,9 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { health, creationPrompt, attentionFingerprint } from "./operations";
+import { health, hasCurrentRun, creationPrompt, attentionFingerprint } from "./operations";
 import { catalogSchedule } from "./catalog-schedule";
 import type { CatalogTask } from "../src/catalog-types";
 const task = { state: "active", missing: false, lastRun: null } as CatalogTask;
 describe("incident review", () => {
+  it("retains historical running evidence without calling an unconfirmed process current", () => {
+    const lastRun = { id: 'old-running', status: 'running', finishedAt: null, exitCode: null } as CatalogTask['lastRun'];
+    const unknown = { ...task, state: 'unknown', history: 'available', lastRun } as CatalogTask;
+    expect(health(unknown).label).toBe('Состояние не подтверждено');
+    expect(hasCurrentRun(unknown)).toBe(false);
+    expect(unknown.lastRun).toBe(lastRun);
+    expect(hasCurrentRun({ ...unknown, state: 'active' })).toBe(true);
+  });
   const failed = { ...task, history: "available", lastRun: { id: "run-a", status: "failed", finishedAt: 1, exitCode: 1 } } as CatalogTask;
   it("keeps an old weekly failure actionable", () => {
     expect(health(failed, undefined, 30 * 86400000).attention).toBe(true);

@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['account-pool-balanced/v*', 'automation-catalog/v*', 'vpn-guard/v*', 'oxi-projects/v*', 'model-connections/v*', 'auto-archive/v*', 'federation-pilot/v*', 'pool-maintenance/v*']
+    tags: ['*/v*']
   pull_request:
   workflow_dispatch:
 
@@ -15,6 +15,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      cursor: ${{ steps.select.outputs.cursor }}
+      session_tree: ${{ steps.select.outputs.session_tree }}
+      matrix: ${{ steps.select.outputs.matrix }}
+      check: ${{ steps.select.outputs.check }}
+      upgrade: ${{ steps.select.outputs.upgrade }}
+      upgrade_mac: ${{ steps.select.outputs.upgrade_mac }}
+      op: ${{ steps.select.outputs.op }}
+      archive: ${{ steps.select.outputs.archive }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m unittest discover -s scripts -p 'test_ci_*.py' -v
+      - id: select
+        run: python3 scripts/ci_plan.py
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GIT_REF: ${{ github.ref }}
+          DIFF_BASE: ${{ github.event.pull_request.base.sha }}
+          DIFF_HEAD: ${{ github.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+
   public-hygiene:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -25,65 +54,110 @@ jobs:
           python-version: '3.12'
       - name: Check public paths and credentials
         run: python3 scripts/check_hygiene.py
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Check plugin identity and release contract
+        run: |
+          node scripts/check-manifests.mjs
+          node scripts/check-vpn-contract.mjs
+          node --test scripts/check-manifests.test.mjs
       - name: Check documentation links
         run: python3 scripts/check_doc_refs.py
 
   check:
+    needs: plan
+    name: check (${{ matrix.os }}, ${{ matrix.plugin }})
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        plugin: [account-pool-balanced, automation-catalog, vpn-guard, oxi-projects, model-connections, federation-pilot, pool-maintenance]
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
       OXI_TEST_REMOTE_EXECUTION: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: matrix.run
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.run
         with:
           node-version: ${{ (matrix.plugin == 'oxi-projects' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance') && '24' || '22' }}
           cache: npm
           cache-dependency-path: plugins/${{ matrix.plugin }}/package-lock.json
-      - name: Check publication manifests
-        run: |
-          node scripts/check-manifests.mjs
-          node scripts/check-vpn-contract.mjs
       - name: Install dependencies
+        if: matrix.run
         working-directory: plugins/${{ matrix.plugin }}
         run: npm ci ${{ matrix.plugin == 'pool-maintenance' && '--legacy-peer-deps' || '' }}
       - name: Typecheck
+        if: matrix.run
         working-directory: plugins/${{ matrix.plugin }}
         run: npm run typecheck
       - name: Test
+        if: matrix.run
         working-directory: plugins/${{ matrix.plugin }}
         run: npm test
       - name: Project UI and integration tests
-        if: matrix.plugin == 'oxi-projects'
+        if: matrix.run && (matrix.plugin == 'oxi-projects')
         working-directory: plugins/oxi-projects
         run: npx vitest run
       - name: Collector tests
-        if: matrix.plugin == 'automation-catalog'
+        if: matrix.run && (matrix.plugin == 'automation-catalog')
         working-directory: plugins/automation-catalog/scripts
-        run: python3 -m unittest test_catalog_collect test_catalog_history test_catalog_sync
+        run: python3 -m unittest discover -p 'test_catalog*.py'
       - name: Build with the published BB CLI
-        if: matrix.plugin != 'vpn-guard' && matrix.plugin != 'oxi-projects' && matrix.plugin != 'model-connections' && matrix.plugin != 'federation-pilot' && matrix.plugin != 'pool-maintenance'
+        if: matrix.run && (matrix.plugin != 'vpn-guard' && matrix.plugin != 'oxi-projects' && matrix.plugin != 'model-connections' && matrix.plugin != 'federation-pilot' && matrix.plugin != 'pool-maintenance')
         working-directory: plugins/${{ matrix.plugin }}
         run: npm exec --yes --package=bb-app@${{ matrix.plugin == 'account-pool-balanced' && '0.46.1' || '0.43.3' }} -- bb plugin build .
       - name: Build plugins requiring BB 0.46
-        if: matrix.plugin == 'vpn-guard' || matrix.plugin == 'oxi-projects' || matrix.plugin == 'model-connections' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance'
+        if: matrix.run && (matrix.plugin == 'vpn-guard' || matrix.plugin == 'oxi-projects' || matrix.plugin == 'model-connections' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance')
         working-directory: plugins/${{ matrix.plugin }}
         run: npm exec --yes --package=bb-app@${{ (matrix.plugin == 'model-connections' || matrix.plugin == 'federation-pilot' || matrix.plugin == 'pool-maintenance') && '0.46.1' || '0.46.0' }} -- bb plugin build .
       - name: Ensure checks leave tracked files clean
+        if: matrix.run
         run: git diff --exit-code
 
+  session-tree:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.plan.outputs.session_tree == 'true'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: needs.plan.outputs.session_tree == 'true'
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: plugins/oxi-thread-list/package-lock.json
+      - run: npm ci
+        if: needs.plan.outputs.session_tree == 'true'
+        working-directory: plugins/oxi-thread-list
+      - run: npm run typecheck
+        if: needs.plan.outputs.session_tree == 'true'
+        working-directory: plugins/oxi-thread-list
+      - run: npm test
+        if: needs.plan.outputs.session_tree == 'true'
+        working-directory: plugins/oxi-thread-list
+      - run: npm exec --yes --package=bb-app@0.49.0 -- bb plugin build .
+        if: needs.plan.outputs.session_tree == 'true'
+        working-directory: plugins/oxi-thread-list
+      - run: git diff --exit-code
+        if: needs.plan.outputs.session_tree == 'true'
+      - name: Report unchanged Session Tree
+        if: needs.plan.outputs.session_tree != 'true'
+        env:
+          SELECTED: ${{ needs.plan.outputs.session_tree }}
+        run: test "$SELECTED" = false
+
   upgrade-script:
+    needs: plan
+    if: needs.plan.outputs.upgrade == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON(needs.plan.outputs.upgrade_mac == 'true' && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@v5
@@ -98,10 +172,25 @@ jobs:
         run: /bin/bash scripts/upgrade-pool.sh --sandbox
       - name: Test upgrade without a live BB server
         run: python3 -m unittest discover -s scripts -p 'test_upgrade_*.py' -v
-      - name: Test Cursor gateway with a synthetic local CLI
-        run: python3 -m unittest discover -s scripts -p test_cursor_route.py -v
       - name: Test read-only Claude host diagnostics
         run: python3 -m unittest discover -s plugins/account-pool-balanced/scripts -p test_claude_host_doctor.py -v
+
+  cursor-gateway:
+    needs: plan
+    if: needs.plan.outputs.cursor == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test Cursor gateway with a synthetic local CLI
+        run: python3 -m unittest discover -s scripts -p test_cursor_route.py -v
 
   secrets:
     runs-on: ubuntu-latest
@@ -120,6 +209,8 @@ jobs:
         run: /tmp/gitleaks-bin/gitleaks git --redact --no-banner --log-opts='--all' .
 
   auto-archive:
+    needs: plan
+    if: needs.plan.outputs.archive == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -138,3 +229,41 @@ jobs:
       - run: npm exec --yes --package=bb-app@0.46.1 -- bb plugin build .
         working-directory: plugins/auto-archive
       - run: git diff --exit-code
+
+  oxi-op:
+    needs: plan
+    if: needs.plan.outputs.op == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: plugins/oxi-op/package-lock.json
+      - run: npm ci
+        working-directory: plugins/oxi-op
+      - run: npm run typecheck
+        working-directory: plugins/oxi-op
+      - run: npm test
+        working-directory: plugins/oxi-op
+      - run: npm exec --yes --package=bb-app@0.48.1 -- bb plugin build .
+        working-directory: plugins/oxi-op
+      - run: git diff --exit-code
+
+  release-gate:
+    if: always()
+    needs: [plan, public-hygiene, secrets, check, upgrade-script, auto-archive, oxi-op, session-tree, cursor-gateway]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Require all selected critical jobs
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_release_gate.py

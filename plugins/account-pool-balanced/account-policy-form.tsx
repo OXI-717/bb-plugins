@@ -46,11 +46,11 @@ export function AccountPolicyForm({ account, threshold, drainHours, save, onUnsa
   );
   return <section className="pool-settings-section">
     <label className="pool-settings-toggle"><input type="checkbox" checked={draft.enabled} disabled={pending} onChange={e => change({ enabled: e.target.checked })} />Account-specific settings</label>
-    <p className="pool-settings-help">{draft.enabled ? policySummary(draft) : 'Shared rules are active. Account-specific values are saved.'}</p>
-    {!account.policy && <p className="pool-settings-help">Fields contain the current shared values. Enabling this saves them as account-specific settings.</p>}
+    <p className="pool-settings-help">{draft.enabled ? policySummary(draft, account.weeklyBudget !== undefined) : 'Shared rules are active. Account-specific values are saved.'}</p>
+    {!account.policy && <p className="pool-settings-help">Fields contain current shared values. Enabling this saves them as account-specific settings.</p>}
     <fieldset disabled={!draft.enabled || pending} className="pool-settings-fields">
       {hasFiveHour && numberField('fiveHourKeep', '5-hour quota to keep, %', inheritedKeep)}
-      {numberField('weeklyKeep', 'Weekly quota to keep, %', inheritedKeep)}
+      {numberField('weeklyKeep', account.weeklyBudget ? 'Model quota to keep, %' : 'Weekly quota to keep, %', inheritedKeep)}
       {account.role === 'reserve' && numberField('reserveDrainHours', 'Enable reserve this many working hours before reset', drainHours)}
       <label className="pool-settings-toggle"><input type="checkbox" checked={draft.schedule !== null} onChange={e => change({ schedule: e.target.checked ? { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, intervals: [{ days: [1,2,3,4,5], start: '09:00', end: '18:00' }] } : null })} />Account schedule</label>
       {draft.schedule && <div className="pool-settings-fields pool-settings-schedule-fields">

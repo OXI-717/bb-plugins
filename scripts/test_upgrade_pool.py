@@ -14,6 +14,63 @@ import upgrade_pool as u
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_transition_to_managed_cli_is_detected_without_open_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            key = Path(temp) / 'operator.env'
+            with patch.object(u, 'MANAGEMENT_KEY_FILE', key), patch.object(u, 'run', return_value='{"legacy":true}') as old, patch.object(u, 'managed_pool', return_value={'managed': True}) as managed:
+                self.assertEqual(u.bb('pool', 'status'), {'legacy': True})
+                managed.assert_not_called()
+                key.write_text('synthetic fixture')
+                self.assertEqual(u.bb('pool', 'status'), {'managed': True})
+                self.assertEqual(old.call_count, 1)
+                managed.assert_called_once_with(('status',), key)
+
+    def test_managed_commands_keep_credentials_in_stdin_and_revoke_afterwards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            key = Path(temp) / 'operator.env'
+            key.write_text('POOL_MANAGEMENT_KEY=' + 'K' * 43 + '\n')
+            key.chmod(0o600)
+            token = 'G' * 43
+            with patch.object(u, 'management_rpc', side_effect=[{'token': token}, None]) as rpc, patch.object(u.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{"inFlight":0}', '')) as process:
+                self.assertEqual(u.managed_pool(('status',), key), {'inFlight': 0})
+                command = process.call_args.args[0]
+                self.assertNotIn(token, ' '.join(command))
+                self.assertNotIn('K' * 43, ' '.join(command))
+                self.assertEqual(json.loads(process.call_args.kwargs['input']), {'token': token, 'argv': ['status', '--json']})
+                self.assertEqual(rpc.call_args_list[-1].args, ('management.lock', {'token': token}))
+
+    def test_managed_command_failure_does_not_retry_or_revert_to_open_cli(self):
+        with tempfile.TemporaryDirectory() as temp:
+            key = Path(temp) / 'operator.env'
+            key.write_text('POOL_MANAGEMENT_KEY=' + 'K' * 43 + '\n')
+            key.chmod(0o600)
+            with patch.object(u, 'management_rpc', side_effect=[{'token': 'G' * 43}, None]) as rpc, patch.object(u.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'sensitive-error')) as process:
+                with self.assertRaises(u.UpgradeError) as error:
+                    u.managed_pool(('maintenance', 'acquire'), key)
+                self.assertNotIn('sensitive-error', str(error.exception))
+                self.assertEqual(process.call_count, 1)
+                self.assertEqual(rpc.call_args_list[-1].args[0], 'management.lock')
+
+    def test_management_key_requires_private_permissions_and_refuses_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            key = Path(temp) / 'operator.env'
+            key.write_text('POOL_MANAGEMENT_KEY=' + 'K' * 43 + '\n')
+            key.chmod(0o644)
+            with patch.object(u, 'management_rpc') as rpc:
+                with self.assertRaises(u.UpgradeError):
+                    u.managed_pool(('status',), key)
+                link = Path(temp) / 'link.env'
+                link.symlink_to(key)
+                with self.assertRaises(OSError):
+                    u.managed_pool(('status',), link)
+                rpc.assert_not_called()
+
+    def test_management_rpc_refuses_remote_urls_before_sending_credentials(self):
+        with patch.dict(os.environ, {'BB_SERVER_URL': 'https://remote.example'}), patch.object(u.urllib.request, 'build_opener') as opener:
+            with self.assertRaises(u.UpgradeError):
+                u.management_rpc('management.unlock', {'key': 'synthetic'})
+            opener.assert_not_called()
+
     def test_wait_only_never_offers_forced_interruption(self):
         with patch.object(u, 'bb', return_value={'inFlight': 1}), patch.object(u, 'report_pool'), patch.object(u, 'confirm_interrupt') as confirm, patch.object(u.time, 'sleep'), patch.object(u.time, 'monotonic', side_effect=[0, 0, 301, 901]):
             with self.assertRaises(u.UpgradeError):
@@ -179,10 +236,12 @@ class UpgradeTests(unittest.TestCase):
                 self.assertEqual(copied.execute('SELECT value FROM sample').fetchone()[0],42)
             self.assertEqual((target/'secrets'/'synthetic.txt').stat().st_mode & 0o777,0o600)
 
-    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False, wrong_drain=False):
+    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False, wrong_drain=False, weekly_budget_after=(), routing_after=None, routing_before=None, routing_failure=False):
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         data = Path(temp.name); db=sqlite3.connect(data/'data.db'); db.close()
-        state = {'accepting':True,'inFlight':0,'accounts':[{'id':'synthetic','enabled':True,'policy':{'enabled':False}, 'drainOnce':True, 'drainGeneration':'synthetic-generation'}], 'routing':{'codex':True},'enabledAccountCount':1}
+        state = {'accepting':True,'inFlight':0,'accounts':[{'id':'synthetic','enabled':True,'policy':{'enabled':False}, 'drainOnce':True, 'drainGeneration':'synthetic-generation', 'weeklyBudget': {'enabled': True, 'floorPercent': 10}}], 'routing':{'codex':True},'enabledAccountCount':1}
+        if routing_before is not None:
+            state['routing'] = routing_before
         source = {'history':[{'version':'b'*40}], 'range':'^0.4.1'}
         updated_source = {**source,'history':[{'version':('c' if wrong_sha else 'a')*40}]}
         infos = [{'version':'0.4.6'}, {'version':'0.4.7'}]
@@ -193,6 +252,15 @@ class UpgradeTests(unittest.TestCase):
             nonlocal status_reads
             if args[:2] == ('pool','status'):
                 status_reads += 1
+                if routing_after is not None and status_reads == 3:
+                    return {**state, 'routing': routing_after}
+                if weekly_budget_after != () and status_reads == 3:
+                    account = dict(state['accounts'][0])
+                    if weekly_budget_after is None:
+                        del account['weeklyBudget']
+                    else:
+                        account['weeklyBudget'] = weekly_budget_after
+                    return {**state, 'accounts': [account]}
                 if wrong_drain and status_reads == 3:
                     return {**state, 'accounts': [{**state['accounts'][0], 'drainOnce': False, 'drainGeneration': None}]}
                 return {**state, 'accounts': []} if wrong_accounts and status_reads == 3 else state
@@ -201,10 +269,11 @@ class UpgradeTests(unittest.TestCase):
             raise AssertionError(args)
         args=argparse.Namespace(check=check, version=None, interrupt_now=False)
         with patch.object(u,'installed',side_effect=infos), patch.object(u,'source_info',side_effect=sources), patch.object(u,'release_target',side_effect=targets), patch.object(u,'wait_idle',return_value=False) as idle, patch.object(u,'bb',side_effect=command), patch.object(u,'run',side_effect=u.UpgradeError('simulated update failure') if fail else None) as run:
-            if changed or fail or wrong_sha or wrong_accounts or wrong_drain:
-                with self.assertRaises(u.UpgradeError): u.perform(args,data,data,lambda _:None)
+            output = []
+            if changed or fail or wrong_sha or wrong_accounts or wrong_drain or weekly_budget_after != () or routing_failure:
+                with self.assertRaises(u.UpgradeError): u.perform(args,data,data,output.append)
             else:
-                self.assertEqual(u.perform(args,data,data,lambda _:None),'PREFLIGHT_PASS' if check else 'PASS')
+                self.assertEqual(u.perform(args,data,data,output.append),'PREFLIGHT_PASS' if check else 'PASS')
             if check:
                 idle.assert_not_called(); run.assert_not_called(); self.assertFalse((data/'backup').exists())
             elif changed:
@@ -212,6 +281,29 @@ class UpgradeTests(unittest.TestCase):
             else:
                 run.assert_called_once_with('bb','plugin','update',u.PLUGIN,'--yes',timeout=600)
                 self.assertTrue((data/'backup'/'RECOVERY.txt').exists())
+
+            return output
+
+    def test_post_update_new_provider_key_is_reported(self):
+        output = self.workflow(routing_after={'codex': True, 'grok': True})
+        self.assertIn('Added routing keys: grok', output)
+
+    def test_post_update_old_provider_modified_fails(self):
+        self.workflow(routing_after={'codex': False, 'grok': True}, routing_failure=True)
+
+    def test_post_update_old_provider_deleted_fails(self):
+        self.workflow(routing_after={'grok': True}, routing_failure=True)
+
+    def test_post_update_null_provider_deleted_fails(self):
+        self.workflow(routing_before={'codex': None}, routing_after={}, routing_failure=True)
+
+    def test_post_update_null_provider_modified_fails(self):
+        self.workflow(routing_before={'codex': None}, routing_after={'codex': True}, routing_failure=True)
+
+    def test_post_update_weekly_budget_loss_or_change_fails(self):
+        for budget in (None, {'enabled': True, 'floorPercent': 20}):
+            with self.subTest(budget=budget):
+                self.workflow(weekly_budget_after=budget)
 
     def test_post_update_drain_state_loss_fails(self): self.workflow(wrong_drain=True)
     def test_post_update_sha_mismatch_fails(self): self.workflow(wrong_sha=True)
@@ -224,3 +316,74 @@ class UpgradeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class DurableManagementTests(unittest.TestCase):
+    def test_explicit_operator_key_reissues_after_reload_invalidates_grants(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);data=root/'plugins'/u.PLUGIN
+            data.mkdir(parents=True);(data/'data.db').touch()
+            key=root/'operator.env';key.write_text('POOL_MANAGEMENT_KEY='+'K'*43+'\n');key.chmod(0o600)
+            generation=[0]; issued=[]; revoked=[]
+            def rpc(method,payload):
+                if method=='management.unlock':
+                    token='generation-'+str(generation[0]);issued.append(token);return {'token':token}
+                revoked.append(payload['token']);return None
+            def process(argv,**kwargs):
+                request=json.loads(kwargs['input'])
+                self.assertEqual(request['token'],'generation-'+str(generation[0]))
+                self.assertNotIn(request['token'],' '.join(argv))
+                return subprocess.CompletedProcess(argv,0,json.dumps({'generation':generation[0]}),'')
+            def bb_run(*argv,**kwargs):
+                self.assertEqual(argv,('bb','status','--json'))
+                return json.dumps({'dataDir':temp})
+            def perform(*args):
+                self.assertEqual(u.bb('pool','status')['generation'],0)
+                generation[0]=1 # ManagementAccess.close/initialize invalidates old grants.
+                self.assertEqual(u.bb('pool','status')['generation'],1)
+                return 'PASS'
+            with patch.object(u.sys,'argv',['upgrade','--operator-key-file',str(key)]),patch.object(u,'run',side_effect=bb_run),patch.object(u,'management_rpc',side_effect=rpc),patch.object(u.subprocess,'run',side_effect=process),patch.object(u,'perform',side_effect=perform),patch.dict(u.os.environ,{'BB_SERVER_URL':'http://127.0.0.1'}),contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(u.main(),0)
+            self.assertEqual(issued,['generation-0','generation-1'])
+            self.assertEqual(revoked,issued)
+
+    def test_check_and_wait_idle_refuse_locked_pool_status_with_clear_error(self):
+        source = {'history': [{'version': 'b' * 40}]}
+        args = argparse.Namespace(check=True, version=None, interrupt_now=False)
+        with patch.object(u, 'installed', return_value={'version': '1.0.1'}), patch.object(u, 'source_info', return_value=source), patch.object(u, 'release_target', return_value=('1.0.1', 'b' * 40)), patch.object(u, 'bb', return_value={'management': 'locked'}):
+            with self.assertRaises(u.UpgradeError) as check_error:
+                u.perform(args, Path('/unused'), Path('/unused'), lambda _: None)
+            self.assertIn('--operator-key-file', str(check_error.exception))
+            self.assertIn('--grant-file', str(check_error.exception))
+            with self.assertRaises(u.UpgradeError) as idle_error:
+                u.wait_idle(lambda _: None, offer_interrupt=False)
+            self.assertIn('locked', str(idle_error.exception).lower())
+
+    def test_missing_or_symlink_explicit_management_files_fail_closed_in_main(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data = root / 'plugins' / u.PLUGIN
+            data.mkdir(parents=True)
+            (data / 'data.db').touch()
+            real_key = root / 'operator.env'
+            real_key.write_text('POOL_MANAGEMENT_KEY=' + 'K' * 43 + '\n')
+            real_key.chmod(0o600)
+            key_link = root / 'operator-link.env'
+            key_link.symlink_to(real_key)
+            real_grant = root / 'grant.json'
+            real_grant.write_text(json.dumps({'token': 'G' * 43}))
+            real_grant.chmod(0o600)
+            grant_link = root / 'grant-link.json'
+            grant_link.symlink_to(real_grant)
+            cases = [
+                (['upgrade', '--check', '--operator-key-file', str(root / 'missing.env')], 'not found'),
+                (['upgrade', '--check', '--operator-key-file', str(key_link)], 'Unsafe'),
+                (['upgrade', '--check', '--grant-file', str(root / 'missing.json')], 'not found'),
+                (['upgrade', '--check', '--grant-file', str(grant_link)], 'Unsafe'),
+            ]
+            for argv, expected in cases:
+                with self.subTest(argv=argv):
+                    stderr = io.StringIO()
+                    with patch.object(u.sys, 'argv', argv), patch.object(u, 'bb', return_value={'dataDir': temp}), patch.object(u, 'perform') as perform, patch.dict(u.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stderr(stderr):
+                        self.assertEqual(u.main(), 1)
+                    perform.assert_not_called()
+                    self.assertIn(expected, stderr.getvalue())

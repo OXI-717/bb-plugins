@@ -18,12 +18,15 @@ async function fixture(){
 }
 it('removes unrecognized fields and refuses arbitrary model/identity strings',async()=>{
  const f=await fixture();f.journal.record(f.event({prompt:'private synthetic prompt',authorization:'secret synthetic header'}));
- f.journal.record(f.event({model:'private-synthetic-model'}));
+ for(const rejected of ['private-synthetic-model','gpt-5.4-private-secret','claude-opus-4-7-customer']) f.journal.record(f.event({model:rejected}));
  const rows=f.journal.snapshot().rows;
- expect(rows).toHaveLength(1);expect(JSON.stringify(rows)).not.toMatch(/private|secret|external-client/);
+ expect(rows).toHaveLength(1);expect(JSON.stringify(rows)).not.toMatch(/private|secret|customer|external-client/);
  const unknown=newTrace('codex','external-client-synthetic','private-project','private-thread','private-model','other');
  expect(unknown).toMatchObject({projectId:null,threadId:null,model:null});
  expect(unknown.clientHash).toBe(f.event().clientHash);
+ for(const allowed of ['gpt-6-astra','gpt-5.4-codex','claude-opus-4-7','claude-sonnet-4-7','claude-haiku-4-5-20251001','glm-4.7','kimi-k2.5','grok-4','gemini-2.5-pro','swe-1.5']) {
+  expect(newTrace('codex','external-client-synthetic','proj_abcdef1234','thr_abcdef1234',allowed,'other').model).toBe(allowed);
+ }
 });
 it('records only fixed typed quota fields and actual before/after evidence without retaining private text',async()=>{
  const f=await fixture(),id='11111111-1111-4111-8111-111111111111';
@@ -135,4 +138,15 @@ it('summarizes Guard separately from upstream errors across all retained rows',a
  f.journal.record(f.event({event:'upstream',status:503}));
  const result=f.journal.snapshot(1);expect(result.guardChecks.find(r=>r.provider==='codex')).toMatchObject({checks:1,timeouts:1,durationMs:4000,lastTimeoutAt:f.now});
  expect(result.rows).toHaveLength(1);expect(JSON.stringify(result)).not.toContain('private token');
+});
+
+it('compacts expired and future observations while preserving surviving order',async()=>{
+ const f=await fixture();
+ f.journal.record(f.event({at:f.now-TTL_MS-1}));
+ f.journal.record(f.event({at:f.now-2}));
+ f.journal.record(f.event({at:f.now+10}));
+ f.journal.record(f.event({at:f.now-1}));
+ expect(f.journal.snapshot().rows.map(r=>r.at)).toEqual([f.now-2,f.now-1]);
+ await f.journal.flush();
+ expect(JSON.parse(await fs.readFile(f.file,'utf8')).rows.map((r:{at:number})=>r.at)).toEqual([f.now-2,f.now-1]);
 });

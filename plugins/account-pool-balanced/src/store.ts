@@ -1,3 +1,4 @@
+import { clientAccountScopeSchema, type ClientAccountScope } from "./client-scope.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -5,7 +6,8 @@ import type Database from "better-sqlite3";
 import { z } from "zod";
 import type { PoolKvStorage } from "./core-storage.js";
 import {
-  accountSchema,
+  accountMetadataSchema,
+  weeklyBudgetSchema,
   accountSecretSchema,
   EMPTY_FAMILY_WEEKLY,
   hubTokenSummarySchema,
@@ -22,7 +24,10 @@ import {
 
 const ACCOUNTS_KEY = "accounts:v1";
 const ACCOUNT_LAST_USED_PERSIST_MS = 60 * 1_000;
-const accountsSchema = z.array(accountSchema);
+const accountsSchema = z.array(accountMetadataSchema);
+// Keep weekly rules out of the strict v1 account array so older builds can read it after rollback.
+const WEEKLY_BUDGETS_KEY = "weekly-budgets:v1";
+const weeklyBudgetsSchema = z.record(z.string().uuid(), weeklyBudgetSchema);
 const HUB_TOKEN_PREFIX = "hub-token-";
 const THREAD_TOKEN_PREFIX = "hub-thread-token-";
 const HUB_TOKEN_GRACE_MS = 10 * 60 * 1_000;
@@ -43,11 +48,14 @@ const storedHubTokenSchema = z
     projectId: z.string().min(1).max(200).optional(),
     threadId: z.string().min(1).max(200).optional(),
     purpose: z.literal("autopilot").optional(),
+    accountScope: clientAccountScopeSchema.optional(),
     mintedAt: z.number().int().nonnegative(),
     lastUsedAt: z.number().int().nonnegative().nullable(),
     previous: z.array(priorHubTokenSchema),
   })
-  .strict().refine(value => value.purpose === undefined || value.projectId !== undefined, "Purpose requires a project binding");
+  .strict().refine(value => value.purpose === undefined || value.projectId !== undefined, "Purpose requires a project binding").refine(value => value.accountScope === undefined ||
+    value.hostId.startsWith("external_") && value.machineHostId === undefined && value.projectId !== undefined,
+    "Account scope requires an external project-bound identity");
 type StoredHubToken = z.infer<typeof storedHubTokenSchema>;
 
 const routedThreadSchema = z
@@ -73,10 +81,17 @@ export class AccountStore {
     await fs.chmod(this.secretsDir, 0o700);
   }
 
+  private async listMetadata() {
+    return accountsSchema.parse(await this.kv.get(ACCOUNTS_KEY) ?? []);
+  }
+
+  private async weeklyBudgets() {
+    return weeklyBudgetsSchema.parse(await this.kv.get(WEEKLY_BUDGETS_KEY) ?? {});
+  }
+
   async list(): Promise<Account[]> {
-    const value = await this.kv.get(ACCOUNTS_KEY);
-    if (value === undefined) return [];
-    return accountsSchema.parse(value);
+    const [accounts, budgets] = await Promise.all([this.listMetadata(), this.weeklyBudgets()]);
+    return accounts.map(account => budgets[account.id] === undefined ? account : { ...account, weeklyBudget: budgets[account.id] });
   }
 
   async get(id: string): Promise<Account | null> {
@@ -86,12 +101,12 @@ export class AccountStore {
   async add(
     input: Omit<
       Account,
-      "id" | "createdAt" | "lastUsedAt" | "lastUsedHostId" | "role" | "cap" | "autopilotAllowed"
+      "id" | "createdAt" | "lastUsedAt" | "lastUsedHostId" | "role" | "cap" | "autopilotAllowed" | "weeklyBudget"
     > & {autopilotAllowed?: boolean},
     secret: AccountSecret,
   ): Promise<Account> {
     return this.serialized(async () => {
-      const account = accountSchema.parse({
+      const account = accountMetadataSchema.parse({
         ...input,
         id: randomUUID(),
         createdAt: Date.now(),
@@ -100,7 +115,7 @@ export class AccountStore {
       });
       await this.writeSecret(account.id, secret);
       try {
-        const accounts = await this.list();
+        const accounts = await this.listMetadata();
         accounts.push(account);
         await this.kv.set(ACCOUNTS_KEY, accounts);
       } catch (error) {
@@ -111,19 +126,34 @@ export class AccountStore {
     });
   }
 
+  async addDraft(input: {label:string;email:string;priority:number}):Promise<Account> {
+    return this.serialized(async()=>{
+      const accounts=await this.listMetadata();
+      if(accounts.some(a=>a.provider==='claude'&&a.email?.toLowerCase()===input.email.toLowerCase()))throw Error("This Claude account is already added.");
+      const account=accountMetadataSchema.parse({...input,id:randomUUID(),provider:'claude',kind:'oauth',draft:true,
+        accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:false,createdAt:Date.now()});
+      accounts.push(account);await this.kv.set(ACCOUNTS_KEY,accounts);return account;
+    });
+  }
+
   async remove(id: string): Promise<boolean> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const next = accounts.filter((account) => account.id !== id);
       if (next.length === accounts.length) return false;
       await this.kv.set(ACCOUNTS_KEY, next);
       await fs.rm(this.accountSecretPath(id), { force: true });
+      const budgets = await this.weeklyBudgets();
+      if (budgets[id] !== undefined) {
+        delete budgets[id];
+        await this.kv.set(WEEKLY_BUDGETS_KEY, budgets);
+      }
       return true;
     });
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<Account | null> {
-    return this.update(id, (account) => ({ ...account, enabled }));
+    return this.update(id, account => {if(enabled&&account.draft)throw Error("Sign in to the account first.");return {...account,enabled};});
   }
 
   async setProjects(id: string, projects: Account["projects"], expected?: Account["projects"] | null): Promise<Account | null> {
@@ -137,6 +167,20 @@ export class AccountStore {
 
   async setPolicy(id: string, policy: Account["policy"]): Promise<Account | null> {
     return this.update(id, account => ({ ...account, policy }));
+  }
+
+  async updateWeeklyBudget(id: string, change: (account: Account) => Account["weeklyBudget"]): Promise<Account | null> {
+    return this.serialized(async () => {
+      const accounts = await this.listMetadata();
+      const account = accounts.find(candidate => candidate.id === id);
+      if (!account) return null;
+      const budgets = await this.weeklyBudgets();
+      const weeklyBudget = change({ ...account, weeklyBudget: budgets[id] });
+      if (weeklyBudget === undefined) delete budgets[id];
+      else budgets[id] = weeklyBudget;
+      await this.kv.set(WEEKLY_BUDGETS_KEY, budgets);
+      return weeklyBudget === undefined ? account : { ...account, weeklyBudget };
+    });
   }
 
   async setPriority(id: string, priority: number): Promise<Account | null> {
@@ -192,7 +236,7 @@ export class AccountStore {
 
   async reorder(provider: PoolProvider, accountIds: string[]): Promise<void> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const current = accounts.filter(
         (account) => account.provider === provider,
       );
@@ -224,7 +268,7 @@ export class AccountStore {
     lastUsedHostId: string,
   ): Promise<boolean> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const index = accounts.findIndex((account) => account.id === id);
       const current = accounts[index];
       if (index < 0 || current === undefined) return false;
@@ -235,7 +279,7 @@ export class AccountStore {
       ) {
         return false;
       }
-      accounts[index] = accountSchema.parse({
+      accounts[index] = accountMetadataSchema.parse({
         ...current,
         lastUsedAt,
         lastUsedHostId,
@@ -272,16 +316,17 @@ export class AccountStore {
     change: (account: Account) => Account,
   ): Promise<Account | null> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const index = accounts.findIndex((account) => account.id === id);
       const current = accounts[index];
       if (index < 0 || current === undefined) return null;
+      const weeklyBudget = (await this.weeklyBudgets())[id];
       const changed = change(current);
       if (changed === current) return current;
-      const updated = accountSchema.parse(changed);
+      const updated = accountMetadataSchema.parse(changed);
       accounts[index] = updated;
       await this.kv.set(ACCOUNTS_KEY, accounts);
-      return updated;
+      return weeklyBudget === undefined ? updated : { ...updated, weeklyBudget };
     });
   }
 
@@ -318,7 +363,7 @@ export class AccountStore {
     secret: AccountSecret,
   ): Promise<Account> {
     return this.serialized(async () => {
-      const accounts = await this.list();
+      const accounts = await this.listMetadata();
       const index = accounts.findIndex(account => account.id === id);
       const account = accounts[index];
       if (!account || account.provider !== "claude" || account.kind !== "oauth")
@@ -328,27 +373,43 @@ export class AccountStore {
         : account.email !== null && identity.email !== null && account.email.toLowerCase() === identity.email.toLowerCase();
       if (!matches)
         throw new Error("Signed in to a different account. Authorize the selected subscription.");
-      const updated = accountSchema.parse({
-        ...account,
+      const {draft:_draft,...authorizedAccount}=account;
+      const updated = accountMetadataSchema.parse({
+        ...authorizedAccount,
         email: identity.email,
         accountUuid: identity.accountUuid,
         subscriptionType: identity.subscriptionType,
         rateLimitTier: identity.rateLimitTier,
       });
-      const previousSecret = await this.readSecret(id);
+      const previousSecret = account.draft ? null : await this.readSecret(id);
       try {
         await this.writeSecret(id, secret);
         accounts[index] = updated;
         await this.kv.set(ACCOUNTS_KEY, accounts);
       } catch (error) {
         try {
-          await this.writeSecret(id, previousSecret);
+          if(previousSecret)await this.writeSecret(id, previousSecret);
+          else await fs.rm(this.accountSecretPath(id),{force:true});
         } catch {
           throw new Error("Could not save or restore authorization. Check storage and sign in again.");
         }
         throw error;
       }
       return updated;
+    });
+  }
+
+  async replaceCodexAuthorization(id: string, codexAccountId: string, secret: AccountSecret): Promise<Account> {
+    return this.serialized(async () => {
+      const account = (await this.listMetadata()).find(candidate => candidate.id === id);
+      if (account?.provider !== "codex" || account.kind !== "oauth") {
+        throw new Error("Codex OAuth account no longer exists.");
+      }
+      if (account.codexAccountId !== codexAccountId) {
+        throw new Error("Codex sign-in selected a different ChatGPT account.");
+      }
+      await this.writeSecret(id, secret);
+      return account;
     });
   }
 
@@ -451,7 +512,11 @@ export class HubTokenStore {
   }
 
   /** Operator-issued identity; neither the name nor request fields grant purpose. */
-  async forIssuedClient(hostId: string, projectId: string | null, purpose?: "autopilot"): Promise<string> {
+  async forIssuedClient(hostId: string, projectId: string | null, purpose?: "autopilot", accountScope?:ClientAccountScope): Promise<string> {
+    if (accountScope !== undefined) {
+      accountScope=clientAccountScopeSchema.parse(accountScope);
+      if (!hostId.startsWith("external_") || projectId === null) throw Error("Account scope requires an external project binding.");
+    }
     if (purpose !== undefined) z.literal("autopilot").parse(purpose);
     if (purpose === "autopilot" && projectId === null) throw Error('Autopilot clients require a project binding.');
     if (projectId !== null) z.string().min(1).max(200).parse(projectId);
@@ -461,11 +526,11 @@ export class HubTokenStore {
       // Older project credentials also have a base host record. That record is not their authority.
       const scoped = all.filter(token => token.machineHostId === hostId);
       const issued = scoped.length ? scoped : all;
-      if (issued.some(token => (token.projectId ?? null) !== projectId || token.purpose !== purpose)) {
+      if (issued.some(token => (token.projectId ?? null) !== projectId || token.purpose !== purpose || JSON.stringify(token.accountScope) !== JSON.stringify(accountScope))) {
         throw Error('Client binding differs; revoke before issuing a new identity.');
       }
       if (issued.length) return issued[0]!.value;
-      const value = storedHubTokenSchema.parse({ ...this.create(hostId), ...(projectId === null ? {} : {projectId}), ...(purpose ? {purpose} : {}) });
+      const value = storedHubTokenSchema.parse({ ...this.create(hostId), ...(projectId === null ? {} : {projectId}), ...(purpose ? {purpose} : {}), ...(accountScope ? {accountScope} : {}) });
       await this.write(hostId, value);
       return value.value;
     }), this.groupLocks);
@@ -508,7 +573,7 @@ export class HubTokenStore {
     return this.serialized(hostId, async () => {
       const current = this.read(hostId);
       const now = this.now();
-      const next = { ...this.create(hostId), ...(current ? {projectId:current.projectId,purpose:current.purpose} : {}), ...(current?.machineHostId ? { machineHostId: current.machineHostId, projectId: current.projectId,threadId:current.threadId } : {}) };
+      const next = { ...this.create(hostId), ...(current ? {projectId:current.projectId,purpose:current.purpose,accountScope:current.accountScope} : {}), ...(current?.machineHostId ? { machineHostId: current.machineHostId, projectId: current.projectId,threadId:current.threadId } : {}) };
       if (current !== null) {
         next.previous = [
           { value: current.value, expiresAt: now + HUB_TOKEN_GRACE_MS },
@@ -524,17 +589,34 @@ export class HubTokenStore {
     return (await this.authenticateContext(presented))?.hostId ?? null;
   }
 
+  /** Synchronous dispatch fence, with no await between validation and transport. */
+  validatesCredential(presented: string | null): boolean {
+    return this.dispatchCredential(presented) !== undefined;
+  }
+
+  validatesAccountScope(presented: string | null, scope: ClientAccountScope): boolean {
+    const token = this.dispatchCredential(presented);
+    return token !== undefined && JSON.stringify(token.accountScope) === JSON.stringify(scope);
+  }
+
+  private dispatchCredential(presented: string | null): StoredHubToken | undefined {
+    if (presented === null) return undefined;
+    const key = this.tokenIndex.get(this.tokenDigest(presented));
+    const token = key === undefined ? undefined : this.tokens.get(key);
+    return token !== undefined && matchesStoredToken(token, presented, this.now()) ? token : undefined;
+  }
+
   /** Inspect only already-initialized state; never load, prune or update usage. */
-  async inspectContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot" } | null> {
+  async inspectContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot"; accountScope?:ClientAccountScope } | null> {
     if (presented === null || this.initialization === null) return null;
     await this.initialization;
     const key = this.tokenIndex.get(this.tokenDigest(presented));
     const token = key === undefined ? null : this.tokens.get(key) ?? null;
     if (token === null || !matchesStoredToken(token, presented, this.now())) return null;
-    return { hostId: token.machineHostId ?? token.hostId, projectId: token.projectId ?? null, ...(token.threadId ? { threadId: token.threadId } : {}), ...(token.purpose ? {purpose:token.purpose} : {}) };
+    return { hostId: token.machineHostId ?? token.hostId, projectId: token.projectId ?? null, ...(token.threadId ? { threadId: token.threadId } : {}), ...(token.purpose ? {purpose:token.purpose} : {}), ...(token.accountScope ? {accountScope:structuredClone(token.accountScope)} : {}) };
   }
 
-  async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot" } | null> {
+  async authenticateContext(presented: string | null): Promise<{ hostId: string; projectId: string | null; threadId?:string; purpose?:"autopilot"; accountScope?:ClientAccountScope } | null> {
     if (presented === null) return null;
     await this.initialize();
     const matchedHostId=this.tokenIndex.get(this.tokenDigest(presented));
@@ -561,7 +643,7 @@ export class HubTokenStore {
       } else {
         this.cacheToken(next);
       }
-      return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null,...(matched.threadId?{threadId:matched.threadId}:{}),...(matched.purpose?{purpose:matched.purpose}:{}) };
+      return { hostId: matched.machineHostId ?? matched.hostId, projectId: matched.projectId ?? null,...(matched.threadId?{threadId:matched.threadId}:{}),...(matched.purpose?{purpose:matched.purpose}:{}),...(matched.accountScope?{accountScope:structuredClone(matched.accountScope)}:{}) };
     });
   }
 

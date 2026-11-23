@@ -2,9 +2,10 @@ import type { CatalogList, CatalogTask } from "../src/catalog-types";
 import type { ComposeIntent } from "../compose";
 import { matchesFilters, type Filters } from "./filters";
 import { health } from "./operations";
+import type { createPresentation } from "./presentation";
 
-export function triageCandidates(data: CatalogList, filters: Filters, now: number, discovered?: ReadonlySet<string>): CatalogTask[] {
-  return data.tasks.filter(task => matchesFilters(task, { ...filters, state: "" }, discovered) &&
+export function triageCandidates(data: CatalogList, filters: Filters, now: number, discovered?: ReadonlySet<string>, display?: ReturnType<typeof createPresentation>): CatalogTask[] {
+  return data.tasks.filter(task => matchesFilters(task, { ...filters, state: "" }, discovered, display?.(task)) &&
     health(task, data.sources.find(source => source.id === task.sourceId), now).attention);
 
 }

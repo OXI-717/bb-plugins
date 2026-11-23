@@ -29,6 +29,7 @@ function register(grokLogin: Partial<GrokDeviceLogin>, codexLogin: Partial<Codex
     undefined,
     undefined,
     undefined,
+    undefined,
     grokLogin as GrokDeviceLogin,
   );
   if (registered === undefined) throw new Error("Pool CLI did not register.");

@@ -9,3 +9,17 @@ New provider launches receive an opaque thread-scoped hub token bound to the BB 
 Thread token files use a separate prefix so the old strict token loader ignores their metadata during rollback. Existing host/project tokens and external clients keep their format and behavior. Rolling back can require a new provider launch to obtain a token understood by the old version. Rotation and host removal cover thread tokens too. Tokens and request contents are never shown in the header.
 
 Bypassed or disabled pool routes do not claim a pooled account. A missing observation stays unknown. Removing an observed account shows it as removed rather than substituting a different account.
+
+
+### Ручной выбор аккаунта треда
+
+Откройте «Подписка треда» кнопкой «Пул» в заголовке. В этом же окне есть
+«Автоматически (по умолчанию)» и разрешённые аккаунты со статусами.
+Выбор применяется к следующему запросу; последний подтверждённый запрос
+остаётся наблюдением до успешной отправки новым аккаунтом.
+Ошибка переключения показывается в окне и не меняет выбор.
+Ручной выбор переживает перезапуск. Снятие выбора возвращает домашний аккаунт.
+По умолчанию закреплённый разговор сам аккаунт не меняет.
+Только явная настройка `pinnedFailover=true` разрешает автоматическую смену
+при недопустимости домашнего или выбранного аккаунта; маршрут всегда свой
+для выбранного аккаунта, прямого обхода назначенного транспорта нет.

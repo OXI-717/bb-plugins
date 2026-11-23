@@ -31,7 +31,7 @@ Event names distinguish causal observations:
 
 At most 2,048 validated records from the last 24 hours remain in memory and in one private snapshot under the plugin's server data directory. The snapshot is limited to 2 MiB; one temporary replacement file can add at most another 2 MiB. The dedicated directory is mode 0700 and files 0600. This is a shared event cap, not 2,048 complete requests: requests may lose their earliest or latest events under load.
 
-Recording performs no disk I/O. Once per second, a background task coalesces changes into an atomic asynchronous snapshot. Only one write is in flight; a slow write cannot create an unbounded queue. Storage/validation failure does not throw into forwarding or streaming. Data since the last snapshot can be lost on a crash. Failed writes increment a counter, without logging exception text; the next changed snapshot can try again. Disposal flushes the bounded snapshot. A periodic pass removes expired rows even without new traffic. Abandoned temporary files are removed at initialization and after failed writes. Filesystem refusal can prevent deletion or replacement; the failure counter reports that limitation and routing continues. Retention enforcement resumes when storage permits it.
+Recording performs no disk I/O. Every 15 seconds a background task coalesces changes into an atomic asynchronous snapshot of the recent rows; the larger hourly history is written at most once a minute (before 0.4.89 both were rewritten every second). Readers are served from memory, so the coarser cadence only widens the window that a crash can lose. Only one write is in flight; a slow write cannot create an unbounded queue. Storage/validation failure does not throw into forwarding or streaming. Data since the last snapshot can be lost on a crash. Failed writes increment a counter, without logging exception text; the next changed snapshot can try again. Disposal flushes the bounded snapshot. A periodic pass removes expired rows even without new traffic. Abandoned temporary files are removed at initialization and after failed writes. Filesystem refusal can prevent deletion or replacement; the failure counter reports that limitation and routing continues. Retention enforcement resumes when storage permits it.
 
 The response declares `coverage=retained-events-only`, oldest retained timestamp, row/time caps, `truncated`, eviction and storage-failure counts since process start. Counts restart with the plugin process. Minute aggregates cover only retained events in the trailing hour: `logicalRequests` counts `request` events, `attempts` counts `attempt` events, and upstream 429, locally formed held 429 and upstream 403 holds have separate counters. Missing/evicted events make these lower bounds, not complete traffic rates. Raw per-token/chunk events are not emitted. Inspect per-record identity/provider fields to attribute repeated requests within this bounded sample; absence of a record is not evidence of absence of traffic.
 
@@ -69,6 +69,22 @@ may use another already-authorized eligible account under existing routing;
 family-specific quota rejections retain their existing quota/reset behavior.
 No new account is enabled or opted into any workload.
 
+### Load-aware placement (0.4.89)
+
+With the `balanced` strategy the pool no longer queues a request behind a full account while another account that the same caller may already use can start it now. "Full" means the account's slots are taken, counting requests that are running, waiting, or already placed on the account but not yet in its queue; a simultaneous burst therefore spreads over the free slots of all allowed accounts instead of piling onto the first one.
+
+- Among accounts of the preferred tier a free one is chosen first; the existing quota balance decides between free accounts. When none is free the request waits on the shortest line of the preferred tier.
+- When every preferred account is busy, the nearest less preferred tier that can start the request now is used (for example a reserve account of the same project). Project access, purpose opt-in, schedules, quota thresholds and reserve caps are evaluated exactly as before: only accounts that were already eligible for this request are considered.
+- A warm conversation keeps its account. It is moved for a single request only when that account is full and another one can start now; the binding is kept, so later requests return to it. A detour costs the prompt cache of that request on the other account.
+- Load alone never moves a pinned conversation away from its eligible home account. When home is ineligible, ordinary selection may use another eligible account with that account's own route. Unassigned conversations retain load-aware placement and always use the selected account's current binding.
+- A waiting request is not re-placed when another account frees up later. A provider hold on the home account still waits in place: a held account is never treated as busy, however many requests are already waiting behind that hold.
+
+### Token counting lane (0.4.90)
+
+`POST /v1/messages/count_tokens` produces no inference, and Claude clients send it in bursts of dozens when a session starts or resumes. On the inference lane those bursts occupied request slots, were spaced like inference starts and delayed the first real request; many were cancelled by the client before they were sent. They now use the auxiliary admission lane that Cursor control calls already use: bounded by the same per-account limit, still subject to provider holds and network policy, but outside start pacing, the inference slots and the load used for placement. Journal and history rows are unchanged, so request counts still include them.
+
+`busyOverflow` (default `true`) turns this off: `bb pool config set busyOverflow false` restores the former placement without a reload. The `sequential` strategy is unchanged.
+
 `status` adds per-account `queuedRequests` and `concurrencyLimit`. The settings UI
 shows current active/queued requests by provider and edits the shared account
 limit. `observations` returns only the last 100 rows plus aggregates over **all
@@ -93,14 +109,16 @@ fourteen days. The existing `observations` output includes a compact `history` s
 short event ring remains unchanged. Both commands are local authorized inspection,
 not new public endpoints. No provider, quota or model calls are made.
 
-Each aggregate groups provider, selected account UUID (or null before selection),
-authenticated client hash and project. There are no prompts, response bodies,
-raw headers, credentials, request IDs, thread IDs, model strings or diagnostic
-quota tuples in long-term storage. Machine labels are resolved on inspection
-from the current trusted host directory, never recorded from request payloads or
-persisted in history. External clients without a trusted machine mapping remain
-hashes; they must not be presented as guessed machine names. Lookup failure sets
-`identitiesAvailable=false` and preserves counters without guessing labels.
+Each aggregate groups hour, provider and selected account UUID (or null before
+selection). Client and project fields remain null in the existing file format;
+loading older snapshots merges these dimensions, summing counters and retaining
+maximum pressure timestamps and concurrency. The short event ring retains its
+existing detail. No prompts, response bodies, credentials or conversation IDs
+are persisted in history. The bounds are 65,536 rows and 64 MiB: 128 account
+series plus ten provider request series for 336 hours use 46,368 rows, leaving
+more than 25% spare capacity. Higher account/provider cardinality remains bounded
+and reports dropped events and evicted buckets. Pool status reports retained rows
+and limits. This is a service limit, not a routing setting.
 
 `requests` counts logical starts and therefore belongs to the null-account row.
 `firstDispatches` counts the first actual upstream dispatch assigned to an account;
@@ -115,14 +133,14 @@ include concurrent streams or ones begun earlier: they are not wall-clock busy
 percentages. The account peak is an observed dispatch/header count, not a provider
 limit. Missing ended streams after a process crash cannot be reconstructed.
 
-The file cap is 8 MiB / 8,192 aggregate buckets, in addition to the existing raw
+The file cap is 64 MiB / 65,536 aggregate buckets, in addition to the existing raw
 2 MiB / 2,048-event ring. At cardinality capacity the oldest hour is evicted as a
 group for new hours; within a full single hour new keys are omitted while existing
 keys continue counting. `capacityEvictedBuckets`, `capacityDroppedEvents` and
 `truncated` disclose these limits. Hour buckets expire entirely after fourteen
 days (the boundary may shorten coverage by less than an hour). There is no
 append-only log or per-request file. One temporary atomic replacement adds at most
-another 8 MiB. The containing directory is 0700 and files are 0600. Temporary files
+another 64 MiB. The containing directory is 0700 and files are 0600. Temporary files
 are removed at startup or failed writes. Expiry runs on the journal's existing
 background tick even with no traffic. Filesystem refusal may prevent replacement
 or deletion; it increments the isolated history failure counter, never blocks or
@@ -142,7 +160,7 @@ not authorization to disable, reroute or rotate an account automatically.
 
 History transport is paginated independently from storage. `bb pool history
 --offset 0 --limit 100 --json` returns at most 100 detail rows by default; `limit`
-is a strict integer 1–200 and `offset` is 0–8,192. `totalRows`, `offset`, `limit`,
+is a strict integer 1–200 and `offset` is 0–65,536. `totalRows`, `offset`, `limit`,
 `nextOffset` and `rowsTruncated` describe the page, separately from the persistent
 capacity-omission flag `truncated`. Follow `nextOffset` until null. Rows sort by
 hour then full aggregate key. Pages are live, not an immutable export: each has
@@ -206,3 +224,20 @@ historical proof of no errors. No backfill, expiry extension, additional file,
 scheduler or logging service is added. Existing storage/CLI bounds and isolated
 failure handling apply. These are operational facts, not an account risk score or
 permission to disable, rotate, relogin or reassign an account.
+
+### Event loop stalls
+
+Every ten seconds a diagnostic window is reset. A maximum delay of at least
+1000 ms emits one `Account Pooler event loop delay` warning with numeric fields:
+`maxDelayMs`, `p99DelayMs` (histogram sampled at 20 ms), `windowMs` (actual
+monotonic elapsed time), `utilization` (event loop active fraction over that
+window), `maxGcPauseMs`, `heapUsedMb`, `rssMb`, and `inFlight` (pool requests).
+The timer is unreferenced and all observers are stopped on disposal.
+A diagnostic source failure stops diagnostics without affecting requests.
+
+High delay with utilization near 1 suggests synchronous work or garbage
+collection; compare the maximum GC pause. High delay with low utilization
+suggests the process did not receive CPU time (VM freeze or steal).
+These are clues, not proof: external descheduling during an active callback and
+synchronous I/O can also count as active time. Independent host scheduling
+telemetry and process CPU deltas are needed to distinguish those cases.

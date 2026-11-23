@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,8 @@ PLUGIN = 'account-pool-balanced'
 REPO = 'https://github.com/OXI-717/bb-plugins.git'
 PREFIX = PLUGIN + '/'
 VERSION = re.compile(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)')
+MANAGEMENT_KEY_FILE = None
+MANAGEMENT_GRANT_FILE = None
 
 
 class UpgradeError(Exception):
@@ -78,7 +81,69 @@ def run(*args, timeout=60):
 
 
 def bb(*args):
+    if args and args[0] == 'pool' and MANAGEMENT_GRANT_FILE is not None:
+        fd = os.open(MANAGEMENT_GRANT_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as stream:
+            stat = os.fstat(stream.fileno())
+            if stat.st_mode & 0o077 or stat.st_size > 4096:
+                raise UpgradeError('Unsafe management grant file')
+            grant = json.load(stream)
+        token = grant.get('token')
+        if not isinstance(token, str) or not token:
+            raise UpgradeError('Invalid operator-issued grant')
+        result = subprocess.run(('bb', 'pool', 'management', 'execute', '--request-stdin'),
+                                input=json.dumps({'token': token, 'argv': [*args[1:], '--json']}),
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise UpgradeError('Operator-authorized pool command failed; no fallback')
+        return json.loads(result.stdout)
+    if args and args[0] == 'pool' and MANAGEMENT_KEY_FILE is not None and MANAGEMENT_KEY_FILE.exists():
+        return managed_pool(args[1:], MANAGEMENT_KEY_FILE)
     return json.loads(run('bb', *args, '--json'))
+
+
+def management_rpc(method, payload):
+    base = os.environ.get('BB_SERVER_URL', 'http://127.0.0.1:38886')
+    parsed = urllib.parse.urlsplit(base)
+    if (parsed.scheme != 'http' or parsed.hostname not in ('localhost', '127.0.0.1', '::1')
+            or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('', '/')):
+        raise UpgradeError('Management requires a local BB server connection')
+    request = urllib.request.Request(base.rstrip('/') + '/api/v1/plugins/' + PLUGIN + '/rpc/' + method,
+                                    data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=30) as response:
+            result = json.load(response)
+        if result.get('ok') is not True:
+            raise UpgradeError('Private management request refused')
+        return result['result']
+    except Exception:
+        raise UpgradeError('Private management request unavailable') from None
+
+
+def managed_pool(args, key_file):
+    descriptor = os.open(key_file, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor) as stream:
+        stat = os.fstat(stream.fileno())
+        if stat.st_mode & 0o077 or stat.st_size > 256:
+            raise UpgradeError('Unsafe private management key file')
+        value = stream.read(257)
+    match = re.fullmatch(r'POOL_MANAGEMENT_KEY=([A-Za-z0-9_-]{43})\n?', value)
+    if not match:
+        raise UpgradeError('Invalid private management key file')
+    grant = management_rpc('management.unlock', {'key': match[1], 'scope': 'manage', 'ttlSeconds': 60})
+    try:
+        result = subprocess.run(('bb', 'pool', 'management', 'execute', '--request-stdin'),
+                                input=json.dumps({'token': grant['token'], 'argv': [*args, '--json']}),
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise UpgradeError('Authorized pool command failed')
+        return json.loads(result.stdout)
+    finally:
+        try:
+            management_rpc('management.lock', {'token': grant['token']})
+        except UpgradeError:
+            pass
 
 
 def installed():
@@ -112,11 +177,37 @@ def release_target(source, expected=None):
     return target, sha
 
 
-def inventory(pool):
-    fields = ('id', 'provider', 'kind', 'enabled', 'priority', 'role', 'cap', 'policy', 'projects', 'drainOnce', 'drainGeneration')
+def validate_pool_status(pool, required=()):
+    if not isinstance(pool, dict):
+        raise UpgradeError('Invalid pool status response')
+    if pool.get('management') == 'locked':
+        raise UpgradeError('Pool management is locked; pass --operator-key-file or --grant-file')
+    missing = [key for key in required if key not in pool]
+    if missing:
+        raise UpgradeError('Pool status is missing required fields: ' + ', '.join(missing))
+    return pool
+
+
+def pool_status(required=()):
+    return validate_pool_status(bb('pool', 'status'), required)
+
+
+def explicit_private_file(raw_path, label):
+    candidate = Path(os.path.abspath(raw_path))
+    if candidate.is_symlink():
+        raise UpgradeError(f'Unsafe {label}')
+    if not candidate.is_file():
+        raise UpgradeError(f'{label.capitalize()} not found')
+    return candidate
+
+
+def inventory(pool, routing_keys=None):
+    validate_pool_status(pool, ('accounts', 'routing', 'enabledAccountCount'))
+    # Restrict only post-update verification; pre-update races remain strict.
+    fields = ('id', 'provider', 'kind', 'enabled', 'priority', 'role', 'cap', 'policy', 'weeklyBudget', 'projects', 'drainOnce', 'drainGeneration')
     return {
         'accounts': sorted(({k: a.get(k) for k in fields} for a in pool['accounts']), key=lambda a: a['id']),
-        'routing': pool['routing'],
+        'routing': {k: v for k, v in pool['routing'].items() if routing_keys is None or k in routing_keys},
         'enabledAccountCount': pool['enabledAccountCount'],
     }
 
@@ -127,6 +218,7 @@ def save_json(path, value):
 
 
 def report_pool(pool, say):
+    validate_pool_status(pool, ('inFlight', 'accounts'))
     say(f"In-flight requests: {pool['inFlight']}")
     names = {h['hostId']: h.get('hostName') or h['hostId'] for h in pool.get('hosts', [])}
     for account in pool['accounts']:
@@ -152,16 +244,21 @@ def confirm_interrupt():
     return False
 
 
-def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=900):
+def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=900, include_native=False):
     start = time.monotonic()
     next_report = start
     stable = 0
     asked = False
+    native_leases_waiting = []
     while time.monotonic() - start < deadline_seconds:
-        pool = bb('pool', 'status')
+        pool = pool_status(('inFlight',))
         count = pool['inFlight']
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             raise UpgradeError('Invalid in-flight request count')
+        native_leases_waiting = native_leases() if include_native else []
+        native_count = len(native_leases_waiting)
+        transport_count = model_activity() if include_native else 0
+        count += native_count + transport_count
         stable = stable + 1 if count == 0 else 0
         if stable == 3:
             say('Pool idle: three checks passed.')
@@ -170,6 +267,8 @@ def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=9
         if now >= next_report:
             say(f'Idle wait: {int(now - start)} / {deadline_seconds} seconds')
             report_pool(pool, say)
+            if native_count:
+                say(f'Native processes awaiting confirmed stop: {native_count}')
             next_report = now + 60
         if offer_interrupt and count and not asked and (prompt_now or now - start >= 300):
             asked = True
@@ -178,7 +277,7 @@ def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=9
                 return True
             say('No interruption approved; continuing to wait up to 15 minutes.')
         time.sleep(3)
-    raise UpgradeError('Idle wait expired; nothing updated')
+    raise UpgradeError('Idle wait expired; nothing updated' + uncertain_lease_details(native_leases_waiting))
 
 
 def backup_state(data, destination, pool, source, info, config):
@@ -208,9 +307,51 @@ def backup_state(data, destination, pool, source, info, config):
         'keep BB stopped and use the saved source metadata with BB support. No destructive reinstall is automated.\n')
 
 
-def verify_pause(args):
-    if getattr(args, 'pause_sessions', False):
-        from pool_session_pause import verify_hold
+def model_activity():
+    value = bb('pool', 'maintenance', 'status')
+    activity = value.get('transportInFlight')
+    if type(activity) is not int or activity < 0:
+        raise UpgradeError('Model transport activity is unavailable; update refused')
+    return activity
+
+
+def native_leases():
+    value = bb('pool', 'native', 'status')
+    leases = value.get('leases')
+    if not isinstance(leases, list):
+        raise UpgradeError('Native executor inventory is unavailable; update refused')
+    return leases
+
+
+def native_in_flight():
+    return len(native_leases())
+
+
+def uncertain_lease_details(leases):
+    now = int(time.time() * 1000)
+    details = []
+    for lease in leases:
+        if not isinstance(lease, dict) or lease.get('state') != 'uncertain':
+            continue
+        executor, kind, lease_id, created_at = (lease.get(key) for key in ('executorId', 'kind', 'id', 'createdAt'))
+        if (not isinstance(executor, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', executor)
+                or kind not in ('task', 'catalog', 'diagnostic')
+                or not isinstance(lease_id, str) or not re.fullmatch(r'[0-9a-fA-F-]{36}', lease_id)
+                or type(created_at) not in (int, float) or not math.isfinite(created_at)):
+            continue
+        age = max(0, int((now - created_at) / 1000))
+        details.append(f'Unconfirmed native stop: {executor} ({kind}), age {age} s. '
+                       f'After confirming stopped: bb pool native attest-stopped {lease_id} --confirmed')
+    return '\n' + '\n'.join(details) if details else ''
+
+
+def verify_pause(args, *, sealed=False):
+    if getattr(args, 'pause_sessions', False) or getattr(args, 'drain_sessions', False):
+        from pool_session_pause import verify_hold, verify_model_hold
+        model = bb('pool', 'maintenance', 'status')
+        verify_model_hold(model, args.maintenance_owner)
+        if sealed and getattr(args, 'pause_sessions', False) and model['lease'].get('upgrade') != 'sealed':
+            raise UpgradeError('Model admission is not sealed; update refused')
         verify_hold(bb('pool-maintenance', 'status'), args.maintenance_owner)
 
 
@@ -222,7 +363,7 @@ def perform(args, data, output, say):
     if version(target) < version(info['version']):
         raise UpgradeError('Downgrades are not supported')
     if args.check:
-        report_pool(bb('pool', 'status'), say)
+        report_pool(pool_status(('inFlight', 'accounts')), say)
     if target == info['version']:
         if not source.get('history') or source['history'][0]['version'] != sha:
             raise UpgradeError('Installed version matches but resolved commit differs')
@@ -232,34 +373,51 @@ def perform(args, data, output, say):
         say('Preflight passed; no update performed.')
         return 'PREFLIGHT_PASS'
     verify_pause(args)
-    paused = getattr(args, 'pause_sessions', False)
+    paused = getattr(args, 'pause_sessions', False) or getattr(args, 'drain_sessions', False)
     forced = wait_idle(say, args.interrupt_now, offer_interrupt=not paused,
-                       deadline_seconds=90 if paused else 900)
-    before = bb('pool', 'status')
+                       deadline_seconds=90 if paused else 900, include_native=paused)
+    if getattr(args, 'pause_sessions', False):
+        from pool_session_pause import verify_model_hold
+        sealed = bb('pool', 'maintenance', 'seal-upgrade', '--owner', args.maintenance_owner)
+        verify_model_hold(sealed, args.maintenance_owner)
+        if sealed['lease'].get('upgrade') != 'sealed':
+            raise UpgradeError('Model admission was not sealed; update refused')
+    before = pool_status(('accepting', 'inFlight', 'accounts', 'routing', 'enabledAccountCount'))
     config = bb('plugin', 'config', PLUGIN)['values']
     if not before['accepting'] or (before['inFlight'] and not forced):
         raise UpgradeError('Pool state changed; retry after requests finish')
-    verify_pause(args)
+    verify_pause(args, sealed=True)
+    if paused:
+        leases = native_leases()
+        if leases or model_activity():
+            raise UpgradeError('Native processes or auxiliary work have not stopped; update refused'
+                               + uncertain_lease_details(leases))
     backup_state(data, output / 'backup', before, source, info, config)
     say('Verified backup created.')
     # Fail closed if a new release or a source/settings change appeared while waiting.
     if source_info() != source or release_target(source, target) != (target, sha):
         raise UpgradeError('Source or release changed while waiting; nothing updated')
-    latest = bb('pool', 'status')
+    latest = pool_status(('inFlight', 'accounts', 'routing', 'enabledAccountCount'))
     if inventory(latest) != inventory(before) or bb('plugin', 'config', PLUGIN)['values'] != config:
         raise UpgradeError('Account settings changed during backup; retry')
     if latest['inFlight'] and not forced:
         raise UpgradeError('New requests arrived during backup; retry')
-    verify_pause(args)
+    verify_pause(args, sealed=True)
+    if paused:
+        leases = native_leases()
+        if leases or model_activity():
+            raise UpgradeError('Native processes or auxiliary work appeared during backup; update refused'
+                               + uncertain_lease_details(leases))
     say(f'Updating to {target} using BB plugin update.')
     run('bb', 'plugin', 'update', PLUGIN, '--yes', timeout=600)
     after_info = installed()
     after_source = source_info()
-    after = bb('pool', 'status')
+    after = pool_status(('accepting', 'accounts', 'routing', 'enabledAccountCount'))
+    verify_pause(args, sealed=True)
     if (after_info['version'] != target or not after_source.get('history')
             or after_source['history'][0]['version'] != sha):
         raise UpgradeError('Updated version or commit differs from verified release; inspect backup/RECOVERY.txt')
-    if not after['accepting'] or inventory(after) != inventory(before):
+    if not after['accepting'] or inventory(after, routing_keys=before['routing']) != inventory(before):
         raise UpgradeError('Post-update account or routing verification failed; inspect backup/RECOVERY.txt')
     after_config = bb('plugin', 'config', PLUGIN)['values']
     if any(after_config.get(key) != value for key, value in config.items()):
@@ -267,20 +425,43 @@ def perform(args, data, output, say):
     with contextlib.closing(sqlite3.connect((data / 'data.db').as_uri() + '?mode=ro', uri=True)) as db:
         if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
             raise UpgradeError('Post-update database integrity check failed')
+    added_routing = sorted(after['routing'].keys() - before['routing'].keys())
+    if added_routing:
+        say('Added routing keys: ' + ', '.join(added_routing))
     say('PASS: version, commit, accounts, routing, configuration and database verified.')
     return 'PASS'
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--candidate-preflight', help='Candidate manifest: artifact hashes, focused tests, network checks; no installation')
+    parser.add_argument('--receipt-output', help='Private candidate receipt output path')
     parser.add_argument('--check', action='store_true', help='Validate release without waiting or updating')
     parser.add_argument('--wait-idle', action='store_true', help='Wait for three idle checks without updating anything')
     parser.add_argument('--version', help='Require this to be the latest compatible release; not a downgrade selector')
     parser.add_argument('--interrupt-now', action='store_true', help='Offer the interactive interruption prompt immediately')
+    parser.add_argument('--drain-sessions', action='store_true', help='Hold dispatch and await natural session completion; never cancel active work')
+    parser.add_argument('--drain-timeout', type=int, default=600, help='Natural drain deadline in seconds (1..600)')
+    parser.add_argument('--operator-key-file', help='Explicit private operator key for durable per-command grants across reload; no autodiscovery')
+    parser.add_argument('--grant-file', help='Explicit private operator-issued management grant JSON; no automatic root-key access')
     parser.add_argument('--pause-sessions', action='store_true', help='Stop active sessions on ALL hosts, update, then continue the same sessions; history retained, current turns interrupted')
     parser.add_argument('--resume-sessions', help='Recover session continuation from a previous private operation receipt; never updates the pool')
     parser.add_argument('--sandbox', action='store_true', help='Exercise the full workflow on temporary synthetic state; no live BB or network')
     args = parser.parse_args()
+    if args.operator_key_file and args.grant_file:
+        parser.error('Choose operator key or one short-lived grant')
+    if args.candidate_preflight:
+        if not args.receipt_output or any((args.check,args.wait_idle,args.version,args.pause_sessions,args.drain_sessions,args.resume_sessions,args.sandbox,args.interrupt_now)):
+            parser.error('Candidate preflight requires receipt output and no live-operation flags')
+        os.umask(0o077)
+        from pool_candidate_preflight import preflight
+        result = preflight(args.candidate_preflight, args.receipt_output)
+        print(json.dumps(result))
+        return 0 if result['status'] == 'pass' else 2
+    if not 1 <= args.drain_timeout <= 600:
+        parser.error('--drain-timeout must be 1..600')
+    if args.drain_sessions and (args.pause_sessions or args.check or args.wait_idle or args.interrupt_now or args.resume_sessions or args.sandbox):
+        parser.error('--drain-sessions cannot combine with other operation modes')
     if args.sandbox:
         if args.version or args.check or args.interrupt_now or args.wait_idle or args.pause_sessions or args.resume_sessions:
             parser.error('--sandbox cannot be combined with live-operation options')
@@ -294,6 +475,9 @@ def main():
         parser.error('--wait-idle cannot be combined with update or interruption options')
     os.umask(0o077)
     output = None
+    global MANAGEMENT_KEY_FILE, MANAGEMENT_GRANT_FILE
+    previous_key_file = MANAGEMENT_KEY_FILE
+    previous_grant_file = MANAGEMENT_GRANT_FILE
     try:
         if args.version:
             version(args.version)
@@ -301,6 +485,8 @@ def main():
         if remote.hostname not in ('localhost', '127.0.0.1', '::1'):
             raise UpgradeError('Run this script on the BB server host with a local BB connection')
         root = Path(bb('status')['dataDir']).resolve()
+        MANAGEMENT_KEY_FILE = explicit_private_file(args.operator_key_file, 'private management key file') if args.operator_key_file else None
+        MANAGEMENT_GRANT_FILE = explicit_private_file(args.grant_file, 'management grant file') if args.grant_file else None
         data = root / 'plugins' / PLUGIN
         if not (data / 'data.db').is_file():
             raise UpgradeError('Local plugin database not found; run on the BB server host')
@@ -328,9 +514,8 @@ def main():
                             raise UpgradeError('Recovery receipt must belong to this server upgrade backups')
                         SessionPause(receipt, bb, say).recover()
                         result = 'SESSIONS_RECOVERED'
-                    elif args.pause_sessions:
+                    elif args.drain_sessions:
                         from pool_session_pause import SessionPause
-                        # Verify release and server before interrupting any session.
                         preflight = argparse.Namespace(**vars(args))
                         preflight.check = True
                         checked = perform(preflight, data, output, say)
@@ -341,13 +526,59 @@ def main():
                             try:
                                 pause.acquire_hold()
                                 args.maintenance_owner = pause.state['operationId']
-                                pause.stop()
+                                def idle():
+                                    return (pool_status(('inFlight',))['inFlight'] == 0
+                                            and native_in_flight() == 0 and model_activity() == 0)
+                                pause.drain(idle, args.drain_timeout)
+                                # Requires the explicit non-cancelling API; no fallback.
+                                pause.acquire_graceful_model_hold()
                                 result = perform(args, data, output, say)
                             finally:
                                 try:
-                                    pause.resume()
+                                    pause.release_model_hold()
                                 finally:
                                     pause.release_hold()
+                    elif args.pause_sessions:
+                        from pool_session_pause import SessionPause
+                        # Verify release and server before interrupting any session.
+                        preflight = argparse.Namespace(**vars(args))
+                        preflight.check = True
+                        checked = perform(preflight, data, output, say)
+                        if checked == 'ALREADY_CURRENT':
+                            result = checked
+                        else:
+                            # A legacy server must fail before acquiring the BB queue hold.
+                            status = bb('pool', 'maintenance', 'status')
+                            if (not isinstance(status, dict) or status.get('schemaVersion') != 1
+                                    or status.get('scope') != 'all-model-clients'
+                                    or type(status.get('transportInFlight')) is not int
+                                    or status['transportInFlight'] < 0 or 'lease' not in status):
+                                raise UpgradeError('All-client model pause API unavailable; no sessions paused')
+                            pause = SessionPause(output / 'sessions.json', bb, say)
+                            try:
+                                pause.acquire_hold()
+                                args.maintenance_owner = pause.state['operationId']
+                                pause.acquire_model_hold('acquire-upgrade')
+                                pause.stop()
+                                result = perform(args, data, output, say)
+                            except (Exception, KeyboardInterrupt) as refusal:
+                                say('Update failed before recovery: ' + str(refusal))
+                                try:
+                                    pause.release_model_hold()
+                                finally:
+                                    try:
+                                        pause.release_hold()
+                                    finally:
+                                        pause.resume(admission_released=True)
+                                raise
+                            else:
+                                try:
+                                    pause.release_model_hold()
+                                finally:
+                                    try:
+                                        pause.resume()
+                                    finally:
+                                        pause.release_hold()
                     elif args.wait_idle:
                         wait_idle(say, offer_interrupt=False)
                         result = 'IDLE_PASS'
@@ -371,6 +602,9 @@ def main():
         else:
             print(f'FAILED: {error}', file=sys.stderr)
         return 1
+    finally:
+        MANAGEMENT_KEY_FILE = previous_key_file
+        MANAGEMENT_GRANT_FILE = previous_grant_file
 
 
 if __name__ == '__main__':

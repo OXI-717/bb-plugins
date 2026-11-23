@@ -22,6 +22,7 @@ class FakeBB:
         }
         self.calls = []
         self.lease = None
+        self.model_lease = None
         self.fail_stop = False
         self.ambiguous_send = False
 
@@ -31,6 +32,19 @@ class FakeBB:
 
     def __call__(self, *args):
         self.calls.append(args)
+        if args[:2] == ('pool', 'maintenance'):
+            if args[2] in ('acquire', 'acquire-upgrade'):
+                self.model_lease = {'owner': args[4], 'expiresAt': time.time()*1000+1_800_000}
+                if args[2] == 'acquire-upgrade':
+                    self.model_lease['upgrade'] = 'draining'
+            elif args[2] == 'release':
+                if self.model_lease and self.model_lease['owner'] != args[4]:
+                    raise RuntimeError('foreign pause')
+                self.model_lease = None
+            elif args[2] == 'interrupt':
+                if not self.model_lease or self.model_lease['owner'] != args[4]:
+                    raise RuntimeError('foreign pause')
+            return {'schemaVersion': 1, 'scope': 'all-model-clients', 'transportInFlight': 0, 'lease': self.model_lease}
         if args[0] == 'pool-maintenance':
             if args[1] == 'acquire':
                 self.lease = {'owner': args[3], 'expiresAt': time.time()*1000+1_800_000}
@@ -77,7 +91,7 @@ class SessionPauseTests(unittest.TestCase):
         sends = [c for c in self.bb.calls if c[1] == 'tell']
         self.assertEqual(len(sends), 1)
         self.assertEqual(sends[0][2], 'thread-a')
-        self.assertEqual(len(sends[0]), 4)
+        self.assertEqual(sends[0][-2:], ('--mode', 'auto'))
         self.assertNotIn('PRIVATE', self.path.read_text())
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
@@ -105,11 +119,27 @@ class SessionPauseTests(unittest.TestCase):
     def test_ambiguous_send_is_never_duplicated(self):
         self.pause.stop()
         self.bb.ambiguous_send = True
-        with self.assertRaises(RuntimeError):
-            self.pause.resume()
-        with self.assertRaises(RuntimeError):
-            SessionPause(self.path, self.bb, lambda _: None, running=self.bb.running).recover()
+        self.pause.resume()
+        SessionPause(self.path, self.bb, lambda _: None, running=self.bb.running).recover()
+        self.assertEqual(self.pause.state['sessions'][0]['action'], 'resumed')
         self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 1)
+
+    def test_lost_continuation_is_retried_and_confirmed(self):
+        self.pause.stop()
+        sends = []
+        def lose_first(*args):
+            if args[:2] == ('thread', 'tell'):
+                sends.append(args)
+                if len(sends) == 1:
+                    return {'delivery': 'sent'}
+            return self.bb(*args)
+        self.pause.bb = lose_first
+        self.pause.sleep = lambda _: None
+        self.pause.resume()
+        self.assertEqual(len(sends), 2)
+        self.assertEqual(sends[-1][-2:], ('--mode', 'auto'))
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
+        self.assertEqual(self.pause.state['uncontinuedThreads'], [])
 
     def test_failed_stop_never_blindly_continues(self):
         self.bb.fail_stop = True
@@ -132,10 +162,20 @@ class SessionPauseTests(unittest.TestCase):
     def test_resume_attempts_other_sessions_after_one_send_failure(self):
         self.bb.threads['thread-b']['status'] = 'active'
         self.pause.stop()
-        self.bb.ambiguous_send = True
+        def no_delivery(*args):
+            if args[:3] == ('thread', 'tell', 'thread-a'):
+                self.bb.calls.append(args)
+                raise TimeoutError()
+            return self.bb(*args)
+        self.pause.bb = no_delivery
+        self.pause.sleep = lambda _: None
         with self.assertRaises(RuntimeError):
             self.pause.resume()
-        self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 2)
+        self.assertEqual(len([c for c in self.bb.calls if c[1] == 'tell']), 3)
+        self.assertEqual(self.pause.state['uncontinuedThreads'], [
+            {'id': 'thread-a', 'reason': 'resume-unconfirmed'}
+        ])
+        self.assertEqual(self.bb.threads['thread-b']['status'], 'active')
 
     def test_missing_metadata_refuses_before_stopping(self):
         self.bb.threads['thread-a'].pop('updatedAt')
@@ -290,11 +330,69 @@ class MaintenanceIntegrationTests(unittest.TestCase):
                 if args.check:
                     return 'PREFLIGHT_PASS'
                 self.assertEqual(fake.threads['thread-a']['status'], 'idle')
-                raise RuntimeError('synthetic update failure')
+                self.assertIsNotNone(fake.lease)
+                self.assertEqual(fake.model_lease.get('upgrade'), 'draining')
+                fake.threads['thread-b']['queuedMessageCount'] = 2
+                raise upgrade.UpgradeError('Idle wait expired; nothing updated')
             with patch('pool_session_pause.running_threads', fake.running), patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', side_effect=perform), patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(upgrade.main(), 1)
             self.assertEqual(calls, [True, False])
+            self.assertIsNone(fake.model_lease)
+            self.assertIsNone(fake.lease)
             self.assertEqual(fake.threads['thread-a']['status'], 'active')
+            self.assertEqual(fake.threads['thread-b']['status'], 'active')
+            self.assertEqual(fake.threads['thread-b']['queuedMessageCount'], 0)
+            self.assertFalse(any(c[:3] == ('pool','maintenance','interrupt') for c in fake.calls))
+            actions = [c[:3] for c in fake.calls]
+            model_release = actions.index(('pool', 'maintenance', 'release'))
+            dispatch_release = next(i for i, c in enumerate(actions) if c[:2] == ('pool-maintenance', 'release'))
+            continue_turn = actions.index(('thread', 'tell', 'thread-a'))
+            self.assertLess(model_release, dispatch_release)
+            self.assertLess(dispatch_release, continue_turn)
+
+    def test_missing_model_pause_api_never_holds_queue_or_stops_sessions(self):
+        for response in (None, {}, {'schemaVersion': 1, 'scope': 'all-hosts-all-projects'}):
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as directory:
+                data = Path(directory) / 'plugins' / upgrade.PLUGIN
+                data.mkdir(parents=True)
+                (data / 'data.db').touch()
+                fake = FakeBB()
+                def bb(*args):
+                    if args == ('status',):
+                        return {'dataDir': directory}
+                    if args == ('pool', 'maintenance', 'status'):
+                        if response is None:
+                            raise RuntimeError('Unknown legacy command')
+                        return response
+                    return fake(*args)
+                with patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', return_value='PREFLIGHT_PASS') as perform, patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(upgrade.main(), 1)
+                self.assertEqual(perform.call_count, 1)
+                self.assertEqual(fake.calls, [])
+                self.assertIsNone(fake.lease)
+
+    def test_model_pause_precedes_stop_and_release_failure_still_cleans_queue(self):
+        for fail_release in (False, True):
+            with self.subTest(fail_release=fail_release), tempfile.TemporaryDirectory() as directory:
+                data = Path(directory) / 'plugins' / upgrade.PLUGIN
+                data.mkdir(parents=True)
+                (data / 'data.db').touch()
+                fake = FakeBB()
+                def bb(*args):
+                    if args == ('status',):
+                        return {'dataDir': directory}
+                    if args[:3] == ('pool', 'maintenance', 'acquire-upgrade'):
+                        self.assertEqual(fake.threads['thread-a']['status'], 'active')
+                        receipt = next((Path(directory) / 'backups').glob('*/sessions.json'))
+                        self.assertEqual(json.loads(receipt.read_text())['sessions'], [])
+                    if fail_release and args[:3] == ('pool', 'maintenance', 'release'):
+                        raise RuntimeError('synthetic model release failure')
+                    return fake(*args)
+                with patch('pool_session_pause.running_threads', fake.running), patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'perform', side_effect=lambda args, *rest: 'PREFLIGHT_PASS' if args.check else 'UPGRADED'), patch.object(upgrade.sys, 'argv', ['upgrade', '--pause-sessions']), patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(upgrade.main(), int(fail_release))
+                self.assertIsNone(fake.lease)
+                self.assertEqual(fake.threads['thread-a']['status'], 'active')
+                self.assertEqual(len([c for c in fake.calls if c[:2] == ('thread', 'tell')]), 1)
 
     def test_preflight_failure_never_stops_sessions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -308,6 +406,143 @@ class MaintenanceIntegrationTests(unittest.TestCase):
                 self.assertEqual(upgrade.main(), 1)
             self.assertFalse(any(c[1] == 'stop' for c in fake.calls))
 
+
+class ModelMaintenanceTests(unittest.TestCase):
+    setUp = SessionPauseTests.setUp
+    def test_recovery_model_release_failure_still_attempts_continuation_and_queue_release(self):
+        self.pause.acquire_hold()
+        self.pause.stop()
+        self.pause.acquire_model_hold()
+        original = self.bb
+        def failed(*args):
+            if args[:3] == ('pool', 'maintenance', 'status'):
+                raise RuntimeError('synthetic unavailable pool')
+            return original(*args)
+        recovered = SessionPause(self.path, failed, lambda _: None, running=self.bb.running)
+        with self.assertRaisesRegex(RuntimeError, 'unavailable pool'):
+            recovered.recover()
+        self.assertIsNone(self.bb.lease)
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
+
+    def test_both_barriers_restore_in_order_and_preserve_foreign_pauses(self):
+        self.pause.acquire_hold()
+        self.pause.acquire_model_hold()
+        self.pause.stop()
+        self.pause.interrupt_model_requests()
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'idle')
+        self.assertIsNotNone(self.bb.model_lease)
+        self.pause.release_model_hold()
+        self.pause.resume()
+        self.pause.release_hold()
+        self.assertIsNone(self.bb.model_lease)
+        self.assertIsNone(self.bb.lease)
+        release = next(i for i, c in enumerate(self.bb.calls) if c[:3] == ('pool', 'maintenance', 'release'))
+        send = next(i for i, c in enumerate(self.bb.calls) if c[:2] == ('thread', 'tell'))
+        self.assertLess(release, send)
+        self.assertEqual(self.bb.threads['thread-a']['status'], 'active')
+
+    def test_recovery_releases_only_its_model_pause_before_continuing(self):
+        self.pause.acquire_hold()
+        self.pause.acquire_model_hold()
+        self.pause.stop()
+        self.bb.model_lease['owner'] = 'foreign-operation'
+        self.pause.recover()
+        self.assertEqual(self.bb.model_lease['owner'], 'foreign-operation')
+        self.assertFalse(any(c[:3] == ('pool', 'maintenance', 'release') for c in self.bb.calls))
+
+    def test_crash_after_model_pause_receipt_recovers_without_duplicate_send(self):
+        self.pause.acquire_hold()
+        self.pause.acquire_model_hold()
+        self.pause.stop()
+        recovered = SessionPause(self.path, self.bb, lambda _: None, running=self.bb.running)
+        recovered.recover()
+        recovered.recover()
+        self.assertIsNone(self.bb.model_lease)
+        self.assertEqual(len([c for c in self.bb.calls if c[:2] == ('thread', 'tell')]), 1)
+
+    def test_missing_or_expiring_model_barrier_refuses_update(self):
+        from pool_session_pause import verify_model_hold
+        good = {'schemaVersion': 1, 'scope': 'all-model-clients', 'transportInFlight': 0, 'lease': {'owner': 'owner-a', 'expiresAt': 1_800_000}}
+        verify_model_hold(good, 'owner-a', now=0)
+        for bad in [None, {}, {**good, 'scope': 'all-hosts-all-projects'}, {**good, 'lease': None}, {**good, 'lease': {'owner':'owner-a','expiresAt':899_999}}]:
+            with self.assertRaises(RuntimeError):
+                verify_model_hold(bad, 'owner-a', now=0)
+
+    def test_idle_refusal_names_uncertain_native_lease_without_releasing_it(self):
+        times = iter([0, 0, 0, 1, 2, 3])
+        lease_id = '11111111-1111-4111-8111-111111111111'
+        lease = {'state': 'uncertain', 'executorId': 'example-executor', 'kind': 'catalog',
+                 'id': lease_id, 'createdAt': 175_000}
+        def bb(*args):
+            if args == ('pool', 'native', 'status'):
+                return {'leases': [lease]}
+            self.assertEqual(args, ('pool', 'status'))
+            return {'inFlight': 0, 'accounts': []}
+        with patch.object(upgrade, 'bb', side_effect=bb), patch.object(upgrade, 'model_activity', return_value=0), patch.object(upgrade.time, 'sleep'), patch.object(upgrade, 'report_pool'), patch.object(upgrade.time, 'monotonic', side_effect=lambda:next(times)), patch.object(upgrade.time, 'time', return_value=300):
+            with self.assertRaises(upgrade.UpgradeError) as error:
+                upgrade.wait_idle(lambda _: None, offer_interrupt=False, deadline_seconds=2, include_native=True)
+            self.assertIn('example-executor (catalog), age 125 s', str(error.exception))
+            self.assertIn(f'bb pool native attest-stopped {lease_id} --confirmed', str(error.exception))
+
+
+class GracefulDrainTests(unittest.TestCase):
+    setUp = SessionPauseTests.setUp
+
+    def test_natural_completion_never_stops_or_sends_continuations(self):
+        self.pause.acquire_hold()
+        ticks = [0]
+        def sleep(_):
+            ticks[0] += 1
+            self.bb.threads['thread-a']['status'] = 'idle'
+        self.pause.sleep = sleep
+        self.pause.clock = lambda: ticks[0]
+        self.pause.drain(lambda: True, 10)
+        self.pause.release_hold()
+        self.assertFalse(any(c[:2] in [('thread', 'stop'), ('thread', 'tell')] for c in self.bb.calls))
+        self.assertEqual(self.pause.state['sessions'], [])
+
+    def test_busy_or_unknown_drain_refuses_without_model_hold(self):
+        self.pause.acquire_hold()
+        ticks = [0]
+        self.pause.sleep = lambda _: ticks.__setitem__(0, ticks[0]+1)
+        self.pause.clock = lambda: ticks[0]
+        with self.assertRaisesRegex(RuntimeError, 'drain expired'):
+            self.pause.drain(lambda: True, 4)
+        self.assertFalse(any(c[:2] == ('thread', 'stop') or c[:3] == ('pool', 'maintenance', 'acquire') for c in self.bb.calls))
+        self.pause.release_hold()
+
+    def test_graceful_model_command_has_no_interrupt_fallback(self):
+        def unsupported(*args):
+            if args[:3] == ('pool', 'maintenance', 'acquire-graceful'):
+                raise RuntimeError('unsupported')
+            return self.bb(*args)
+        self.pause.bb = unsupported
+        with self.assertRaisesRegex(RuntimeError, 'unsupported'):
+            self.pause.acquire_graceful_model_hold()
+        self.assertEqual(self.pause.state['modelAdmission'], 'acquire-intent')
+        self.assertFalse(any(c[:3] in [('pool', 'maintenance', 'acquire'), ('pool', 'maintenance', 'interrupt')] for c in self.bb.calls))
+
+
+class GracefulMainTests(unittest.TestCase):
+    def test_cli_drain_uses_non_cancelling_command_and_releases_both_holds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data=Path(directory)/'plugins'/upgrade.PLUGIN
+            data.mkdir(parents=True);(data/'data.db').touch()
+            fake=FakeBB()
+            fake.threads['thread-a']['status']='idle'
+            def bb(*args):
+                if args==('status',):return {'dataDir':directory}
+                if args==('pool','status'):return {'inFlight':0}
+                if args==('pool','native','status'):return {'leases':[]}
+                if args[:3]==('pool','maintenance','acquire-graceful'):
+                    fake.calls.append(args)
+                    fake.model_lease={'owner':args[4],'expiresAt':time.time()*1000+1_800_000}
+                    return {'schemaVersion':1,'scope':'all-model-clients','transportInFlight':0,'lease':fake.model_lease}
+                return fake(*args)
+            with patch.object(upgrade,'bb',side_effect=bb), patch.object(upgrade,'perform',side_effect=lambda a,*r:'PREFLIGHT_PASS' if a.check else 'PASS'), patch('pool_session_pause.running_threads',fake.running), patch('pool_session_pause.time.sleep'), patch.object(upgrade.sys,'argv',['upgrade','--drain-sessions']), patch.dict(upgrade.os.environ,{'BB_SERVER_URL':'http://127.0.0.1'}),contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(upgrade.main(),0)
+            self.assertFalse(any(c[:2] in [('thread','stop'),('thread','tell')] or c[:3] in [('pool','maintenance','acquire'),('pool','maintenance','interrupt')] for c in fake.calls))
+            self.assertIsNone(fake.lease);self.assertIsNone(fake.model_lease)
 
 if __name__ == '__main__':
     unittest.main()

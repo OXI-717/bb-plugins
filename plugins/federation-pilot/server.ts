@@ -1,3 +1,6 @@
+import {createReconciler} from './reconcile.ts';
+import {z} from 'zod';
+import {ConfigurationChangedError,createRecovery,failureKind,failureLabels} from './recovery.ts';
 import {randomUUID,createHash} from 'node:crypto';
 import type {BbPluginApi,ExperimentalPluginWebSocket} from '@get-bb/plugin-sdk';
 import {hostContract,hostSignals,requestSchema} from './contract.ts';
@@ -24,7 +27,7 @@ export default function plugin(bb:BbPluginApi){
  });
  const host=bb.hosts.experimental_client({contract:hostContract,experimental_signals:hostSignals});
  type Snapshot={key:string,at:number,inventory:Inventory,project:any};
- type Client={socket:ExperimentalPluginWebSocket,config:RemoteConfig,ready:boolean,closed:boolean,queue:string[],lastSeen:number};
+ type Client={socket:ExperimentalPluginWebSocket,config:RemoteConfig,ready:boolean,closed:boolean,queue:string[],lastSeen:number,timelineSubscriptions:Set<string>};
  const caches=new Map<string,Snapshot>(),loading=new Map<string,Promise<Snapshot>>(),clients=new Map<string,Client>();
  const verifiedOwners=new Map<string,string>();let verifiedTopology='';
  const absentPrimary=new Set<string>();
@@ -32,7 +35,39 @@ export default function plugin(bb:BbPluginApi){
  async function configurations(){const s=await settings.get();return {enabled:s.enabled,servers:parseServers(s.servers,s)};}
  async function selected(serverId:string){const all=await configurations();if(!all.enabled)throw Error('Federation disabled');const c=all.servers.find(c=>c.serverId===serverId);if(!c)throw Error('Unknown or disabled remote');return c;}
  const keyOf=(c:RemoteConfig)=>JSON.stringify(c);
- async function upstream(c:RemoteConfig,method:string,path:string,body:string|null=null){return host.call('request',{sshTarget:c.sshTarget,port:c.remotePort,...requestSchema.parse({method,path,body})},{hostId:c.bridgeHostId});}
+ const monitors=new Map<string,{key:string,c:RemoteConfig,recovery:ReturnType<typeof createRecovery>}>();
+ let stopped=false;
+ function monitor(c:RemoteConfig){
+  let entry=monitors.get(c.serverId);if(entry?.key===keyOf(c))return entry.recovery;
+  entry?.recovery.dispose();
+  const recovery=createRecovery({
+   probe:async signal=>{
+    let bridge;try{bridge=await bb.sdk.hosts.get({hostId:c.bridgeHostId});}catch{throw Error('federation:bridge_offline');}
+    if(bridge.status!=='connected')throw Error('federation:bridge_offline');
+    const r=await host.call('request',{sshTarget:c.sshTarget,port:c.remotePort,method:'GET',path:'/api/v1/projects/'+c.projectId,body:null},{hostId:c.bridgeHostId,signal,timeoutMs:30000});
+    if(r.status!==200)throw Error('federation:remote_bb_unavailable');
+    try{if(JSON.parse(Buffer.from(r.bodyBase64,'base64').toString()).id!==c.projectId)throw Error();}catch{throw Error('federation:remote_bb_unavailable');}
+   },
+   notify:async()=>{const r=await bb.sdk.plugins.callRpc({pluginId:'push-notifications',method:'notifications.send',input:{title:'OXI Federation: connection unavailable',body:'Automatic recovery is running. Check Federation connection status.'},outputSchema:z.object({ok:z.literal(true),channels:z.array(z.string())}),signal:AbortSignal.timeout(10000)});if(!r.channels.length)throw Error('No notification channel');},
+  });monitors.set(c.serverId,{key:keyOf(c),c,recovery});return recovery;
+ }
+ async function assertCurrent(c:RemoteConfig){try{if(stopped||keyOf(await selected(c.serverId))!==keyOf(c))throw Error();}catch{throw new ConfigurationChangedError('Federation configuration changed');}}
+ async function upstream(c:RemoteConfig,method:string,path:string,body:string|null=null){if(stopped||keyOf(await selected(c.serverId))!==keyOf(c))throw Error('Federation configuration changed');return monitor(c).run(method,async signal=>{await assertCurrent(c);return host.call('request',{sshTarget:c.sshTarget,port:c.remotePort,...requestSchema.parse({method,path,body})},{hostId:c.bridgeHostId,signal,timeoutMs:30000});});}
+ const reconciler=createReconciler((hostId,keys,signal)=>host.call('reconcile',{keys},{hostId,signal,timeoutMs:5000}));
+ let configTimer:ReturnType<typeof setTimeout>|null=null,connectionTopology='';
+ async function refreshConnections(){
+  try{const all=await configurations();if(stopped)return;
+   const active=all.enabled?all.servers:[];
+   const topology=JSON.stringify(active);if(topology===connectionTopology)return;connectionTopology=topology;
+   const bridges=new Set([...monitors.values()].map(e=>e.c.bridgeHostId));
+   for(const [id,e]of monitors)if(!active.some(c=>c.serverId===id&&keyOf(c)===e.key)){e.recovery.dispose();monitors.delete(id);}
+   for(const hostId of bridges)reconciler.update(hostId,active.filter(c=>c.bridgeHostId===hostId).map(c=>c.sshTarget+':'+c.remotePort));
+   if(stopped)return;
+   for(const c of active){const r=monitor(c);if(r.state.status==='connecting')void r.check().catch(()=>{});}
+  }catch{}finally{if(!stopped)configTimer=setTimeout(refreshConnections,5000);}
+ }
+ configTimer=setTimeout(refreshConnections,0);
+ bb.http.route('GET','/connections',ctx=>ctx.json({servers:[...monitors].map(([serverId,e])=>({serverId,...e.recovery.state}))}));
  async function json(c:RemoteConfig,path:string){const r=await upstream(c,'GET',path);if(r.status>=300)throw Error(`Remote API ${r.status}: GET ${path}`);return JSON.parse(Buffer.from(r.bodyBase64,'base64').toString('utf8'));}
  async function primaryExists(id:string){
   try{
@@ -98,23 +133,24 @@ export default function plugin(bb:BbPluginApi){
  }
  registerAgentReads(bb,createAgentReads({configurations,exclusive,get:json}));
  const handoffs=createHandoffs({configurations,selected,exclusive,get:json,
-  upload:(c,input)=>host.call('handoffUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId}),
+  upload:(c,input)=>monitor(c).run('POST',async signal=>{await assertCurrent(c);return host.call('handoffUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId,signal});}),
   create:(c,body)=>upstream(c,'POST','/api/v1/threads',body),
   load:id=>bb.storage.kv.get(`handoff:${id}`),save:(id,value)=>bb.storage.kv.set(`handoff:${id}`,value),
  });
  bb.rpc.register(handoffRpc,{
+  handoffSource:input=>handoffs.source(input),
   handoffTargets:()=>handoffs.targets(),handoffOptions:input=>handoffs.options(input),
   handoffBegin:input=>handoffs.begin(input),handoffUpload:input=>handoffs.upload(input),
   handoffCommit:input=>handoffs.commit(input),handoffStatus:input=>handoffs.status(input),
  });
  registerImageRoutes(bb,{selected,exclusive,
-  upload:(c,input)=>host.call('imageUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId}),
+  upload:(c,input)=>monitor(c).run('POST',async signal=>{await assertCurrent(c);return host.call('imageUpload',{...input,sshTarget:c.sshTarget,port:c.remotePort},{hostId:c.bridgeHostId,signal});}),
   get:(c,path)=>upstream(c,'GET',path),
  });
  bb.http.route('GET','/config',async ctx=>{try{const c=await configurations();return ctx.json({enabled:c.enabled,servers:c.servers.map(publicServer)});}catch{return ctx.json({enabled:false,servers:[],error:'Invalid server settings'},400);}});
  bb.http.route('GET','/diagnostics',ctx=>ctx.json({failures}));
  bb.http.route('GET','/check',async ctx=>{
-  const cfg=await configurations();const rows=await Promise.all(cfg.servers.map(async c=>{try{const d=await inventory(c,true);return {serverId:c.serverId,ok:true,projectId:c.projectId,threads:d.inventory.threads.size};}catch(e){return {serverId:c.serverId,ok:false,error:String(e)};}}));
+  const cfg=await configurations();const rows=await Promise.all(cfg.servers.map(async c=>{try{await monitor(c).check();const d=await inventory(c,true);return {serverId:c.serverId,ok:true,projectId:c.projectId,threads:d.inventory.threads.size};}catch(e){return {serverId:c.serverId,ok:false,error:failureLabels[failureKind(e)]};}}));
   return ctx.json({ok:rows.length>0&&rows.every(r=>r.ok),servers:rows});
  });
  bb.http.route('POST','/proxy',async ctx=>{
@@ -138,11 +174,17 @@ export default function plugin(bb:BbPluginApi){
    if(method!=='GET'&&method!=='HEAD')data.at=0;
    if(method==='POST'&&url.pathname==='/api/v1/threads'&&r.status<300){const created=JSON.parse(Buffer.from(r.bodyBase64,'base64').toString());if(created.projectId!==c.projectId||typeof created.id!=='string')throw Error('Invalid created thread');await exclusive(c,[created.id]);i.threads.add(created.id);if(created.environmentId)i.environments.add(created.environmentId);}
    return new Response([204,205,304].includes(r.status)?null:Buffer.from(r.bodyBase64,'base64'),{status:r.status,headers:{'content-type':r.contentType,'cache-control':'no-store'}});
-  }catch(e){if(e instanceof PrimaryCollisionError){const response=ctx.json({error:{code:'federation_primary_owner',message:e.message}},409);response.headers.set('x-bb-federation-primary',e.id);return response;}d.error=String(e).slice(0,500);failures.push(d);if(failures.length>30)failures.shift();bb.log.warn(`Federation request failed (${d.serverId}): ${d.error}`);return ctx.json({error:{code:'federation_unavailable',message:String(e)}},503);}
+  }catch(e){if(e instanceof PrimaryCollisionError){const response=ctx.json({error:{code:'federation_primary_owner',message:e.message}},409);response.headers.set('x-bb-federation-primary',e.id);return response;}d.error=failureLabels[failureKind(e)];failures.push(d);if(failures.length>30)failures.shift();bb.log.warn(`Federation request failed (${d.serverId}): ${d.error}`);return ctx.json({error:{code:'federation_unavailable',message:d.error}},503);}
  });
  host.experimental_onSignal('frame',({hostId,payload})=>{
   const client=clients.get(payload.id);if(!client||client.config.bridgeHostId!==hostId||client.closed)return;
-  let m:any;try{m=JSON.parse(payload.data);}catch{return;}client.lastSeen=Date.now();if(m.type!=='changed')return;
+  let m:any;try{m=JSON.parse(payload.data);}catch{return;}client.lastSeen=Date.now();
+  if(m.type==='thread-timeline'){
+   const t=m.target,i=caches.get(client.config.serverId)?.inventory;
+   if(t?.kind==='thread-timeline'&&i?.threads.has(t.threadId)&&client.timelineSubscriptions.has(JSON.stringify([t.threadId,t.segmentLimit,t.deferContent]))&&client.socket.readyState===1)client.socket.send(payload.data);
+   return;
+  }
+  if(m.type!=='changed')return;
   const cached=caches.get(client.config.serverId),i=cached?.inventory;if(!i)return;
   // Unknown IDs never gain ownership from a signal. Refresh the verified project list instead.
   if(m.entity==='thread'&&!i.threads.has(m.id)){
@@ -164,14 +206,18 @@ export default function plugin(bb:BbPluginApi){
    if(!['subscribe','unsubscribe','ping'].includes(m.type))return;
    if(m.type!=='ping'){
     const t=m.target,i=caches.get(serverId)?.inventory;if(!i||!t)return;
-    if(t.kind==='thread-detail'&&!i.threads.has(t.threadId)){if(!/^thr_[a-z0-9]+$/.test(t.threadId??''))return;await verifyUnknown(c.config,i,[t.threadId]);}
-    const valid=['thread-list','project-list','host-list','environment-list'].includes(t.kind)||t.kind==='thread-detail'&&i.threads.has(t.threadId)||t.kind==='project-detail'&&t.projectId===i.projectId||t.kind==='environment-detail'&&i.environments.has(t.environmentId)||t.kind==='host-detail'&&i.hosts.has(t.hostId);if(!valid)return;
+    if(['thread-detail','thread-timeline'].includes(t.kind)&&!i.threads.has(t.threadId)){if(!/^thr_[a-z0-9]+$/.test(t.threadId??''))return;await verifyUnknown(c.config,i,[t.threadId]);}
+    const valid=['thread-list','project-list','host-list','environment-list'].includes(t.kind)||['thread-detail','thread-timeline'].includes(t.kind)&&i.threads.has(t.threadId)||t.kind==='project-detail'&&t.projectId===i.projectId||t.kind==='environment-detail'&&i.environments.has(t.environmentId)||t.kind==='host-detail'&&i.hosts.has(t.hostId);if(!valid)return;
+    if(t.kind==='thread-timeline'){
+     if(!(t.segmentLimit===null||Number.isInteger(t.segmentLimit)&&t.segmentLimit>0)||typeof t.deferContent!=='boolean')return;
+     if(m.type==='subscribe')c.timelineSubscriptions.add(JSON.stringify([t.threadId,t.segmentLimit,t.deferContent]));else c.timelineSubscriptions.delete(JSON.stringify([t.threadId,t.segmentLimit,t.deferContent]));
+    }
    }
    if(!c.ready){if(c.queue.length<128)c.queue.push(data);return;}
    const result=await host.call('send',{id,data},{hostId:c.config.bridgeHostId});if(!result.ok)throw Error('Remote disconnected');
   }
   return {
-   async onOpen(socket){try{const config=await selected(serverId);await inventory(config);if(ended||socket.readyState!==1)return;const c:Client={socket,config,ready:false,closed:false,queue:[],lastSeen:Date.now()};clients.set(id,c);
+   async onOpen(socket){try{const config=await selected(serverId);await inventory(config);if(ended||socket.readyState!==1)return;const c:Client={socket,config,ready:false,closed:false,queue:[],lastSeen:Date.now(),timelineSubscriptions:new Set()};clients.set(id,c);
     for(const data of early.splice(0))await forward(data);await host.call('connect',{id,sshTarget:config.sshTarget,port:config.remotePort},{hostId:config.bridgeHostId});
     if(c.closed||ended||socket.readyState!==1){await host.call('disconnect',{id},{hostId:config.bridgeHostId});await closeClient(id);return;}
     c.ready=true;socket.send('{"type":"fedprobe-remote-ready"}');for(const data of c.queue.splice(0))await forward(data);
@@ -180,5 +226,5 @@ export default function plugin(bb:BbPluginApi){
    async onClose(){ended=true;early.length=0;await closeClient(id);},
   };
  });
- bb.onDispose(async()=>{clearInterval(heartbeat);for(const [id,c]of clients){c.socket.close(1001,'Federation disabled');await closeClient(id);}});
+ bb.onDispose(async()=>{stopped=true;reconciler.dispose();if(configTimer!==null)clearTimeout(configTimer);for(const e of monitors.values())e.recovery.dispose();monitors.clear();clearInterval(heartbeat);for(const [id,c]of clients){c.socket.close(1001,'Federation disabled');await closeClient(id);}});
 }

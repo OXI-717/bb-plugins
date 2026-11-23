@@ -4,6 +4,37 @@ import {mountMachineMarks,createMachineMarkStore} from './machine-marks-dom';
 const config={enabled:true,hosts:{host_mac:{kind:'local' as const},host_main:{kind:'primary' as const}}};
 const tick=()=>new Promise(resolve=>setTimeout(resolve,35));
 afterEach(()=>{document.body.replaceChildren();});
+it('rolls a child stop through existing ancestor glyphs and clears after resume or reparenting',async()=>{
+ const root=row('thr_root'),parent=row('thr_parent'),child=row('thr_child'),sibling=row('thr_sibling');
+ const host={id:'host_mac',name:'Example Mac'};
+ const threads=[{id:'thr_root',host},{id:'thr_parent',host,parentThreadId:'thr_root'},{id:'thr_child',host,parentThreadId:'thr_parent'},{id:'thr_sibling',host,parentThreadId:'thr_root'}];
+ const store=createMachineMarkStore(),dispose=mountMachineMarks(document,store);
+ store.set(threads,config,new Set(['thr_child']));await tick();
+ for(const r of [root,parent,child]){expect(r.querySelectorAll('button')).toHaveLength(1);expect(r.querySelector('[data-machine-stop]')).not.toBeNull();expect(r.querySelector('button')?.textContent).toBe('');}
+ expect(parent.querySelector('button')?.getAttribute('aria-label')).toContain('Есть остановленные дочерние сессии');
+ expect(child.querySelector('button')?.getAttribute('aria-label')).toContain('Остановлена');expect(sibling.querySelector('[data-machine-stop]')).toBeNull();
+ store.set(threads.map(t=>t.id==='thr_child'?{...t,parentThreadId:'thr_sibling'}:t),config,new Set(['thr_child']));await tick();
+ expect(parent.querySelector('[data-machine-stop]')).toBeNull();expect(sibling.querySelector('[data-machine-stop]')).not.toBeNull();
+ store.set(threads,config);await tick();expect(document.querySelector('[data-machine-stop]')).toBeNull();dispose();
+});
+it('does not roll up hidden, unknown or cross-project children and terminates parent cycles',()=>{
+ const host={id:'host_mac',name:'Example Mac'},store=createMachineMarkStore();
+ store.set([{id:'thr_root',host,projectId:'proj_a'},{id:'thr_hidden',host,projectId:'proj_a',parentThreadId:'thr_root',isHidden:true},{id:'thr_foreign',host,projectId:'proj_b',parentThreadId:'thr_root'}],config,new Set(['thr_hidden','thr_foreign','thr_missing']));
+ expect(store.get('thr_root')?.stopped).not.toBe(true);
+ store.set([{id:'thr_a',host,parentThreadId:'thr_b'},{id:'thr_b',host,parentThreadId:'thr_a'},{id:'thr_orphan',host,parentThreadId:'thr_missing'}],config,new Set(['thr_a','thr_orphan']));
+ expect(store.get('thr_b')?.stopped).toBe(true);expect(store.get('thr_a')?.label).toContain('Остановлена');
+});
+it('adds stop inside the existing machine glyph, without an extra button or visible label, and clears it on resume',async()=>{
+ const r=row();const store=createMachineMarkStore();const dispose=mountMachineMarks(document,store);
+ const threads=[{id:'thr_a',host:{id:'host_remote',name:'Example remote'}}];
+ store.set(threads,config);await tick();const button=r.querySelector('button')!;const normalColor=button.style.color;
+ store.set(threads,config,new Set(['thr_a']));await tick();
+ expect(r.querySelectorAll('button')).toHaveLength(1);expect(r.querySelectorAll('[data-machine-stop]')).toHaveLength(1);
+ expect(button.querySelector('svg')?.getAttribute('data-machine-glyph')).toBe('cloud');expect(button.textContent).toBe('');
+ expect(button.style.color).not.toBe(normalColor);expect(button.getAttribute('aria-label')).toContain('Остановлена');
+ expect(r.querySelector('.bb-thread-title')?.textContent).toBe('Original title');expect(r.querySelector('[data-status]')?.textContent).toBe('working');
+ store.set(threads,config);await tick();expect(r.querySelector('[data-machine-stop]')).toBeNull();expect(button.style.color).toBe(normalColor);dispose();
+});
 function row(id='thr_a'){
  const el=document.createElement('div');el.innerHTML=`<a data-sidebar-thread-id="${id}" href="/threads/${id}"></a><span><i data-provider-icon>model</i><span class="bb-thread-title">Original title</span></span><i data-status>working</i>`;document.body.append(el);return el;
 }

@@ -1,16 +1,14 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { spawn, type ChildProcessByStdio } from "node:child_process";
-import type { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
+import type { Readable } from "node:stream";
 import type { AccountSummary } from "./contracts.js";
-import {
-  importGrokCredentials,
-  type GrokSubscriptionCredentials,
-} from "./grok-credentials.js";
+import { parseGrokAuthFile, type GrokSubscriptionCredentials } from "./grok-credentials.js";
 
 const LOGIN_TIMEOUT_MS = 10 * 60 * 1_000;
+const LOGIN_PROMPT_TIMEOUT_MS = 30_000;
 const MAX_CAPTURED_OUTPUT = 16_384;
 
 export interface GrokDeviceLoginStart {
@@ -30,8 +28,9 @@ export interface GrokDeviceLoginOptions {
   now?: () => number;
   command?: string;
   args?: string[];
+  beforeSpawn?: () => Promise<void>;
   spawnLogin?: (env: NodeJS.ProcessEnv, authFile: string) => LoginChild;
-  addAccount: (authenticated: GrokSubscriptionCredentials) => Promise<AccountSummary>;
+  addAccount: (credentials: GrokSubscriptionCredentials) => Promise<AccountSummary>;
 }
 
 type LoginChild = ChildProcessByStdio<null, Readable, Readable>;
@@ -39,42 +38,34 @@ type LoginChild = ChildProcessByStdio<null, Readable, Readable>;
 interface LoginSession {
   sessionId: string;
   child: LoginChild;
-  authFile: string;
-  home: string;
+  grokHome: string;
   expiresAt: number;
-  url: string | null;
+  verificationUri: string | null;
   userCode: string | null;
   output: string;
-  settled: { code: number | null; error: string | null } | null;
+  settled: { code: number | null; failed: boolean } | null;
   polling: boolean;
+  expiryTimer?: ReturnType<typeof setTimeout>;
 }
 
-const URL_LINE = /https:\/\/\S+/u;
-const CODE_LINE = /(?:^|\n)\s*code:\s*([A-Za-z0-9-]{4,})\s*(?:\n|$)/iu;
+const URL_PATTERN = /https:\/\/[^\s"'<>]+/u;
+const CODE_PATTERN = /\b(?:user\s+)?code\s*(?:is\s*)?[:=]?\s*([A-Za-z0-9-]{4,})/iu;
 
 export class GrokDeviceLogin {
   private readonly sessions = new Map<string, LoginSession>();
   private readonly now: () => number;
   private readonly command: string;
   private readonly args: string[];
-  private readonly spawnLogin: GrokDeviceLoginOptions["spawnLogin"];
 
   constructor(private readonly options: GrokDeviceLoginOptions) {
     this.now = options.now ?? Date.now;
     this.command = options.command ?? "grok";
     this.args = options.args ?? ["login", "--device-auth"];
-    this.spawnLogin = options.spawnLogin;
   }
 
   async start(): Promise<GrokDeviceLoginStart> {
-    const home = await mkdtemp(path.join(tmpdir(), "grok-login-"));
-    const authFile = path.join(home, "auth.json");
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      GROK_HOME: home,
-      GROK_AUTH_PATH: authFile,
-      GROK_DISABLE_API_KEY_AUTH: "1",
-    };
+    const grokHome = await mkdtemp(path.join(tmpdir(), "bb-pool-grok-login-"));
+    const env: NodeJS.ProcessEnv = { ...process.env, GROK_HOME: grokHome, GROK_AUTH_PATH: path.join(grokHome, "auth.json"), GROK_DISABLE_API_KEY_AUTH: "1" };
     for (const name of [
       "XAI_API_KEY",
       "GROK_XAI_API_BASE_URL",
@@ -87,25 +78,33 @@ export class GrokDeviceLogin {
       "GROK_OIDC_ISSUER",
       "GROK_OIDC_CLIENT_ID",
     ]) delete env[name];
+
+    try {
+      await this.options.beforeSpawn?.();
+    } catch (error) {
+      await rm(grokHome, { recursive: true, force: true });
+      throw error;
+    }
+
     let child: LoginChild;
     try {
-      child = this.spawnLogin
-        ? this.spawnLogin(env, authFile)
+      child = this.options.spawnLogin
+        ? this.options.spawnLogin(env, path.join(grokHome, "auth.json"))
         : spawn(this.command, this.args, {
             env,
             stdio: ["ignore", "pipe", "pipe"] as const,
           });
     } catch {
-      await rm(home, { recursive: true, force: true });
+      await rm(grokHome, { recursive: true, force: true });
       throw new Error("Grok CLI could not be started. Install the official `grok` CLI and retry.");
     }
+
     const session: LoginSession = {
       sessionId: randomUUID(),
       child,
-      authFile,
-      home,
+      grokHome,
       expiresAt: this.now() + LOGIN_TIMEOUT_MS,
-      url: null,
+      verificationUri: null,
       userCode: null,
       output: "",
       settled: null,
@@ -113,29 +112,40 @@ export class GrokDeviceLogin {
     };
     const capture = (chunk: Buffer) => {
       session.output = (session.output + chunk.toString("utf8")).slice(-MAX_CAPTURED_OUTPUT);
-      const url = URL_LINE.exec(session.output);
-      const code = CODE_LINE.exec(session.output);
-      if (url) session.url = url[0];
-      if (code?.[1]) session.userCode = code[1];
+      const url = URL_PATTERN.exec(session.output)?.[0]?.replace(/[.,)]+$/u, "");
+      const code = CODE_PATTERN.exec(session.output)?.[1];
+      if (url !== undefined) session.verificationUri = url;
+      if (code !== undefined) session.userCode = code;
     };
     child.stdout.on("data", capture);
     child.stderr.on("data", capture);
-    child.once("error", (error) => {
-      session.settled = { code: null, error: error.message };
+    child.once("error", () => {
+      session.settled = { code: null, failed: true };
     });
     child.once("close", (code) => {
-      session.settled ??= { code, error: null };
+      session.settled ??= { code, failed: false };
     });
     this.sessions.set(session.sessionId, session);
-    const ready = await this.waitForPrompt(session);
-    if (ready !== null) {
+    session.expiryTimer = setTimeout(() => void this.disposeSession(session), LOGIN_TIMEOUT_MS);
+    session.expiryTimer.unref();
+
+    const deadline = Date.now() + LOGIN_PROMPT_TIMEOUT_MS;
+    // URL and code can arrive in separate output chunks: wait for both,
+    // subject to the deadline and the process exiting early.
+    while (
+      Date.now() < deadline &&
+      (session.verificationUri === null || session.userCode === null) &&
+      session.settled === null
+    ) await new Promise((resolve) => setTimeout(resolve, 25));
+
+    if (session.verificationUri === null || session.userCode === null) {
       await this.disposeSession(session);
-      throw new Error(ready);
+      throw new Error("Grok CLI did not provide a device code. Check that the installed CLI supports device login.");
     }
     return {
       sessionId: session.sessionId,
-      verificationUri: session.url!,
-      userCode: session.userCode!,
+      verificationUri: session.verificationUri,
+      userCode: session.userCode,
       expiresAt: session.expiresAt,
       intervalMs: 1_000,
     };
@@ -143,30 +153,29 @@ export class GrokDeviceLogin {
 
   async poll(input: { sessionId: string }): Promise<GrokDeviceLoginPoll> {
     const session = this.sessions.get(input.sessionId);
-    if (session === undefined) {
-      return { status: "error", message: "Login session was not found. Start again." };
-    }
+    if (session === undefined) return { status: "error", message: "Grok login session was not found. Start again." };
     if (this.now() >= session.expiresAt) {
       await this.disposeSession(session);
-      return { status: "error", message: "Code expired, start again." };
+      return { status: "error", message: "Grok sign-in expired. Start again." };
     }
     if (session.settled === null || session.polling) return { status: "pending" };
     session.polling = true;
     try {
-      if (session.settled.code !== 0) {
+      if (session.settled.code !== 0 || session.settled.failed) {
         await this.disposeSession(session);
-        return {
-          status: "error",
-          message: "Grok sign-in did not finish. Start again.",
-        };
+        return { status: "error", message: "Grok sign-in did not finish. Start again." };
       }
-      const authenticated = await importGrokCredentials(session.authFile);
-      const account = await this.options.addAccount(authenticated);
+      const authFile = path.join(session.grokHome, "auth.json");
+      const credentials = parseGrokAuthFile(await readFile(authFile, "utf8"));
+      if (this.sessions.get(session.sessionId) !== session || this.now() >= session.expiresAt) {
+        return { status: "error", message: "Grok sign-in expired or was cancelled. Start again." };
+      }
+      const account = await this.options.addAccount(credentials);
       await this.disposeSession(session);
       return { status: "complete", account };
     } catch {
       await this.disposeSession(session);
-      return { status: "error", message: "Grok account could not be saved. Start again." };
+      return { status: "error", message: "Grok credentials could not be saved. Start again." };
     } finally {
       session.polling = false;
     }
@@ -191,19 +200,11 @@ export class GrokDeviceLogin {
     for (const session of this.sessions.values()) void this.disposeSession(session);
   }
 
-  private async waitForPrompt(session: LoginSession): Promise<string | null> {
-    for (let attempt = 0; attempt < 750; attempt += 1) {
-      if (session.url !== null && session.userCode !== null) return null;
-      if (session.settled !== null) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    return "Grok sign-in did not show a device code. Start again.";
-  }
-
   private async disposeSession(session: LoginSession): Promise<void> {
-    this.sessions.delete(session.sessionId);
+    if (!this.sessions.delete(session.sessionId)) return;
+    clearTimeout(session.expiryTimer);
     session.output = "";
-    if (session.settled === null) session.child.kill();
-    await rm(session.home, { recursive: true, force: true }).catch(() => undefined);
+    if (session.settled === null) session.child.kill("SIGKILL");
+    await rm(session.grokHome, { recursive: true, force: true }).catch(() => undefined);
   }
 }

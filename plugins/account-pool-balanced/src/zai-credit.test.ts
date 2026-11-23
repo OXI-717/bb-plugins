@@ -106,7 +106,7 @@ async function vertical(provider: "zai" | "opencode-go" = "zai") {
     getSettings: () => accountPoolConfigSchema.parse({ vpnGuardEnabled: false, requireVerifiedVpn: false }),
     fetch: fetcher, now: () => NOW });
   let handlers: Record<string, (input: { resourceId: string; refresh: boolean }) => Promise<unknown>>;
-  registerUsageSource({ rpc: { register: (_contract: unknown, methods: typeof handlers) => { handlers = methods; } } } as unknown as BbPluginApi, hub);
+  registerUsageSource({ rpc: { register: (_contract: unknown, methods: typeof handlers) => { handlers = methods; } } } as unknown as BbPluginApi, hub, false);
   writes.mockClear();
   return { account, accounts, quotas, writes, fetcher,
     respond: (next: () => Response) => { response = next; },

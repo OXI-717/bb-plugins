@@ -112,7 +112,7 @@ describe("usage presentation labels", () => {
         }
       }),
     } as unknown as AccountPoolHub;
-    registerUsageSource(bb, hub, () => now);
+    registerUsageSource(bb, hub, false, () => now);
     const list = usageResourceListSchema.parse(await handlers[usageListMethod]!({ resourceId: "", refresh: false }));
     expect(list.resources[0]?.label).toBe("Claude Code · primary (work@example.com)");
     expect(list.resources[1]?.label).toBe("Claude Code · reserve (team@example.com)");
@@ -205,7 +205,7 @@ it('exposes Gemini models and declared plan, with absolute credits in the existi
  const account={id:'00000000-0000-4000-8000-000000000001',provider:'gemini',label:'Synthetic',email:null,accountUuid:null,subscriptionType:null,rateLimitTier:null,observedAt:100,error:null,limitWindows:[],familyWeekly:EMPTY_FAMILY_WEEKLY,
  geminiUsage:{observedAt:100,plan:{id:'fixture-tier',name:'Fixture plan'},credits:'12',models:[{modelId:'gemini-fixture',tokenType:'REQUESTS',usedPercent:0,resetAt:null},{modelId:'gemini-fixture-pro',tokenType:'WTUS',usedPercent:100,resetAt:200}]}};
  const hub={status:async()=>({accounts:[account]}),assertNetworkAllowed:vi.fn(),refreshUsage:vi.fn()} as unknown as AccountPoolHub;
- registerUsageSource(bb,hub,()=>100);
+ registerUsageSource(bb,hub,false,()=>100);
  const list=usageResourceListSchema.parse(await handlers[usageListMethod]!({resourceId:'',refresh:false}));
  expect(list.resources[0]?.label).toContain('Google One AI credits: 12');
  const result=usageMeasurementSchema.parse(await handlers[usageFetchMethod]!({resourceId:account.id,refresh:false}));

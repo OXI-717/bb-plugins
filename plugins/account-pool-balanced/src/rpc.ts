@@ -1,8 +1,15 @@
+import {type NativeProbeInput,type NativeProbeResult} from './native-probe-wire.js';
+import {maintenanceStatusSchema, type PoolMaintenance} from './maintenance.js';
+import {updateStatusSchema, type PoolUpdate} from './pool-update.js';
+import { accountProxyInputSchema, egressProfileSchema, egressStateSchema, type AccountEgress } from "./account-egress.js";
+import {nativeProbeInputSchema,nativeProbeResultSchema,nativeAccountUpdateSchema, type NativeAccountUpdate, nativeProjectsSchema, nativeAccountsSchema, type NativeAccounts} from "./native-accounts.js";
+import { httpScopeAcceptInputSchema, httpScopeRevokeInputSchema } from './http-scope-acceptance.js';
 import type {AgyOAuthLogin} from "./agy-oauth-login.js";
 import { defineRpcContract, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   accountPolicySchema,
+  weeklyBudgetChangeSchema,
   accountProjectsSchema,
   accountAddInputSchema,
   accountCapInputSchema,
@@ -45,6 +52,11 @@ export const threadAccountStatusSchema = z.object({
 });
 export type ThreadAccountStatus = z.infer<typeof threadAccountStatusSchema>;
 
+export const threadAccountChoicesSchema=z.object({
+ currentAccountId:z.string().uuid().nullable(),mode:z.enum(['auto','manual']),pinned:z.boolean(),
+ accounts:z.array(z.object({id:z.string().uuid(),label:z.string(),state:z.enum(['ready','exhausted','held','disabled','error']),until:z.number().int().nonnegative().nullable(),selectable:z.boolean(),assigned:z.boolean()}))
+});
+export type ThreadAccountChoices=z.infer<typeof threadAccountChoicesSchema>;
 const browserOpenInputSchema = z.object({
   accountId: z.string().uuid(),
   url: z.string().max(8192).url().refine(value => {
@@ -56,8 +68,24 @@ const browserOpenInputSchema = z.object({
 export type BrowserOpenInput = z.infer<typeof browserOpenInputSchema>;
 
 export const accountPoolRpcContract = defineRpcContract({
+  "maintenance.status": {input:z.null(), output:maintenanceStatusSchema},
+  "update.status": {input:z.null(), output:updateStatusSchema},
+  "update.start": {input:z.null(), output:updateStatusSchema},
+  "native.setProjects": {input:z.object({accountId:z.string().min(1).max(80),projects:nativeProjectsSchema,expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
+  "native.probe": {input:nativeProbeInputSchema,output:nativeProbeResultSchema},
+  "native.updateAccount": {input:nativeAccountUpdateSchema,output:z.null()},
+  "native.accounts": {input: z.null(), output: nativeAccountsSchema},
+  "native.prefer": {input:z.object({executorId:z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
+  "egress.proxy":{input:accountProxyInputSchema,output:z.null()},
+  "egress.status":{input:z.null(),output:egressStateSchema},
+  "egress.bind":{input:z.object({accountId:z.string().uuid(),ref:z.object({id:z.string(),version:z.number().int().positive()}).strict().nullable()}).strict(),output:z.null()},
+  "egress.configure":{input:egressProfileSchema,output:z.null()},
+  "egress.scopeAccept":{input:httpScopeAcceptInputSchema,output:z.object({acceptanceId:z.string().uuid(),active:z.boolean()}).strict()},
+  "egress.scopeRevoke":{input:httpScopeRevokeInputSchema,output:z.null()},
   "readiness.get": {input: z.object({projectId:z.string().min(1).max(200).nullable()}).strict(), output:z.array(providerReadinessSchema).length(providerSchema.options.length)},
   "browser.open": { input: browserOpenInputSchema, output: z.object({ opened: z.literal(true) }).strict() },
+  "thread.accountChoices": {input:z.object({threadId:z.string().min(1)}).strict(),output:threadAccountChoicesSchema},
+  "thread.switchAccount": {input:z.object({threadId:z.string().min(1),accountId:z.string().uuid().nullable()}).strict(),output:threadAccountChoicesSchema},
   "thread.account": { input: z.object({ threadId: z.string().min(1) }).strict(), output: threadAccountStatusSchema },
   "account.add": {
     input: accountAddInputSchema,
@@ -90,6 +118,10 @@ export const accountPoolRpcContract = defineRpcContract({
   },
   "account.setPolicy": {
     input: z.object({ accountId: z.string().uuid(), policy: accountPolicySchema }).strict(),
+    output: z.object({ account: accountSchema.nullable() }).strict(),
+  },
+  "account.setWeeklyBudget": {
+    input: weeklyBudgetChangeSchema,
     output: z.object({ account: accountSchema.nullable() }).strict(),
   },
   "account.setEmail": {
@@ -126,6 +158,10 @@ export const accountPoolRpcContract = defineRpcContract({
       .object({ provider: providerSchema, enabled: z.boolean() })
       .strict(),
   },
+  "vpnPolicy.get": {
+    input: z.null(),
+    output: accountPoolConfigSchema.pick({ vpnGuardEnabled: true, vpnPolicyVersion: true, vpnOnlyProviders: true }).strict(),
+  },
   "config.get": {
     input: z.null(),
     output: accountPoolConfigSchema,
@@ -151,7 +187,7 @@ export const accountPoolRpcContract = defineRpcContract({
   "agyLogin.complete": {input:z.object({sessionId:z.string().min(1).max(128),pasted:z.string().trim().min(1).max(16384)}).strict(),output:accountSchema},
   "agyLogin.cancel": {input:z.object({sessionId:z.string().min(1).max(128)}).strict(),output:z.object({cancelled:z.literal(true)}).strict()},
   "codexLogin.start": {
-    input: z.null(),
+    input: z.object({accountId: z.string().uuid()}).strict().nullable(),
     output: codexLoginStartSchema,
   },
   "codexLogin.poll": {
@@ -222,15 +258,40 @@ export function createRpcHandlers(
   openBrowser: (input: BrowserOpenInput) => Promise<{ opened: true }> = async () => { throw new Error("Account browser unavailable"); },
   agyLogin?: AgyOAuthLogin,
   openAgyBrowser:(url:string)=>Promise<{opened:true}>=async()=>{throw Error("Sign-in browser unavailable");},
+  egress?:AccountEgress,
   grokLogin?: GrokDeviceLogin,
+  nativeAccounts: () => Promise<NativeAccounts> = async () => ({managed: false, accounts: []}),
+  nativeSetProjects: (accountId:string,projects:import('./contracts.js').AccountProjects,revision:string)=>Promise<null> = async()=>{throw Error('Native project settings unavailable');},
+  nativePrefer:(executorId:string,revision:string)=>Promise<null> = async()=>{throw Error('Native account selection unavailable');},
+  maintenance?: Pick<PoolMaintenance,'status'>,
+  update?: Pick<PoolUpdate,'status'|'start'>,
+  nativeUpdateAccount:(input:NativeAccountUpdate)=>Promise<null> = async()=>{throw Error('Native settings unavailable');},
+  nativeProbe:(input:NativeProbeInput)=>Promise<NativeProbeResult> = async input=>({...input,status:'runtime-unavailable',verified:false,observedAt:Date.now(),catalog:[]}),
+  selection?: {choices:(threadId:string)=>Promise<ThreadAccountChoices>;switch:(threadId:string,accountId:string|null)=>Promise<ThreadAccountChoices>},
   geminiLogin?: GeminiLogin,
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
+    "maintenance.status":()=>{if(!maintenance)throw Error('Maintenance unavailable');return maintenance.status();},
+    "update.status":()=>update?.status()??null,
+    "update.start":()=>{if(!update)throw Error('Updater unavailable');return update.start();},
+    "native.accounts": () => nativeAccounts(),
+    "native.probe": input=>nativeProbe(input),
+    "native.updateAccount": input => nativeUpdateAccount(input),
+    "native.prefer": ({executorId,expectedRevision}) => nativePrefer(executorId,expectedRevision),
+    "native.setProjects": ({accountId,projects,expectedRevision}) => nativeSetProjects(accountId,projects,expectedRevision),
+    "egress.proxy":async input=>{if(!egress)throw Error("Egress unavailable");await egress.configureProxy(input);return null;},
+    "egress.status":()=>{if(!egress)throw Error("Egress unavailable");return egress.snapshot();},
+    "egress.configure":async input=>{if(!egress)throw Error("Egress unavailable");await egress.configure(input);return null;},
+    "egress.scopeAccept":async input=>{if(!egress)throw Error('Egress unavailable');return egress.acceptScope(input);},
+    "egress.scopeRevoke":async input=>{if(!egress)throw Error('Egress unavailable');await egress.revokeScope(input);return null;},
+    "egress.bind":async({accountId,ref})=>{if(!egress)throw Error("Egress unavailable");await egress.bind(accountId,ref);return null;},
     "readiness.get": ({projectId}) => operations.readiness(projectId),
     "browser.open": input => openBrowser(input),
     "projects.list": () => projectsList(),
     "account.setProjects": async ({ accountId, projects, expectedProjects }) => ({ account: await operations.setProjects(accountId, projects, expectedProjects) }),
     "thread.account": ({ threadId }) => threadAccount(threadId),
+    "thread.accountChoices": ({threadId})=>{if(!selection)throw Error("Account selection unavailable");return selection.choices(threadId);},
+    "thread.switchAccount": ({threadId,accountId})=>{if(!selection)throw Error("Account selection unavailable");return selection.switch(threadId,accountId);},
     "account.add": (input) => operations.add(input),
     "account.list": () => operations.list(),
     "account.remove": async ({ id }) => ({
@@ -246,6 +307,7 @@ export function createRpcHandlers(
     "account.setPolicy": async ({ accountId, policy }) => ({
       account: await operations.setPolicy(accountId, policy),
     }),
+    "account.setWeeklyBudget": async input => ({ account: await operations.setWeeklyBudget(input) }),
     "account.setEmail":async({accountId,email,expectedEmail})=>({account:await operations.setEmail(accountId,email,expectedEmail)}),
     "account.setPriority": async ({ accountId, priority }) => ({
       account: await operations.setPriority(accountId, priority),
@@ -270,6 +332,10 @@ export function createRpcHandlers(
       await operations.setRouting(provider, enabled);
       return { provider, enabled };
     },
+    "vpnPolicy.get": async () => {
+      const { vpnGuardEnabled, vpnPolicyVersion, vpnOnlyProviders } = await config.get();
+      return { vpnGuardEnabled, vpnPolicyVersion, vpnOnlyProviders };
+    },
     "config.get": () => config.get(),
     "config.set": (input) => config.set(input),
     "login.start": () => login.start(),
@@ -282,7 +348,7 @@ export function createRpcHandlers(
     "agyLogin.start":()=>{if(!agyLogin)throw Error('Antigravity login unavailable');return agyLogin.start();},
     "agyLogin.complete":async({sessionId,pasted})=>{if(!agyLogin)throw Error('Antigravity login unavailable');return operations.addAgyOAuth(await agyLogin.complete(sessionId,pasted));},
     "agyLogin.cancel":({sessionId})=>{if(!agyLogin)throw Error('Antigravity login unavailable');agyLogin.cancel(sessionId);return {cancelled:true};},
-    "codexLogin.start": () => codexLogin.start(),
+    "codexLogin.start": (input) => codexLogin.start(input?.accountId),
     "codexLogin.poll": (input) => codexLogin.poll(input),
     "codexLogin.cancel": (input) => ({
       cancelled: codexLogin.cancel(input),

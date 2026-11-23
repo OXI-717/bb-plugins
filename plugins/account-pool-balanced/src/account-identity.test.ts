@@ -3,7 +3,7 @@ import {afterEach,expect,it,vi} from 'vitest';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {createAccountPoolPlugin} from './server.js';
+import {createAccountPoolPlugin} from './management-test-fixture.js';
 import {vpnProof} from './vpn-test-fixture.js';
 import type {PoolProvider,Account} from './contracts.js';
 const cleanup:Array<()=>Promise<void>>=[];afterEach(async()=>{while(cleanup.length)await cleanup.pop()!();});
@@ -64,5 +64,46 @@ it.each(['bypass','routing-off','account-disabled'] as const)('cancels queued re
  if(change==='account-disabled')expect(env).toEqual(expect.arrayContaining([expect.objectContaining({name:'OXI_KIMI_BASE_URL'}),expect.objectContaining({name:'KIMI_API_KEY'})]));
  else expect(env).toEqual([]);
  const hook=host.harness.registrations.hooks['message.dispatch']!;
- expect(await hook(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},requestedExecution:{providerId:'acp-opencode-kimi'},queuedMessages:[{id:'retry-one',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}]}))).toMatchObject({action:'reject'});
+ expect(await hook(makeMessageDispatchHookContext({thread:{id:'thread-one',status:'error'},requestedExecution:{providerId:'acp-opencode-kimi'},queuedMessages:[{id:'retry-one',payload:{kind:'retry',retryOfTurnRequestId:'request-one',attempt:2,reason:'Temporary connection failure. Retry 1/3.'}}]} as unknown as NonNullable<Parameters<typeof makeMessageDispatchHookContext>[0]>))).toMatchObject({action:'reject'});
+});
+
+it('validates manual choices, persists selection and rejects bypass and foreign accounts',async()=>{
+ const {host,account,token}=await setup('claude','claude-code');
+ const call=(method:string,input:unknown)=>host.harness.behavior.callRpc(method,input);
+ const other=await call('account.add',{provider:'claude',source:{kind:'api-key',apiKey:'synthetic-other'},label:'Other',priority:1}) as Account;
+ const foreign=await call('account.add',{provider:'kimi',source:{kind:'api-key',apiKey:'synthetic-foreign'},label:'Foreign',priority:1}) as Account;
+ expect(await call('thread.accountChoices',{threadId:'thread-one'})).toMatchObject({mode:'auto'});
+ expect(await call('thread.switchAccount',{threadId:'thread-one',accountId:other.id})).toMatchObject({mode:'manual',currentAccountId:other.id});
+ await expect(call('thread.switchAccount',{threadId:'thread-one',accountId:foreign.id})).rejects.toThrow();
+ const response=await host.harness.behavior.fetchHttp('POST','/v1/messages',{headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:'{}'});
+ expect(response.status).toBe(200);await response.text();
+ expect(await call('thread.account',{threadId:'thread-one'})).toMatchObject({account:{id:other.id}});
+ await call('account.disable',{id:other.id});
+ await expect(call('thread.switchAccount',{threadId:'thread-one',accountId:other.id})).rejects.toThrow();
+ await call('account.setProjects',{accountId:account.id,projects:{onlySelected:true,rules:[{projectId:'other-project',role:'primary'}]}});
+ await expect(call('thread.switchAccount',{threadId:'thread-one',accountId:account.id})).rejects.toThrow();
+ await call('bypass.set',{threadId:'thread-one',bypassed:true});
+ await expect(call('thread.switchAccount',{threadId:'thread-one',accountId:null})).rejects.toThrow();
+});
+
+it('keeps failover opt-in configurable through CLI without a UI setting',async()=>{
+ const {host}=await setup('claude','claude-code');
+ expect(await host.harness.behavior.callRpc('config.get',null)).toMatchObject({pinnedFailover:false});
+ const result=await host.harness.behavior.runCli(['config','set','pinnedFailover','true']);
+ expect(result.exitCode).toBe(0);
+ expect(await host.harness.behavior.callRpc('config.get',null)).toMatchObject({pinnedFailover:true});
+ expect((await host.harness.behavior.runCli(['config'])).stdout).toContain('pinnedFailover: true');
+});
+
+it('reports account availability by the thread project role, not the global one',async()=>{
+ const {host,account}=await setup('claude','claude-code');
+ const call=(method:string,input:unknown)=>host.harness.behavior.callRpc(method,input);
+ // A global reserve is suppressed while a global primary is usable, but this project
+ // promotes it to primary: the thread can use it now.
+ const promoted=await call('account.add',{provider:'claude',source:{kind:'api-key',apiKey:'synthetic-promoted'},label:'Promoted',priority:1}) as Account;
+ await call('account.setRole',{accountId:promoted.id,role:'reserve'});
+ await call('account.setProjects',{accountId:promoted.id,projects:{onlySelected:false,rules:[{projectId:'project-one',role:'primary'}]},expectedProjects:null});
+ const choices=await call('thread.accountChoices',{threadId:'thread-one'}) as {accounts:Array<{id:string;state:string}>};
+ expect(choices.accounts.find(item=>item.id===promoted.id)?.state).toBe('ready');
+ expect(choices.accounts.find(item=>item.id===account.id)?.state).toBe('ready');
 });

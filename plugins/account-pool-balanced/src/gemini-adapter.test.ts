@@ -49,7 +49,7 @@ describe("gemini adapter", () => {
     expect(adapter().upstreamUrl(request, {
       ...DEFAULT_ACCOUNT_POOL_CONFIG,
       geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
-    }, account, oauth).toString()).toBe(
+    }, undefined, account, oauth).toString()).toBe(
       "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
     );
   });
@@ -63,7 +63,7 @@ describe("gemini adapter", () => {
       ...DEFAULT_ACCOUNT_POOL_CONFIG,
       geminiUpstreamBaseUrl: "https://generativelanguage.googleapis.com",
     };
-    expect(adapter().upstreamUrl(request, settings, account, { kind: "api-key", apiKey: "stored-key" }).origin)
+    expect(adapter().upstreamUrl(request, settings, undefined, account, { kind: "api-key", apiKey: "stored-key" }).origin)
       .toBe("https://generativelanguage.googleapis.com");
     const headers = adapter().requestHeaders(
       new Headers({ authorization: "Bearer hub-token" }),

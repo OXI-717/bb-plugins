@@ -3,7 +3,7 @@ import {afterEach,expect,it,vi} from 'vitest';
 import {mkdtemp,rm,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {createAccountPoolPlugin} from './server.js';
+import {createAccountPoolPlugin} from './management-test-fixture.js';
 import {accountSchema} from './contracts.js';
 const cleanups:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse())await cleanup();});

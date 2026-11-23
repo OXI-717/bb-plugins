@@ -4,17 +4,19 @@ import { z } from 'zod';
 import {automationInputSchema,automationStatusSchema} from './automation-contract.js';
 import {guardEventSchema} from './event-journal.js';
 
-export const evidenceSchema=z.object({state:z.enum(['connected','disconnected','unknown']),assurance:z.enum(['verified_ipv4','unverified','invalid']),reason:z.string(),updatedAt:z.number().nullable(),probeAt:z.number().nullable()});
+export const evidenceSchema=z.object({state:z.enum(['connected','disconnected','unknown']),assurance:z.enum(['verified_ipv4','system_ipv4','unverified','invalid']),source:z.enum(['incy','tailscale']).optional(),reason:z.string(),updatedAt:z.number().nullable(),probeAt:z.number().nullable()});
 export const hostContract = defineRpcContract({
   automation: {input:automationInputSchema,output:automationStatusSchema},
   readState: { input: z.null(), output: z.object({ state: z.enum(['connected','disconnected','unknown']),evidence:evidenceSchema.optional() }) },
 });
 export const modeSchema = z.enum(['observe','enforce']);
 export const stopReasonSchema=z.enum(['manual_block','host_rpc_failed','host_catalog_unavailable','no_route','no_core','probe_failed','probe_stale','healing','invalid_evidence','file_stale_or_schema','probe_unverified','epoch_changed','sleep_gap','starting']);
+export type StopReason=z.infer<typeof stopReasonSchema>;
 export const stopObservationSchema=z.object({threadId:z.string().max(160),hostId:z.string().max(160),at:z.number().int().nonnegative(),reason:stopReasonSchema});
 export const configurationSchema = z.object({
   mode: modeSchema,
   manualBlock: z.boolean().default(false),
+  manualBlockHostIds: z.array(z.string().min(1).max(160)).max(256).default([]),
   hostIds: z.array(z.string().min(1)).max(256),
   directHostIds: z.array(z.string().min(1)).max(256).default([]),
   suspendNativePluginsGlobally: z.boolean(),
@@ -25,6 +27,7 @@ export const configurationSchema = z.object({
 export const statusSchema = z.object({
   mode: modeSchema,
   manualBlock: z.boolean(),
+  manualBlockHostIds: z.array(z.string()).default([]),
   serverHostId:z.string().nullable(),
   hostIds: z.array(z.string()),
   directHostIds: z.array(z.string()).default([]),
@@ -35,6 +38,8 @@ export const statusSchema = z.object({
   hosts: z.array(z.object({
     id:z.string(), name:z.string(), selected:z.boolean(), available:z.boolean(), networkMode:z.enum(['direct','vpn-required']).optional(),
     vpn:z.enum(['connected','disconnected','unknown']).nullable(),evidence:evidenceSchema.nullable().optional(),rpc:rpcDiagnosticSchema.nullable().optional(),
+    // Selected machines only; absent in older Guard status.
+    lastEvidenceAt:z.number().nullable().optional(),unobservedSince:z.number().nullable().optional(),
   })),
   protectedProviders: z.array(z.string()),
   ownedDisabledPlugins: z.array(z.string()),
@@ -51,11 +56,12 @@ export const rpcContract = defineRpcContract({
   automationIdentity:{input:z.null(),output:z.object({instanceId:z.string()})},
   setAutomationCoordination:{input:z.object({enabled:z.boolean(),executable:z.string().nullable()}),output:statusSchema},
   automationAction:{input:z.object({action:z.enum(["pause","resume"])}),output:statusSchema},
-  networkDecision: {input:z.object({hostId:z.string().min(1),provider:z.enum(['codex','claude','cursor','devin','opencode-go','neuraldeep','agy'])}).strict(),output:z.object({schema:z.literal('bb-vpn-guard/network-decision/1'),allowed:z.boolean(),reason:z.enum(['manual_block','vpn_unavailable','outside_scope','observe','connected','restore_required'])}).strict()},
+  networkDecision: {input:z.object({hostId:z.string().min(1),provider:z.enum(['codex','claude','cursor','devin','opencode-go','neuraldeep','agy','grok'])}).strict(),output:z.object({schema:z.literal('bb-vpn-guard/network-decision/1'),allowed:z.boolean(),reason:z.enum(['manual_block','vpn_unavailable','outside_scope','observe','connected','restore_required'])}).strict()},
   setDirectHosts: {input:z.object({hostIds:z.array(z.string().min(1)).max(256)}).strict(),output:statusSchema},
-  networkDecisionV2: {input:z.object({hostId:z.string().min(1),provider:z.enum(['codex','claude','cursor','devin','opencode-go','neuraldeep','agy'])}).strict(),output:z.object({schema:z.literal('bb-vpn-guard/network-decision/2'),hostId:z.string().min(1),allowed:z.boolean(),reason:z.enum(['manual_block','vpn_unavailable','outside_scope','observe','connected','restore_required','direct'])}).strict()},
+  networkDecisionV2: {input:z.object({hostId:z.string().min(1),provider:z.enum(['codex','claude','cursor','devin','opencode-go','neuraldeep','agy','grok'])}).strict(),output:z.object({schema:z.literal('bb-vpn-guard/network-decision/2'),hostId:z.string().min(1),allowed:z.boolean(),reason:z.enum(['manual_block','vpn_unavailable','outside_scope','observe','connected','restore_required','direct'])}).strict()},
   resumeThread: {input:z.object({threadId:z.string().min(1).max(160),stoppedAt:z.number().int().nonnegative()}).strict(),output:z.object({accepted:z.literal(true)})},
   status: {input:z.null(),output:statusSchema},
+  setHostManualBlock: {input:z.object({hostId:z.string().min(1).max(160),blocked:z.boolean()}).strict(),output:statusSchema},
   setManualBlock: {input:z.object({blocked:z.boolean()}),output:statusSchema},
   setMode: {input:z.object({mode:modeSchema}),output:statusSchema},
   setHosts: {input:z.object({hostIds:z.array(z.string().min(1)).max(256)}),output:statusSchema},

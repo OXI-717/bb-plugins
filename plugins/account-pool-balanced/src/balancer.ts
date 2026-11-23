@@ -1,5 +1,5 @@
 import { reserveHours, scheduleAllows } from "./account-policy.js";
-import type { AccountPolicy } from "./contracts.js";
+import type { Account, AccountPolicy } from "./contracts.js";
 import type { AccountQuota } from "./contracts.js";
 
 const MINUTE_MS = 60 * 1_000;
@@ -28,7 +28,7 @@ interface ProgressiveCap {
   late: number;
 }
 
-interface PoolMembership {
+interface PoolMembership extends Pick<Account, "weeklyBudget"> {
   policy?: AccountPolicy;
   role: "primary" | "reserve";
   cap: ProgressiveCap | null;
@@ -223,8 +223,14 @@ export function drainOpensAt(
 export function weeklyUtilization(
   quota: AccountQuota,
   now: number,
+  account?: PoolMembership,
 ): number | null {
-  return weeklyWindow(quotaWindows(quota, now))?.utilization ?? null;
+  const windows = quotaWindows(quota, now);
+  return (account ? progressiveWindow(account, windows) : weeklyWindow(windows))?.utilization ?? null;
+}
+
+function progressiveWindow(account: PoolMembership, windows: QuotaWindow[]): QuotaWindow | null {
+  return weeklyWindow(account.weeklyBudget ? windows.filter(window => window.lengthMs !== WEEK_MS) : windows);
 }
 
 export function capLimit(
@@ -234,13 +240,9 @@ export function capLimit(
   week: WorkWeek = CALENDAR_WEEK,
 ): number | null {
   const cap = effectiveCap(account);
-  if (cap === null) return null;
-  return allowedUtilization(
-    cap,
-    weeklyWindow(quotaWindows(quota, now)),
-    now,
-    week,
-  );
+  const window = progressiveWindow(account, quotaWindows(quota, now));
+  if (cap === null || (account.weeklyBudget && window === null)) return null;
+  return allowedUtilization(cap, window, now, week);
 }
 
 export function gateMembership<
@@ -252,16 +254,16 @@ export function gateMembership<
   week: WorkWeek = CALENDAR_WEEK,
 ): T[] {
   const assessed = entries.filter(entry => (entry.account.drainOnce || scheduleAllows(entry.account.policy, now))).map((entry) => {
-    const weekly = weeklyWindow(quotaWindows(entry.quota, now));
+    const windows = quotaWindows(entry.quota, now);
+    const weekly = weeklyWindow(windows);
     const left = weekly === null ? null : remainingWorkMs(weekly, now, week);
-    return { entry, weekly, draining: left !== null && left <= reserveHours(entry.account, drainMs / 3600000) * 3600000 };
+    return { entry, weekly, windows, draining: left !== null && left <= reserveHours(entry.account, drainMs / 3600000) * 3600000 };
   });
-  const withinCap = assessed.filter(({ entry, weekly }) => {
+  const withinCap = assessed.filter(({ entry, weekly, windows }) => {
     const cap = effectiveCap(entry.account);
-    return (
-      cap === null ||
-      (weekly?.utilization ?? 0) < allowedUtilization(cap, weekly, now, week)
-    );
+    const window = entry.account.weeklyBudget ? progressiveWindow(entry.account, windows) : weekly;
+    return cap === null || (entry.account.weeklyBudget && window === null) ||
+      (window?.utilization ?? 0) < allowedUtilization(cap, window, now, week);
   });
   const preferred = withinCap.filter(
     ({ entry, draining }) => entry.account.role === "primary" || draining,

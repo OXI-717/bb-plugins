@@ -8,9 +8,10 @@ export function retryableNetworkFailure(failure:PluginTurnFailedEvent):boolean {
   if(!Number.isInteger(failure.attemptNumber)||failure.attemptNumber<1||failure.attemptNumber>3)return false;
   const error=failure.errorInfo;
   if(!error)return false;
+  if(error.providerCode==='POOL_EGRESS_UNAVAILABLE' && ((error.httpStatusCode??0)<500 || (error.httpStatusCode??0)>=600))return false;
   if(error.category==='connection-failed'||error.category==='stream-disconnected')return true;
   // Stable local codes only; never infer retries from arbitrary exception text.
-  return ['POOL_UPSTREAM_UNAVAILABLE','VPN_REQUIRED','VPN_GUARD_BLOCKED','VPN_GUARD_UNAVAILABLE'].includes(error.providerCode??'') && (error.httpStatusCode??0)>=500 &&
+  return ['POOL_EGRESS_UNAVAILABLE','POOL_UPSTREAM_UNAVAILABLE','VPN_REQUIRED','VPN_GUARD_BLOCKED','VPN_GUARD_UNAVAILABLE'].includes(error.providerCode??'') && (error.httpStatusCode??0)>=500 &&
     !['unauthorized','policy','billing','rate-limit','overloaded'].includes(error.category);
 }
 // ACP drops JSON-RPC error.data. Read only the latest provider error in the
@@ -23,10 +24,13 @@ async function normalizedCursorFailure(bb:BbPluginApi,failure:PluginTurnFailedEv
     if(row.threadId!==failure.threadId)return failure;
     if(row.type==='client/turn/requested'){
       if(row.data.requestId!==failure.requestId||!message)return failure;
-      const match=/^\[(POOL_UPSTREAM_UNAVAILABLE|VPN_REQUIRED|VPN_GUARD_BLOCKED|VPN_GUARD_UNAVAILABLE)\] Pooler connection temporarily unavailable\.$/.exec(message);
+      const match=/^(?:Internal error: )?\[(POOL_EGRESS_UNAVAILABLE|POOL_UPSTREAM_UNAVAILABLE|VPN_REQUIRED|VPN_GUARD_BLOCKED|VPN_GUARD_UNAVAILABLE)\] Pooler connection temporarily unavailable\.$/.exec(message);
       return match?{...failure,errorInfo:{category:'connection-failed',httpStatusCode:503,providerCode:match[1]!}}:failure;
     }
-    if(row.type==='provider/error'&&message===undefined)message=row.data.message;
+    if(row.type==='provider/error'&&message===undefined){
+      const detail=row.data.detail;
+      message=row.data.message==='Provider error'&&typeof detail==='string'?detail:row.data.message;
+    }
   }
   return failure;
 }
@@ -70,15 +74,18 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   // Native retries are checked again at queue drain: an RPC can lose its reply
   // before a late row appears, after event/startup cancellation already ran.
   const dispatchReads=new Map<string,Promise<{requestId:string|null;eligible:boolean}>>();
-  bb.experimental_hooks.on('message.dispatch',async context=>{
-    const queued=context.queuedMessages;
+   bb.experimental_hooks.on('message.dispatch',async context=>{
+     const queued = context.queuedMessages;
     if(!queued.some(entry=>entry.payload.kind==='retry'))return {action:'proceed'};
     if(queued.length!==1)return {action:'reject',message:'Automatic retry cancelled because its dispatch group includes other queued work.'};
     const entry=queued[0]!;
     if(entry.payload.kind!=='retry')return {action:'reject',message:'Automatic retry cancelled because its queued work could not be verified.'};
     const payload=entry.payload;
+    // A row whose reason no longer matches the owned pattern is manual work
+    // (e.g. the user converted an owned retry): never fence it by its id.
+    if(!/^Temporary connection failure\. Retry [123]\/3\.$/.test(payload.reason))return {action:'proceed'};
 
-    if(!claims)return /^Temporary connection failure\. Retry [123]\/3\.$/.test(payload.reason)?{action:'wait',reason:'Pooler retry journal unavailable',sendAt:now()+10_000}:{action:'proceed'};
+    if(!claims)return {action:'wait',reason:'Pooler retry journal unavailable',sendAt:now()+10_000};
     const claim=claims.find(value=>value.threadId===context.thread.id&&(value.queuedMessageId===entry.id||
       (value.originalRequestId===payload.retryOfTurnRequestId&&payload.reason===`Temporary connection failure. Retry ${value.attempt}/3.`)));
     if(!claim)return {action:'proceed'};
@@ -134,16 +141,34 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   bb.events.on('turn.failed',async failure=>{
     if(disposed||!claims||!Number.isInteger(failure.attemptNumber)||failure.attemptNumber<1||failure.attemptNumber>3||flights.has(failure.threadId))return;
     flights.add(failure.threadId);
+    const started=now();
+    let phase='thread',outcome='rpc-error',records=0;
+    const observe=(next:string,result='pending')=>{
+      phase=next;
+      if(records++>=12)return;
+      // Trusted opaque identifiers and fixed enums only; never SDK exception text.
+      const safeId=(value:string)=>/^[a-zA-Z0-9_-]{1,160}$/.test(value)?value:undefined;
+      try{bb.log.warn('Pooler network retry diagnostic '+JSON.stringify({
+        phase,outcome:result,attempt:failure.attemptNumber,elapsedMs:Math.max(0,now()-started),
+        threadId:safeId(failure.threadId),requestId:safeId(failure.requestId),
+      }));}catch{/* Logging must not change retry behavior. */}
+    };
+    observe('thread');
     try {
       const thread=await bb.sdk.threads.get({threadId:failure.threadId});
-      if(disposed||thread.status!=='error'||thread.archivedAt!=null||thread.deletedAt!=null||thread.queuedMessageCount)return;
-      if(!await eligible(thread.id,thread.providerId))return;
+      if(disposed||thread.status!=='error'||thread.archivedAt!=null||thread.deletedAt!=null||thread.queuedMessageCount){outcome='thread-unavailable';return;}
+      observe('eligible');
+      if(!await eligible(thread.id,thread.providerId)){outcome='route-unavailable';return;}
+      observe('classification');
       const classified=thread.providerId==='acp-oxi-cursor'?await normalizedCursorFailure(bb,failure):failure;
-      if(!retryableNetworkFailure(classified))return;
-      if((await bb.sdk.threads.queue.list({threadId:thread.id})).length)return;
+      if(!retryableNetworkFailure(classified)){outcome='not-retryable';return;}
+      observe('queue');
+      if((await bb.sdk.threads.queue.list({threadId:thread.id})).length){outcome='queue-occupied';return;}
+      observe('request');
       const requests=await bb.sdk.threads.events.list({threadId:thread.id,order:'desc',limit:'1',types:['client/turn/requested']});
       const currentRequest=requests.find(row=>row.type==='client/turn/requested');
-      if(!currentRequest||currentRequest.data.requestId!==failure.requestId)return;
+      if(!currentRequest||currentRequest.data.requestId!==failure.requestId){outcome='request-superseded';return;}
+      observe('claim');
       const originalRequestId=currentRequest.data.retryOfRequestId??failure.requestId;
       const claim=claimTail.then(async()=>{
         if(disposed||!claims||claims.some(value=>value.threadId===thread.id&&value.requestId===failure.requestId))return false;
@@ -152,14 +177,17 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
         await bb.storage.kv.set(KEY,next);claims=next;return true;
       });
       claimTail=claim.then(()=>undefined,()=>undefined);
-      if(!await claim||disposed)return;
+      if(!await claim||disposed){outcome='claim-not-acquired';return;}
       const delay=DELAYS[failure.attemptNumber-1]!;
       // The core validates the exact failed request again, deduplicates the
       // original retry chain and preserves inputAccepted/attemptNumber semantics.
+      observe('schedule');
       const result=await bb.sdk.threads.retry({threadId:thread.id,turnRequestId:failure.requestId,
         sendAt:now()+delay+Math.floor(Math.max(0,Math.min(1,random()))*delay*0.1),
         reason:`Temporary connection failure. Retry ${failure.attemptNumber}/3.`});
+      outcome=result.delivery==='queued'?'queued':'not-queued';
       if(result.delivery==='queued'&&result.queuedMessageId){
+        observe('record');
         const record=claimTail.then(async()=>{
           if(disposed||!claims)return;
           const next=claims.map(value=>value.threadId===thread.id&&value.requestId===failure.requestId?{...value,queuedMessageId:result.queuedMessageId}:value);
@@ -170,9 +198,10 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
         await cancelIfSuperseded(thread.id,current.status);
       }
     } catch {
+      outcome='rpc-error';
       // A timed-out RPC may already have queued the retry. Keep the durable
       // claim instead of blindly sending again; no raw exception in logs.
       if(!disposed)bb.log.warn('Pooler automatic network retry could not be confirmed; inspect the thread queue.');
-    } finally {flights.delete(failure.threadId);}
+    } finally {observe(phase,outcome);flights.delete(failure.threadId);}
   });
 }

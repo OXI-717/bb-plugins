@@ -6,13 +6,28 @@ import { providerSchema } from './contracts.js';
 import { codexQuotaObservationSchema } from './codex-quota-observation.js';
 import { TrafficHistory } from './traffic-history.js';
 export const MAX_ROWS=2048, TTL_MS=86400000, MAX_BYTES=2*1024*1024;
+// Background persistence cadence. Each snapshot rewrites a whole file on the server's
+// event loop, so it is deliberately coarse; readers are served from memory.
+export const SNAPSHOT_INTERVAL_MS=15_000, HISTORY_SNAPSHOT_INTERVAL_MS=60_000;
 const number=z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable();
 const binding=(prefix:string)=>z.string().regex(new RegExp(`^${prefix}_[a-z0-9]{6,32}$`)).nullable();
+const PUBLIC_MODEL_PATTERNS = [
+  /^gpt-\d+(?:\.\d+)?(?:-(?:codex|mini|nano|pro|turbo|astra|sol|spark|preview|max|fast|high|low|\d{4}-\d{2}-\d{2}))*$/,
+  /^o[1-9](?:-(?:mini|pro|preview|\d{4}-\d{2}-\d{2}))*$/,
+  /^claude-(?:opus|sonnet|haiku|fable)-\d+(?:[.-]\d+)*(?:-(?:\d{8}|fast|preview|thinking|1m))?$/,
+  /^gemini-\d+(?:\.\d+)?-(?:pro|flash|ultra)(?:-(?:lite|preview|exp|thinking|high|low|\d{3,8}))*$/,
+  /^glm-\d+(?:\.\d+)?(?:-(?:air|flash|plus|pro|max|turbo|code|coding|thinking|x|v|preview))*$/,
+  /^kimi-(?:k\d+(?:\.\d+)?|for-coding)(?:-(?:thinking|turbo|preview|fast|instruct|\d{4}))*$/,
+  /^grok-(?:\d+(?:\.\d+)?|code)(?:-(?:mini|fast|code|beta|vision|reasoning|preview|\d+))*$/,
+  /^(?:deepseek|qwen\d*|minimax|mimo)-(?:r\d+|v\d+|m\d+(?:\.\d+)?|\d+(?:\.\d+)?|chat|coder|reasoner)(?:-(?:r\d+|v\d+|m\d+|chat|coder|reasoner|pro|plus|max|turbo|flash|mini|fast|thinking|instruct|preview|\d+))*$/,
+  /^swe-\d+(?:\.\d+)?(?:-(?:mini|pro|fast|preview))*$/,
+] as const;
+const publicModelSchema = z.string().max(64).refine(value => PUBLIC_MODEL_PATTERNS.some(pattern => pattern.test(value))).nullable();
 export const observationSchema=z.object({
  at:z.number().int().nonnegative(),requestId:z.string().uuid(),attempt:z.number().int().min(0).max(100000),
  event:z.enum(['request','attempt','upstream','local-held','hold','result','stream-end','queue-wait','account-switch','auth-refresh','guard-check']),provider:providerSchema,
  accountId:z.string().uuid().nullable(),clientHash:z.string().regex(/^[a-f0-9]{24}$/).nullable(),projectId:binding('proj'),threadId:binding('thr'),
- model:z.enum(['gpt-6-astra','gpt-6.1-sol','gpt-6-sol','gpt-5.4','gpt-5.3-codex','claude-opus-4-6','claude-sonnet-4-6']).nullable(),
+ model:publicModelSchema,
  modelFamily:z.enum(['fable','sonnet','opus','haiku','other']),status:z.number().int().min(100).max(599).nullable(),
  durationMs:number,inFlight:z.number().int().nonnegative(),accountInFlight:z.number().int().nonnegative(),retryAfterMs:number,retryAfterSupplied:z.boolean().nullable(),quotaEvidence:z.boolean().nullable(),
  holdSource:z.enum(['upstream429','upstream403','existing-hold']).nullable(),heldUntil:number,
@@ -42,6 +57,7 @@ export class RequestJournal {
  private rows:Observation[]=[];
  private evicted=0;private failures=0;private dirty=false;private closed=false;
  private timer:ReturnType<typeof setTimeout>|null=null;private writing:Promise<void>|null=null;
+ private historySnapshotAt=Number.NEGATIVE_INFINITY;
  private readonly history:TrafficHistory;
  constructor(private readonly file:string,private readonly now=Date.now){this.history=new TrafficHistory(path.join(path.dirname(file),'history.json'),now);}
  async initialize():Promise<void>{
@@ -100,14 +116,24 @@ export class RequestJournal {
    evictedSinceStart:this.evicted,storageFailuresSinceStart:this.failures,oldestAt:this.rows[0]?.at??null,truncated:this.evicted>0||this.rows.length===MAX_ROWS,
    observedAt:now,totalRetainedRows:this.rows.length,rowsTruncated:this.rows.length>limit,providers:[...providers.values()].map(p=>({...p,accounts:[...p.accounts.values()]})),minutes:[...minutes.values()].sort((a,b)=>a.at-b.at),rows:this.rows.slice(-Math.max(1, Math.min(MAX_ROWS,limit))),history:this.history.summary()};
  }
+ historySummary(from:number,to:number){return this.history.periodSummary(from,to);}
  historySnapshot(offset = 0, limit = 100){return this.history.snapshot(offset,limit);}
  private prune():void{
-  const now=this.now(),retained=this.rows.filter(r=>r.at>=now-TTL_MS&&r.at<=now);
-  if(retained.length!==this.rows.length){this.evicted+=this.rows.length-retained.length;this.rows=retained;this.dirty=true;}
+  const now=this.now();
+  // Compact in place: record() runs for every event, including when all rows survive.
+  let retained=0;
+  for(const row of this.rows)if(row.at>=now-TTL_MS&&row.at<=now)this.rows[retained++]=row;
+  if(retained!==this.rows.length){this.evicted+=this.rows.length-retained;this.rows.length=retained;this.dirty=true;}
  }
  private schedule():void{
   if(this.timer!==null||this.closed)return;
-  this.timer=setTimeout(()=>{this.timer=null;void this.flush().finally(()=>this.schedule());},1000);this.timer.unref();
+  this.timer=setTimeout(()=>{this.timer=null;void this.snapshotDue().finally(()=>this.schedule());},SNAPSHOT_INTERVAL_MS);this.timer.unref();
+ }
+ /** Periodic pass: recent rows every tick, the larger hourly history once a minute. */
+ private async snapshotDue():Promise<void>{
+  const now=Date.now(),history=now-this.historySnapshotAt>=HISTORY_SNAPSHOT_INTERVAL_MS;
+  if(history)this.historySnapshotAt=now;
+  await Promise.all([this.flushRecent(),...(history?[this.history.flush()]:[])]);
  }
  async flush():Promise<void>{
   await Promise.all([this.flushRecent(),this.history.flush()]);

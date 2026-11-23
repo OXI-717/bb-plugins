@@ -241,3 +241,118 @@ it("enforces snapshot size in UTF-8 bytes before writing", () => {
   expect(() => catalog.publish(input)).toThrow("Snapshot exceeds 4 MB");
   expect(catalog.list()).toEqual({ tasks: [], sources: [] });
 });
+
+describe("source archival", () => {
+  it("preserves task history, allows restoration and treats a new publication as live", () => {
+    const { catalog } = setup();
+    const first = snapshot();
+    catalog.publish(first);
+    const key = catalog.list().tasks[0].key;
+    const history = catalog.detail({ key }).runs;
+    catalog.setSourceArchived("test", first.observedAt, true);
+    expect(catalog.list().sources[0].archivedAt).toBeGreaterThan(0);
+    expect(catalog.detail({ key }).runs).toEqual(history);
+    expect(catalog.list().tasks[0].state).toBe("active");
+    catalog.publish(first);
+    expect(catalog.detail({ key }).source.archivedAt).toBeGreaterThan(0);
+    catalog.setSourceArchived("test", first.observedAt, false);
+    expect(catalog.list().sources[0].archivedAt).toBeUndefined();
+    catalog.setSourceArchived("test", first.observedAt, true);
+    catalog.publish({ ...first, observedAt: first.observedAt + 1 });
+    expect(catalog.list().sources[0].archivedAt).toBeUndefined();
+  });
+
+  it("refuses an old receipt, a current source or a native BB source", () => {
+    const { catalog } = setup();
+    const first = snapshot(Date.now());
+    catalog.publish(first);
+    expect(() => catalog.setSourceArchived("test", first.observedAt - 1, true)).toThrow(/changed/);
+    expect(() => catalog.setSourceArchived("test", first.observedAt, true)).toThrow(/fresh/);
+    catalog.publish({ ...snapshot(), source: { ...first.source, id: "native", bbServerUrl: "http://127.0.0.1:38886" } }, "http://localhost:38886");
+    expect(() => catalog.setSourceArchived("native", 1000, true)).toThrow(/BB/);
+  });
+});
+
+describe("one-off execution classification", () => {
+  it("preserves the card and old findings while binding the actual invocation", () => {
+    const { catalog } = setup();
+    const legacy = snapshot(3000);
+    legacy.tasks[0].scheduler = "inventory-audit";
+    legacy.runs[0] = { ...legacy.runs[0], id: "old-inventory-finding", startedAt: 3000, finishedAt: 3000, status: "succeeded" };
+    catalog.publish(legacy);
+    const key = catalog.list().tasks[0].key;
+    const invocation = { ...snapshot(4000), tasks: [{ ...legacy.tasks[0], scheduler: "systemd", scheduleKind: "once" as const, state: "failed" as const, executionId: "systemd:invocation-one" }],
+      runs: [{ ...legacy.runs[0], id: "systemd:invocation-one", startedAt: 1000, finishedAt: 2000, status: "failed" as const, exitCode: 70 }] };
+    catalog.publish(invocation);
+    expect(catalog.list().tasks[0]).toMatchObject({ key, state: "failed", lastRun: { id: "systemd:invocation-one", exitCode: 70 } });
+    const detail = catalog.detail({ key });
+    expect(detail.task.lastRun).toMatchObject({ id: "systemd:invocation-one", exitCode: 70 });
+    expect(detail.total).toBe(2);
+    expect(detail.runs.find(r => r.id === "old-inventory-finding")).toMatchObject({ startedAt: 3000, status: "succeeded" });
+    catalog.publish({ ...invocation, observedAt: 5000, tasks: [{ ...invocation.tasks[0], executionId: "systemd:not-yet-published" }], runs: [] });
+    expect(catalog.list().tasks[0].lastRun).toBeNull();
+    expect(catalog.detail({ key }).task.lastRun).toBeNull();
+    expect(catalog.detail({ key }).total).toBe(2);
+  });
+});
+
+describe("bounded per-task run history and indexed queries", () => {
+  it("prunes excess runs per task while preserving executionId and latest execution outcome", () => {
+    const db = new Database(":memory:");
+    databases.push(db);
+    db.exec(catalogMigration);
+    const catalog = createCatalog(db, { maxRunsPerTask: 5 });
+    const base = snapshot(10_000);
+    const runs = [
+      { ...base.runs[0], id: "exec-pinned", evidence: "execution" as const, startedAt: 100, finishedAt: 110, observedAt: 110, status: "failed" as const, exitCode: 1 },
+      { ...base.runs[0], id: "exec-latest", evidence: "execution" as const, startedAt: 200, finishedAt: 210, observedAt: 210, status: "succeeded" as const, exitCode: 0 },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        ...base.runs[0],
+        id: `state-${String(index).padStart(2, "0")}`,
+        evidence: "state-change" as const,
+        status: "unknown" as const,
+        startedAt: null,
+        finishedAt: null,
+        observedAt: 1000 + index * 10,
+        exitCode: null,
+      })),
+    ];
+    catalog.publish({ ...base, tasks: [{ ...base.tasks[0], scheduleKind: "once" as const, executionId: "exec-pinned" }], runs });
+    const list = catalog.list();
+    expect(list.tasks).toHaveLength(1);
+    const key = list.tasks[0].key;
+    expect(list.tasks[0].lastRun?.id).toBe("exec-pinned");
+    const detail = catalog.detail({ key, offset: 0, limit: 25 });
+    expect(detail.total).toBe(7); // 5 newest state-changes + pinned executionId + latest execution
+    const ids = detail.runs.map((run) => run.id);
+    expect(ids).toContain("exec-pinned");
+    expect(ids).toContain("exec-latest");
+    expect(ids).toContain("state-11");
+    expect(ids).not.toContain("state-00");
+    // Dropping executionId still preserves latest execution outcome.
+    catalog.publish({
+      ...base,
+      observedAt: 20_000,
+      tasks: [{ ...base.tasks[0], scheduleKind: "recurring" as const }],
+      runs: [{ ...runs[runs.length - 1], id: "state-12", observedAt: 2000 }],
+    });
+    expect(catalog.list().tasks[0].lastRun?.id).toBe("exec-latest");
+    const after = catalog.detail({ key, offset: 0, limit: 25 });
+    expect(after.total).toBe(6); // 5 newest state-changes + latest execution
+    expect(after.runs.map((run) => run.id)).toContain("exec-latest");
+  });
+
+  it("avoids temporary B-tree sorting in detail and list run lookups", () => {
+    const { db, catalog } = setup();
+    catalog.publish(snapshot());
+    const key = catalog.list().tasks[0].key;
+    const detailPlan = db
+      .prepare("EXPLAIN QUERY PLAN SELECT data FROM automation_catalog_runs WHERE task_key = ? ORDER BY sort_at DESC, id DESC LIMIT 25 OFFSET 0")
+      .all(key) as Array<{ detail: string }>;
+    const latestPlan = db
+      .prepare("EXPLAIN QUERY PLAN SELECT data FROM automation_catalog_runs WHERE task_key = ? AND evidence = 'execution' ORDER BY sort_at DESC, id DESC LIMIT 1")
+      .all(key) as Array<{ detail: string }>;
+    expect(detailPlan.map((row) => row.detail).join("\n")).not.toContain("TEMP B-TREE");
+    expect(latestPlan.map((row) => row.detail).join("\n")).not.toContain("TEMP B-TREE");
+  });
+});

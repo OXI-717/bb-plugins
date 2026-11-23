@@ -10,6 +10,7 @@ export function vpnProof(nowMs:number) {
 
 /** Match the host RPC evidence contract rather than inventing a state-only allow. */
 export function verifiedHostResult(state:VpnState) {
+  const observedAt=Date.now();
   return {state,evidence:{state,assurance:state==='connected'?'verified_ipv4' as const:'unverified' as const,
-    reason:state==='connected'?'ok':'probe_failed',updatedAt:Date.now(),probeAt:Date.now()}};
+    reason:state==='connected'?'ok':'probe_failed',updatedAt:observedAt,probeAt:observedAt}};
 }

@@ -1,3 +1,18 @@
+import {startLoopDelay} from './loop-delay.js';
+import {ThreadAccountSelection} from './thread-account-selection.js';
+import {projectTier} from './project-policy.js';
+import {blockingResetAt} from './quota.js';
+import {policyThresholds} from './account-policy.js';
+import {createManagedConnectSource} from './managed-connect-source.js';
+import {ProxySecrets} from './proxy-secrets.js';
+import {ManagementAccess} from './management-access.js';
+import {managementCli,registerManagementRpc} from './management-boundary.js';
+import {PoolMaintenance} from './maintenance.js';
+import {PoolUpdate} from './pool-update.js';
+import {serverGuardRead,runGuardProbe,type GuardServerAccess} from './guard-server.js';
+import {registerNativeUnlockRpc} from "./native-unlock-rpc.js";
+import { AccountEgress, EgressUnavailable } from "./account-egress.js";
+import type { HttpScopeEnforcementSource } from './http-scope-acceptance.js';
 import { ADDITIONAL_BUDGET_PROVIDERS } from './provider-budget.js';
 import {NativeSessions,NativeSessionError,nativeHttp} from './native-sessions.js';
 import {AgyOAuthLogin,readNativeAgyConfig,type AgyAppConfig} from "./agy-oauth-login.js";
@@ -63,6 +78,9 @@ import {
 } from "./store.js";
 
 export interface AccountPoolPluginOptions {
+  // Internal override; production uses the root-owned Fleet observer by default.
+  // Never substitute Guard readiness, a receipt file or caller-supplied metadata.
+  httpScopeEnforcement?:HttpScopeEnforcementSource;
   agyAppConfig?:()=>Promise<AgyAppConfig>;
   fetch?: typeof fetch;
   fetchIpv4?:typeof fetch;
@@ -154,22 +172,55 @@ export function createAccountPoolPlugin(
     const accounts = new AccountStore(bb.storage.kv, secretDir);
     await accounts.initialize();
     const now = options.now ?? Date.now;
+    const management = new ManagementAccess(path.join(secretDir, 'management'), now);
+    await management.initialize().catch(() => bb.log.warn('Management access is unavailable; account administration remains locked.'));
+    bb.onDispose(() => management.close());
+    let maintenanceActivity=()=>0;
+    const maintenance = new PoolMaintenance(value=>bb.storage.kv.set('model-maintenance-v1',value),now,()=>maintenanceActivity());
+    await maintenance.initialize(await bb.storage.kv.get('model-maintenance-v1'));
+    const update = new PoolUpdate(bb,now);
+    const nativeGuardChecks=new Map<string,ReturnType<typeof createGuardNetworkCheck>>();
+    const nativeGuardCheckFor=(hostId:string)=>{
+      let check=nativeGuardChecks.get(hostId);
+      if(!check){
+        if(nativeGuardChecks.size>=64)nativeGuardChecks.clear();
+        check=createGuardNetworkCheck(async(provider,signal,trace)=>{
+          trace.host(hostId);
+          trace.stage('guard-rpc');
+          const decision=await bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal});
+          trace.stage('validate-host');
+          return bindGuardNetworkDecision(decision,hostId);
+        },undefined,event=>{
+          if(event.attempt===1&&(event.outcome==='allowed'||event.outcome==='direct'))return;
+          bb.log.warn('Account Pooler native Guard permission '+JSON.stringify(event));
+        });
+        nativeGuardChecks.set(hostId,check);
+      }
+      return check;
+    };
     const nativeSessions=new NativeSessions(bb.storage.kv,now,async(hostId,caller)=>{
-      if(!(await routing.isProviderEnabled('agy')))throw Error('Native AGY routing disabled');
-      if(!(await bb.sdk.hosts.list()).some(host=>host.id===hostId))throw Error('Native executor host not enrolled');
+      if(!(await routing.isProviderEnabled('agy')))throw new NativeSessionError(403,'native-routing-disabled');
+      if(!(await bb.sdk.hosts.list()).some(host=>host.id===hostId))throw new NativeSessionError(403,'native-host-not-enrolled');
       if(currentSettings.vpnGuardEnabled){
-        await createGuardNetworkCheck(async(provider,signal)=>bindGuardNetworkDecision(
-          await bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal}),hostId))('agy');
-      }else if(currentSettings.vpnOnlyProviders.includes('agy'))throw Error('Native protected host requires its Guard decision');
+        await nativeGuardCheckFor(hostId)('agy');
+      }else if(currentSettings.vpnOnlyProviders.includes('agy'))throw new NativeSessionError(503,'native-guard-required');
       if(caller.threadId&&await routing.isBypassed(caller.threadId))throw new NativeSessionError(403,'native-thread-bypassed');
+    },executor=>{if(executor.execution){try{egress.validateNativeProfile(executor.execution.profile,executor.hostId);}
+      catch{throw new NativeSessionError(503,'native-execution-unprepared');}}},async(requestId,signal)=>{
+      await bb.sdk.plugins.callRpc({pluginId:'oxi-op',method:'runPreparedTask',input:{requestId},
+        outputSchema:z.object({completed:z.literal(true)}).strict(),signal});
     });
+    nativeSessions.admissionCheck=()=>{if(maintenance.status().lease)throw new NativeSessionError(503,'POOL_MAINTENANCE');};
     await nativeSessions.initialize();
+    registerNativeUnlockRpc(bb,nativeSessions);
+    bb.onDispose(()=>nativeSessions.close());
     const hubTokens = new HubTokenStore(secretDir, now);
     await hubTokens.initialize();
     const enrolledHosts = await bb.sdk.hosts.list();
     await hubTokens.prune(enrolledHosts.map((host) => host.id));
     const externalClients = new ExternalClients(path.join(secretDir, "external-clients"));
     await externalClients.tokens.initialize();
+    const manualSelection=new ThreadAccountSelection(bb.storage.kv,async id=>(await accounts.list()).some(a=>a.id===id));
     const routing = new RoutingStore(bb.storage.kv, now);
     // bb resolves provider env with a null thread and project when it lists models.
     const isThreadBypassed = async (context: ProviderEnvScope) =>
@@ -184,6 +235,12 @@ export function createAccountPoolPlugin(
     const journal=new RequestJournal(path.join(bb.server.experimental_dataDir,'plugins',bb.pluginId,'request-metadata','recent.json'),now);
     await journal.initialize();
     bb.onDispose(()=>journal.close());
+    const egress=new AccountEgress(bb.storage.kv,async()=>{const id=(await bb.sdk.system.config()).primaryHostId;if(!id)throw Error("Pool server machine unknown");return id;},async id=>{const account=await accounts.get(id);return account?.provider==='claude'||account?.provider==='codex';},new ProxySecrets(path.join(secretDir,'account-proxies')),now,options.httpScopeEnforcement??createManagedConnectSource(now),key=>{
+      let observationKey=key;try{const value=JSON.parse(key);if(Array.isArray(value)&&value.length===4)observationKey=JSON.stringify(["thread",value[3],value[0],value[1],value[2]]);}catch{}
+      return new PoolAffinityStore(db).observation(observationKey)?.lastUsedAt??null;
+    });
+    await egress.initialize();
+    bb.onDispose(()=>egress.close());
     const transport =
       options.fetch === undefined ? createUpstreamTransport() : null;
     const upstreamFetch = options.fetch ?? transport?.fetch;
@@ -202,7 +259,16 @@ export function createAccountPoolPlugin(
       await bb.storage.kv.set('agy-model-ids-v1',[...agyModels]);
     };
     await registerAgyModels((await bb.storage.kv.get<string[]>('agy-model-ids-v1'))??[]);
+    const guardAccess:GuardServerAccess={
+      serverHost:async(signal)=>(await bb.sdk.system.config({signal})).primaryHostId,
+      decision:(hostId,provider,signal)=>bb.sdk.plugins.callRpc({pluginId:'vpn-guard',method:'networkDecisionV2',input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal}),
+    };
     const hub = createHub({
+      maintenance,
+      accountRoute:(accountId,sessionKey)=>egress.acquire(accountId,sessionKey),
+      manualRouteAccount:sessionKey=>manualSelection.get(sessionKey),
+      pinnedRouteAccount:sessionKey=>egress.pinnedAccount(sessionKey),
+      routeCompatible:(accountId,sessionKey)=>egress.compatible(accountId,sessionKey),
       nativeAgyManaged:()=>nativeSessions.managed(),
       agyModels:registerAgyModels,
       route: hubBasePath(bb.pluginId),
@@ -214,13 +280,9 @@ export function createAccountPoolPlugin(
       getSettings: () => currentSettings,
       fetch: upstreamFetch,fetchIpv4:options.fetchIpv4??transport?.fetchIpv4,
       vpnPayload: options.vpnPayload,
-      guardCheck:createGuardNetworkCheck(async (provider,signal)=>{
-        const hostId=(await bb.sdk.system.config({signal})).primaryHostId;
-        if(!hostId) throw new Error("Pool server machine unknown");
-        const decision=await bb.sdk.plugins.callRpc({pluginId:"vpn-guard",method:"networkDecisionV2",input:{hostId,provider},outputSchema:hostGuardDecisionSchema,signal});
-        // Rebind after I/O: migration during the RPC cannot grant another host's egress.
-        if((await bb.sdk.system.config({signal})).primaryHostId!==hostId)throw Error('Pool server machine changed');
-        return bindGuardNetworkDecision(decision,hostId);
+      guardCheck:createGuardNetworkCheck(serverGuardRead(guardAccess),undefined,event=>{
+        if(event.attempt===1&&(event.outcome==='allowed'||event.outcome==='direct'))return;
+        bb.log.warn('Account Pooler Guard permission '+JSON.stringify(event));
       }),
       now,
       refreshUrl: options.refreshUrl,
@@ -249,7 +311,7 @@ export function createAccountPoolPlugin(
       onUpstreamError: (provider, error, context) => {
         const diagnostic = describeTransportError(error);
         bb.log.warn(
-          `Account Pooler ${provider} transport failed: ${transportErrorCode(error)}. ` +
+          `Account Pooler ${provider} transport failed: ${diagnostic.category==='policy'?diagnostic.code:transportErrorCode(error)}. ` +
           JSON.stringify({ ...diagnostic, ...context }),
         );
       },
@@ -303,6 +365,13 @@ export function createAccountPoolPlugin(
     },now);
     const login = new ClaudeOAuthLogin({
       beforeStart: () => hub.assertNetworkAllowed("claude"),
+      accountFetch:async id=>{
+        const account=await accounts.get(id);
+        if(!account||account.provider!=='claude')throw Error("Claude account not found.");
+        const route=await egress.acquire(id);
+        const send=hub.outboundFetch('claude',route.fetch(true));
+        return async(input,init)=>{if(!await accounts.get(id))throw Error('Claude OAuth account no longer exists.');return send(input,init);};
+      },
       fetch: hub.outboundFetch("claude"),
       now,
       authorizeUrl: options.oauthAuthorizeUrl,
@@ -319,15 +388,32 @@ export function createAccountPoolPlugin(
     },onModels:registerAgyModels,now});
     const codexLogin = new CodexDeviceLogin({
       fetch: hub.outboundFetch("codex"),
+      accountFetch: async accountId => {
+        const account = await accounts.get(accountId);
+        if (account?.provider !== "codex" || account.kind !== "oauth") {
+          throw Error("Codex OAuth account no longer exists.");
+        }
+        const original = await egress.acquire(accountId);
+        return async (input, init) => {
+          const current = await accounts.get(accountId);
+          if (current?.provider !== "codex" || current.kind !== "oauth") throw new EgressUnavailable();
+          const route = await egress.acquire(accountId);
+          if (JSON.stringify(route.profile) !== JSON.stringify(original.profile)) throw new EgressUnavailable();
+          const send = route.fetch(true);
+          if (route.assigned && !send) throw new EgressUnavailable();
+          return hub.outboundFetch("codex", send)(input, init);
+        };
+      },
       now,
       authBaseUrl: options.codexAuthBaseUrl,
-      addAccount: (authenticated) => operations.addCodexOAuth(authenticated),
+      addAccount: (authenticated, accountId) => operations.addCodexOAuth(authenticated, accountId),
     });
     const grokLogin = new GrokDeviceLogin({
+      beforeSpawn: () => hub.assertLoginAllowed("grok"),
       now,
       command: options.grokLoginCommand,
       args: options.grokLoginArgs,
-      addAccount: (authenticated) => operations.addGrokOAuth(authenticated),
+      addAccount: (credentials) => operations.addGrokOAuth(credentials),
     });
     const geminiLogin = new GeminiLogin({
       now,
@@ -344,15 +430,56 @@ export function createAccountPoolPlugin(
     const browserHost=bb.hosts.experimental_client({contract:browserHostContract});
     const browser=createBrowserRouter({
       getHostId:()=>config.get().browserHostId,
+      proxyForAccount:id=>egress.browserProxy(id),
+      routedAccountIds:()=>Object.keys(egress.snapshot().bindings),
       listHosts:()=>bb.sdk.hosts.list(),accounts:()=>operations.list(),
       callHost:(method,input,hostId)=>method==='open'
         ? browserHost.call('open',browserHostContract.open.input.parse(input),{hostId,timeoutMs:60000})
         : browserHost.call('list',browserHostContract.list.input.parse(input),{hostId,timeoutMs:10000}),
-      localOpen:async(query,url)=>openAccountBrowser({accounts:await operations.list(),query,url,dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId,vpnStatusFile:config.get().vpnStatusFile}),
-      localList:async()=>listBrowserProfiles({accounts:await operations.list(),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
+      localOpen:async(query,url)=>openAccountBrowser({accounts:await operations.list(),routedAccountIds:Object.keys(egress.snapshot().bindings),query,url,proxyUrl:await egress.browserProxy(query),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId,vpnStatusFile:config.get().vpnStatusFile}),
+      localList:async()=>listBrowserProfiles({accounts:await operations.list(),routedAccountIds:Object.keys(egress.snapshot().bindings),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
     });
-    bb.rpc.register(
-      accountPoolRpcContract,
+    maintenanceActivity=()=>hub.maintenanceActivity();
+    bb.onDispose(startLoopDelay(message=>bb.log.warn(message),()=>hub.inFlightCount()));
+    const maintenanceApi = {
+      status:()=>maintenance.status(),
+      acquire:(owner:string)=>maintenance.acquire(owner),
+      acquireGraceful:(owner:string)=>maintenance.acquireGraceful(owner),
+      acquireUpgrade:(owner:string)=>maintenance.acquireUpgrade(owner),
+      sealUpgrade:(owner:string)=>maintenance.sealUpgrade(owner),
+      release:(owner:string)=>maintenance.release(owner),
+      interrupt:async(owner:string)=>{hub.interruptForMaintenance(owner);return maintenance.status();},
+    };
+    const selectionContext=async(threadId:string)=>{
+      const thread=await bb.sdk.threads.get({threadId,include:'environment'});
+      const provider:PoolProvider|null=({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi'} as Record<string,PoolProvider>)[thread.providerId]??null;
+      if(!provider || await routing.isBypassed(threadId) || !await operations.isRoutingEnabled(provider))throw Error("This thread does not use the account pool");
+      const hostId='environment' in thread?thread.environment?.hostId:undefined;
+      if(!hostId)throw Error("Thread environment unavailable");
+      return {provider,key:JSON.stringify([hostId,thread.projectId,threadId,provider]),projectId:thread.projectId};
+    };
+    const choices=async(threadId:string)=>{
+      const context=await selectionContext(threadId),manual=await manualSelection.get(context.key);
+      const rows=(await operations.list()).filter(a=>a.provider===context.provider && projectTier(a,context.projectId)!==null);
+      const routes=egress.snapshot();
+      // Global status applies global roles; this thread is admitted by its project's rules.
+      const available=await hub.projectAvailability(context.provider,context.projectId);
+      return {currentAccountId:manual??egress.pinnedAccount(context.key),mode:manual?'manual' as const:'auto' as const,pinned:manual!==null || egress.pinnedAccount(context.key)!==null,
+        accounts:rows.map(a=>{
+          const q=quotas.get(a.id),at=now();
+          // The same reset the pool reports when it refuses a request for this account.
+          const reset=blockingResetAt(q,'other',policyThresholds(a,currentSettings.switchThreshold,q,at),at);
+          const state=!a.enabled?'disabled' as const:q.error?'error' as const:(q.heldUntil??0)>at?'held' as const:!available.has(a.id)?'exhausted' as const:'ready' as const;
+          return {id:a.id,label:a.email??a.label,state,until:state==='held'?q.heldUntil:state==='exhausted'&&reset!==null&&reset>at?Math.round(reset):null,
+            selectable:a.enabled&&!q.error,assigned:routes.bindings[a.id]!==undefined || routes.pins[context.key]?.accountId===a.id};
+        })};
+    };
+    const selection={choices,switch:async(threadId:string,accountId:string|null)=>{
+      const context=await selectionContext(threadId);
+      if(accountId!==null && !(await choices(threadId)).accounts.some(a=>a.id===accountId && a.selectable))throw Error("This account is unavailable for the thread");
+      await manualSelection.set(context.key,accountId);return choices(threadId);
+    }};
+    registerManagementRpc(bb, management,
       createRpcHandlers(operations, login, codexLogin, config, async (threadId) => {
         const thread = await bb.sdk.threads.get({ threadId, include: "environment" });
         const provider:PoolProvider|null = ({codex:'codex','claude-code':'claude','acp-oxi-cursor':'cursor','acp-oxi-devin-pool':'devin','acp-opencode-zai':'zai','acp-agy':'agy','acp-opencode-neuraldeep':'neuraldeep','acp-opencode-nvidia':'nvidia','acp-opencode-ifm':'ifm','acp-opencode-go':'opencode-go','acp-opencode-kimi':'kimi','acp-opencode-kimi-highspeed':'kimi','acp-grok':'grok','acp-antigravity':'gemini'} as Record<string,PoolProvider>)[thread.providerId]??null;
@@ -383,16 +510,18 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url), grokLogin, geminiLogin),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update,input=>nativeSessions.updateAccount(input),input=>nativeSessions.probe(input,async()=>{try{return (await browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})).protocol===1;}catch{return false;}},request=>browserHost.call('nativeProbe',request,{hostId:input.hostId,timeoutMs:125000})),selection,geminiLogin),
     );
-    registerPoolCli(bb, operations, login, codexLogin, config, externalClients,browser,nativeSessions,grokLogin,geminiLogin);
-    registerUsageSource(bb, hub, now);
+    operations.uncertainNativeLeases=()=>nativeSessions.uncertainLeases();
+    operations.routeTracking=async()=>{await egress.cleanup();return egress.capacity();};
+    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})),()=>update.status(),geminiLogin);
+    registerUsageSource(bb, hub, false, now);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
       if (readiness.reason === "routing-disabled") return null;
-      if (readiness.ready) return {label: "Proxied", statusMessage: "Credentials are provided by the Account Pooler hub."};
+      if (readiness.ready) return {label: "Ready", statusMessage: "Provider access is ready."};
       if (!("projectId" in context)) return null;
-      return {status: "unavailable" as const, label: "Account Pooler", statusMessage: `Account Pooler is not ready: ${readiness.reason}.`};
+      return {status: "unavailable" as const, label: "Unavailable", statusMessage: "Provider access is unavailable."};
     };
     if (transport !== null) bb.providers.experimental_contributeEnvHealth("acp-oxi-devin-pool", context => proxiedHealth("devin", context));
     bb.providers.experimental_contributeEnv("claude-code", async (context) => {
@@ -460,7 +589,8 @@ export function createAccountPoolPlugin(
     );
     bb.http.route('GET','/agy/v1beta/models',context=>hub.handle(context.req.raw,'agy'),{auth:'none'});
     bb.http.route('POST','/native/agy',context=>nativeHttp(context.req.raw,nativeSessions,
-      token=>combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token)),{auth:'none'});
+      async token=>{const caller=await combinedTokens(hubTokens,externalClients.tokens).authenticateContext(token);return caller?.accountScope?null:caller;},
+      event=>bb.log.warn('Account Pooler native admission rejected '+JSON.stringify(event))),{auth:'none'});
     bb.providers.experimental_contributeEnv('acp-agy',async context=>{
       if(nativeSessions.managed()){
         const catalog=context.threadId===null;
@@ -493,6 +623,12 @@ export function createAccountPoolPlugin(
           (context) => hub.handle(context.req.raw, "grok"),
           { auth: "none" },
         );
+      }
+    }
+    // Retain existing Pooler session URLs alongside the upstream versioned form.
+    for (const method of ["GET", "POST"] as const) {
+      for (const suffix of ["chat/completions", "responses", "models", "settings", "feedback/config", "user"]) {
+        bb.http.route(method, `/${GROK_MOUNT_PREFIX}${suffix}`, context => hub.handle(context.req.raw, "grok"), {auth:"none"});
       }
     }
     bb.providers.experimental_contributeEnv("acp-grok", async (context) => {
@@ -723,7 +859,9 @@ export function createAccountPoolPlugin(
     });
     bb.providers.experimental_contributeEnvHealth("acp-antigravity", context => proxiedHealth("gemini", context));
     for (const entry of openAiCompatibleRoutes) {
-      for (const route of ((entry.provider === "neuraldeep" || entry.provider === "nvidia" || entry.provider === "ifm") ? ["chat/completions", "models"] : ["chat/completions", "responses", "models"])) {
+      // OpenCode Go multiplexes Anthropic Messages next to Chat Completions
+      // and Responses on the same base URL — route all three wires through.
+      for (const route of ((entry.provider === "neuraldeep" || entry.provider === "nvidia" || entry.provider === "ifm") ? ["chat/completions", "models"] : entry.provider === "opencode-go" ? ["chat/completions", "responses", "messages", "models"] : ["chat/completions", "responses", "models"])) {
         bb.http.route(
           (entry.provider === "neuraldeep" || entry.provider === "nvidia" || entry.provider === "ifm") && route === "models" ? "GET" : "POST",
           `/${entry.mountPrefix}v1/${route}`,
@@ -823,14 +961,18 @@ export function createAccountPoolPlugin(
         if (timer !== null) clearTimeout(timer);
       }
     });
-    for(const provider of ADDITIONAL_BUDGET_PROVIDERS)bb.http.route('GET',`/budget/${provider}`,async context=>
-      hub.providerBudget(context.req.raw,provider,await routing.isProviderEnabled(provider),threadId=>routing.isBypassed(threadId)),{auth:'none'});
-    bb.http.route("GET", "/budget/codex", async context => hub.codexBudget(
-      context.req.raw, await routing.isProviderEnabled("codex"), threadId => routing.isBypassed(threadId),
-    ), { auth: "none" });
+    const budgetUnavailable = () => Response.json({error:'Pool budget evidence unavailable.'},{status:503,headers:{'cache-control':'no-store'}});
+    for(const provider of ADDITIONAL_BUDGET_PROVIDERS)bb.http.route('GET',`/budget/${provider}`,async context=>{
+      try {return await hub.providerBudget(context.req.raw,provider,await routing.isProviderEnabled(provider),threadId=>routing.isBypassed(threadId));}
+      catch {return budgetUnavailable();}
+    },{auth:'none'});
+    bb.http.route("GET", "/budget/codex", async context => {
+      try {return await hub.codexBudget(context.req.raw, await routing.isProviderEnabled("codex"), threadId => routing.isBypassed(threadId));}
+      catch {return budgetUnavailable();}
+    }, { auth: "none" });
     bb.http.route("GET", "/budget/zai", async context => {
       try {return await hub.zaiBudget(context.req.raw,await routing.isProviderEnabled('zai'),threadId=>routing.isBypassed(threadId));}
-      catch {return Response.json({error:'Pool budget evidence unavailable.'},{status:503,headers:{'cache-control':'no-store'}});}
+      catch {return budgetUnavailable();}
     }, {auth:'none'});
     bb.http.route(
       "POST",
@@ -846,6 +988,7 @@ export function createAccountPoolPlugin(
     );
     for (const route of [
       "/v1/responses",
+      "/v1/responses/compact",
       "/v1/images/generations",
       "/v1/images/edits",
       "/v1/alpha/search",

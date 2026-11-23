@@ -1,6 +1,6 @@
 /** Interactive native launcher: no DevTools connection or automation switches. */
 export const NATIVE_BROWSER_WORKER = String.raw`
-const {createServer}=require('node:http'),net=require('node:net'),fs=require('node:fs');
+const {createServer}=require('node:http'),net=require('node:net'),tls=require('node:tls'),fs=require('node:fs');
 const {spawn}=require('node:child_process'),{randomUUID}=require('node:crypto');
 const {pathToFileURL}=require('node:url'),path=require('node:path'),os=require('node:os');
 let input='',primary,proxy,control,socketPath,documents,closing=false,active=0;
@@ -36,6 +36,7 @@ function documentURL(url){
  return {url:pathToFileURL(file).href,ready};
 }
 async function boot(cfg){
+ if(cfg.proxyUrl){const u=new URL(cfg.proxyUrl);if(!['http:','https:'].includes(u.protocol)||u.hostname.includes(':')||u.pathname!=='/'||u.search||u.hash)throw new Error('Invalid account browser proxy.');}
  const profiles=new Set(cfg.profileDirectories);
  if(!profiles.size||[...profiles].some(p=>!/^Profile [1-9]\d{0,6}$/.test(p))||!profiles.has(cfg.profileDirectory))throw new Error('Invalid browser profiles.');
  socketPath=cfg.socketPath;
@@ -45,10 +46,36 @@ async function boot(cfg){
  proxy.on('connect',(req,client,head)=>{
   const m=/^([^\s/:\[\]@?#]+):(\d{1,5})$/.exec(req.url||'');
   if(!m||+m[2]<1||+m[2]>65535){client.end('HTTP/1.1 400 Bad Request\r\n\r\n');return;}
-  const upstream=net.connect({host:m[1],port:+m[2],family:4});track(upstream);
-  const timer=setTimeout(()=>{upstream.destroy();client.destroy();},4000);
-  upstream.once('connect',()=>{clearTimeout(timer);client.write('HTTP/1.1 200 Connection Established\r\n\r\n');if(head.length)upstream.write(head);client.pipe(upstream);upstream.pipe(client);});
-  upstream.on('error',()=>client.destroy());upstream.on('close',()=>{clearTimeout(timer);client.destroy();});client.on('close',()=>upstream.destroy());
+  if(!cfg.proxyUrl){
+   const upstream=net.connect({host:m[1],port:+m[2],family:4});track(upstream);
+   const timer=setTimeout(()=>{upstream.destroy();client.destroy();},4000);
+   upstream.once('connect',()=>{clearTimeout(timer);client.write('HTTP/1.1 200 Connection Established\r\n\r\n');if(head.length)upstream.write(head);client.pipe(upstream);upstream.pipe(client);});
+   upstream.on('error',()=>client.destroy());upstream.on('close',()=>{clearTimeout(timer);client.destroy();});client.on('close',()=>upstream.destroy());
+   return;
+  }
+  // Account proxy credentials arrive only on the supervisor's private stdin.
+  // Never resolve or connect to the destination locally, even on proxy failure.
+  const target=new URL(cfg.proxyUrl);
+  const opts={host:target.hostname,port:Number(target.port||(target.protocol==='https:'?443:80)),family:4};
+  const upstream=target.protocol==='https:'?tls.connect({...opts,servername:net.isIP(target.hostname)?undefined:target.hostname}):net.connect(opts);
+  track(upstream);let headers=Buffer.alloc(0);
+  const timer=setTimeout(()=>{upstream.destroy();client.destroy();},10000);
+  upstream.once(target.protocol==='https:'?'secureConnect':'connect',()=>{
+   let auth='';if(target.username||target.password)auth='Proxy-Authorization: Basic '+Buffer.from(decodeURIComponent(target.username)+':'+decodeURIComponent(target.password)).toString('base64')+'\r\n';
+   upstream.write('CONNECT '+m[1]+':'+m[2]+' HTTP/1.1\r\nHost: '+m[1]+':'+m[2]+'\r\n'+auth+'\r\n');
+  });
+  const onData=chunk=>{
+   headers=Buffer.concat([headers,chunk]);const end=headers.indexOf('\r\n\r\n');
+   if(end<0){if(headers.length>16384){upstream.destroy();client.destroy();}return;}
+   if(end>16384||!/^HTTP\/1\.[01] 200(?: |\r)/.test(headers.toString('latin1',0,end))){upstream.destroy();client.destroy();return;}
+   clearTimeout(timer);upstream.off('data',onData);
+   client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+   const remainder=headers.subarray(end+4);if(remainder.length)client.write(remainder);
+   if(head.length)upstream.write(head);client.pipe(upstream);upstream.pipe(client);
+  };
+  upstream.on('data',onData);upstream.on('error',()=>client.destroy());
+  upstream.on('close',()=>{clearTimeout(timer);client.destroy();});client.on('close',()=>{clearTimeout(timer);upstream.destroy();});
+
  });
  await listen(proxy,{port:0,host:'127.0.0.1'});
  const env={};for(const key of ['PATH','HOME','USER','LOGNAME','TMPDIR','TMP','TEMP','DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','XDG_CONFIG_HOME','XDG_CACHE_HOME','XDG_DATA_HOME','DBUS_SESSION_BUS_ADDRESS','LANG','LANGUAGE','LC_ALL','LC_CTYPE','TZ'])if(process.env[key]!==undefined)env[key]=process.env[key];
@@ -80,9 +107,10 @@ async function boot(cfg){
    const message=data;data='';
    Promise.resolve().then(async()=>{
     const cmd=JSON.parse(message);
-    if(!negotiated&&cmd.type==='hello'){negotiated=true;s.write(JSON.stringify({protocol:5,navigation:'native-file',profiles:'native'})+'\n');return;}
+    if(!negotiated&&cmd.type==='hello'){negotiated=true;s.write(JSON.stringify({protocol:6,navigation:'native-file',profiles:'native'})+'\n');return;}
     s.removeAllListeners('data');
-    if(!negotiated||cmd.protocol!==5)throw new Error('Close this account browser and reopen it after updating Pooler.');
+    if(!negotiated||cmd.protocol!==6)throw new Error('Close this account browser and reopen it after updating Pooler.');
+    if(cmd.routeKey!==cfg.routeKey)throw new Error('Close this account browser before changing its proxy.');
     if(cmd.timezone!==cfg.timezone||cmd.executable!==cfg.executable||!primary||primary.exitCode!==null)throw new Error('Close this account browser window before changing its exit timezone or executable.');
     if(typeof cmd.url!=='string')throw new Error('Invalid browser URL.');
     await launch(cmd.url,cmd.profileDirectory);s.end(JSON.stringify({ok:true})+'\n');

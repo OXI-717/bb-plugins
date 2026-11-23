@@ -1,3 +1,10 @@
+import {nativeProbeInputSchema} from './native-probe-wire.js';
+import { clientAccountScopeSchema } from "./client-scope.js";
+import type {PoolMaintenance} from './maintenance.js';
+import {z} from 'zod';
+import type {CursorStream} from './network-flights.js';
+import {guardProbeSchema,type GuardProbeInput, type runGuardProbe} from './guard-server.js';
+import type { AccountEgress } from "./account-egress.js";
 import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
 import { setTimeout as wait } from "node:timers/promises";
 import {
@@ -24,6 +31,7 @@ import {
   type LimitWindow,
   type ModelFamily,
   type PoolStatusReport,
+  attestNativeLeaseCommand,
 } from "./contracts.js";
 import type { PoolOperations } from "./operations.js";
 import type {createBrowserRouter} from "./browser-host.js";
@@ -41,11 +49,17 @@ interface ParsedFlags {
 }
 
 const HELP = [
+  "  bb pool maintenance <status|acquire-graceful|acquire-upgrade|seal-upgrade|acquire|interrupt|release> [--owner <uuid>] --json",
   "Usage:",
+  "  bb pool egress status --json",
+  "  bb pool egress configure <profile-json>",
+  "  bb pool egress bind <account-id> <profile-id> <version>",
+  "  bb pool egress unbind <account-id>",
   "  bb pool account add --provider claude --import [--label <text>] [--priority <n>]",
   "  bb pool account add --provider codex --import [--label <text>] [--priority <n>]",
+  "  bb pool account add --provider claude --draft --email <email> [--label <name>]",
   "  bb pool account add --provider claude --login",
-  "  bb pool account add --provider codex --login",
+  "  bb pool account add --provider codex --login [--account-id <id>]",
   "  bb pool account add --provider grok --login",
   "  bb pool account add --provider gemini --login",
   "  bb pool account add --provider grok --import [--label <text>] [--priority <n>]",
@@ -69,16 +83,21 @@ const HELP = [
   "  bb pool status [--json]",
   "  bb pool readiness [--project <id>] [--json]",
   '  bb pool native status --json',
+  '  bb pool native preflight <target-json>',
   '  bb pool native configure <executor-json>',
+  '  bb pool native prefer <executor-id>',
   '  bb pool native mode <managed|off>',
   '  bb pool native attest-stopped <lease-id> --confirmed',
+  "  bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]",
+  "  bb pool diagnostics --from <UTC-hour> --to <UTC-hour> [--compare-previous] [--json]",
   "  bb pool observations [--json]",
-  "  bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]",
+  "  bb pool guard-probe --provider cursor [--delay-stage guard-rpc] [--delay-ms 4100] [--delay-attempts first|all] [--json]",
+  "  bb pool history [--offset <0..65536>] [--limit <1..200>] [--json]",
   "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> [--off]",
   "  bb pool config",
-  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|geminiUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|geminiUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|pinnedFailover|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
-  "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot]",
+  "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot] [--account-scope-json <json>]",
   "  bb pool client revoke <name>",
   "  bb pool bypass <thread-id> [--off]",
   "  bb pool browser open <id|email|label> [--url <url>]",
@@ -215,6 +234,10 @@ function formatStatus(status: PoolStatusReport): string {
     `Accepting: ${status.accepting}`,
     `Enabled accounts: ${status.enabledAccountCount}`,
     `In flight: ${status.inFlight}`,
+    ...(status.uncertainNativeLeases ?? []).map(lease =>
+      `Native stop unconfirmed: ${lease.executorId} (${lease.kind}), age ${Math.floor(lease.ageMs / 1000)} s. After confirming stopped: ${attestNativeLeaseCommand(lease.leaseId)}`),
+    ...(status.routeTracking?[`Route tracking: ${status.routeTracking.decisions}/${status.routeTracking.maxDecisions} decisions; ${status.routeTracking.bytes}/${status.routeTracking.maxBytes} bytes`]:[]),
+    ...(status.historyCapacity?[`History: ${status.historyCapacity.rows}/${status.historyCapacity.maxRows} rows; byte limit ${status.historyCapacity.maxBytes}`]:[]),
     "",
     "Machine tokens:",
     ...(status.hosts.length === 0
@@ -243,6 +266,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `kimiUpstreamBaseUrl: ${config.kimiUpstreamBaseUrl}`,
     `zaiUpstreamBaseUrl: ${config.zaiUpstreamBaseUrl}`,
     `opencodeGoUpstreamBaseUrl: ${config.opencodeGoUpstreamBaseUrl}`,
+    `opencodeFreeUpstreamBaseUrl: ${config.opencodeFreeUpstreamBaseUrl}`,
     `neuraldeepUpstreamBaseUrl: ${config.neuraldeepUpstreamBaseUrl}`,
     `cursorUpstreamBaseUrl: ${config.cursorUpstreamBaseUrl}`,
     `devinUpstreamBaseUrl: ${config.devinUpstreamBaseUrl}`,
@@ -254,6 +278,8 @@ function formatConfig(config: AccountPoolConfig): string {
     `browserHostId: ${config.browserHostId ?? "local"}`,
     `maxConcurrentRequestsPerAccount: ${config.maxConcurrentRequestsPerAccount}`,
     `claudeRequestStartIntervalMs: ${config.claudeRequestStartIntervalMs}`,
+    `pinnedFailover: ${config.pinnedFailover}`,
+    `busyOverflow: ${config.busyOverflow}`,
     `switchThreshold: ${config.switchThreshold}`,
     `routingStrategy: ${config.routingStrategy}`,
     `reserveDrainHours: ${config.reserveDrainHours}`,
@@ -293,6 +319,11 @@ function parseConfigUpdate(
     });
   }
   if (key === "neuraldeepUpstreamBaseUrl") return accountPoolConfigSetInputSchema.parse({ neuraldeepUpstreamBaseUrl: value });
+  if (key === "opencodeFreeUpstreamBaseUrl") {
+    return {
+      opencodeFreeUpstreamBaseUrl: value,
+    };
+  }
   if (key === "opencodeGoUpstreamBaseUrl") {
     return accountPoolConfigSetInputSchema.parse({
       opencodeGoUpstreamBaseUrl: value,
@@ -331,6 +362,8 @@ function parseConfigUpdate(
     });
   }
   if (key === "vpnGuardEnabled" && ["true","false"].includes(value)) return accountPoolConfigSetInputSchema.parse({vpnGuardEnabled:value==="true"});
+  if (key === "pinnedFailover" && ["true","false"].includes(value)) return accountPoolConfigSetInputSchema.parse({pinnedFailover:value==="true"});
+  if (key === "busyOverflow" && ["true","false"].includes(value)) return accountPoolConfigSetInputSchema.parse({busyOverflow:value==="true"});
   if (key === "vpnOnlyProviders") return accountPoolConfigSetInputSchema.parse({ vpnOnlyProviders: value === "none" ? [] : value.split(",") });
   if (key === "browserHostId") return accountPoolConfigSetInputSchema.parse({browserHostId:value === "local" ? null : value});
   if (key === "vpnStatusFile") return accountPoolConfigSetInputSchema.parse({ vpnStatusFile: value === "default" ? null : value });
@@ -343,7 +376,7 @@ function parseConfigUpdate(
     });
   }
   throw new Error(
-    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, neuraldeepUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, grokUpstreamBaseUrl, geminiUpstreamBaseUrl, maxConcurrentRequestsPerAccount, claudeRequestStartIntervalMs, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, or vpnGuardEnabled.",
+    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, opencodeFreeUpstreamBaseUrl, neuraldeepUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, grokUpstreamBaseUrl, geminiUpstreamBaseUrl, maxConcurrentRequestsPerAccount, claudeRequestStartIntervalMs, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, vpnGuardEnabled, pinnedFailover, or busyOverflow.",
   );
 }
 
@@ -360,7 +393,13 @@ export function registerPoolCli(
   externalClients?: ExternalClients,
   browser?: ReturnType<typeof createBrowserRouter>,
   nativeSessions?: NativeSessions,
+  egress?: AccountEgress,
   grokLogin?: GrokDeviceLogin,
+  guardProbe?:(input:GuardProbeInput)=>ReturnType<typeof runGuardProbe>,
+  streamProbe?:(threadId:string,requestId?:string)=>{streams:CursorStream[];interrupted?:boolean},
+  maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & Partial<Pick<PoolMaintenance,'acquireGraceful'|'acquireUpgrade'|'sealUpgrade'>> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
+  nativePreflight?:(input:import('./native-probe-wire.js').NativeProbeInput)=>Promise<object>,
+  updateStatus?:()=>Promise<import("zod").z.infer<typeof import("./pool-update.js").updateStatusSchema>>,
   geminiLogin?: GeminiLogin,
 ): void {
   bb.cli.register({
@@ -368,6 +407,7 @@ export function registerPoolCli(
     summary:
       "Manage Claude, Codex, and Grok accounts and inspect the Account Pooler hub",
     commands: [
+      {name:"egress",summary:"Manage server-owned account egress profiles",usage:"bb pool egress <status|configure|bind|unbind>"},
       {
         name: "account-add",
         summary:
@@ -427,8 +467,11 @@ export function registerPoolCli(
         usage: "bb pool account refresh <id>",
       },
       { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json]" },
+      {name:"stream-probe",summary:"Inspect one thread or interrupt one exact observed Cursor body",usage:"bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]"},
+      { name:"guard-probe", summary:"Rehearse read-only Guard admission, optionally delaying only this probe", usage:"bb pool guard-probe --provider cursor [--delay-stage server-host|guard-rpc|server-host-recheck] [--delay-ms 0..4500] [--delay-attempts first|all] [--json]" },
+      { name:"diagnostics", summary:"Read bounded before/after queue and account diagnostics", usage:"bb pool diagnostics --from <UTC-hour> --to <UTC-hour> [--compare-previous] [--json]" },
       { name:"observations", summary:"Inspect bounded request metadata and retained-event minute counts", usage:"bb pool observations [--json]" },
-      { name:"history", summary:"Inspect bounded fourteen-day hourly account and client counters", usage:"bb pool history [--offset <0..8192>] [--limit <1..200>] [--json]" },
+      { name:"history", summary:"Inspect bounded fourteen-day hourly provider and account counters", usage:"bb pool history [--offset <0..65536>] [--limit <1..200>] [--json]" },
       {
         name: "status",
         summary: "Show hub, machine token, routing, and account status",
@@ -448,7 +491,7 @@ export function registerPoolCli(
         name: "config-set",
         summary: "Update one Account Pooler routing configuration value",
         usage:
-          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|geminiUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|geminiUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|pinnedFailover|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
       },
       {
         name: "token-rotate",
@@ -474,11 +517,38 @@ export function registerPoolCli(
     ],
     async run(argv, ctx): Promise<PluginCliResult> {
       try {
+        if(argv[0]==='maintenance'){
+          if(!maintenance)throw Error('Model maintenance unavailable');
+          let result:object;
+          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=maintenance.status();
+          else if (argv.length===5&&argv[2]==='--owner'&&argv[4]==='--json'&&
+            (argv[1]==='acquire-graceful'||argv[1]==='acquire-upgrade'||argv[1]==='seal-upgrade')) {
+            const method = argv[1]==='acquire-graceful' ? 'acquireGraceful' : argv[1]==='acquire-upgrade' ? 'acquireUpgrade' : 'sealUpgrade';
+            if (!maintenance[method]) throw Error('Requested model admission operation unavailable');
+            result = await maintenance[method](z.uuid().parse(argv[3]));
+          }
+          else if(['acquire','release','interrupt'].includes(argv[1]!)&&argv.length===5&&argv[2]==='--owner'&&argv[4]==='--json'){
+            const owner=z.uuid().parse(argv[3]);
+            result=await maintenance[argv[1] as 'acquire'|'release'|'interrupt'](owner);
+          }else throw Error(HELP);
+          return {exitCode:0,stdout:json(result)};
+        }
+        if(argv[0]==='egress'){
+          if(!egress)throw Error('Egress management unavailable.');
+          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')return {exitCode:0,stdout:JSON.stringify(egress.snapshot(),null,2)+'\n'};
+          if(argv[1]==='configure'&&argv.length===3)await egress.configure(JSON.parse(argv[2]!));
+          else if(argv[1]==='bind'&&argv.length===5)await egress.bind(argv[2]!,{id:argv[3]!,version:Number(argv[4])});
+          else if(argv[1]==='unbind'&&argv.length===3)await egress.bind(argv[2]!,null);
+          else throw Error('Invalid egress operation.');
+          return {exitCode:0,stdout:'Account egress configured for new sessions; existing sessions stay pinned.\n'};
+        }
         if(argv[0]==='native'){
           if(!nativeSessions)throw Error('Native executor management unavailable.');
           let result:object;
-          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=await nativeSessions.snapshot();
+          if(argv[1]==='preflight'&&argv.length===3&&nativePreflight){result=await nativePreflight(nativeProbeInputSchema.parse(JSON.parse(argv[2]!)));return {exitCode:(result as {status:string}).status==='ready'?0:2,stdout:json(result)};}
+          else if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')result=await nativeSessions.snapshot();
           else if(argv[1]==='configure'&&argv.length===3)result=await nativeSessions.configure(JSON.parse(argv[2]!));
+          else if(argv[1]==='prefer'&&argv.length===3){await nativeSessions.prefer(argv[2]!, (await nativeSessions.accounts()).selectionRevision);result={executorId:argv[2]!};}
           else if(argv[1]==='mode'&&argv.length===3&&['managed','off'].includes(argv[2]!))result=await nativeSessions.setManaged(argv[2]==='managed');
           else if(argv[1]==='attest-stopped'&&argv.length===4&&argv[3]==='--confirmed')result=await nativeSessions.attestStopped(argv[2]!);
           else throw Error(HELP);
@@ -566,21 +636,26 @@ export function registerPoolCli(
         if (argv[0] === "account" && argv[1] === "add") {
           const flags = parseFlags(
             argv.slice(2),
-            ["import", "api-key-stdin", "login"],
-            ["provider", "api-key", "label", "priority"],
+            ["import", "api-key-stdin", "login", "draft"],
+            ["provider", "api-key", "label", "priority", "email", "account-id"],
           );
+          const draft=flags.booleans.has("draft");
           const imported = flags.booleans.has("import");
           const apiKeyStdin = flags.booleans.has("api-key-stdin");
           const loginRequested = flags.booleans.has("login");
           const apiKey = flags.values.get("api-key");
+          const accountId = flags.values.get("account-id");
+          if (accountId !== undefined && (!loginRequested || flags.values.get("provider") !== "codex")) {
+            throw new Error("--account-id requires --provider codex --login.");
+          }
           const sourceCount =
-            Number(imported) +
+            Number(draft) + Number(imported) +
             Number(apiKeyStdin) +
             Number(loginRequested) +
             Number(apiKey !== undefined);
           if (sourceCount !== 1)
             throw new Error(
-              "Choose exactly one of --login, --import, --api-key-stdin, or --api-key <key>.",
+              "Choose exactly one of --draft, --login, --import, --api-key-stdin, or --api-key <key>.",
             );
           if (flags.values.get("provider") === "agy") {
             throw new Error("Use Antigravity login in the Pooler UI; local login/import and API keys are not supported.");
@@ -632,7 +707,7 @@ export function registerPoolCli(
               };
             }
             if (provider === "codex") {
-              const started = await codexLogin.start();
+              const started = await codexLogin.start(accountId === undefined ? undefined : accountIdInputSchema.parse({ id: accountId }).id);
               return {
                 exitCode: 0,
                 stdout: `${[
@@ -675,7 +750,7 @@ export function registerPoolCli(
           const priorityText = flags.values.get("priority") ?? "100";
           const input = accountAddInputSchema.parse({
             provider: flags.values.get("provider"),
-            source: imported ? { kind: "import" } : { kind: "api-key", apiKey },
+            source: draft ? {kind:"draft",email:flags.values.get("email")} : imported ? { kind: "import" } : { kind: "api-key", apiKey },
             label: flags.values.get("label") ?? null,
             priority: Number(priorityText),
           });
@@ -841,6 +916,49 @@ export function registerPoolCli(
           const entries = await operations.readiness(projectId);
           return {exitCode:0, stdout:flags.booleans.has("json") ? json(entries) : entries.map(entry => `${entry.provider}: ${entry.ready ? "ready" : entry.reason}`).join("\n")+"\n"};
         }
+        if(argv[0]==='stream-probe'){
+          const flags=parseFlags(argv.slice(1),['json','confirm'],['thread','interrupt-request']);
+          const threadId=flags.values.get('thread')??'',requestId=flags.values.get('interrupt-request');
+          if(!/^thr_[a-z0-9]+$/.test(threadId))throw Error('--thread requires a BB thread ID');
+          if(requestId!==undefined&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestId))throw Error('--interrupt-request requires an exact request UUID');
+          if((requestId!==undefined)!==flags.booleans.has('confirm'))throw Error('Interrupting one stream requires both --interrupt-request and --confirm');
+          if(!streamProbe)throw Error('Cursor stream probe unavailable');
+          return {exitCode:0,stdout:json(streamProbe(threadId,requestId))};
+        }
+        if(argv[0]==='guard-probe'){
+          const flags=parseFlags(argv.slice(1),['json'],['provider','delay-stage','delay-ms','delay-attempts']);
+          if(!guardProbe)throw Error('Guard probe unavailable');
+          const rawDelay=flags.values.get('delay-ms');
+          if(rawDelay!==undefined&&!/^\d+$/.test(rawDelay))throw Error('--delay-ms requires an integer 0..4500');
+          const input=guardProbeSchema.parse({provider:flags.values.get('provider'),delayStage:flags.values.get('delay-stage'),
+            delayMs:rawDelay===undefined?undefined:Number(rawDelay),delayAttempts:flags.values.get('delay-attempts')});
+          return {exitCode:0,stdout:json(await guardProbe(input))};
+        }
+        if(argv[0]==='diagnostics'){
+          const flags=parseFlags(argv.slice(1),['json','compare-previous'],['from','to']);
+          const parseHour=(name:string)=>{
+            const raw=flags.values.get(name);
+            if(!raw||!/^\d{4}-\d{2}-\d{2}T\d{2}:00:00Z$/.test(raw))throw Error(`--${name} requires a UTC hour (YYYY-MM-DDTHH:00:00Z)`);
+            const value=Date.parse(raw);
+            if(!Number.isFinite(value)||new Date(value).toISOString()!==raw.replace('Z','.000Z'))throw Error('Invalid UTC hour');
+            return value;
+          };
+          const from=parseHour('from'),to=parseHour('to');
+          if(from<0||from>=to||to-from>14*86400000||(flags.booleans.has('compare-previous')&&from-(to-from)<0))throw Error('Period must be positive and at most fourteen days');
+          const report=await operations.diagnostics(from,to);
+          const before=flags.booleans.has('compare-previous')?await operations.diagnostics(from-(to-from),from):null;
+          const comparison=before?{
+            before,after:report,
+            delta:report.history.map(after=>{
+              const prior=before.history.find(row=>row.provider===after.provider);
+              return {provider:after.provider,queueWaits:prior?after.queueWaits-prior.queueWaits:null,
+                queueFailures:prior?after.queueFailures-prior.queueFailures:null,
+                meanQueueWaitMs:prior?.meanQueueWaitMs!=null&&after.meanQueueWaitMs!=null?after.meanQueueWaitMs-prior.meanQueueWaitMs:null};
+            }),
+          }:undefined;
+          const update=await updateStatus?.();
+          return {exitCode:0,stdout:json({...report,comparison,update:update?{operationId:update.operationId,startedAt:update.startedAt,state:update.state}:null})};
+        }
         if (argv[0] === "observations") {
           parseFlags(argv.slice(1), ['json'], []);
           return {exitCode:0,stdout:json(operations.observations())};
@@ -854,7 +972,7 @@ export function registerPoolCli(
               throw Error(`--${name} requires an integer ${min}..${max}.`);
             return Number(raw);
           };
-          return {exitCode:0,stdout:json(await operations.trafficHistory(integer('offset',0,0,8192),integer('limit',100,1,200)))};
+          return {exitCode:0,stdout:json(await operations.trafficHistory(integer('offset',0,0,65536),integer('limit',100,1,200)))};
         }
         if (argv[0] === "status") {
           const flags = parseFlags(argv.slice(1), ["json"], []);
@@ -907,13 +1025,15 @@ export function registerPoolCli(
         }
         if (argv[0] === "client" && externalClients) {
           if (argv[1] === "add" && argv[2]) {
-            const flags = parseFlags(argv.slice(3), [], ["output", "project", "purpose"]);
+            const flags = parseFlags(argv.slice(3), [], ["output", "project", "purpose", "account-scope-json"]);
             const output = flags.values.get("output");
             if (!output) throw new Error("--output is required (path on the BB server).");
             const projectId = flags.values.get("project") ?? null;
             const purpose = flags.values.get("purpose");
             if (purpose !== undefined && purpose !== "autopilot") throw Error("Unsupported client purpose.");
-            await externalClients.add(argv[2], output, projectId, purpose);
+            const scopeInput=flags.values.get("account-scope-json");
+            const scope=scopeInput===undefined?undefined:clientAccountScopeSchema.parse(JSON.parse(scopeInput));
+            await externalClients.add(argv[2], output, projectId, purpose, scope);
             return { exitCode: 0, stdout: "External client token saved to private file on the BB server.\n" };
           }
           if (argv[1] === "revoke" && argv.length === 3) {
