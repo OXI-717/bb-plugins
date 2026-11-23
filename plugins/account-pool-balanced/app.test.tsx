@@ -213,10 +213,10 @@ function egressSnapshot(accountId: string) {
   });
 }
 
-async function openEgressSettings(slot: ReturnType<typeof render>) {
+async function openEgressSettings(slot: ReturnType<typeof render>, selectedLabel = "Test egress · version 2") {
   fireEvent.click(await slot.findByRole("button", { name: "Open account card: person@example.com" }));
   fireEvent.click(slot.getByText(/Access and route/, { selector: "summary" }));
-  await slot.findByRole("option", { name: "Test egress · version 2", selected: true });
+  await slot.findByRole("option", { name: selectedLabel, selected: true });
 }
 
 describe("Account Pool settings", () => {
@@ -414,8 +414,7 @@ describe("Account Pool settings", () => {
     const slot = render([selected], {
       "egress.status": () => ({...snapshot, displayNames: {"prepared-egress:2": "full-node-name"}}),
     });
-    await openEgressSettings(slot);
-    await slot.findByRole("option", {name: "full-node-name · version 2", selected: true});
+    await openEgressSettings(slot, "full-node-name · version 2");
     expect(slot.queryByRole("option", {name: "Test egress · version 2"})).toBeNull();
   });
 
