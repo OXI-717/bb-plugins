@@ -1,3 +1,4 @@
+import { geminiSummaryDiagnosticSchema, type GeminiSummaryDiagnostic } from "./gemini-usage.js";
 import {type NativeProbeInput,type NativeProbeResult} from './native-probe-wire.js';
 import {maintenanceStatusSchema, type PoolMaintenance} from './maintenance.js';
 import {updateStatusSchema, type PoolUpdate} from './pool-update.js';
@@ -149,8 +150,8 @@ export const accountPoolRpcContract = defineRpcContract({
     output: z.null(),
   },
   "account.refreshUsage": {
-    input: z.object({ accountId: z.string().uuid() }).strict(),
-    output: z.object({ account: accountSummarySchema.nullable() }).strict(),
+    input: z.object({ accountId: z.string().uuid(), includeGeminiDiagnostic: z.boolean().optional() }).strict(),
+    output: z.object({ account: accountSummarySchema.nullable(), geminiDiagnostic: geminiSummaryDiagnosticSchema.optional() }).strict(),
   },
   "routing.set": {
     input: routingSetInputSchema,
@@ -321,9 +322,12 @@ export function createRpcHandlers(
     "account.setCap": async ({ accountId, cap }) => ({
       account: await operations.setCap(accountId, cap),
     }),
-    "account.refreshUsage": async ({ accountId }) => ({
-      account: await operations.refreshUsage(accountId),
-    }),
+    "account.refreshUsage": async ({ accountId, includeGeminiDiagnostic }) => {
+      let diagnostic: GeminiSummaryDiagnostic | undefined;
+      const account = await operations.refreshUsage(accountId, includeGeminiDiagnostic
+        ? result => { diagnostic = result; } : undefined);
+      return diagnostic ? { account, geminiDiagnostic: diagnostic } : { account };
+    },
     "account.reorder": async ({ provider, accountIds }) => {
       await operations.reorder(provider, accountIds);
       return null;

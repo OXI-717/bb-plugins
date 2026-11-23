@@ -55,6 +55,7 @@ import {
 } from "./openai-compatible-usage.js";
 import { importGrokCredentials, type GrokSubscriptionCredentials } from "./grok-credentials.js";
 import { GROK_CHAT_PROXY_BASE_URL, GROK_REFRESH_URL } from "./grok-oauth.js";
+import type { GeminiSummaryDiagnostic } from "./gemini-usage.js";
 import { createGeminiAdapter } from "./gemini-adapter.js";
 import { importGeminiCredentials, type GeminiSubscriptionCredentials } from "./gemini-credentials.js";
 import {
@@ -229,7 +230,7 @@ export class AccountPoolHub {
   private affinityBindings = new Map<string, AccountBinding>();
   private activeAccounts = new Map<string, ActiveAccount>();
   private stopping: Promise<void> | null = null;
-  private readonly usageRefreshes = new Map<string, Promise<void>>();
+  private readonly usageRefreshes = new Map<string, Promise<GeminiSummaryDiagnostic | undefined>>();
   private readonly lastUsageRefreshAt = new Map<string, number>();
   private readonly drainWaiters = new Set<() => void>();
 
@@ -511,7 +512,14 @@ export class AccountPoolHub {
         (accountId === undefined || account.id === accountId),
     );
     await Promise.all(
-      accounts.map((account) => this.refreshAccountUsage(account, force, geminiSummaryDiagnostic).catch((error: unknown) => { if (reportErrors) throw error; })),
+      accounts.map(async account => {
+        try {
+          const result = await this.refreshAccountUsage(account, force);
+          if (result) geminiSummaryDiagnostic?.(result);
+        } catch (error) {
+          if (reportErrors) throw error;
+        }
+      }),
     );
   }
 
@@ -557,8 +565,7 @@ export class AccountPoolHub {
   private async refreshAccountUsage(
     account: Account,
     force: boolean,
-    geminiSummaryDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"],
-  ): Promise<void> {
+  ): Promise<GeminiSummaryDiagnostic | undefined> {
     const adapter = this.adapter(account.provider);
     const interval = account.provider === "zai" ? ZAI_USAGE_REFRESH_INTERVAL_MS : DEFAULT_USAGE_REFRESH_INTERVAL_MS;
     if (!force) {
@@ -581,10 +588,11 @@ export class AccountPoolHub {
     if (running !== undefined) return running;
     this.lastUsageRefreshAt.set(account.id, now);
     let usageSecret: AccountSecret | undefined;
+    let summaryDiagnostic: GeminiSummaryDiagnostic | undefined;
     const refresh = adapter
       .refreshUsage({
         account,
-        geminiSummaryDiagnostic: account.provider === "gemini" ? geminiSummaryDiagnostic : undefined,
+        geminiSummaryDiagnostic: account.provider === "gemini" ? result => { summaryDiagnostic = result; } : undefined,
         freshSecret: async (rejectedAccessToken) => {
           const secret = await this.freshSecret(account, adapter, rejectedAccessToken === undefined
             ? { kind: "normal", zaiQuotaCollection: account.provider === "zai" && account.kind === "api-key", geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" }
@@ -597,7 +605,10 @@ export class AccountPoolHub {
         fetch: (input, init) => this.accountFetch(account,route)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
         now: this.options.now,
       })
-      .then(async () => { await this.settleDrain(account); })
+      .then(async () => {
+        await this.settleDrain(account);
+        return summaryDiagnostic;
+      })
       .catch(async error => {
         if (error instanceof AccountAuthorizationRequiredError) {
           const rejected = this.authorizationFailures.get(error) ?? usageSecret;

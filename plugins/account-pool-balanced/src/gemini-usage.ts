@@ -39,13 +39,16 @@ type SummaryWindow = z.infer<typeof summaryWindowSchema>;
 
 type WeeklyValidation = "invalid-summary" | "weekly-not-declared" | "weekly-rejected" | "weekly-accepted";
 
-export interface GeminiSummaryDiagnostic {
-  enrichment: "request-failed" | "http-error" | "body-invalid" | "project-missing" | "project-present";
-  enrichmentHttpStatus: number | null;
-  summary: "not-requested" | "request-failed" | "http-error" | "body-invalid" | WeeklyValidation;
-  summaryHttpStatus: number | null;
-  weeklyStored: boolean;
-}
+const httpStatus = z.number().int().min(100).max(599).nullable();
+export const geminiSummaryDiagnosticSchema = z.object({
+  enrichment: z.enum(["request-failed", "http-error", "body-invalid", "project-missing", "project-present"]),
+  enrichmentHttpStatus: httpStatus,
+  summary: z.enum(["not-requested", "request-failed", "http-error", "body-invalid",
+    "invalid-summary", "weekly-not-declared", "weekly-rejected", "weekly-accepted"]),
+  summaryHttpStatus: httpStatus,
+  weeklyStored: z.boolean(),
+}).strict();
+export type GeminiSummaryDiagnostic = z.infer<typeof geminiSummaryDiagnosticSchema>;
 
 export function geminiSummaryWindows(payload: unknown, onWeekly?: (result: WeeklyValidation) => void): SummaryWindow[] {
   const invalidSummary = () => {

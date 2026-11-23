@@ -9414,6 +9414,41 @@ describe('Gemini account reauthorization',()=>{
    fetch:fetchOverride ?? (async()=>Response.json({buckets:[{modelId:'gemini-fixture',remainingFraction:0.75}]})),
   }});
  }
+ it.each([true, false])('observes a shared Gemini refresh with weekly bucket present=%s', async present => {
+  const started = deferred();
+  const release = deferred();
+  const calls: string[] = [];
+  let block = false;
+  const f = await reauthFixture(undefined, async url => {
+   const method = String(url).split(':').at(-1)!;
+   if (block) calls.push(method);
+   if (method === 'retrieveUserQuota') {
+    if (block) { started.resolve(); await release.promise; }
+    return Response.json({buckets:[{modelId:'gemini-fixture', remainingFraction:0.75}]});
+   }
+   if (method === 'loadCodeAssist') return Response.json({cloudaicompanionProject:'fixture'});
+   return Response.json({groups:[{buckets:present ? [{bucketId:'gemini-weekly', remainingFraction:0.5}] : []}]});
+  });
+  const rpc = f.host.harness.behavior.callRpc;
+  await rpc('account.disable', {id:f.account.id});
+  block = true;
+  const automatic = rpc('account.enable', {id:f.account.id});
+  await started.promise;
+  const manual = rpc('account.refreshUsage', {accountId:f.account.id, includeGeminiDiagnostic:true});
+  try { await new Promise(resolve => setImmediate(resolve)); } finally { release.resolve(); }
+  const [, result] = await Promise.all([automatic, manual]);
+  expect(calls).toEqual(['retrieveUserQuota', 'loadCodeAssist', 'retrieveUserQuotaSummary']);
+  const entries = f.host.harness.inspection.logEntries.filter(e => e.message.startsWith('Gemini quota summary '));
+  expect(entries).toHaveLength(1);
+  expect(JSON.parse(entries[0]!.message.slice('Gemini quota summary '.length))).toMatchObject({
+   summary:present ? 'weekly-accepted' : 'weekly-not-declared', weeklyStored:present,
+  });
+  expect(result).toMatchObject({geminiDiagnostic:{
+   summary:present ? 'weekly-accepted' : 'weekly-not-declared', weeklyStored:present,
+  }});
+  const windows = (result as {account:AccountSummary}).account.geminiUsage?.windows ?? [];
+  expect(windows).toEqual(present ? [{kind:'weekly', usedPercent:50, resetAt:null}] : []);
+ });
  it('logs the Gemini quota diagnostic only on explicit account refresh', async () => {
   const quotaReads = vi.fn();
   const f = await reauthFixture(undefined, async url => {
@@ -9431,7 +9466,8 @@ describe('Gemini account reauthorization',()=>{
   await callRpc('account.enable', {id:f.account.id});
   expect(quotaReads).toHaveBeenCalledTimes(1);
   expect(diagnostics()).toHaveLength(0);
-  await callRpc('account.refreshUsage', {accountId:f.account.id});
+  const result = await callRpc('account.refreshUsage', {accountId:f.account.id});
+  expect(result).not.toHaveProperty('geminiDiagnostic');
   expect(quotaReads).toHaveBeenCalledTimes(2);
   expect(diagnostics()).toHaveLength(1);
  });

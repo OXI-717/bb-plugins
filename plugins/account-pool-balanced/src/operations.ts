@@ -396,10 +396,16 @@ export class PoolOperations {
     this.onAccountsChanged();
   }
 
-  async refreshUsage(id: string): Promise<AccountSummary | null> {
+  async refreshUsage(
+    id: string,
+    onDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"],
+  ): Promise<AccountSummary | null> {
     const account = await this.accounts.get(id);
     if (account === null) return null;
-    await this.hub.refreshUsage(id, true, true, this.geminiSummaryDiagnostic);
+    await this.hub.refreshUsage(id, true, true, result => {
+      this.geminiSummaryDiagnostic?.(result);
+      onDiagnostic?.(result);
+    });
     this.onAccountsChanged();
     return (
       (await this.status()).accounts.find((account) => account.id === id) ??
