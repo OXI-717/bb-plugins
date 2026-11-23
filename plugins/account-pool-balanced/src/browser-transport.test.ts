@@ -232,23 +232,23 @@ describe("detached browser supervisor", () => {
     expect(await tunnel(port, "[::1]:443")).toContain("400");
     expect(await tunnel(port, "does-not-exist.invalid:443")).not.toContain("200 Connection");
   });
-  it("does not resolve an IPv6-only DNS destination onto an IPv6 trap", async () => {
-    let hits = 0;
-    const trap = createServer(s => { hits++; s.destroy(); });
-    await new Promise<void>(resolve => trap.listen(0, "::1", resolve));
-    cleanup.push(async () => { await new Promise<void>(resolve => trap.close(() => resolve())); });
+  it("asks DNS for IPv4 only and denies an IPv6-only destination", async () => {
     const options = await fixture();
     const preload = path.join(options.root, "dns.cjs");
+    const lookupLog = path.join(options.root, "dns-families");
     await writeFile(preload, `const dns = require('node:dns'); const original = dns.lookup;
+      const { appendFileSync } = require('node:fs');
       dns.lookup = (host, opts, cb) => {
         if (host !== 'ipv6.fixture.test') return original(host, opts, cb);
+        appendFileSync(${JSON.stringify(lookupLog)}, String(opts.family) + '\\n');
         if (opts.family === 4) return cb(Object.assign(new Error('IPv4 unavailable'), { code: 'ENOTFOUND' }));
         if (opts.all) cb(null, [{ address: '::1', family: 6 }]); else cb(null, '::1', 6);
       };`);
     options.env.NODE_OPTIONS = "--require=" + preload;
     await startBrowserTransport(options);
-    const response = await tunnel(await proxyPort(options), `ipv6.fixture.test:${(trap.address() as { port: number }).port}`);
-    expect(response).not.toContain("200 Connection"); expect(hits).toBe(0);
+    const response = await tunnel(await proxyPort(options), "ipv6.fixture.test:443");
+    expect(await readFile(lookupLog, "utf8")).toBe("4\n");
+    expect(response).not.toContain("200 Connection");
   });
   it("closes proxy/control resources after a late browser exit", async () => {
     const options = await fixture({ FIXTURE_EXIT_MS: "500" });

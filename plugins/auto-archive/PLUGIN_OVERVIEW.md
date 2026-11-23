@@ -36,3 +36,19 @@ On the first start of 0.2.2, live threads protected by uppercase explicit titles
 A failed migration prevents startup and can be retried without losing prior writes.
 After completion, uppercase titles no longer protect new threads. Unchecking a
 migrated flag survives restart; independent pin/keep protections still apply.
+
+## Unarchive grace & archived retention
+
+Returning a thread from archive (`thread.unarchived`) records `unarchiveCount`
+and `lastUnarchivedAt` in plugin metadata and multiplies its effective
+inactivity, file-cleanup, and export+delete thresholds (default `2x` per
+unarchive, capped).
+
+Optional archived retention (`bb auto-archive retention --dry-run`) defaults to
+off (`enableArchivedFileCleanup=false`, `enableAutomatedExportDelete=false`):
+- **Archived file cleanup:** removes local `thread-storage/<id>` files for old
+  archived unprotected threads while keeping conversation history in `bb.db`.
+- **Automated export + delete:** exports old archived automated/child threads
+  atomically to `.jsonl.gz` + `.sha256`, verifies checksum and event count on
+  disk, and deletes leaves first with `childThreadsConfirmed: false`. Manual
+  visible root threads and permanent/pinned/kept threads are never deleted.

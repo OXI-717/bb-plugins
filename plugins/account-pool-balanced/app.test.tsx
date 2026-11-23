@@ -4,26 +4,12 @@ import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { version } from "./package.json";
+import { egressStateSchema } from "./src/account-egress.js";
 import type {
   AccountPoolConfig,
   AccountSummary,
   PoolStatus,
 } from "./src/contracts.js";
-
-vi.mock('./management-ui', async () => {
-  const { useRpc } = await import('@get-bb/plugin-sdk/app');
-  return {
-    ManagementGate: ({ children }: { children: unknown }) => children,
-    usePoolRpc: () => {
-      const rpc = useRpc();
-      return { call: async (method: string, input: unknown) => {
-        if (method.startsWith('update.')) throw new Error('Management access is locked.');
-        return rpc.call(method, input);
-      } };
-    },
-    useManagementGrant: () => ({ scope: 'manage', expiresAt: Date.now() + 60_000 }),
-  };
-});
 
 const app = await loadPluginApp(() => import("./app"));
 afterEach(() => {
@@ -203,6 +189,34 @@ function render(
   );
 }
 
+function egressSnapshot(accountId: string) {
+  return egressStateSchema.parse({
+    schema: 1,
+    profiles: [{
+      id: "prepared-egress",
+      version: 2,
+      label: "Тестовый выход",
+      node: "test-exit",
+      hostIds: ["host-one"],
+      transport: "ssh-connect",
+      endpoint: "http://127.0.0.1:19081",
+      dns: "remote",
+      ipv4: true,
+      ipv6: false,
+      failure: "closed",
+      expectedExit: ["192.0.2.1"],
+      assurance: "proxy-enforced",
+    }],
+    bindings: { [accountId]: { id: "prepared-egress", version: 2 } },
+  });
+}
+
+async function openEgressSettings(slot: ReturnType<typeof render>) {
+  fireEvent.click(await slot.findByRole("button", { name: "Открыть карточку: person@example.com" }));
+  fireEvent.click(slot.getByText(/Доступ и маршрут/, { selector: "summary" }));
+  await slot.findByRole("option", { name: "Тестовый выход · версия 2", selected: true });
+}
+
 describe("Account Pool settings", () => {
   it("shows the Pooler version beside the update controls", async () => {
     const slot = render();
@@ -377,6 +391,47 @@ describe("Account Pool settings", () => {
     await slot.findByText("Could not save autopilot permission. Refresh the data and try again.");
     expect(slot.rpcCalls).toContainEqual({method:"account.setAutopilotAllowed",input:{accountId:account().id,allowed:true,expectedAllowed:false}});
     expect(checkbox.checked).toBe(false);
+  });
+
+  it("shows the assigned egress profile in ordinary account settings without an operator grant", async () => {
+    const selected = account();
+    const snapshot = egressSnapshot(selected.id);
+    const slot = render([selected], { "egress.status": () => snapshot });
+    await openEgressSettings(slot);
+
+    expect(slot.getByRole("combobox", { name: "Выходной профиль" }).hasAttribute("disabled")).toBe(false);
+    expect(slot.rpcCalls).toContainEqual({ method: "egress.status", input: null });
+    expect(slot.rpcCalls.some(({ method }) =>
+      ["management.call", "egress.bind", "egress.proxy"].includes(method)
+    )).toBe(false);
+  });
+
+  it("saves a profile and proxy through the ordinary account settings and reloads the profile", async () => {
+    const selected = account();
+    const snapshot = egressSnapshot(selected.id);
+    const statusRpc = vi.fn(() => snapshot)
+      .mockReturnValueOnce(snapshot)
+      .mockReturnValueOnce({ ...snapshot, bindings: {} });
+    const slot = render([selected], {
+      "egress.status": statusRpc,
+      "egress.bind": () => null,
+      "egress.proxy": () => null,
+    });
+    await openEgressSettings(slot);
+
+    const profile = slot.getByRole("combobox", { name: "Выходной профиль" });
+    const proxy = slot.getByLabelText("Прокси аккаунта");
+    fireEvent.change(profile, { target: { value: "" } });
+    await slot.findByRole("option", { name: "Текущий маршрут Pooler", selected: true });
+
+    const url = "http://proxy.example:8080";
+    fireEvent.change(proxy, { target: { value: url } });
+    fireEvent.click(slot.getByRole("button", { name: "Сохранить прокси" }));
+    await slot.findByRole("option", { name: "Тестовый выход · версия 2", selected: true });
+    expect(statusRpc).toHaveBeenCalledTimes(3);
+    expect(slot.rpcCalls).toContainEqual({ method: "egress.bind", input: { accountId: selected.id, ref: null } });
+    expect(slot.rpcCalls).toContainEqual({ method: "egress.proxy", input: { accountId: selected.id, url } });
+    expect(slot.rpcCalls.some(({ method }) => method.startsWith("management."))).toBe(false);
   });
 
   it("opens the selected account browser from its menu", async () => {

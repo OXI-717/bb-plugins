@@ -1,4 +1,4 @@
-import { permanentIds } from "./permanent.js";
+import { loadThreadProtectionMeta, permanentIds } from "./permanent.js";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
   countThreadExclusions,
@@ -48,7 +48,7 @@ export async function collect(
           "Thread inventory exceeds safety limit; no actions performed",
         );
     }
-  const permanent = await permanentIds(bb, [...rows.keys()], signal);
+  const protection = await loadThreadProtectionMeta(bb, [...rows.keys()], signal);
   const snapshots: Snapshot[] = [];
   const statuses = new Map<string, Promise<Snapshot["workspace"]>>();
   await mapBatches([...rows.values()], async (t) => {
@@ -91,6 +91,7 @@ export async function collect(
         workspace = await status;
       } else if (t.environmentIsWorktree) workspace = "unknown";
     }
+    const meta = protection.get(t.id);
     snapshots.push({
       id: t.id,
       title: t.title,
@@ -102,7 +103,9 @@ export async function collect(
       latestAttentionAt: at,
       status: t.status,
       pinnedAt: t.pinnedAt,
-      permanent: permanent.has(t.id),
+      permanent: meta?.permanent === true,
+      unarchiveCount: meta?.unarchiveCount ?? 0,
+      lastUnarchivedAt: meta?.lastUnarchivedAt ?? null,
       workspace,
       archived: t.archivedAt !== null,
       busy:
@@ -203,11 +206,44 @@ export async function runOperation(
   }
   return report;
 }
-export function parseDays(raw: string): number {
+export function parseDays(raw: string, fieldName = "inactivityDays"): number {
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 1 || value > 36500)
-    throw new Error("inactivityDays must be between 1 and 36500");
+    throw new Error(`${fieldName} must be between 1 and 36500`);
   return value;
+}
+export function parseMultiplier(raw: string): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 1 || value > 10)
+    throw new Error("unarchiveGraceMultiplier must be between 1 and 10");
+  return value;
+}
+export function parseMaxPerRun(raw: string): number {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 500)
+    throw new Error("retentionMaxPerRun must be an integer between 1 and 500");
+  return value;
+}
+export function parseOriginPluginIds(raw: string): string[] {
+  if (raw.length > 65536)
+    throw new Error("automatedOriginPluginIds exceeds 64 KiB");
+  const value: unknown = JSON.parse(raw);
+  if (
+    !Array.isArray(value) ||
+    value.length > 200 ||
+    !value.every(
+      (id) =>
+        typeof id === "string" &&
+        id.length >= 1 &&
+        id.length <= 128 &&
+        /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id),
+    )
+  ) {
+    throw new Error(
+      "automatedOriginPluginIds must be a JSON array of plugin IDs",
+    );
+  }
+  return [...new Set(value)];
 }
 export function parseKeep(raw: string): string[] {
   if (raw.length > 262144) throw new Error("keepThreadIds exceeds 256 KiB");
