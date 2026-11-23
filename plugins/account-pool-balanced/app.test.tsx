@@ -2,7 +2,7 @@
 import { ThreadAccountOverlay } from "./app";
 import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+import { loadPluginApp, renderSlot, type PluginSdkTestFakes } from "@get-bb/plugin-sdk/testing/app";
 import { version } from "./package.json";
 import { egressStateSchema } from "./src/account-egress.js";
 import type {
@@ -172,6 +172,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
 function render(
   accounts = [account()],
   extraRpc: Record<string, () => object | null | Promise<object | null>> = {},
+  sdk?: PluginSdkTestFakes,
 ) {
   return renderSlot(
     app.settingsSections[0]!,
@@ -184,6 +185,7 @@ function render(
         "native.accounts": () => ({managed: false, accounts: []}),
         ...extraRpc,
       },
+      sdk,
       openUrl: () => true,
     },
   );
@@ -1869,4 +1871,54 @@ it('summarizes matching Gemini reports without inventing a shared limit or hidin
  expect(details.textContent).toContain('gemini-fixture-a · WTUS');
  expect(details.textContent).toContain('gemini-fixture-b · WTUS');
  expect(details.textContent).not.toContain('skip at');
+});
+
+it("identifies individual model reports in both views and keeps groups distinct", async () => {
+  const known = "gemini-example-known-model";
+  const unknown = "gemini-example-long-unregistered-model-for-narrow-screens";
+  const twin = "gemini-example-other";
+  const selected = account({ provider: "gemini", geminiUsage: {
+    observedAt: 100, plan: null, credits: null, models: [
+      { modelId: known, tokenType: "REQUESTS", usedPercent: 5, resetAt: null },
+      { modelId: unknown, tokenType: "WTUS", usedPercent: 17, resetAt: null },
+      { modelId: twin, tokenType: "WTUS", usedPercent: 17, resetAt: null },
+    ],
+  } });
+  const models = vi.fn(async () => ({
+    modelLoadError: null, permissionCeiling: "full" as const, selectedOnlyModels: [],
+    providers: [{
+      id: "acp-antigravity", displayName: "Example agent", pluginId: "example", logoUrl: null,
+      icon: { glyph: "Sparkles" }, available: true, completedTurnDisplay: "flat" as const,
+      composerActions: [], maintenance: { health: false, usage: false, installation: false },
+      capabilities: { modelCatalogScope: "host" as const, permissionModes: [], supportsFork: false,
+        supportsNativeUserQuestion: false, supportsServiceTier: false, supportsSessionRewind: false,
+        supportsThreadArchive: false, supportsThreadRename: false },
+    }],
+    models: [{id: "picker-known", model: known, displayName: "Known", description: "",
+      defaultReasoningEffort: "", isDefault: false, reasoningDiscovery: "known" as const, supportedReasoningEfforts: []}],
+  }));
+  const slot = render([selected], {}, { providers: { models } });
+  const heading = await slot.findByRole("heading", { name: "Gemini" });
+  expect(heading.querySelector('[data-provider-id="acp-antigravity"]')).toBeTruthy();
+  const row = await slot.findByRole("button", { name: `Open ${selected.label}` });
+  const label = (parent: HTMLElement, name: string) => within(parent).getByText(name).parentElement!;
+  await waitFor(() => expect(label(row, known + " · REQUESTS").querySelector('[data-provider-glyph="Sparkles"][aria-hidden="true"]')).toBeTruthy());
+  expect(label(row, "2 matching reports · WTUS").querySelector('[data-icon="Layers"]')).toBeTruthy();
+  fireEvent.click(row);
+  const details = await slot.findByLabelText("Gemini model quotas");
+  expect(label(details, known + " · REQUESTS").querySelector('[data-provider-id="acp-antigravity"]')).toBeTruthy();
+  expect(label(details, unknown + " · WTUS").querySelector('[data-icon="Bot"]')).toBeTruthy();
+  expect(models).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the model name and a neutral icon when the catalog is unavailable", async () => {
+  const selected = account({ provider: "gemini", geminiUsage: {
+    observedAt: 100, credits: null, plan: null,
+    models: [{ modelId: "gemini-unknown", tokenType: null, usedPercent: 9, resetAt: null }],
+  } });
+  const models = vi.fn().mockRejectedValue(new Error("catalog unavailable"));
+  const slot = render([selected], {}, { providers: { models } });
+  const label = await slot.findByText("gemini-unknown");
+  expect(label.parentElement?.querySelector('[data-icon="Bot"][aria-hidden="true"]')).toBeTruthy();
+  expect(models).toHaveBeenCalledTimes(1);
 });

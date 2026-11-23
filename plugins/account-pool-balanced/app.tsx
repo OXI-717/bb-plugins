@@ -1,3 +1,5 @@
+import { USAGE_PROVIDER_IDS } from "./src/usage-provider-ids.js";
+import { ModelQuotaLabel, GeminiModelCatalog } from "./model-quota-label";
 import {geminiPlanLabel, geminiCreditLabel, geminiSummaryRows, geminiUsageGroups} from './src/gemini-usage.js';
 import {AccountDraftForm} from './account-draft-form';
 import {NativeAccountRow, NativeAccountSettings} from './native-account-settings';
@@ -42,6 +44,8 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import {
   definePluginApp,
+  experimental_ProviderIcon as ProviderIcon,
+  experimental_useProviders as useProviders,
   useBbNavigate,
   useRpc,
   useRealtime,
@@ -427,21 +431,28 @@ function tier(account: AccountSummary): string {
   );
 }
 function SettingsSection({
+  providerId,
   title,
   description,
   action,
   children,
 }: {
+  providerId: string;
   title: string;
   description: string;
   action: ReactNode;
   children: ReactNode;
 }) {
+  const { providers } = useProviders();
+  const provider = providers.find(entry => entry.id === providerId);
   return (
     <section className="space-y-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+          <h2 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+            <ProviderIcon providerKind="agent" provider={provider ?? { id: providerId }} fallback="Bot" className="size-4 shrink-0" aria-hidden />
+            {title}
+          </h2>
           <p className="mt-0.5 text-xs leading-snug text-subtle-foreground/75">
             {description}
           </p>
@@ -461,6 +472,7 @@ type QuotaSlot = {
   limit: number;
   resetAt: number | null;
   weekly?: boolean;
+  model?: string | null;
 };
 
 function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
@@ -470,9 +482,9 @@ function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
     const models = summary.some(window => window.kind === "five-hour") ? []
       : geminiUsageGroups(account.geminiUsage?.models ?? []).filter(model => model.resetAt === null || model.resetAt > now);
     return [
-      ...summary.map(window => ({ key: window.kind, ...window })),
+      ...summary.map(window => ({ key: window.kind, model: null, ...window })),
       ...models.map(model => ({ key: model.id, ...model })),
-    ].map(row => ({ key: row.key, resetAt: row.resetAt, label: row.label,
+    ].map(row => ({ key: row.key, resetAt: row.resetAt, label: row.label, model: row.model,
       utilization: row.usedPercent / 100, status: null, limit: 1 }));
   }
   const limits = dashboardThresholds(account, threshold);
@@ -505,7 +517,7 @@ function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
     ...(!generic.some(slot => slot.label === "5H") && (present(fiveHour) || account.provider === "claude") ? [fiveHour] : []),
     ...(!generic.some(slot => slot.weekly) && (present(weekly) || account.provider === "claude") ? [weekly] : []),
     ...(fable ? [{
-      key: "fable", label: "FABLE", utilization: fable.utilization, status: fable.status,
+      key: "fable", label: "FABLE", model: null, utilization: fable.utilization, status: fable.status,
       limit: limits.familyWeekly ?? limits.weekly, resetAt: fable.resetAt,
     }] : []),
   ];
@@ -542,7 +554,7 @@ function QuotaValue({
       )}
     >
       <div className="text-2xs uppercase tracking-wide text-subtle-foreground/75">
-        {slot.label}
+        {slot.model === undefined ? slot.label : <ModelQuotaLabel model={slot.model}>{slot.label}</ModelQuotaLabel>}
       </div>
       <div className="text-xs font-semibold">
         <span className={quotaToneClass(slot)}>{percent(slot.utilization)}</span>
@@ -833,7 +845,7 @@ function QuotaDetail({
   skipAt,
   showSkipAt = true,
 }: {
-  label: string;
+  label: ReactNode;
   quota: FamilyQuota | null;
   threshold: number;
   skipAt?: number;
@@ -1618,6 +1630,7 @@ function UnlockedAccountPoolSettings() {
         (right.drainOpensAt ?? Number.POSITIVE_INFINITY),
     );
   return (
+    <GeminiModelCatalog enabled={accounts.some(account => account.provider === "gemini" && Boolean(account.geminiUsage?.models.length))}>
     <div className="w-full space-y-6">
       <PoolUpdatePanel />
       <div className="space-y-2">
@@ -1707,6 +1720,7 @@ function UnlockedAccountPoolSettings() {
         return (
           <SettingsSection
             key={provider.id}
+            providerId={USAGE_PROVIDER_IDS[provider.id]}
             title={provider.title}
             description={provider.id === "agy" && nativeAccounts?.managed !== false ? "Google sign-in on machines. The session limit is shared across the subscription." : `${provider.description} In flight: ${providerAccounts.reduce((n,a)=>n+a.inFlight,0)}; queued: ${providerAccounts.reduce((n,a)=>n+a.queuedRequests,0)}. Per-account limit: ${config?.maxConcurrentRequestsPerAccount ?? 2}.`}
             action={
@@ -2524,6 +2538,7 @@ function UnlockedAccountPoolSettings() {
       </Dialog>
       <AccountSettingsStyle />
     </div>
+    </GeminiModelCatalog>
   );
 }
 
@@ -2634,7 +2649,7 @@ function AccountCard({
               quota={shared(window.usedPercent / 100, window.resetAt, null)} threshold={1} showSkipAt={false} />
           )}
           {account.geminiUsage?.models.length ? account.geminiUsage.models.map((model,index) =>
-            <QuotaDetail key={`${model.modelId}:${index}`} label={`${model.modelId}${model.tokenType ? ` · ${model.tokenType}` : ""}`}
+            <QuotaDetail key={`${model.modelId}:${index}`} label={<ModelQuotaLabel model={model.modelId}>{model.modelId}{model.tokenType && ` · ${model.tokenType}`}</ModelQuotaLabel>}
               quota={{...shared(model.usedPercent / 100, model.resetAt, null),source:"usage",observedAt:account.geminiUsage!.observedAt}} threshold={1} showSkipAt={false} />
           ) : <p>No model quotas observed yet.</p>}
         </div> : <>
@@ -2657,7 +2672,7 @@ function AccountCard({
           <QuotaDetail label={account.provider === "cursor" ? "Billing period" : "7 days"} quota={shared(account.sevenDayUtilization, account.sevenDayResetAt, account.sevenDayStatus)} threshold={weeklySkipAt} />}
         {modelFamilySchema.options.map(family => {
           const quota = account.familyWeekly[family];
-          return quota && <QuotaDetail key={family} label={FAMILY_LABELS[family]} quota={quota} threshold={limits.familyWeekly ?? limits.weekly} />;
+          return quota && <QuotaDetail key={family} label={<ModelQuotaLabel model={null}>{FAMILY_LABELS[family]}</ModelQuotaLabel>} quota={quota} threshold={limits.familyWeekly ?? limits.weekly} />;
         })}
 
         </>}
