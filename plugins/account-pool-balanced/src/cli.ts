@@ -81,7 +81,7 @@ const HELP = [
   "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> <id>...",
   "  bb pool account refresh <id>",
   "  bb pool status [--json|--summary]",
-  "  bb pool readiness [--project <id>] [--json]",
+  "  bb pool readiness [--project <id>] [--json] | readiness --summary --project <id>",
   '  bb pool native status --json',
   '  bb pool native preflight <target-json>',
   '  bb pool native configure <executor-json>',
@@ -466,7 +466,7 @@ export function registerPoolCli(
         summary: "Refresh one account's observed usage",
         usage: "bb pool account refresh <id>",
       },
-      { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json]" },
+      { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json] | readiness --summary --project <id>" },
       {name:"stream-probe",summary:"Inspect one thread or interrupt one exact observed Cursor body",usage:"bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]"},
       { name:"guard-probe", summary:"Rehearse read-only Guard admission, optionally delaying only this probe", usage:"bb pool guard-probe --provider cursor [--delay-stage server-host|guard-rpc|server-host-recheck] [--delay-ms 0..4500] [--delay-attempts first|all] [--json]" },
       { name:"diagnostics", summary:"Read bounded before/after queue and account diagnostics", usage:"bb pool diagnostics --from <UTC-hour> --to <UTC-hour> [--compare-previous] [--json]" },
@@ -911,9 +911,17 @@ export function registerPoolCli(
           };
         }
         if (argv[0] === "readiness") {
-          const flags = parseFlags(argv.slice(1), ["json"], ["project"]);
+          const flags = parseFlags(argv.slice(1), ["json", "summary"], ["project"]);
           const projectId = providerReadinessSchema.shape.projectId.parse(flags.values.get("project") ?? null);
+          const summary = flags.booleans.has("summary");
+          if (summary && projectId === null) throw Error("Readiness summary requires --project <id>.");
           const entries = await operations.readiness(projectId);
+          if (summary) {
+            return {exitCode:0, stdout:json({
+              checkedAt: Math.min(...entries.map(entry => entry.checkedAt)),
+              providers: entries.map(({provider, ready, reason}) => ({provider, ready, reason})),
+            })};
+          }
           return {exitCode:0, stdout:flags.booleans.has("json") ? json(entries) : entries.map(entry => `${entry.provider}: ${entry.ready ? "ready" : entry.reason}`).join("\n")+"\n"};
         }
         if(argv[0]==='stream-probe'){

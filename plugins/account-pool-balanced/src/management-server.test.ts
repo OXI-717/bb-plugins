@@ -32,6 +32,22 @@ it('keeps owner RPCs available while CLI and delegated management remain guarded
   await expect(call('provider-usage.v1.listResources', {})).resolves.toEqual({ label: 'Account Pooler', resources: [] });
   const key = (await fs.readFile(path.join(dataDir, 'plugins', 'pool-test', 'secrets', 'accounts', 'management', 'operator.env'), 'utf8')).trim().split('=')[1]!;
   const grant = await call('management.unlock', { key, scope: 'manage', ttlSeconds: 60 }) as { token: string };
+  const project = 'proj_synthetic';
+  const readinessArgs = ['readiness', '--summary', '--project', project];
+  const { runCli } = host.harness.behavior;
+  expect((await runCli(readinessArgs)).exitCode).toBe(1);
+  const readGrant = await call('management.unlock', { key, scope: 'read', ttlSeconds: 60 }) as { token: string };
+  const execute = (argv: string[]) => runCli(['management', 'execute', '--request', JSON.stringify({ token: readGrant.token, argv })]);
+  expect((await execute(['readiness', '--summary'])).exitCode).toBe(1);
+  const projectSummary = await execute(readinessArgs);
+  expect(projectSummary.exitCode).toBe(0);
+  const report = JSON.parse(projectSummary.stdout);
+  expect(Object.keys(report).sort()).toEqual(['checkedAt', 'providers']);
+  expect(report.checkedAt).toEqual(expect.any(Number));
+  expect(report.providers).toEqual(expect.arrayContaining([
+    { provider: 'claude', ready: false, reason: expect.any(String) },
+  ]));
+  expect(JSON.stringify(report)).not.toContain(project);
   const created = await call('management.call', { token: grant.token, method: 'account.add', input: {
     provider: 'claude', source: { kind: 'api-key', apiKey: 'synthetic-upstream-input' }, label: 'Private operator account', priority: 100,
   } }) as { ok: boolean; result: { id: string } };

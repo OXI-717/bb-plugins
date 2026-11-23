@@ -35,3 +35,13 @@ The summary contains counts and an exhaustion flag. The minimum usage
 percentage is null unless at least two quota-ready accounts have complete,
 fresh numeric evidence. Counts and repeated samples can reveal operational
 activity. The command does not refresh quotas or return account identifiers.
+
+### Project readiness summary
+
+With a read management grant, pass
+`["readiness", "--summary", "--project", "<project-id>"]` as the command in
+`bb pool management execute --request-stdin`. The result contains the earliest
+check timestamp in milliseconds and provider entries with only the provider,
+readiness and a fixed reason code. The project is required and is not echoed.
+This reuses native project eligibility checks. Dispatch still checks admission
+at the time of use.
