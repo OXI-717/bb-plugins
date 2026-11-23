@@ -46,6 +46,7 @@ IPv6 и обход через NO_PROXY/direct запрещены. Глобаль
 - `bb pool egress status --json` — реестр, привязки и закреплённые разговоры.
 - `bb pool egress configure <profile-json>` — добавить неизменяемую версию.
 - `bb pool egress bind <account-id> <profile-id> <version>` — новые разговоры аккаунта.
+- `bb pool egress display-name <profile-id> <version> <name>` — имя существующей версии в интерфейсе. Назначения, закреплённые разговоры и параметры транспорта сохраняются.
 - `bb pool egress unbind <account-id>` — вернуть новые разговоры к прежнему маршруту.
 
 Шаблон JSON: id/version/label/node/hostIds/transport=ssh-connect,

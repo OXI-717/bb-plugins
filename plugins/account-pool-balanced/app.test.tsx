@@ -401,6 +401,18 @@ describe("Account Pool settings", () => {
     )).toBe(false);
   });
 
+  it("shows the full display name for an existing assigned profile", async () => {
+    const selected = account();
+    const snapshot = egressSnapshot(selected.id);
+    const slot = render([selected], {
+      "egress.status": () => ({...snapshot, displayNames: {"prepared-egress:2": "full-node-name"}}),
+    });
+    fireEvent.click(await slot.findByRole("button", {name: "Открыть карточку: person@example.com"}));
+    fireEvent.click(slot.getByText(/Доступ и маршрут/, {selector: "summary"}));
+    await slot.findByRole("option", {name: "full-node-name · версия 2", selected: true});
+    expect(slot.queryByRole("option", {name: "Тестовый выход · версия 2"})).toBeNull();
+  });
+
   it("saves a profile and proxy through the ordinary account settings and reloads the profile", async () => {
     const selected = account();
     const snapshot = egressSnapshot(selected.id);

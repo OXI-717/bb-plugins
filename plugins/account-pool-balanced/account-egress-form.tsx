@@ -1,10 +1,11 @@
 import {Button} from './ui/components/ui/button';
 import React,{useEffect,useState} from 'react';
 import {useRpc} from '@get-bb/plugin-sdk/app';
-import type {AccountEgress} from './src/account-egress.js';
+import type {z} from 'zod';
+import type {egressDisplayStateSchema} from './src/account-egress.js';
 import type {PoolProvider} from './src/contracts.js';
 import type {accountPoolRpcContract} from './src/rpc.js';
-type Snapshot=ReturnType<AccountEgress['snapshot']>;
+type Snapshot=z.output<typeof egressDisplayStateSchema>;
 
 export function EgressControl({accountId,provider,state,pending,error,save}:{
  accountId:string;provider:PoolProvider;state:Snapshot|null;pending:boolean;error:string;
@@ -21,7 +22,10 @@ export function EgressControl({accountId,provider,state,pending,error,save}:{
          save(profile?{id:profile.id,version:profile.version}:null);
        }}>
        <option value="">Текущий маршрут Pooler</option>
-       {state?.profiles.map(p=><option key={`${p.id}:${p.version}`} value={`${p.id}:${p.version}`}>{p.label} · версия {p.version}</option>)}
+       {state?.profiles.map(p=>{
+         const key=`${p.id}:${p.version}`;
+         return <option key={key} value={key}>{state.displayNames?.[key]??p.label} · версия {p.version}</option>;
+       })}
      </select>
    </label>
    <p className="pool-settings-help">{supported?'Изменение применяется к новым разговорам. Начатые сохраняют аккаунт и версию маршрута.':'Для официального клиента этого провайдера поддержка транспорта ещё не подтверждена.'}</p>

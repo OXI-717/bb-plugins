@@ -39,6 +39,10 @@ export const egressStateSchema = z.object({schema:z.literal(1),profiles:z.array(
   unassigned:z.record(z.string().max(2048),z.array(z.string().uuid()).min(1).max(128)).default({}),
   assignmentBlocked:z.boolean().default(false),
 }).strict();
+const displayNameSchema = z.string().trim().min(1).max(120);
+const displayNamesSchema = z.record(z.string().regex(/^[a-zA-Z0-9_-]{1,80}:[1-9]\d*$/), displayNameSchema);
+const displayNamesKey = 'account-egress-display-names-v1';
+export const egressDisplayStateSchema = egressStateSchema.extend({displayNames: displayNamesSchema.optional()});
 export const ROUTE_RETENTION_MS=30*86400000;
 const MAX_REGISTRY_BYTES=240*1024; // Reserve space below the SDK's 256 KiB value bound.
 const registryBytes=(state:unknown)=>Buffer.byteLength(JSON.stringify(state),'utf8');
@@ -64,6 +68,7 @@ export interface AccountRoute {
 /** Server-owned selection, never read from client headers or model names. */
 export class AccountEgress {
   private state:z.infer<typeof egressStateSchema> = {schema:1,profiles:[],bindings:{},pins:{},unassigned:{},assignmentBlocked:false};
+  private displayNames: z.infer<typeof displayNamesSchema> = {};
   private readonly agents = new Map<string,ProxyAgent>();
   private readonly sessions = new Map<string,{accountId:string;route:AccountRoute}>();
   private readonly lastSeen=new Map<string,number>();
@@ -78,6 +83,9 @@ export class AccountEgress {
     }
   async initialize(){
     const stored=await this.kv.get('account-egress-v1');if(stored!==undefined)this.state=egressStateSchema.parse(stored);
+    const displayNames = await this.kv.get(displayNamesKey);
+    const parsedNames = displayNamesSchema.safeParse(displayNames);
+    if (parsedNames.success) this.displayNames = parsedNames.data;
     await this.scopeAcceptances.initialize();
     await this.cleanup();
     if(decisionCount(this.state)>=4096 || registryBytes(this.state)>=MAX_REGISTRY_BYTES)this.state.assignmentBlocked=true;
@@ -107,6 +115,20 @@ export class AccountEgress {
     this.lastCleanup=now;
   });}
   snapshot(){return structuredClone(this.state);}
+  displaySnapshot() {
+    return {...this.snapshot(), displayNames: {...this.displayNames}};
+  }
+  setDisplayName(ref: z.input<typeof refSchema>, name: string) {
+    return this.update(async () => {
+      const {id, version} = refSchema.parse(ref);
+      if (!this.state.profiles.some(profile => profile.id === id && profile.version === version)) {
+        throw new Error('Egress profile not found.');
+      }
+      const next = {...this.displayNames, [`${id}:${version}`]: displayNameSchema.parse(name)};
+      await this.kv.set(displayNamesKey, next);
+      this.displayNames = next;
+    });
+  }
   async acceptScope(value:unknown){
     const input=httpScopeAcceptInputSchema.parse(value);
     const profile=this.state.profiles.find(p=>p.id===input.profile.id&&p.version===input.profile.version);
