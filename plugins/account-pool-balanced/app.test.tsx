@@ -195,7 +195,7 @@ function egressSnapshot(accountId: string) {
     profiles: [{
       id: "prepared-egress",
       version: 2,
-      label: "Тестовый выход",
+      label: "Test egress",
       node: "test-exit",
       hostIds: ["host-one"],
       transport: "ssh-connect",
@@ -212,9 +212,9 @@ function egressSnapshot(accountId: string) {
 }
 
 async function openEgressSettings(slot: ReturnType<typeof render>) {
-  fireEvent.click(await slot.findByRole("button", { name: "Открыть карточку: person@example.com" }));
-  fireEvent.click(slot.getByText(/Доступ и маршрут/, { selector: "summary" }));
-  await slot.findByRole("option", { name: "Тестовый выход · версия 2", selected: true });
+  fireEvent.click(await slot.findByRole("button", { name: "Open account card: person@example.com" }));
+  fireEvent.click(slot.getByText(/Access and route/, { selector: "summary" }));
+  await slot.findByRole("option", { name: "Test egress · version 2", selected: true });
 }
 
 describe("Account Pool settings", () => {
@@ -399,7 +399,7 @@ describe("Account Pool settings", () => {
     const slot = render([selected], { "egress.status": () => snapshot });
     await openEgressSettings(slot);
 
-    expect(slot.getByRole("combobox", { name: "Выходной профиль" }).hasAttribute("disabled")).toBe(false);
+    expect(slot.getByRole("combobox", { name: "Egress profile" }).hasAttribute("disabled")).toBe(false);
     expect(slot.rpcCalls).toContainEqual({ method: "egress.status", input: null });
     expect(slot.rpcCalls.some(({ method }) =>
       ["management.call", "egress.bind", "egress.proxy"].includes(method)
@@ -419,15 +419,15 @@ describe("Account Pool settings", () => {
     });
     await openEgressSettings(slot);
 
-    const profile = slot.getByRole("combobox", { name: "Выходной профиль" });
-    const proxy = slot.getByLabelText("Прокси аккаунта");
+    const profile = slot.getByRole("combobox", { name: "Egress profile" });
+    const proxy = slot.getByLabelText("Account proxy");
     fireEvent.change(profile, { target: { value: "" } });
-    await slot.findByRole("option", { name: "Текущий маршрут Pooler", selected: true });
+    await slot.findByRole("option", { name: "Current Pooler route", selected: true });
 
     const url = "http://proxy.example:8080";
     fireEvent.change(proxy, { target: { value: url } });
-    fireEvent.click(slot.getByRole("button", { name: "Сохранить прокси" }));
-    await slot.findByRole("option", { name: "Тестовый выход · версия 2", selected: true });
+    fireEvent.click(slot.getByRole("button", { name: "Save proxy" }));
+    await slot.findByRole("option", { name: "Test egress · version 2", selected: true });
     expect(statusRpc).toHaveBeenCalledTimes(3);
     expect(slot.rpcCalls).toContainEqual({ method: "egress.bind", input: { accountId: selected.id, ref: null } });
     expect(slot.rpcCalls).toContainEqual({ method: "egress.proxy", input: { accountId: selected.id, url } });
