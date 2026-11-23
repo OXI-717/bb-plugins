@@ -30,7 +30,7 @@
 - `plugins/account-pool-balanced/src/openai-compatible-adapter.ts` — `GROK_MOUNT_PREFIX` and `collectUsage`.
 - `plugins/account-pool-balanced/src/server.ts` — route table entry, `retryProviders`, thread provider map.
 - `plugins/account-pool-balanced/src/cli.ts`, `app.tsx`, `src/usage-source.ts`, `src/browser-profiles.ts`, `src/standalone/http.ts` — help text, card, usage id, browser title, standalone path.
-- Docs: `PLUGIN_OVERVIEW.md`, `docs/external-clients.md`, `skills/account-pool/references/accounts-and-routing.md`.
+- Docs: `PLUGIN_OVERVIEW.md`, `plugins/account-pool-balanced/docs/external-clients.md`, `plugins/account-pool-balanced/skills/account-pool/references/accounts-and-routing.md`.
 - Tests live next to those files. No new production file.
 
 ## Review Focus
