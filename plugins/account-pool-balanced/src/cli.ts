@@ -1069,6 +1069,9 @@ export function registerPoolCli(
         }
         throw new Error(HELP);
       } catch (error) {
+        if (argv[0] === "readiness" && argv.includes("--summary")) {
+          return { exitCode: 1, stderr: "Project readiness summary unavailable.\n" };
+        }
         return {
           exitCode: 1,
           stderr: `${error instanceof Error ? error.message : String(error)}\n`,

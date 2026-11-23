@@ -39,6 +39,13 @@ it('keeps owner RPCs available while CLI and delegated management remain guarded
   const readGrant = await call('management.unlock', { key, scope: 'read', ttlSeconds: 60 }) as { token: string };
   const execute = (argv: string[]) => runCli(['management', 'execute', '--request', JSON.stringify({ token: readGrant.token, argv })]);
   expect((await execute(['readiness', '--summary'])).exitCode).toBe(1);
+  const invalid = await execute([...readinessArgs, project]);
+  expect(invalid.exitCode).toBe(1);
+  expect(invalid.stderr?.trim()).toBe('Project readiness summary unavailable.');
+  expect(JSON.stringify(invalid)).not.toContain(project);
+  const legacyInvalid = await execute(['readiness', '--project', project, project]);
+  expect(legacyInvalid.stderr).toContain(project);
+
   const projectSummary = await execute(readinessArgs);
   expect(projectSummary.exitCode).toBe(0);
   const report = JSON.parse(projectSummary.stdout);
