@@ -89,7 +89,7 @@ it('permits owner UI RPCs while refusing untrusted plugin dispatch', async () =>
   registerManagementRpc(bb, access, handlers);
   const legacy = registrations[0]!.handlers;
   for (const [method, handler] of Object.entries(legacy)) {
-    if(['egress.scopeAccept','egress.scopeRevoke'].includes(method)){
+    if(['egress.scopeAccept','egress.scopeRevoke','egress.registerProxy'].includes(method)){
       expect(()=>handler(null)).toThrow(PoolManagementLocked);
       continue;
     }
