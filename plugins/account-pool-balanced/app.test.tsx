@@ -209,7 +209,7 @@ function egressSnapshot(accountId: string) {
 async function openEgressSettings(slot: ReturnType<typeof render>) {
   fireEvent.click(await slot.findByRole("button", { name: "Открыть карточку: person@example.com" }));
   fireEvent.click(slot.getByText(/Доступ и маршрут/, { selector: "summary" }));
-  await slot.findByRole("option", { name: "Тестовый выход · версия 2", selected: true });
+  await slot.findByRole("option", { name: "Тестовый выход", selected: true });
 }
 
 describe("Account Pool settings", () => {
@@ -409,8 +409,45 @@ describe("Account Pool settings", () => {
     });
     fireEvent.click(await slot.findByRole("button", {name: "Открыть карточку: person@example.com"}));
     fireEvent.click(slot.getByText(/Доступ и маршрут/, {selector: "summary"}));
-    await slot.findByRole("option", {name: "full-node-name · версия 2", selected: true});
-    expect(slot.queryByRole("option", {name: "Тестовый выход · версия 2"})).toBeNull();
+    await slot.findByRole("option", {name: "full-node-name", selected: true});
+    expect(slot.queryByRole("option", {name: "Тестовый выход"})).toBeNull();
+  });
+
+  it("lists each exit once and keeps the assigned version until the user applies a change", async () => {
+    const selected = account();
+    const snapshot = egressSnapshot(selected.id);
+    const newest = snapshot.profiles[0]!;
+    const previous = { ...newest, version: 1, hostIds: ["previous-host"] };
+    const otherExit = { ...newest, id: "other-exit", version: 1, label: "Другой выход" };
+    const slot = render([selected], {
+      "egress.status": () => ({
+        ...snapshot,
+        profiles: [newest, previous, otherExit],
+        bindings: { [selected.id]: { id: previous.id, version: previous.version } },
+        displayNames: { "prepared-egress:2": "Основной выход" },
+      }),
+      "egress.bind": () => null,
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть карточку: person@example.com" }));
+    fireEvent.click(slot.getByText(/Доступ и маршрут/, { selector: "summary" }));
+
+    await slot.findByRole("option", { name: "Основной выход", selected: true });
+    const profile = slot.getByRole("combobox", { name: "Выходной профиль" });
+    expect(within(profile).getAllByRole("option").map(option => option.textContent)).toEqual([
+      "Текущий маршрут Pooler", "Основной выход", "Другой выход",
+    ]);
+    expect(slot.getByText(/Поддерживаемые хосты: previous-host/)).toBeTruthy();
+    expect(slot.rpcCalls.some(({ method }) => method === "egress.bind")).toBe(false);
+
+    fireEvent.click(slot.getByRole("button", { name: "Применить актуальную конфигурацию" }));
+    expect(slot.rpcCalls).toContainEqual({
+      method: "egress.bind", input: { accountId: selected.id, ref: { id: newest.id, version: newest.version } },
+    });
+    await waitFor(() => expect(profile.hasAttribute("disabled")).toBe(false));
+    fireEvent.change(profile, { target: { value: otherExit.id } });
+    expect(slot.rpcCalls).toContainEqual({
+      method: "egress.bind", input: { accountId: selected.id, ref: { id: otherExit.id, version: otherExit.version } },
+    });
   });
 
   it("saves a profile and proxy through the ordinary account settings and reloads the profile", async () => {
@@ -434,7 +471,7 @@ describe("Account Pool settings", () => {
     const url = "http://proxy.example:8080";
     fireEvent.change(proxy, { target: { value: url } });
     fireEvent.click(slot.getByRole("button", { name: "Сохранить прокси" }));
-    await slot.findByRole("option", { name: "Тестовый выход · версия 2", selected: true });
+    await slot.findByRole("option", { name: "Тестовый выход", selected: true });
     expect(statusRpc).toHaveBeenCalledTimes(3);
     expect(slot.rpcCalls).toContainEqual({ method: "egress.bind", input: { accountId: selected.id, ref: null } });
     expect(slot.rpcCalls).toContainEqual({ method: "egress.proxy", input: { accountId: selected.id, url } });
