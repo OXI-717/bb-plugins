@@ -159,6 +159,11 @@ it.each([200, 403])('collects a declared Gemini quota summary or preserves short
         ? { cloudaicompanionProject: { id: 'fixture-project' } }
         : {});
     }
+    // A partial summary is a valid HTTP response for older clients.
+    const userAgent = new Headers(init?.headers).get("user-agent");
+    if (!userAgent?.startsWith("antigravity/cli/1.5.0 (aidev_client;")) {
+      return Response.json({ groups: [{ buckets: [{ bucketId: "3p-weekly", remainingFraction: 1 }] }] });
+    }
     if (status === 403) return new Response(null, { status });
     return Response.json({ response: { groups: [{ buckets: [
       { bucketId: 'gemini-5h', remainingFraction: 0.75, resetTime },

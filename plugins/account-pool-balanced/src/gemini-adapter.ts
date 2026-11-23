@@ -30,6 +30,10 @@ export const GEMINI_ROUTE_SUFFIXES = [
   "v1internal:retrieveUserQuota",
 ] as const;
 
+// Protocol signature used by the Antigravity CLI for its /usage summary.
+const summaryArchitecture = process.arch === "x64" ? "amd64" : process.arch;
+const summaryUserAgent = `antigravity/cli/1.5.0 (aidev_client; os_type=${process.platform}; arch=${summaryArchitecture}; cl=1013440158; auth_method=consumer)`;
+
 export const GEMINI_USAGE_REQUEST_TIMEOUT_MS = 20_000;
 const USAGE_REQUEST_TIMEOUT_MS = GEMINI_USAGE_REQUEST_TIMEOUT_MS;
 const ALLOWED_REQUEST_HEADERS = new Set(["accept", "content-type", "user-agent"]);
@@ -184,7 +188,7 @@ export function createGeminiAdapter(options: GeminiAdapterOptions): ProviderAdap
               `${options.cloudCodeBaseUrl.replace(/\/+$/u, '')}/v1internal:retrieveUserQuotaSummary`,
               {
                 method: "POST", redirect: "error", signal,
-                headers: { authorization: `Bearer ${secret.accessToken}`, "content-type": "application/json", "user-agent": GEMINI_USER_AGENT },
+                headers: { authorization: `Bearer ${secret.accessToken}`, "content-type": "application/json", "user-agent": summaryUserAgent },
                 body: JSON.stringify({ project }),
               },
             ), signal);
