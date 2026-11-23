@@ -164,7 +164,7 @@ export function createGeminiAdapter(options: GeminiAdapterOptions): ProviderAdap
         try {
           const auxiliary = await context.fetch(`${options.cloudCodeBaseUrl.replace(/\/+$/u, '')}/v1internal:loadCodeAssist`, {
             method: 'POST', headers: {authorization: `Bearer ${secret.accessToken}`, 'content-type': 'application/json', accept: 'application/json', 'user-agent': GEMINI_USER_AGENT},
-            body: JSON.stringify({metadata: {}}), signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
+            body: JSON.stringify({metadata: {ideType: "ANTIGRAVITY"}}), signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
           });
           diagnostic.enrichmentHttpStatus = auxiliary.status;
           diagnostic.enrichment = auxiliary.ok ? "body-invalid" : "http-error";

@@ -149,12 +149,15 @@ it.each([200, 403])('collects a declared Gemini quota summary or preserves short
   const setGeminiUsage = vi.fn();
   const put = vi.fn();
   const resetTime = '2030-01-02T00:00:00Z';
-  const fetch = vi.fn(async (input: unknown) => {
+  const fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
     if (String(input).endsWith(':retrieveUserQuota')) {
       return Response.json({ buckets: [{ modelId: 'gemini-fixture', remainingFraction: 0.8 }] });
     }
     if (String(input).endsWith(':loadCodeAssist')) {
-      return Response.json({ cloudaicompanionProject: { id: 'fixture-project' } });
+      const request = JSON.parse(String(init?.body));
+      return Response.json(request.metadata?.ideType === 'ANTIGRAVITY'
+        ? { cloudaicompanionProject: { id: 'fixture-project' } }
+        : {});
     }
     if (status === 403) return new Response(null, { status });
     return Response.json({ response: { groups: [{ buckets: [
