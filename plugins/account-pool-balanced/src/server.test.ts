@@ -10056,3 +10056,19 @@ it('skips Guard RPC checks on background usage ticks while accounts are not due'
     vi.useRealTimers();
   }
 });
+
+
+it.each([
+ ['/grok/chat/completions','api-key'],['/grok/v1/chat/completions','api-key'],
+ ['/grok/chat/completions','oauth'],['/grok/v1/chat/completions','oauth'],
+] as const)('normalizes the legacy and versioned Grok route %s with %s',async (route,kind)=>{
+ const urls:string[]=[];
+ const f=await createFixture({upstreamUrl:'https://api.x.ai/v1',provider:'grok',source:kind==='oauth'?'import':'api-key',options:{
+  importGrokCredentials:async()=>({label:'Synthetic',email:'fixture@example.com',accessToken:'synthetic-access',refreshToken:'synthetic-refresh',expiresAt:Date.parse('2099-01-01T00:00:00Z'),clientId:'synthetic-client',issuer:'https://auth.x.ai'}),
+  fetch:async(input)=>{urls.push(String(input));return Response.json({choices:[]});},
+ }});
+ urls.length=0;
+ const response=await f.host.harness.behavior.fetchHttp('POST',route,{headers:{authorization:`Bearer ${f.key}`,'content-type':'application/json'},body:JSON.stringify({model:'fixture-model',messages:[]})});
+ expect(response.status).toBe(200);await response.text();
+ expect(urls).toEqual([kind==='oauth'?'https://cli-chat-proxy.grok.com/v1/chat/completions':'https://api.x.ai/v1/chat/completions']);
+});

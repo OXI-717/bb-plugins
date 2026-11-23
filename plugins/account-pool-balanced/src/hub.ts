@@ -2281,7 +2281,7 @@ export function createHub(options: {
         provider: "grok",
         upstreamName: "xAI",
         mountPrefix: GROK_MOUNT_PREFIX,
-        normalizeUpstreamPathSuffix: suffix => suffix.replace(/^v1\//u, ""),
+        normalizeUpstreamPathSuffix: suffix => suffix.replace(/^grok\//u, "").replace(/^v1\//u, ""),
         upstreamBaseUrl: (settings) => settings.grokUpstreamBaseUrl,
         usagesUrl: "https://api.x.ai/v1/models",
         collectUsage: true,
