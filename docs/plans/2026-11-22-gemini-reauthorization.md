@@ -7,3 +7,6 @@ Use the CLI's documented --gemini-dir flag for isolated login state, retaining t
 Validate synthetic identity, removed-account, persistence-failure, login isolation and UI cases; run typecheck and official build; obtain distinct review and audit the complete public delta and commit metadata before updating the existing upstream PR. No live login or deployment is part of this change.
 
 Cancellation is accepted only before the save callback begins. A cancelled session cannot enter that callback after a delayed credential import. Once the callback starts, cancellation is declined even while it waits for authorization locks; closing the dialog does not undo a save already in progress.
+
+
+Interactive Google code entry uses a masked input in the Gemini login dialog. Submit once to the existing session through the CLI stdin pipe, never through arguments, stored settings or logs. Validate expiry, cancellation and bounded single-line input. Clear the input on submission, restart and close; retain polling for completion and the existing same-account save boundary. Sessions launched before this change cannot acquire a stdin pipe and must be restarted by the user.

@@ -115,6 +115,33 @@ function cancellationLogin(reauthorizeAccount: NonNullable<ConstructorParameters
 }
 const syntheticAuthorization={label:'Synthetic',email:'pool@example.com',accessToken:'synthetic-access',refreshToken:'synthetic-refresh',expiresAt:null,clientId:'synthetic-client'};
 
+it("accepts a pasted Google code over the session stdin and completes authentication", async () => {
+  let added = 0;
+  const login = new GeminiLogin({
+    spawnLogin: env => spawn(process.execPath, ["-e", `
+      process.stdout.write("Open https://accounts.google.com/o/oauth2/auth\\nEnter the authorization code:");
+      process.stdin.once("data", chunk => {
+        if (chunk.toString() !== "synthetic-google-code\\n") process.exit(2);
+        ${loginScript(0, false)}
+      });
+    `], {env, stdio: ["pipe", "pipe", "pipe"]}),
+    addAccount: async () => { added++; return account; },
+  });
+  try {
+    const started = await login.start();
+    expect(await login.submitCode({sessionId: started.sessionId, code: "synthetic-google-code"})).toEqual({accepted: true});
+    await expect(login.submitCode({sessionId: started.sessionId, code: "synthetic-google-code"})).rejects.toThrow();
+    let result = await login.poll({sessionId: started.sessionId});
+    const deadline = Date.now() + 2000;
+    while (result.status === "pending" && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 30));
+      result = await login.poll({sessionId: started.sessionId});
+    }
+    expect(result).toEqual({status: "complete", account});
+    expect(added).toBe(1);
+  } finally { login.dispose(); }
+});
+
 it('cancel boundary: accepted cancellation before commit leaves authorization unchanged',async()=>{
  const entered=barrier<void>();const release=barrier<typeof syntheticAuthorization>();let authorization='old';
  const read=vi.spyOn(credentials,'importGeminiCredentials').mockImplementation(async()=>{entered.resolve();return release.promise;});
@@ -136,4 +163,30 @@ it('cancel boundary: cancellation is declined once authorization commit has begu
   expect(login.cancel({sessionId:started.sessionId})).toBe(false);
   release.resolve();expect((await poll).status).toBe('complete');expect(authorization).toBe('new');
  }finally{release.resolve();read.mockRestore();login.dispose();}
+});
+
+
+function codeWaitingLogin(now = Date.now) {
+  return new GeminiLogin({now,
+    spawnLogin: env => spawn(process.execPath, ['-e', 'process.stdout.write("https://accounts.google.com/login\\n");setInterval(()=>{},1000)'], {env,stdio:['pipe','pipe','pipe']}),
+    addAccount: async () => { throw Error('Unexpected save'); },
+  });
+}
+it.each(['', 'one\nsecond', 'code\u001b', 'a'.repeat(8193)])('rejects invalid code before stdin consumption (%#)', async code => {
+  const login=codeWaitingLogin();
+  try {
+    const {sessionId}=await login.start();
+    await expect(login.submitCode({sessionId,code})).rejects.toThrow('single authorization code');
+    expect(await login.submitCode({sessionId,code:'synthetic-valid'})).toEqual({accepted:true});
+  } finally { login.dispose(); }
+});
+it('rejects a pasted code after accepted cancellation',async()=>{
+ const login=codeWaitingLogin();
+ try {const {sessionId}=await login.start();expect(login.cancel({sessionId})).toBe(true);await expect(login.submitCode({sessionId,code:'synthetic-valid'})).rejects.toThrow('no longer accepting');}
+ finally {login.dispose();}
+});
+it('rejects a pasted code after expiry without saving',async()=>{
+ let now=1000;const login=codeWaitingLogin(()=>now);
+ try {const {sessionId}=await login.start();now+=600001;await expect(login.submitCode({sessionId,code:'synthetic-valid'})).rejects.toThrow('expired');expect(login.has(sessionId)).toBe(false);}
+ finally {login.dispose();}
 });

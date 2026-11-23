@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import type { Readable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import type { AccountSummary } from "./contracts.js";
 import {
@@ -35,7 +35,7 @@ export interface GeminiLoginOptions {
   addAccount: (authenticated: GeminiSubscriptionCredentials) => Promise<AccountSummary>;
 }
 
-type LoginChild = ChildProcessByStdio<null, Readable, Readable>;
+type LoginChild = ChildProcessByStdio<Writable | null, Readable, Readable>;
 
 interface LoginSession {
   targetAccountId?: string;
@@ -51,6 +51,7 @@ interface LoginSession {
   polling: boolean;
   cancelled: boolean;
   commitStarted: boolean;
+  codeSubmitted: boolean;
 }
 
 const URL_LINE = /https:\/\/\S+/u;
@@ -81,7 +82,7 @@ export class GeminiLogin {
     const args = [...this.args, "--gemini-dir", home];
     const child = this.spawnLogin
       ? this.spawnLogin(env, home, args)
-      : spawn(this.command, args, { env, stdio: ["ignore", "pipe", "pipe"] as const });
+      : spawn(this.command, args, { env, stdio: ["pipe", "pipe", "pipe"] as const });
     const session: LoginSession = {
       targetAccountId,
       sessionId: randomUUID(),
@@ -96,6 +97,7 @@ export class GeminiLogin {
       polling: false,
       cancelled: false,
       commitStarted: false,
+      codeSubmitted: false,
     };
     const capture = (chunk: Buffer) => {
       session.output += chunk.toString("utf8");
@@ -106,6 +108,9 @@ export class GeminiLogin {
     };
     child.stdout.on("data", capture);
     child.stderr.on("data", capture);
+    child.stdin?.on("error", () => {
+      session.settled ??= { code: null, error: "Sign-in input is unavailable." };
+    });
     child.once("error", (error) => {
       session.settled = { code: null, error: error.message };
     });
@@ -160,6 +165,30 @@ export class GeminiLogin {
     } finally {
       session.polling = false;
     }
+  }
+
+  async submitCode(input: { sessionId: string; code: string }): Promise<{ accepted: true }> {
+    const session = this.sessions.get(input.sessionId);
+    if (!session || session.cancelled || session.commitStarted || session.codeSubmitted || session.settled !== null)
+      throw new Error("Sign-in is no longer accepting a code. Start again.");
+    if (this.now() >= session.expiresAt) {
+      await this.disposeSession(session);
+      throw new Error("Sign-in expired. Start again.");
+    }
+    const code = input.code.trim();
+    if (!code || code.length > 8192 || /[^\x21-\x7e]/u.test(code))
+      throw new Error("Enter a single authorization code without spaces or line breaks.");
+    const stdin = session.child.stdin;
+    if (!stdin || stdin.destroyed || !stdin.writable)
+      throw new Error("Sign-in cannot receive a code. Start again.");
+    session.codeSubmitted = true;
+    await new Promise<void>((resolve, reject) => {
+      stdin.write(`${code}\n`, error => {
+        if (error) reject(new Error("Sign-in could not receive the code. Start again."));
+        else resolve();
+      });
+    });
+    return { accepted: true };
   }
 
   nextPollDelayMs(): number {

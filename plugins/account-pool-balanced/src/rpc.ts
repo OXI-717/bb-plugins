@@ -186,6 +186,10 @@ export const accountPoolRpcContract = defineRpcContract({
     input: codexLoginPollInputSchema,
     output: codexLoginPollSchema,
   },
+  "geminiLogin.submitCode": {
+    input: z.object({ sessionId: z.string().uuid(), code: z.string().min(1).max(8192) }).strict(),
+    output: z.object({ accepted: z.literal(true) }).strict(),
+  },
   "geminiLogin.cancel": {
     input: codexLoginPollInputSchema,
     output: codexLoginCancelSchema,
@@ -306,6 +310,10 @@ export function createRpcHandlers(
     "geminiLogin.poll": (input) => {
       if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
       return geminiLogin.poll(input);
+    },
+    "geminiLogin.submitCode": input => {
+      if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
+      return geminiLogin.submitCode(input);
     },
     "geminiLogin.cancel": (input) => ({
       cancelled: geminiLogin === undefined ? false : geminiLogin.cancel(input),

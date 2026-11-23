@@ -1399,6 +1399,7 @@ function AccountPoolSettings() {
     });
   }
   async function startGemini(targetAccountId?: string): Promise<void> {
+    setPastedCode("");
     if (geminiStep) void rpc.call("geminiLogin.cancel", {sessionId: geminiStep.sessionId}).catch(() => undefined);
     setGeminiStep(null);
     setReauthorizeAccountId(targetAccountId ?? null);
@@ -2430,13 +2431,18 @@ function AccountPoolSettings() {
             geminiStep={geminiStep}
             loginDone={loginDone}
             pending={pending !== null}
-            pastedCode=""
+            pastedCode={pastedCode}
             countdown={countdown}
             error={error ?? (browserError?.accountId === reauthorizeAccountId ? browserError.text : null)}
             close={closeDialog}
             openUrl={navigate.openUrl}
-            setPastedCode={() => {}}
-            complete={() => {}}
+            setPastedCode={setPastedCode}
+            complete={() => void run("gemini-code", async () => {
+              if (geminiStep === null) return;
+              const code = pastedCode;
+              setPastedCode("");
+              await rpc.call("geminiLogin.submitCode", {sessionId: geminiStep.sessionId, code});
+            })}
             restart={() => void startGemini(reauthorizeAccountId ?? undefined)}
           />
         ) : null}
@@ -2826,12 +2832,12 @@ function LoginDialog({
             {reauthorizing === null ? <Button variant="outline" onClick={restart}>Add another</Button> : null}
             <Button onClick={close}>Done</Button>
           </>
-        ) : provider === "claude" ? (
+        ) : provider === "claude" || provider === "gemini" ? (
           <>
             <span className="flex-1" />
             <Button
               disabled={
-                loginStep === null || pastedCode.trim().length === 0 || pending
+                (provider === "gemini" ? geminiStep === null : loginStep === null) || pastedCode.trim().length === 0 || pending
               }
               onClick={complete}
             >
@@ -2873,7 +2879,7 @@ function LoginDialog({
                 ? "Open the verification page, sign in to Grok, and enter this code."
                 : provider === "gemini"
                   ? geminiStep?.verificationUri
-                    ? "Open the Google page and finish sign-in."
+                    ? "Open the Google page, sign in, then paste the authorization code below."
                     : "Finish Google sign-in on this machine."
                   : "Open the verification page, sign in to ChatGPT, and enter this code."}
           </p>
@@ -2892,10 +2898,13 @@ function LoginDialog({
             <p className="text-sm text-muted-foreground">The window will open on the Pooler machine.</p>
             {browserNotice === null ? null : <p role="status" className="text-sm text-muted-foreground">{browserNotice}</p>}
           </div>}
-          {provider === "claude" ? (
+          {provider === "claude" || provider === "gemini" ? (
             <Input
-              aria-label="Claude authorization code"
-              placeholder="Paste code#state here"
+              aria-label={`${name} authorization code`}
+              type={provider === "gemini" ? "password" : "text"}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={provider === "gemini" ? "Paste Google authorization code here" : "Paste code#state here"}
               value={pastedCode}
               onChange={(event) => setPastedCode(event.target.value)}
             />

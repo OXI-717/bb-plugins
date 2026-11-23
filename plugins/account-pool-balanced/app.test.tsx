@@ -1415,6 +1415,24 @@ it('distinguishes Gemini token types without claiming a per-model routing thresh
  expect(details.textContent).not.toContain('skip at');
 });
 
+it('submits the pasted Gemini code from a password field to the current login session',async()=>{
+ const selected=account({provider:'gemini'});
+ const slot=render([selected],{
+  'geminiLogin.reauthorize':()=>({sessionId:'fixture-session',verificationUri:'https://accounts.google.com/device',userCode:null,expiresAt:Date.now()+600000,intervalMs:1000}),
+  'geminiLogin.poll':()=>({status:'pending'}),
+  'geminiLogin.submitCode':()=>({accepted:true}),
+ });
+ fireEvent.click(await slot.findByRole('button',{name:`Open ${selected.label}`}));
+ fireEvent.pointerDown(slot.getByRole('button',{name:'More account actions'}),{button:0,ctrlKey:false});
+ fireEvent.click(await slot.findByRole('menuitem',{name:'Sign in again'}));
+ const input=await slot.findByLabelText('Gemini authorization code');
+ expect(input.getAttribute('type')).toBe('password');
+ fireEvent.change(input,{target:{value:'synthetic-google-code'}});
+ fireEvent.click(slot.getByRole('button',{name:'Finish'}));
+ await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'geminiLogin.submitCode',input:{sessionId:'fixture-session',code:'synthetic-google-code'}}));
+ await waitFor(()=>expect((input as HTMLInputElement).value).toBe(''));
+});
+
 it('offers Gemini sign-in again for the selected account without adding a replacement or exposing provider JSON',async()=>{
  const selected=account({provider:'gemini',enabled:false,status:'error',error:'{"reason":"SUBSCRIPTION_REQUIRED","message":"synthetic-private-marker"}'});
  const slot=render([selected],{
