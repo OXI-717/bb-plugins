@@ -35,6 +35,27 @@ it('pins account and version across edits and server restart without changing pr
  await initial.fetch(false)!('https://model.example/v1');expect(observed).toHaveBeenCalledOnce();
  expect(process.env.HTTPS_PROXY).toBe('http://127.0.0.1:1');
 });
+it('persists display names per version without changing routing or saved pins', async () => {
+  const kv = storage();
+  const egress = new AccountEgress(kv, async () => 'host-one', async () => true);
+  cleanup.push(() => egress.close());
+  const ref = {id: profile.id, version: 1};
+  await egress.configure(profile);
+  await egress.configure({...profile, version: 2});
+  await egress.bind(a, ref);
+  await egress.acquire(a, 'existing-conversation');
+  const before = egress.snapshot();
+
+  await egress.setDisplayName(ref, 'full-node-name');
+  await expect(egress.setDisplayName({...ref, version: 3}, 'unknown')).rejects.toThrow('not found');
+  expect((await egress.acquire(a, 'existing-conversation')).profile).toEqual(profile);
+  expect(egress.snapshot()).toEqual(before);
+
+  const restarted = new AccountEgress(kv, async () => 'host-one', async () => true);
+  cleanup.push(() => restarted.close());
+  await restarted.initialize();
+  expect(restarted.displaySnapshot()).toEqual({...before, displayNames: {'node-one:1': 'full-node-name'}});
+});
 it('uses current bindings for warm unassigned conversations',async()=>{
  const kv=storage(),e=new AccountEgress(kv,async()=>'host-one',async()=>true);cleanup.push(()=>e.close());
  expect((await e.acquire(a,'already-warm')).assigned).toBe(false);

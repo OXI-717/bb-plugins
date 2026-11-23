@@ -34,3 +34,39 @@ it('requires a manage grant for acceptance/revocation and keeps production witho
     expect((await call('egress.status',null) as {bindings:unknown}).bindings).toEqual({});
   } finally {await host.harness.lifecycle.dispose();await fs.rm(dataDir,{recursive:true,force:true});}
 });
+
+it('registers a named proxy without binding it and hides credentials from status', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-management-'));
+  const host = createFakePluginHost({
+    pluginId: 'fixture-pool', dataDir,
+    sdk: {hosts: {list: async () => []}, system: {config: async () => ({primaryHostId: 'host-one'})}},
+  });
+  try {
+    await createAccountPoolPlugin()(host.bb);
+    const call = host.harness.behavior.callRpc;
+    const key = (await fs.readFile(path.join(dataDir, 'plugins', 'fixture-pool', 'secrets', 'accounts', 'management', 'operator.env'), 'utf8')).trim().split('=')[1]!;
+    const read = await call('management.unlock', {key, scope: 'read', ttlSeconds: 60}) as {token: string};
+    const manage = await call('management.unlock', {key, scope: 'manage', ttlSeconds: 60}) as {token: string};
+    const method = 'egress.registerProxy';
+    const input = {id: 'node-full-name', label: 'node-full-name', url: 'https://fixture-user:fixture-password@proxy.example:18444'};
+    await expect(call(method, input)).rejects.toThrow('management is locked');
+    expect(await call('management.call', {token: read.token, method, input})).toEqual({ok: false, code: 'pool-management-locked'});
+    const request = {token: manage.token, method, input};
+    const result = {ok: true, result: {id: input.id, version: 1}};
+    await expect(call('management.call', request)).resolves.toEqual(result);
+    await expect(call('management.call', request)).resolves.toEqual(result);
+    await expect(call('management.call', {...request, input: {...input, url: 'https://other.example:18444'}})).rejects.toThrow('immutable');
+    const snapshot = await call('egress.status', null);
+    expect(snapshot).toMatchObject({
+      profiles: [expect.objectContaining({
+        id: input.id, label: input.label, version: 1, endpoint: 'https://proxy.example:18444/',
+        hostIds: ['host-one'], failure: 'closed',
+      })],
+      bindings: {}, pins: {},
+    });
+    expect(JSON.stringify(snapshot)).not.toMatch(/fixture-user|fixture-password/);
+  } finally {
+    await host.harness.lifecycle.dispose();
+    await fs.rm(dataDir, {recursive: true, force: true});
+  }
+});
