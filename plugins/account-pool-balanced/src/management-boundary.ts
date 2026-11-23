@@ -48,7 +48,7 @@ export function registerManagementRpc(bb: Pick<BbPluginApi, 'rpc'>, access: Mana
   const guarded = Object.fromEntries(Object.entries(handlers).map(([method, handler]) => [method,
     (input: unknown, context?: unknown) => {
       // These declarations may only enter through management.call with a manage grant.
-      if(method==='egress.scopeAccept'||method==='egress.scopeRevoke')throw new PoolManagementLocked();
+      if(method==='egress.scopeAccept'||method==='egress.scopeRevoke'||method==='egress.registerProxy')throw new PoolManagementLocked();
       const caller = (context as { experimental_caller?: { kind?: string; pluginId?: string } } | undefined)?.experimental_caller;
       if (!caller || caller.kind === 'client') return (handler as (input: unknown) => unknown)(input);
       if (caller?.kind !== 'plugin' || typeof caller.pluginId !== 'string' || pluginReads.get(caller.pluginId)?.has(method) !== true) throw new PoolManagementLocked();

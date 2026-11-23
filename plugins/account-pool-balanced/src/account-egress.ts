@@ -29,6 +29,11 @@ const httpProfileSchema = z.object({
 }).strict();
 export const egressProfileSchema=z.discriminatedUnion('transport',[sshProfileSchema,httpProfileSchema]);
 export const accountProxyInputSchema=z.object({accountId:z.string().uuid(),url:z.string().min(1).max(4096)}).strict();
+export const registerProxyInputSchema = z.object({
+  id,
+  label: z.string().trim().min(1).max(120),
+  url: z.string().min(1).max(4096),
+}).strict();
 export type EgressProfile = z.infer<typeof egressProfileSchema>;
 const refSchema = z.object({id, version:z.number().int().positive()}).strict();
 export const egressStateSchema = z.object({schema:z.literal(1),profiles:z.array(egressProfileSchema).max(128),
@@ -151,8 +156,8 @@ export class AccountEgress {
     const profile=this.state.profiles.find(p=>p.id===ref.id&&p.version===ref.version);
     if(!profile||profile.transport!=='ssh-connect'||!profile.hostIds.includes(hostId))throw new EgressUnavailable();
   }
-  private update(change:()=>Promise<void>){
-    const next=this.mutation.then(change);this.mutation=next.catch(()=>undefined);return next;
+  private update<T>(change:()=>Promise<T>){
+    const next=this.mutation.then(change);this.mutation=next.then(()=>undefined,()=>undefined);return next;
   }
   configure(input:unknown){return this.update(async()=>{
     const profile=egressProfileSchema.parse(input);
@@ -168,14 +173,42 @@ export class AccountEgress {
     const parsed=accountProxyInputSchema.safeParse(input);
     if(!parsed.success)throw Error('Invalid account proxy settings.');
     const {accountId,url}=parsed.data;
-    const u=parseProxyUrl(url);
-    if(!this.proxySecrets || !await this.accountExists(accountId))throw Error('Account proxy unavailable.');
-    const host=await this.hostId(),secretRef=randomUUID();
-    await this.proxySecrets.write(secretRef,u.href);
-    u.username='';u.password='';
-    const ref={id:'proxy-'+secretRef,version:1};
-    await this.configure({...ref,label:('Прокси '+u.hostname).slice(0,120),hostIds:[host],transport:'http-connect',endpoint:u.href,secretRef,failure:'closed'});
+    if(!await this.accountExists(accountId))throw Error('Account proxy unavailable.');
+    const ref = await this.saveProxy(parseProxyUrl(url));
     await this.bind(accountId,ref);
+  }
+  registerProxy(input: z.input<typeof registerProxyInputSchema>) {
+    const {id, label, url} = registerProxyInputSchema.parse(input);
+    return this.saveProxy(parseProxyUrl(url), {id, label});
+  }
+  private async saveProxy(url: URL, named?: {id: string; label: string}) {
+    const hostId = await this.hostId();
+    const credentials = url.href;
+    url.username = '';
+    url.password = '';
+    return this.update(async () => {
+      if (!this.proxySecrets) throw new Error('Proxy credential storage is unavailable.');
+      const secretRef = randomUUID();
+      const ref = {id: named?.id ?? 'proxy-' + secretRef, version: 1};
+      const label = named?.label ?? ('Прокси ' + url.hostname).slice(0, 120);
+      const existing = this.state.profiles.find(profile => profile.id === ref.id && profile.version === ref.version);
+      if (existing) {
+        if (existing.transport === 'http-connect' && existing.endpoint === url.href &&
+            existing.label === label && existing.hostIds.length === 1 && existing.hostIds[0] === hostId &&
+            await this.proxySecrets.read(existing.secretRef) === credentials) return ref;
+        throw new Error('Egress versions are immutable.');
+      }
+      const profile = httpProfileSchema.parse({
+        ...ref, label, hostIds: [hostId], transport: 'http-connect',
+        endpoint: url.href, secretRef, failure: 'closed',
+      });
+      const next = egressStateSchema.parse({...this.state, profiles: [...this.state.profiles, profile]});
+      requireRegistrySpace(next);
+      await this.proxySecrets.write(secretRef, credentials);
+      await this.kv.set('account-egress-v1', next);
+      this.state = next;
+      return ref;
+    });
   }
   bind(accountId:string,ref:z.infer<typeof refSchema>|null){return this.update(async()=>{
     z.string().uuid().parse(accountId);
