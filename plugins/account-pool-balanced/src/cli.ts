@@ -52,6 +52,7 @@ const HELP = [
   "  bb pool maintenance <status|acquire-graceful|acquire-upgrade|seal-upgrade|acquire|interrupt|release> [--owner <uuid>] --json",
   "Usage:",
   "  bb pool egress status --json",
+  "  bb pool egress display-name <profile-id> <version> <name>",
   "  bb pool egress configure <profile-json>",
   "  bb pool egress bind <account-id> <profile-id> <version>",
   "  bb pool egress unbind <account-id>",
@@ -535,7 +536,11 @@ export function registerPoolCli(
         }
         if(argv[0]==='egress'){
           if(!egress)throw Error('Egress management unavailable.');
-          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')return {exitCode:0,stdout:JSON.stringify(egress.snapshot(),null,2)+'\n'};
+          if(argv[1]==='status'&&argv.length===3&&argv[2]==='--json')return {exitCode:0,stdout:JSON.stringify(egress.displaySnapshot(),null,2)+'\n'};
+          if(argv[1]==='display-name'&&argv.length===5){
+            await egress.setDisplayName({id:argv[2]!,version:Number(argv[3])},argv[4]!);
+            return {exitCode:0,stdout:'Egress profile display name saved.\n'};
+          }
           if(argv[1]==='configure'&&argv.length===3)await egress.configure(JSON.parse(argv[2]!));
           else if(argv[1]==='bind'&&argv.length===5)await egress.bind(argv[2]!,{id:argv[3]!,version:Number(argv[4])});
           else if(argv[1]==='unbind'&&argv.length===3)await egress.bind(argv[2]!,null);

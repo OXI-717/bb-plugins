@@ -2,7 +2,7 @@ import { geminiSummaryDiagnosticSchema, type GeminiSummaryDiagnostic } from "./g
 import {type NativeProbeInput,type NativeProbeResult} from './native-probe-wire.js';
 import {maintenanceStatusSchema, type PoolMaintenance} from './maintenance.js';
 import {updateStatusSchema, type PoolUpdate} from './pool-update.js';
-import { accountProxyInputSchema, egressProfileSchema, egressStateSchema, type AccountEgress } from "./account-egress.js";
+import { accountProxyInputSchema, egressProfileSchema, egressDisplayStateSchema, registerProxyInputSchema, type AccountEgress } from "./account-egress.js";
 import {nativeProbeInputSchema,nativeProbeResultSchema,nativeAccountUpdateSchema, type NativeAccountUpdate, nativeProjectsSchema, nativeAccountsSchema, type NativeAccounts} from "./native-accounts.js";
 import { httpScopeAcceptInputSchema, httpScopeRevokeInputSchema } from './http-scope-acceptance.js';
 import type {AgyOAuthLogin} from "./agy-oauth-login.js";
@@ -78,7 +78,8 @@ export const accountPoolRpcContract = defineRpcContract({
   "native.accounts": {input: z.null(), output: nativeAccountsSchema},
   "native.prefer": {input:z.object({executorId:z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),expectedRevision:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),output:z.null()},
   "egress.proxy":{input:accountProxyInputSchema,output:z.null()},
-  "egress.status":{input:z.null(),output:egressStateSchema},
+  "egress.registerProxy":{input:registerProxyInputSchema,output:z.object({id:z.string(),version:z.number().int().positive()}).strict()},
+  "egress.status":{input:z.null(),output:egressDisplayStateSchema},
   "egress.bind":{input:z.object({accountId:z.string().uuid(),ref:z.object({id:z.string(),version:z.number().int().positive()}).strict().nullable()}).strict(),output:z.null()},
   "egress.configure":{input:egressProfileSchema,output:z.null()},
   "egress.scopeAccept":{input:httpScopeAcceptInputSchema,output:z.object({acceptanceId:z.string().uuid(),active:z.boolean()}).strict()},
@@ -281,7 +282,11 @@ export function createRpcHandlers(
     "native.prefer": ({executorId,expectedRevision}) => nativePrefer(executorId,expectedRevision),
     "native.setProjects": ({accountId,projects,expectedRevision}) => nativeSetProjects(accountId,projects,expectedRevision),
     "egress.proxy":async input=>{if(!egress)throw Error("Egress unavailable");await egress.configureProxy(input);return null;},
-    "egress.status":()=>{if(!egress)throw Error("Egress unavailable");return egress.snapshot();},
+    "egress.registerProxy": input => {
+      if (!egress) throw new Error("Egress unavailable");
+      return egress.registerProxy(input);
+    },
+    "egress.status":()=>{if(!egress)throw Error("Egress unavailable");return egress.displaySnapshot();},
     "egress.configure":async input=>{if(!egress)throw Error("Egress unavailable");await egress.configure(input);return null;},
     "egress.scopeAccept":async input=>{if(!egress)throw Error('Egress unavailable');return egress.acceptScope(input);},
     "egress.scopeRevoke":async input=>{if(!egress)throw Error('Egress unavailable');await egress.revokeScope(input);return null;},
