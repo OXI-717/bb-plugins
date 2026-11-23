@@ -1,5 +1,26 @@
 // Tree-aware selection for the MIT Auto Archive fork (upstream: Shane Logsdon).
 export const DAY = 86_400_000;
+export const MAX_UNARCHIVE_EXTENSIONS = 5;
+export const MAX_RETENTION_DAYS = 36_500;
+
+export function effectiveRetentionDays(
+  baseDays: number,
+  unarchiveCount = 0,
+  multiplier = 1,
+): number {
+  const safeBase = Number.isFinite(baseDays) && baseDays > 0 ? baseDays : 1;
+  const safeCount =
+    Number.isFinite(unarchiveCount) && unarchiveCount > 0
+      ? Math.min(Math.floor(unarchiveCount), MAX_UNARCHIVE_EXTENSIONS)
+      : 0;
+  const safeMult =
+    Number.isFinite(multiplier) && multiplier > 1 ? multiplier : 1;
+  return Math.min(
+    MAX_RETENTION_DAYS,
+    safeBase * Math.pow(safeMult, safeCount),
+  );
+}
+
 export interface Snapshot {
   id: string;
   title: string | null;
@@ -15,12 +36,15 @@ export interface Snapshot {
   permanent?: boolean;
   busy?: boolean;
   archived?: boolean;
+  unarchiveCount?: number;
+  lastUnarchivedAt?: number | null;
 }
 export interface Config {
   inactivityDays: number;
   sinceInstallAt: number;
   keepThreadIds: string[];
   detachActiveDescendants: boolean;
+  unarchiveGraceMultiplier?: number;
 }
 export interface Action {
   rootId: string;
@@ -119,11 +143,32 @@ const protectedThread = (t: Snapshot, c: Config) =>
   Object.values(threadExclusions(t, c)).some(Boolean) ||
   t.visibility === "hidden" ||
   t.workspace !== "clean";
-const active = (t: Snapshot, cutoff: number) =>
-  !Number.isFinite(t.latestAttentionAt) ||
-  t.latestAttentionAt > cutoff ||
-  !["idle", "error"].includes(t.status) ||
-  t.busy === true;
+const effectiveActivityAt = (t: Snapshot) => {
+  if (!Number.isFinite(t.latestAttentionAt)) return t.latestAttentionAt;
+  if (
+    typeof t.lastUnarchivedAt === "number" &&
+    Number.isFinite(t.lastUnarchivedAt) &&
+    t.lastUnarchivedAt > 0
+  ) {
+    return Math.max(t.latestAttentionAt, t.lastUnarchivedAt);
+  }
+  return t.latestAttentionAt;
+};
+const active = (t: Snapshot, now: number, c: Config) => {
+  const days = effectiveRetentionDays(
+    c.inactivityDays,
+    t.unarchiveCount ?? 0,
+    c.unarchiveGraceMultiplier ?? 1,
+  );
+  const cutoff = now - days * DAY;
+  const at = effectiveActivityAt(t);
+  return (
+    !Number.isFinite(at) ||
+    at > cutoff ||
+    !["idle", "error"].includes(t.status) ||
+    t.busy === true
+  );
+};
 
 // Retention is global: a quiet leaf may be reached from an active branch in
 // one root and an archive cascade in another. Every planner/revalidator must
@@ -140,8 +185,7 @@ function retainedAcrossGraph(
     if (
       !t.archived &&
       (protectedThread(t, c) ||
-        (!exemptActiveAncestors.has(t.id) &&
-          active(t, now - c.inactivityDays * DAY)))
+        (!exemptActiveAncestors.has(t.id) && active(t, now, c)))
     ) {
       for (const child of closure(t.id, threads)) retained.add(child.id);
     }
@@ -157,13 +201,12 @@ function actionFor(
   initialCuts = new Set<string>(),
   preserve = new Set<string>(),
 ): Action | string {
-  const cutoff = now - c.inactivityDays * DAY;
   const cuts = new Set(initialCuts);
   const tree = closure(root.id, threads, cuts);
   const exception = tree.find((t) => !t.archived && protectedThread(t, c));
   if (exception)
     return `${root.id}: protected ${exception.id} (pin, keep, hidden or workspace)`;
-  if (active(root, cutoff)) return `${root.id}: root is active`;
+  if (active(root, now, c)) return `${root.id}: root is active`;
   const retained = preserve;
   const needsCut = tree.filter((t) => retained.has(t.id));
   if (needsCut.length && !c.detachActiveDescendants)
@@ -174,7 +217,7 @@ function actionFor(
   if (immutable)
     return `${root.id}: cannot detach lifecycle owner or hidden source for ${immutable.id}`;
   const live = remaining.filter((t) => !t.archived);
-  if (Math.max(...live.map((t) => t.latestAttentionAt)) < c.sinceInstallAt)
+  if (Math.max(...live.map((t) => effectiveActivityAt(t))) < c.sinceInstallAt)
     return `${root.id}: pre-install backlog`;
   return {
     rootId: root.id,
@@ -201,11 +244,10 @@ export function planSweep(
     (t) => !t.archived && owners(t).length === 0,
   )) {
     const tree = closure(root.id, threads).filter((t) => !t.archived);
-    const latest = Math.max(...tree.map((t) => t.latestAttentionAt));
+    const latest = Math.max(...tree.map((t) => effectiveActivityAt(t)));
     if (
       latest < config.sinceInstallAt &&
-      latest <= now - config.inactivityDays * DAY &&
-      tree.every((t) => !active(t, now - config.inactivityDays * DAY))
+      tree.every((t) => !active(t, now, config))
     )
       p.backlogRoots++;
     const action = actionFor(root, threads, config, now, new Set(), retained);

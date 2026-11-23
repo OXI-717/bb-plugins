@@ -53,11 +53,90 @@ bb plugin config auto-archive set inactivityDays 14
 bb plugin config auto-archive set keepThreadIds '["thr_example"]'
 bb plugin config auto-archive set detachActiveDescendants false
 bb plugin config auto-archive set dryRun true
+bb plugin config auto-archive set unarchiveGraceMultiplier 2
+bb plugin config auto-archive set enableArchivedFileCleanup false
+bb plugin config auto-archive set clearArchivedFilesAfterDays 14
+bb plugin config auto-archive set enableAutomatedExportDelete false
+bb plugin config auto-archive set exportDeleteAfterDays 30
+bb plugin config auto-archive set exportDir /path/to/bb-exports
+bb plugin config auto-archive set retentionMaxPerRun 50
 bb auto-archive status
 ```
 
 `keepThreadIds` is a JSON array in a string setting. Invalid settings fail
-closed. `inactivityDays` accepts finite numbers from 1 through 36500.
+closed. `inactivityDays`, `clearArchivedFilesAfterDays`, and
+`exportDeleteAfterDays` accept finite numbers from 1 through 36500.
+`unarchiveGraceMultiplier` accepts 1 through 10 (default `2`).
+
+## Unarchive grace extension
+
+When a thread is returned from archive (`thread.unarchived`), the plugin
+increments `unarchiveCount` and records `lastUnarchivedAt` in its thread
+metadata (preserving `permanent`). Each unarchive multiplies the thread's
+effective inactivity, file-cleanup, and export+delete thresholds by
+`unarchiveGraceMultiplier` (capped at 5 extensions / 36500 days), and resets
+the inactivity clock from `lastUnarchivedAt` so a freshly unarchived thread is
+never re-archived immediately.
+
+## Archived retention & verified export
+
+Both destructive retention actions default to **off** (`false`) so upgrading an
+existing installation with `dryRun=false` never deletes files or threads without
+explicit opt-in. Always preview first:
+
+```sh
+bb auto-archive retention --dry-run --limit 200
+```
+
+1. **Archived thread-storage cleanup (`enableArchivedFileCleanup`):** For
+   archived, stopped, unprotected threads older than
+   `clearArchivedFilesAfterDays`, removes only their local
+   `thread-storage/<threadId>` directory on the server host. Conversation
+   history in `bb.db` stays intact. Permanent threads (**Постоянный тред**),
+   pinned threads, `📌`-prefixed threads, `keepThreadIds`, symlinks, and
+   remote-host directories are skipped.
+2. **Verified automated export + delete (`enableAutomatedExportDelete`):**
+   Only archived, stopped, unprotected **automated or child** threads older
+   than `exportDeleteAfterDays` qualify:
+   - `originPluginId` in `automatedOriginPluginIds` (default: `workflows`,
+     `automations`, `automation-catalog`, `oxi-autopilot`, `aim-growth`),
+   - `visibility === "hidden"`, or
+   - child threads (`parentThreadId !== null`) whose parent is archived or
+     missing.
+   - Manually created visible root threads (and user-facing roots like
+     `handoff` or `oxi-projects`) are **never** deleted.
+   - Threads with any live, protected, manual, or younger descendant are
+     blocked; eligible trees are processed strictly bottom-up (leaves first)
+     with `childThreadsConfirmed: false`.
+   - Before deleting a thread, the plugin exports its metadata and complete
+     event history to `<exportDir>/YYYY-MM/<threadId>.jsonl.gz` (written
+     atomically via `.tmp` + `fsync` + `rename`, mode `0600`), reads the
+     compressed file back to verify gzip integrity, event count, and SHA-256,
+     writes `<threadId>.jsonl.gz.sha256`, and revalidates the thread state.
+     Any export or verification failure aborts deletion.
+
+## Offloading exports to an external drive
+
+Use [scripts/pull-exports.py](scripts/pull-exports.py) on a workstation with an
+external archive volume attached (for example via `launchd` on macOS):
+
+```sh
+python3 plugins/auto-archive/scripts/pull-exports.py \
+  --source user@bb-server.example:/var/lib/bb-exports \
+  --dest-dir /Volumes/ArchiveDisk/bb-thread-exports \
+  --require-mount-root /Volumes/ArchiveDisk \
+  --require-sentinel .bb-archive-volume \
+  --delete-remote
+```
+
+The script refuses to run if the external volume is not mounted or the sentinel
+file is missing, syncs completed `.jsonl.gz` + `.sha256` pairs via `rsync`
+(ignoring `*.tmp*`), verifies SHA-256 + gzip + event count locally on the
+external drive, and removes ONLY verified files from the server outbox. A source
+archive is removed only while it still hashes to the verified digest; a bundle
+re-exported after the copy stays for the next run (`keptChangedSourceArchives`).
+Pass `--dry-run` to preview without deleting source files, or `--verify-all` to
+scrub the entire destination archive.
 
 By default a fresh descendant keeps its old root alive. With
 `detachActiveDescendants=true`, the plugin clears the parent of each active
