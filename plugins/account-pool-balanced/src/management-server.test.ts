@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
 import ts from 'typescript';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { providerSchema } from './contracts.js';
 import { createAccountPoolPlugin } from './server.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -21,9 +22,40 @@ it('keeps owner RPCs available while CLI and delegated management remain guarded
   for (const method of ['account.list', 'status.get', 'config.get', 'egress.status', 'native.accounts']) await expect(call(method, null)).resolves.toBeDefined();
   expect((await host.harness.behavior.runCli(['egress', 'status', '--json'])).exitCode).toBe(1);
   expect(JSON.parse((await host.harness.behavior.runCli(['status', '--json'])).stdout)).toEqual({ management: 'locked' });
+  const summary = await host.harness.behavior.runCli(['status', '--summary']);
+  expect(summary.exitCode).toBe(0);
+  const empty = { readyCount: 0, totalEnabled: 0, minUsedPercent: null, exhausted: false };
+  expect(JSON.parse(summary.stdout)).toEqual({
+    generatedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
+    providers: Object.fromEntries(providerSchema.options.map(provider => [provider, empty])),
+  });
+  expect((await host.harness.behavior.runCli(['status', '--summary', '--json'])).exitCode).toBe(1);
   await expect(call('provider-usage.v1.listResources', {})).resolves.toEqual({ label: 'Account Pooler', resources: [] });
   const key = (await fs.readFile(path.join(dataDir, 'plugins', 'pool-test', 'secrets', 'accounts', 'management', 'operator.env'), 'utf8')).trim().split('=')[1]!;
   const grant = await call('management.unlock', { key, scope: 'manage', ttlSeconds: 60 }) as { token: string };
+  const project = 'proj_synthetic';
+  const readinessArgs = ['readiness', '--summary', '--project', project];
+  const { runCli } = host.harness.behavior;
+  expect((await runCli(readinessArgs)).exitCode).toBe(1);
+  const readGrant = await call('management.unlock', { key, scope: 'read', ttlSeconds: 60 }) as { token: string };
+  const execute = (argv: string[]) => runCli(['management', 'execute', '--request', JSON.stringify({ token: readGrant.token, argv })]);
+  expect((await execute(['readiness', '--summary'])).exitCode).toBe(1);
+  const invalid = await execute([...readinessArgs, project]);
+  expect(invalid.exitCode).toBe(1);
+  expect(invalid.stderr?.trim()).toBe('Project readiness summary unavailable.');
+  expect(JSON.stringify(invalid)).not.toContain(project);
+  const legacyInvalid = await execute(['readiness', '--project', project, project]);
+  expect(legacyInvalid.stderr).toContain(project);
+
+  const projectSummary = await execute(readinessArgs);
+  expect(projectSummary.exitCode).toBe(0);
+  const report = JSON.parse(projectSummary.stdout);
+  expect(Object.keys(report).sort()).toEqual(['checkedAt', 'providers']);
+  expect(report.checkedAt).toEqual(expect.any(Number));
+  expect(report.providers).toEqual(expect.arrayContaining([
+    { provider: 'claude', ready: false, reason: expect.any(String) },
+  ]));
+  expect(JSON.stringify(report)).not.toContain(project);
   const created = await call('management.call', { token: grant.token, method: 'account.add', input: {
     provider: 'claude', source: { kind: 'api-key', apiKey: 'synthetic-upstream-input' }, label: 'Private operator account', priority: 100,
   } }) as { ok: boolean; result: { id: string } };

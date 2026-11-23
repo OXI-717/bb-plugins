@@ -8,10 +8,10 @@ import {version} from './package.json';
 import {Button} from './ui/components/ui/button';
 
 const labels = {
-  starting:'Запускаю обновление…', running:'Подготовка и обновление выполняются. Работа возобновится автоматически.',
-  succeeded:'Операция завершена. Pooler готов к работе.',
-  failed:'Обновление не завершено. Подробности — в терминале «Pool update» на машине сервера.',
-  unknown:'Проверяется состояние запуска. Не запускайте обновление повторно; проверьте терминал «Pool update».',
+  starting:"Starting update…", running:"Preparation and update are running. Work will resume automatically.",
+  succeeded:"Operation complete. Pooler is ready.",
+  failed:"Update did not finish. See the Pool update terminal on the server machine.",
+  unknown:"Checking launch status. Do not start another update; inspect the Pool update terminal.",
 };
 export function PoolUpdatePanel() {
   const rpc=useRpc<typeof accountPoolRpcContract>();
@@ -33,7 +33,7 @@ export function PoolUpdatePanel() {
       setOperation(next);
       setStatusError(null);
     } catch {
-      if(current===generation.current)setStatusError('Не удалось проверить состояние обновления. Запуск пока недоступен.');
+      if(current===generation.current)setStatusError("Could not check update status. Starting is unavailable for now.");
     } finally {
       if(request.current===current)request.current=null;
       if(current===generation.current)setLoading(false);
@@ -47,7 +47,7 @@ export function PoolUpdatePanel() {
     generation.current++;
     setStarting(true);setError(null);
     void rpc.call('update.start',null).then(setOperation).catch(()=>{
-      setError('Не удалось подтвердить запуск. Проверяю состояние операции…');setLoading(true);
+      setError("Could not confirm launch. Checking operation status…");setLoading(true);
     }).finally(()=>{startPending.current=false;setStarting(false);void refresh();});
   }}/>;
 }
@@ -55,17 +55,17 @@ export function PoolUpdatePanel() {
 export function PoolUpdateView({operation,busy,error,statusUnavailable=false,onStart}:{
   operation:z.infer<typeof updateStatusSchema>;busy:boolean;error:string|null;statusUnavailable?:boolean;onStart:()=>void;
 }) {
-  return <section aria-label="Обновление Pooler" className="space-y-2 rounded-lg border border-border p-4">
+  return <section aria-label="Pooler update" className="space-y-2 rounded-lg border border-border p-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="space-y-1">
-        <h2 className="text-sm font-medium">Обновление Pooler</h2>
-        <p className="text-xs text-muted-foreground">Версия Pooler {version}</p>
+        <h2 className="text-sm font-medium">Pooler update</h2>
+        <p className="text-xs text-muted-foreground">Pooler version {version}</p>
       </div>
-      <Button size="sm" disabled={busy} onClick={onStart}>{busy&&!statusUnavailable?'Проверяю обновление…':'Обновить Pooler'}</Button>
+      <Button size="sm" disabled={busy} onClick={onStart}>{busy&&!statusUnavailable?"Checking update…":"Update Pooler"}</Button>
     </div>
-    <p className="text-xs text-muted-foreground">Приостановит сессии и запросы автопилота на всех машинах, сохранит резервную копию, установит новую версию и возобновит работу. Текущие ответы могут быть прерваны.</p>
+    <p className="text-xs text-muted-foreground">Pauses sessions and autopilot requests on all machines, verifies a backup, installs the new version and resumes work. Current responses may be interrupted.</p>
     {operation?<p role="status" className="text-xs text-muted-foreground">
-      {operation.alreadyCurrent ? 'Уже установлена последняя версия.' : labels[operation.state]}
+      {operation.alreadyCurrent ? "The latest version is already installed." : labels[operation.state]}
     </p>:null}
     {error?<p role="alert" className="text-xs text-destructive-text">{error}</p>:null}
   </section>;
@@ -86,9 +86,9 @@ export function PoolSelectedAccounts({accounts}: {
   accounts: ReadonlyArray<{ provider: string; account: string }>;
 }) {
   return (
-    <PoolDisclosure title="Выбранные аккаунты">
-      <section aria-label="Выбранные аккаунты" className="space-y-3 border-t border-border py-3">
-        <p className="text-xs text-subtle-foreground">Pooler показывает последний выбор. У проектов и тредов могут быть свои аккаунты.</p>
+    <PoolDisclosure title="Selected accounts">
+      <section aria-label="Selected accounts" className="space-y-3 border-t border-border py-3">
+        <p className="text-xs text-subtle-foreground">Pooler shows the latest selection. Projects and threads can use different accounts.</p>
         <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {accounts.map(({provider, account}) => (
             <div key={provider} className="min-w-0 rounded-md border border-border px-3 py-2">
@@ -104,7 +104,7 @@ export function PoolSelectedAccounts({accounts}: {
 
 export function PoolTechnicalDetails({children}: {children: ReactNode}) {
   return (
-    <PoolDisclosure title="Технические детали">
+    <PoolDisclosure title="Technical details">
       <p className="break-words pb-3 text-xs text-muted-foreground">{children}</p>
     </PoolDisclosure>
   );

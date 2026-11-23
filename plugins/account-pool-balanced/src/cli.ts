@@ -39,6 +39,7 @@ import { listBrowserProfiles, openAccountBrowser } from "./browser-profiles.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
 import type { GrokDeviceLogin } from "./grok-device-login.js";
+import type { GeminiLogin } from "./gemini-login.js";
 import type { ExternalClients } from "./external-clients.js";
 import type {NativeSessions} from './native-sessions.js';
 
@@ -61,10 +62,13 @@ const HELP = [
   "  bb pool account add --provider claude --login",
   "  bb pool account add --provider codex --login [--account-id <id>]",
   "  bb pool account add --provider grok --login",
-  "  bb pool account login-poll --session <id> [--provider codex|grok]",
+  "  bb pool account add --provider gemini --login",
+  "  bb pool account add --provider grok --import [--label <text>] [--priority <n>]",
+  "  bb pool account add --provider gemini --import [--label <text>] [--priority <n>]",
+  "  bb pool account login-poll --session <id> [--provider codex|grok|gemini]",
   "  printf '%s\\n' \"$CLAUDE_AUTH_CODE\" | bb pool account login-complete --session <id> --code-stdin",
   "  bb pool account add --provider claude --api-key-stdin [--label <text>] [--priority <n>]",
-  "  bb pool account add --provider <kimi|zai|opencode-go|neuraldeep|cursor|devin|grok> --api-key-stdin [--label <text>] [--priority <n>]",
+  "  bb pool account add --provider <kimi|zai|opencode-go|neuraldeep|nvidia|ifm|cursor|devin|grok|gemini> --api-key-stdin [--label <text>] [--priority <n>]",
   "  bb pool account add --provider claude --api-key <key> [--label <text>] [--priority <n>]  Unsafe: exposes the key in process arguments.",
   "  bb pool account list [--json]",
   "  bb pool account remove <id>",
@@ -75,10 +79,10 @@ const HELP = [
   '  bb pool account projects <id> <JSON|off>',
   "  bb pool account cap <id> <early> <late>",
   "  bb pool account cap <id> off",
-  "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin|grok> <id>...",
+  "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> <id>...",
   "  bb pool account refresh <id>",
-  "  bb pool status [--json]",
-  "  bb pool readiness [--project <id>] [--json]",
+  "  bb pool status [--json|--summary]",
+  "  bb pool readiness [--project <id>] [--json] | readiness --summary --project <id>",
   '  bb pool native status --json',
   '  bb pool native preflight <target-json>',
   '  bb pool native configure <executor-json>',
@@ -90,9 +94,9 @@ const HELP = [
   "  bb pool observations [--json]",
   "  bb pool guard-probe --provider cursor [--delay-stage guard-rpc] [--delay-ms 4100] [--delay-attempts first|all] [--json]",
   "  bb pool history [--offset <0..65536>] [--limit <1..200>] [--json]",
-  "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin|grok> [--off]",
+  "  bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> [--off]",
   "  bb pool config",
-  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|pinnedFailover|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+  "  bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|geminiUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|pinnedFailover|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
   "  bb pool token rotate --machine <id-or-name>",
   "  bb pool client add <name> --output <new-private-file-on-server> [--project <project-id>] [--purpose autopilot] [--account-scope-json <json>]",
   "  bb pool client revoke <name>",
@@ -268,6 +272,7 @@ function formatConfig(config: AccountPoolConfig): string {
     `cursorUpstreamBaseUrl: ${config.cursorUpstreamBaseUrl}`,
     `devinUpstreamBaseUrl: ${config.devinUpstreamBaseUrl}`,
     `grokUpstreamBaseUrl: ${config.grokUpstreamBaseUrl}`,
+    `geminiUpstreamBaseUrl: ${config.geminiUpstreamBaseUrl}`,
     `vpnGuardEnabled: ${config.vpnGuardEnabled}`,
     `vpnOnlyProviders: ${config.vpnOnlyProviders.join(",") || "none"}`,
     `vpnStatusFile: ${config.vpnStatusFile ?? "default local guard file"}`,
@@ -341,6 +346,9 @@ function parseConfigUpdate(
     return accountPoolConfigSetInputSchema.parse({claudeRequestStartIntervalMs:Number(value)});
   }
   if (key === "maxConcurrentRequestsPerAccount") return accountPoolConfigSetInputSchema.parse({maxConcurrentRequestsPerAccount:Number(value)});
+  if (key === "geminiUpstreamBaseUrl") {
+    return accountPoolConfigSetInputSchema.parse({ geminiUpstreamBaseUrl: value });
+  }
   if (key === "switchThreshold") {
     return accountPoolConfigSetInputSchema.parse({
       switchThreshold: Number(value),
@@ -369,7 +377,7 @@ function parseConfigUpdate(
     });
   }
   throw new Error(
-    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, opencodeFreeUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, grokUpstreamBaseUrl, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, vpnGuardEnabled, pinnedFailover, or busyOverflow.",
+    "Config key must be anthropicUpstreamBaseUrl, codexUpstreamBaseUrl, kimiUpstreamBaseUrl, zaiUpstreamBaseUrl, opencodeGoUpstreamBaseUrl, opencodeFreeUpstreamBaseUrl, neuraldeepUpstreamBaseUrl, cursorUpstreamBaseUrl, devinUpstreamBaseUrl, grokUpstreamBaseUrl, geminiUpstreamBaseUrl, maxConcurrentRequestsPerAccount, claudeRequestStartIntervalMs, switchThreshold, routingStrategy, reserveDrainHours, restDays, vpnOnlyProviders, vpnStatusFile, browserHostId, vpnGuardEnabled, pinnedFailover, or busyOverflow.",
   );
 }
 
@@ -393,6 +401,7 @@ export function registerPoolCli(
   maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & Partial<Pick<PoolMaintenance,'acquireGraceful'|'acquireUpgrade'|'sealUpgrade'>> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
   nativePreflight?:(input:import('./native-probe-wire.js').NativeProbeInput)=>Promise<object>,
   updateStatus?:()=>Promise<import("zod").z.infer<typeof import("./pool-update.js").updateStatusSchema>>,
+  geminiLogin?: GeminiLogin,
 ): void {
   bb.cli.register({
     name: "pool",
@@ -403,9 +412,9 @@ export function registerPoolCli(
       {
         name: "account-add",
         summary:
-          "Sign in to Claude, Codex, or Grok; import supported credentials; or add an API key",
+          "Sign in to Claude, Codex, Grok, or Gemini, import credentials, or add an API key",
         usage:
-          "bb pool account add --provider <claude|codex|grok> --login\nbb pool account add --provider codex --login --account-id <id>\nbb pool account add --provider <claude|codex> --import [--label <text>] [--priority <n>]\nbb pool account add --provider <claude|kimi|zai|opencode-go|cursor|devin|grok> --api-key-stdin [--label <text>] [--priority <n>]\nUnsafe compatibility form: bb pool account add --provider claude --api-key <key> [--label <text>] [--priority <n>]",
+          "bb pool account add --provider <claude|codex|grok|gemini> --login\nbb pool account add --provider <claude|codex|grok|gemini> --import [--label <text>] [--priority <n>]\nbb pool account add --provider <claude|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|cursor|devin|grok|gemini> --api-key-stdin [--label <text>] [--priority <n>]\nUnsafe compatibility form: bb pool account add --provider claude --api-key <key> [--label <text>] [--priority <n>]",
       },
       {
         name: "account-login-poll",
@@ -451,14 +460,14 @@ export function registerPoolCli(
       {
         name: "account-reorder",
         summary: "Set the complete failover order for one provider",
-        usage: "bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin|grok> <id>...",
+        usage: "bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> <id>...",
       },
       {
         name: "account-refresh",
         summary: "Refresh one account's observed usage",
         usage: "bb pool account refresh <id>",
       },
-      { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json]" },
+      { name:"readiness", summary:"Inspect cached project-scoped pool admission without a model request", usage:"bb pool readiness [--project <id>] [--json] | readiness --summary --project <id>" },
       {name:"stream-probe",summary:"Inspect one thread or interrupt one exact observed Cursor body",usage:"bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]"},
       { name:"guard-probe", summary:"Rehearse read-only Guard admission, optionally delaying only this probe", usage:"bb pool guard-probe --provider cursor [--delay-stage server-host|guard-rpc|server-host-recheck] [--delay-ms 0..4500] [--delay-attempts first|all] [--json]" },
       { name:"diagnostics", summary:"Read bounded before/after queue and account diagnostics", usage:"bb pool diagnostics --from <UTC-hour> --to <UTC-hour> [--compare-previous] [--json]" },
@@ -467,12 +476,12 @@ export function registerPoolCli(
       {
         name: "status",
         summary: "Show hub, machine token, routing, and account status",
-        usage: "bb pool status [--json]",
+        usage: "bb pool status [--json|--summary]",
       },
       {
         name: "routing",
         summary: "Enable or disable pooled routing for one provider",
-        usage: "bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin|grok> [--off]",
+        usage: "bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> [--off]",
       },
       {
         name: "config",
@@ -483,7 +492,7 @@ export function registerPoolCli(
         name: "config-set",
         summary: "Update one Account Pooler routing configuration value",
         usage:
-          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|pinnedFailover|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
+          "bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|kimiUpstreamBaseUrl|zaiUpstreamBaseUrl|opencodeGoUpstreamBaseUrl|opencodeFreeUpstreamBaseUrl|neuraldeepUpstreamBaseUrl|cursorUpstreamBaseUrl|devinUpstreamBaseUrl|grokUpstreamBaseUrl|geminiUpstreamBaseUrl|maxConcurrentRequestsPerAccount|claudeRequestStartIntervalMs|pinnedFailover|busyOverflow|switchThreshold|routingStrategy|reserveDrainHours|restDays|vpnOnlyProviders|vpnStatusFile|browserHostId|vpnGuardEnabled> <value>",
       },
       {
         name: "token-rotate",
@@ -658,13 +667,32 @@ export function registerPoolCli(
           }
           if (loginRequested) {
             const provider = flags.values.get("provider");
-            if (provider !== "claude" && provider !== "codex" && provider !== "grok") {
+            if (provider !== "claude" && provider !== "codex" && provider !== "grok" && provider !== "gemini") {
               throw new Error(
-                "--login requires --provider claude, codex, or grok.",
+                "--login requires --provider claude, --provider codex, --provider grok, or --provider gemini.",
               );
             }
             if (flags.values.has("label") || flags.values.has("priority")) {
               throw new Error("--login does not accept --label or --priority.");
+            }
+            if (provider === "gemini") {
+              if (geminiLogin === undefined) {
+                throw new Error("Gemini sign-in is unavailable.");
+              }
+              const started = await geminiLogin.start();
+              const lines = ["Open this URL to sign in to Gemini:"];
+              lines.push(started.verificationUri ?? "Finish sign-in on this machine.");
+              if (started.userCode !== null) {
+                lines.push("", `Enter this code: ${started.userCode}`);
+              }
+              lines.push(
+                "",
+                `Session ID: ${started.sessionId}`,
+                "",
+                "After authorizing, wait for the account to be added with:",
+                `bb pool account login-poll --session ${started.sessionId}`,
+              );
+              return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
             }
             if (provider === "grok") {
               if (grokLogin === undefined) throw new Error("Grok sign-in is unavailable. Reload the Account Pool plugin and retry.");
@@ -739,15 +767,17 @@ export function registerPoolCli(
         }
         if (argv[0] === "account" && argv[1] === "login-poll") {
           const flags = parseFlags(argv.slice(2), [], ["session", "provider"]);
-          const provider = flags.values.get("provider") ?? "codex";
-          if (provider !== "codex" && provider !== "grok") {
-            throw new Error("--provider must be codex or grok.");
-          }
           const input = codexLoginPollInputSchema.parse({
             sessionId: flags.values.get("session"),
           });
-          const poller = provider === "grok" ? grokLogin : codexLogin;
-          if (poller === undefined) throw new Error("Grok sign-in is unavailable. Reload the Account Pool plugin and retry.");
+          const provider = flags.values.get("provider") ??
+            (geminiLogin?.has?.(input.sessionId) === true ? "gemini"
+              : grokLogin?.has?.(input.sessionId) === true ? "grok" : "codex");
+          if (provider !== "codex" && provider !== "grok" && provider !== "gemini") {
+            throw new Error("--provider must be codex, grok, or gemini.");
+          }
+          const poller = provider === "grok" ? grokLogin : provider === "gemini" ? geminiLogin : codexLogin;
+          if (poller === undefined) throw new Error(`${provider === "gemini" ? "Gemini" : "Grok"} sign-in is unavailable. Reload the Account Pool plugin and retry.`);
           const signal = ctx.signal;
           const cancel = () => poller.cancel(input);
           signal?.addEventListener("abort", cancel, { once: true });
@@ -759,6 +789,8 @@ export function registerPoolCli(
             while (true) {
               const delayMs = provider === "grok"
                 ? grokLogin!.nextPollDelayMs()
+                : provider === "gemini"
+                ? geminiLogin!.nextPollDelayMs()
                 : codexLogin.nextPollDelayMs(input.sessionId);
               await wait(delayMs, undefined, { signal });
               const result = await poller.poll(input);
@@ -884,9 +916,17 @@ export function registerPoolCli(
           };
         }
         if (argv[0] === "readiness") {
-          const flags = parseFlags(argv.slice(1), ["json"], ["project"]);
+          const flags = parseFlags(argv.slice(1), ["json", "summary"], ["project"]);
           const projectId = providerReadinessSchema.shape.projectId.parse(flags.values.get("project") ?? null);
+          const summary = flags.booleans.has("summary");
+          if (summary && projectId === null) throw Error("Readiness summary requires --project <id>.");
           const entries = await operations.readiness(projectId);
+          if (summary) {
+            return {exitCode:0, stdout:json({
+              checkedAt: Math.min(...entries.map(entry => entry.checkedAt)),
+              providers: entries.map(({provider, ready, reason}) => ({provider, ready, reason})),
+            })};
+          }
           return {exitCode:0, stdout:flags.booleans.has("json") ? json(entries) : entries.map(entry => `${entry.provider}: ${entry.ready ? "ready" : entry.reason}`).join("\n")+"\n"};
         }
         if(argv[0]==='stream-probe'){
@@ -1034,6 +1074,9 @@ export function registerPoolCli(
         }
         throw new Error(HELP);
       } catch (error) {
+        if (argv[0] === "readiness" && argv.includes("--summary")) {
+          return { exitCode: 1, stderr: "Project readiness summary unavailable.\n" };
+        }
         return {
           exitCode: 1,
           stderr: `${error instanceof Error ? error.message : String(error)}\n`,

@@ -12,6 +12,10 @@ import { VpnRequiredError } from "../vpn-policy.js";
 const routes = new Map<string, PoolProvider>([
   ["/neuraldeep/v1/chat/completions", "neuraldeep"],
   ["/neuraldeep/v1/models", "neuraldeep"],
+  ["/nvidia/v1/chat/completions", "nvidia"],
+  ["/nvidia/v1/models", "nvidia"],
+  ["/ifm/v1/chat/completions", "ifm"],
+  ["/ifm/v1/models", "ifm"],
   ["/v1/messages", "claude"], ["/v1/messages/count_tokens", "claude"],
   ["/v1/responses", "codex"], ["/v1/responses/compact", "codex"],
   ["/v1/models", "codex"], ["/v1/images/generations", "codex"], ["/v1/images/edits", "codex"], ["/v1/alpha/search", "codex"],
@@ -60,11 +64,16 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
       const cursorGateway = cursorPath === "rpc";
       const cursorRoute = cursorExchange || cursorGateway || (cursorPath !== null && isCursorRpcPath(cursorPath));
       const agy=agyRoute(url);
-      const provider = agy ? 'agy' : cursorRoute ? "cursor" : routes.get(url.pathname);
+      const grokRoute = url.pathname === "/grok/v1" || url.pathname.startsWith("/grok/v1/");
+      const geminiRoute = url.pathname.startsWith("/gemini/");
+      const geminiApiKeyRoute = url.pathname.startsWith("/gemini/v1beta/models/");
+      const provider = agy ? 'agy' : cursorRoute ? "cursor" : grokRoute ? "grok" : geminiRoute ? "gemini" : routes.get(url.pathname);
       const devinCreate = url.pathname === "/agents/devin/sessions" && req.method === "POST";
       const devinSession = /^\/agents\/devin\/sessions\/([A-Za-z0-9_-]{1,160})(\/messages)?$/.exec(url.pathname);
       const devinRoute = devinSession && (devinSession[2] ? req.method === "POST" : req.method === "GET" || req.method === "DELETE");
-      const modelMethod = agy ? (agy.kind==='models'?'GET':'POST') : cursorRoute && req.method === "GET" && !cursorExchange ? "GET" : url.pathname.endsWith("/v1/models") ? "GET" : "POST";
+      const grokMethod = grokRoute && (req.method === "GET" || req.method === "POST") ? req.method : null;
+      const geminiMethod = geminiRoute && req.method === "POST" ? "POST" : null;
+      const modelMethod = agy ? (agy.kind==='models'?'GET':'POST') : grokMethod ?? geminiMethod ?? (cursorRoute && req.method === "GET" && !cursorExchange ? "GET" : url.pathname.endsWith("/v1/models") ? "GET" : "POST");
       if ((!provider || req.method !== modelMethod) && !devinCreate && !devinRoute) { fail(404, "Unknown pool route."); return; }
       const headers = new Headers();
       for (const [key, value] of Object.entries(req.headers)) {
@@ -97,7 +106,11 @@ export async function listenPool(pool: StandalonePool, options: { port: number; 
         return;
       }
       const request = new Request(url, { method: modelMethod, headers, body: modelMethod === "GET" ? undefined : body, signal: controller.signal });
-      const response = await pool.hub.handle(request, provider!);
+      const response = await pool.hub.handle(
+        request,
+        provider!,
+        geminiApiKeyRoute ? { accountKind: "api-key" } : undefined,
+      );
       const responseHeaders = Object.fromEntries(response.headers);
       responseHeaders["cache-control"] = "no-store";
       res.writeHead(response.status, responseHeaders);

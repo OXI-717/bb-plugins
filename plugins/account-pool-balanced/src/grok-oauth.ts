@@ -4,6 +4,7 @@ import { OAuthRefreshRejectedError, TransientOAuthRefreshError } from "./provide
 
 export const GROK_CHAT_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 export const GROK_REFRESH_URL = "https://auth.x.ai/oauth2/token";
+export const GROK_SUBSCRIPTION_HEADER_PREFIXES = ["x-grok-", "x-xai-"] as const;
 
 const refreshResponseSchema = z
   .object({
@@ -15,13 +16,14 @@ const refreshResponseSchema = z
 
 export async function refreshGrokAccess(input: {
   fetch: typeof fetch;
+  url?: string;
   now: () => number;
   secret: Extract<AccountSecret, { kind: "oauth" }>;
 }): Promise<Extract<AccountSecret, { kind: "oauth" }>> {
   if (input.secret.clientId === undefined) {
     throw new OAuthRefreshRejectedError(401, "invalid_client");
   }
-  const response = await input.fetch(GROK_REFRESH_URL, {
+  const response = await input.fetch(input.url ?? GROK_REFRESH_URL, {
     method: "POST",
     headers: {
       accept: "application/json",

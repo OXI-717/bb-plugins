@@ -10,7 +10,7 @@ const cleanup:Array<()=>Promise<void>>=[];afterEach(async()=>{while(cleanup.leng
 async function setup(provider:PoolProvider,providerId:string){
  const dir=await mkdtemp(path.join(tmpdir(),'pool-identity-'));
  const host=createFakePluginHost({pluginId:'account-pool-balanced',dataDir:dir,sdk:{hosts:{list:async()=>[makeHostResponse({id:'host-one'})]},system:{providerStates:async()=>({providers:[]})},threads:{events:{list:async()=>[]},get:async({threadId})=>({...makeThreadResponse({id:threadId,providerId,projectId:'project-one'}),environment:{hostId:'host-one'}}) as never}}});
- const fetcher:typeof fetch=async input=>String(input).includes('exchange_user_api_key')?Response.json({accessToken:'synthetic-access'}):Response.json({id:'synthetic-response'});
+ const fetcher:typeof fetch=async input=>String(input).includes('/monitor/usage/quota/limit')?Response.json({code:200,data:{level:'lite',limits:[{type:'CREDIT_LIMIT',unit:3,number:5,percentage:0}]}}):String(input).includes('exchange_user_api_key')?Response.json({accessToken:'synthetic-access'}):Response.json({id:'synthetic-response'});
  await createAccountPoolPlugin({fetch:fetcher,fetchIpv4:fetcher,vpnPayload:async now=>vpnProof(now,'connected')})(host.bb);
  const service=host.harness.behavior.runService('hub');
  cleanup.push(async()=>{service.controller.abort();await service.done;await host.harness.lifecycle.dispose();await rm(dir,{recursive:true,force:true});});

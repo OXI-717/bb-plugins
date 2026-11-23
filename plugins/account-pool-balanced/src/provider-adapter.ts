@@ -1,3 +1,4 @@
+import type { GeminiSummaryDiagnostic } from './gemini-usage.js';
 import { VpnRequiredError } from "./vpn-policy.js";
 import type {
   Account,
@@ -18,7 +19,7 @@ export class AccountAuthorizationRequiredError extends Error {
     super(message);
   }
   get accountMessage(): string {
-    return `[OAUTH_REAUTH_REQUIRED] ${this.message}${this.oauthCode ? ` OAuth: ${this.oauthCode}.` : ""} Требуется повторная авторизация / Sign in again. HTTP status alone does not establish why the token was rejected.`;
+    return `[OAUTH_REAUTH_REQUIRED] ${this.message}${this.oauthCode ? ` OAuth: ${this.oauthCode}.` : ""} Sign in again. HTTP status alone does not establish why the token was rejected.`;
   }
 }
 
@@ -76,6 +77,7 @@ export interface AdapterSecretContext {
 }
 
 export interface AdapterUsageContext {
+  geminiSummaryDiagnostic?: (result: GeminiSummaryDiagnostic) => void;
   account: Account;
   freshSecret: (rejectedAccessToken?: string) => Promise<AccountSecret>;
   accounts: AccountStore;

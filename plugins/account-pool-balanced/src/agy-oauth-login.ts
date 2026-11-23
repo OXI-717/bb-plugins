@@ -37,7 +37,7 @@ export async function raceAbort<T>(promise:Promise<T>,signal:AbortSignal):Promis
   try{return await Promise.race([promise,stopped]);}finally{signal.removeEventListener('abort',reject);}
 }
 function object(value:unknown):value is Record<string,unknown>{return value!==null&&typeof value==='object'&&!Array.isArray(value);}
-function managedProject(value:Record<string,unknown>):string|null {
+export function managedProject(value:Record<string,unknown>):string|null {
   const raw=value.cloudaicompanionProject;
   const id=typeof raw==='string'?raw:object(raw)?raw.id:null;
   return typeof id==='string'&&id.trim()&&id.trim().length<=512?id.trim():null;

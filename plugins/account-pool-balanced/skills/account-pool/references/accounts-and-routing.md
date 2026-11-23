@@ -1,5 +1,5 @@
 Enable Account Pool Balanced and keep the builtin Account Pooler disabled.
-Add Claude or Codex credentials, then inspect proxy routes and account quota:
+Add Claude, Codex, or Grok credentials, then inspect proxy routes and account quota:
 
 ```sh
 bb plugin enable account-pool-balanced
@@ -7,26 +7,33 @@ bb pool account add --provider claude --login
 printf '%s\n' "$CLAUDE_AUTH_CODE" | bb pool account login-complete --session <id> --code-stdin
 bb pool account add --provider codex --login
 bb pool account login-poll --session <id>
+bb pool account add --provider grok --login
+bb pool account login-poll --session <id> --provider grok
 bb pool account add --provider claude --import
 bb pool account add --provider codex --import
 bb pool account add --provider grok --login
 bb pool account login-poll --session <id> --provider grok
 printf '%s\n' "$ANTHROPIC_API_KEY" | bb pool account add --provider claude --api-key-stdin [--label <text>] [--priority <n>]
 bb pool account add --provider claude --api-key <key> [--label <text>] [--priority <n>]
+bb pool account add --provider grok --login
+bb pool account add --provider gemini --login
+bb pool account add --provider grok --import [--label <text>] [--priority <n>]
+bb pool account add --provider gemini --import [--label <text>] [--priority <n>]
+bb pool account add --provider <kimi|zai|opencode-go|cursor|devin|grok|gemini> --api-key-stdin [--label <text>] [--priority <n>]
 bb pool account list [--json]
 bb pool account remove <id>
 bb pool account enable <id>
 bb pool account disable <id>
 bb pool account priority <id> <n>
-bb pool account reorder <claude|codex|grok> <id>...
+bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> <id>...
 bb pool account role <id> <primary|reserve>
 bb pool account cap <id> <early> <late>
 bb pool account cap <id> off
 bb pool account refresh <id>
 bb pool status [--json]
-bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|agy|cursor|devin|grok> [--off]
+bb pool routing <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> [--off]
 bb pool config
-bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|grokUpstreamBaseUrl|switchThreshold|parentMode|routingStrategy|reserveDrainHours|restDays> <value>
+bb pool config set <anthropicUpstreamBaseUrl|codexUpstreamBaseUrl|grokUpstreamBaseUrl|geminiUpstreamBaseUrl|switchThreshold|parentMode|routingStrategy|reserveDrainHours|restDays> <value>
 bb pool token rotate --machine <id-or-name>
 bb pool bypass <thread-id> [--off]
 ```
@@ -37,12 +44,17 @@ session ID within ten minutes. Grok `--login` requires the official Grok CLI wit
 `grok login --device-auth` support: it prints a device URL, code and session ID,
 and `account login-poll --provider grok` waits for the server-side account. Codex `--login` prints a device verification
 URL, one-time code, session ID, and an `account login-poll` command that waits
-for authorization. The Claude code stays out of process arguments, and either
+for authorization. Grok `--login` requires the official Grok CLI with
+`grok login --device-auth` support; it prints a device URL, code and session ID,
+then `account login-poll --provider grok` waits for the server-side account to
+be saved. This flow uses a temporary isolated `GROK_HOME`; it does not import a
+login from the machine. An xAI API key can be added separately for API billing. The Claude code stays out of process arguments, and either
 browser may be on a different machine from the bb server. Newly added or
 enabled accounts are available without a plugin reload. With an
 enabled account whose secret file remains readable and valid, matching Claude
-Code, Codex or Grok sessions receive the pool route and a distinct secret token for
-their machine.
+Code, Codex, and Grok sessions receive the pool route and a distinct secret
+token for their machine. Grok ACP sessions also receive an isolated Grok config
+directory so a machine login cannot override the Pool route.
 Codex receives `CODEX_OPENAI_BASE_URL` and the secret
 `CODEX_POOL_AUTH_TOKEN`; bb applies them as in-memory app-server config.
 Codex image generation and editing use the same authenticated pool route.
@@ -54,7 +66,22 @@ prior token valid for ten minutes. Agents should pipe API keys to
 `--api-key <key>` is an unsafe compatibility form that exposes the key in
 process arguments, shell history, and agent transcripts. Prefer `--import` for
 an existing Claude Code login. The CLI Codex import path reads
-`~/.codex/auth.json` on the bb server host. OAuth quota refreshes on add or
+`~/.codex/auth.json` on the bb server host. Grok `--login` prints a device
+code and uses the same `account login-poll` wait. Grok `--import` reads the
+login on the bb server host and removes the refresh token from that file, so
+only the pool refreshes it. With a Grok subscription account enabled,
+`acp-grok` receives the pool route and does not receive `XAI_API_KEY`. An API
+key is the paid fallback and is used only when no subscription account is
+enabled. Gemini `--login` starts `agy acp --login` in an isolated home and
+prints a URL or a line to finish on this machine. Gemini `--import` reads the
+nested Antigravity token and removes its refresh token. With a Gemini
+subscription account enabled, `acp-antigravity` receives `CLOUD_CODE_URL` and a
+Pool-owned `HOME`. The scoped hub token lives at
+`$HOME/.gemini/antigravity-cli/antigravity-oauth-token`; the pool does not copy
+personal Gemini settings or refresh tokens. The ACP process and commands it
+launches inherit this isolated `HOME`, so their user-level settings are isolated
+too. The provider does not receive `GEMINI_API_KEY`. Grok and Gemini both list
+quota. OAuth quota refreshes on add or
 enable and every five minutes while an account is idle. Use
 `bb pool account refresh <id>` to request an immediate refresh for one account.
 Account tables add columns for observed model-family buckets; JSON status
@@ -83,7 +110,7 @@ and the pool retains the 4,096 most recently used pins.
 
 Drag an account’s handle in Account Pooler settings (or focus the handle and use
 Space, arrow keys, and Space again), or
-`bb pool account reorder <claude|codex|grok> <id>...`, to set the complete order for
+`bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> <id>...`, to set the complete order for
 one provider. Include disabled accounts too. Reordering changes the next failover
 sequence without moving the current account. `bb pool account priority <id> <n>`
 sets an individual priority; the same operations are available through the

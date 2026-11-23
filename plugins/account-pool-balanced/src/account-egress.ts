@@ -190,7 +190,7 @@ export class AccountEgress {
       if (!this.proxySecrets) throw new Error('Proxy credential storage is unavailable.');
       const secretRef = randomUUID();
       const ref = {id: named?.id ?? 'proxy-' + secretRef, version: 1};
-      const label = named?.label ?? ('Прокси ' + url.hostname).slice(0, 120);
+      const label = named?.label ?? ('Proxy ' + url.hostname).slice(0, 120);
       const existing = this.state.profiles.find(profile => profile.id === ref.id && profile.version === ref.version);
       if (existing) {
         if (existing.transport === 'http-connect' && existing.endpoint === url.href &&

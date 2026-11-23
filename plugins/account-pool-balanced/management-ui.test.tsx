@@ -10,8 +10,8 @@ afterEach(()=>{cleanup();active=null;localStorage.clear();sessionStorage.clear()
 it('opens owner settings without requesting an administrator key or management grant',async()=>{
   active=renderSlot(app.settingsSections[0]!,{}, {rpc:{'status.get':()=>Promise.reject(new Error('Synthetic status unavailable'))}});
   await waitFor(()=>expect(active!.rpcCalls.some(call=>call.method==='status.get')).toBe(true));
-  expect(active.queryByLabelText('Ключ администратора')).toBeNull();
-  expect(active.queryByRole('button',{name:'Разблокировать'})).toBeNull();
+  expect(active.queryByLabelText('Administrator key')).toBeNull();
+  expect(active.queryByRole('button',{name:'Unlock'})).toBeNull();
   expect(active.rpcCalls.some(call=>call.method.startsWith('management.'))).toBe(false);
 });
 
@@ -28,7 +28,7 @@ it('ignores obsolete browser inventory and does not persist credentials or manag
 it('shows an unavailable inventory without replacing owner controls with a key prompt',async()=>{
   active=renderSlot(app.settingsSections[0]!,{}, {rpc:{'status.get':()=>Promise.reject(new Error('Synthetic status unavailable'))}});
   await active.findByText('Synthetic status unavailable');
-  expect(active.getAllByRole('button',{name:'Добавить аккаунт'}).length).toBeGreaterThan(0);
+  expect(active.getAllByRole('button',{name:'Add account'}).length).toBeGreaterThan(0);
   expect(active.rpcCalls.some(call=>call.method.startsWith('management.'))).toBe(false);
-  expect(active.queryByLabelText('Ключ администратора')).toBeNull();
+  expect(active.queryByLabelText('Administrator key')).toBeNull();
 });

@@ -45,7 +45,7 @@ export function AccountListRow({
         <button
           type="button"
           className="grid min-w-0 flex-1 grid-cols-1 items-center gap-y-1.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          aria-label={`Открыть ${name}`}
+          aria-label={`Open ${name}`}
           aria-expanded={expanded}
           aria-controls={controls}
           onClick={onOpen}
@@ -67,8 +67,8 @@ export function AccountListRow({
           </div>
         </button>
         {actions}
-        <button type="button" className="shrink-0 rounded-md px-1.5 py-1 text-xs hover:bg-muted" aria-label={`${expanded ? "Свернуть карточку" : "Открыть карточку"}: ${name}`} aria-expanded={expanded} aria-controls={controls} onClick={onOpen}>
-          {expanded === undefined ? <ResourceRowDetailChevron /> : expanded ? "Свернуть" : "Детали"}
+        <button type="button" className="shrink-0 rounded-md px-1.5 py-1 text-xs hover:bg-muted" aria-label={`${expanded ? "Collapse account card" : "Open account card"}: ${name}`} aria-expanded={expanded} aria-controls={controls} onClick={onOpen}>
+          {expanded === undefined ? <ResourceRowDetailChevron /> : expanded ? "Collapse" : "Details"}
         </button>
       </div>
     </div>

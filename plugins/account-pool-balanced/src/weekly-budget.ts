@@ -50,13 +50,13 @@ export function currentWeeklyBudget(account: Budget, quota: Quota, now: number) 
 export function changeWeeklyBudget(account: Account, quota: Quota, input: WeeklyBudgetChange, now: number): Account["weeklyBudget"] {
   const current = account.weeklyBudget;
   if (JSON.stringify(current ?? null) !== JSON.stringify(input.expected)) {
-    throw new Error("Недельное правило изменилось. Обновите данные и повторите.");
+    throw new Error("The weekly rule changed. Refresh and try again.");
   }
   if (input.change.kind === "rule") return input.change.rule ? { rule: input.change.rule, override: null } : undefined;
-  if (!current) throw new Error("Сначала сохраните недельное правило.");
+  if (!current) throw new Error("Save the weekly rule first.");
   if (input.change.kind === "clear-override") return { rule: current.rule, override: null };
   const resetAt = observedWeek(quota, now)?.resetAt ?? null;
-  if (account.drainOnce || resetAt === null) throw new Error("Для временного потолка нужен действующий недельный сброс и выключенный режим «До исчерпания».");
+  if (account.drainOnce || resetAt === null) throw new Error("A temporary cap needs a valid weekly reset and Until exhausted disabled.");
   const scheduled = currentWeeklyBudget({ weeklyBudget: { rule: current.rule, override: null } }, quota, now);
   const until = input.change.until === "next-step" ? scheduled?.nextChangeAt ?? resetAt : resetAt;
   return { rule: current.rule, override: { ceiling: input.change.ceiling, until, resetAt } };

@@ -50,7 +50,7 @@ export function ManagementGate({ children }: { children: ReactNode }) {
     if (previous) await rpc.call('management.lock', { token: previous.token }).catch(() => {});
   }, [rpc]);
   if (grant) return <>
-    <div className="mb-4 flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">Управление разблокировано до {new Date(grant.expiresAt).toLocaleTimeString('ru-RU')}.</p><Button size="sm" onClick={() => void lock()}>Заблокировать управление</Button></div>
+    <div className="mb-4 flex items-center justify-between gap-3"><p className="text-sm text-muted-foreground">Management unlocked until {new Date(grant.expiresAt).toLocaleTimeString('en-US')}.</p><Button size="sm" onClick={() => void lock()}>Lock management</Button></div>
     {children}
   </>;
   return <ManagementAccessForm value={key} pending={pending} error={error} onChange={setKey} onSubmit={async event => {

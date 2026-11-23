@@ -15,7 +15,7 @@ import { NetworkFlights } from "./network-flights.js";
 import { observeUpstreamFetch } from "./transport-diagnostics.js";
 import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
 import { createVpnPolicy, VpnRequiredError } from "./vpn-policy.js";
-import { isRecoverableAccessError } from "./recoverable-access.js";
+import { isGeminiSubscriptionDenial, isRecoverableAccessError, isRecoverableZaiQuotaNetworkError } from "./recoverable-access.js";
 import { projectTier, projectRole } from "./project-policy.js";
 import { currentWeeklyBudget, observedWeek } from "./weekly-budget.js";
 import { policyThresholds, reserveHours, scheduleAllows } from "./account-policy.js";
@@ -38,21 +38,32 @@ import {
 } from "./codex-adapter.js";
 import { CURSOR_PROXIED_PATHS, createCursorAdapter } from "./cursor-adapter.js";
 import { createDevinAdapter } from "./devin-adapter.js";
-import { createGrokAdapter } from "./grok-adapter.js";
 import { createKimiAdapter } from "./kimi-adapter.js";
 import {
   createOpenAiCompatibleAdapter,
   isChatCompletionsBody,
+  GROK_MOUNT_PREFIX,
   opencodeGoUpstreamPathSuffix,
   isOpenCodeGoFreeModelBody,
   OPENCODE_GO_MOUNT_PREFIX,
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
 import {
+  grokQuotaFromUsages,
   opencodeGoQuotaFromUsages,
   zaiQuotaFromUsages,
 } from "./openai-compatible-usage.js";
-import type { ProviderAdapter } from "./provider-adapter.js";
+import { importGrokCredentials, type GrokSubscriptionCredentials } from "./grok-credentials.js";
+import { GROK_CHAT_PROXY_BASE_URL, GROK_REFRESH_URL } from "./grok-oauth.js";
+import type { GeminiSummaryDiagnostic } from "./gemini-usage.js";
+import { createGeminiAdapter } from "./gemini-adapter.js";
+import { importGeminiCredentials, type GeminiSubscriptionCredentials } from "./gemini-credentials.js";
+import {
+  GEMINI_CLOUD_CODE_BASE_URL,
+  GEMINI_REFRESH_URL,
+  readGeminiOAuthClientSecret,
+} from "./gemini-oauth.js";
+import type { AdapterUsageContext, ProviderAdapter } from "./provider-adapter.js";
 import type { ImportedProviderAccount } from "./provider-adapter.js";
 import { TransientOAuthRefreshError } from "./provider-adapter.js";
 import type {
@@ -188,7 +199,7 @@ interface RefreshBackoff {
   error: TransientOAuthRefreshError;
 }
 
-type SecretUse = { kind: "normal" } | { kind: "rejected"; accessToken: string };
+type SecretUse = { kind: "normal"; zaiQuotaCollection?: boolean; geminiQuotaRecheck?: boolean } | { kind: "rejected"; accessToken: string; geminiQuotaRecheck?: boolean };
 
 type SecretFlight =
   | { kind: "refresh"; use: SecretUse; routeKey?: string; result: Promise<AccountSecret> }
@@ -219,7 +230,7 @@ export class AccountPoolHub {
   private affinityBindings = new Map<string, AccountBinding>();
   private activeAccounts = new Map<string, ActiveAccount>();
   private stopping: Promise<void> | null = null;
-  private readonly usageRefreshes = new Map<string, Promise<void>>();
+  private readonly usageRefreshes = new Map<string, Promise<GeminiSummaryDiagnostic | undefined>>();
   private readonly lastUsageRefreshAt = new Map<string, number>();
   private readonly drainWaiters = new Set<() => void>();
 
@@ -428,7 +439,11 @@ export class AccountPoolHub {
         quotaEvidence:null,holdSource:null,heldUntil:null,outcome:null,failover:null,errorClass:null,...fields });
     } catch { /* Observability must not alter requests or streams. */ }
   }
-  async handle(request: Request, provider: PoolProvider): Promise<Response> {
+  async handle(
+    request: Request,
+    provider: PoolProvider,
+    options: { accountKind?: Account["kind"] } = {},
+  ): Promise<Response> {
     const maintenanceSignal = this.options.maintenance?.signal;
     const adapter = this.adapter(provider);
     if(provider==='agy'&&this.options.nativeAgyManaged?.())return this.errorResponse(adapter,request,410,'Use the managed official Antigravity executor.');
@@ -469,7 +484,7 @@ export class AccountPoolHub {
       const body = new Uint8Array(await request.arrayBuffer());
       const refusal = adapter.guardRequest?.(request, body);
       if (refusal !== null && refusal !== undefined) return refusal;
-      return await this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null, "purpose" in context ? context.purpose : undefined, maintenanceSignal, "accountScope" in context ? context.accountScope : undefined, token);
+      return await this.forward(request, body, adapter, context.hostId, context.projectId, "threadId" in context ? context.threadId ?? null : null, "purpose" in context ? context.purpose : undefined, maintenanceSignal, "accountScope" in context ? context.accountScope : undefined, token, options.accountKind);
     } finally {
       this.admittedModelRequests--;
     }
@@ -483,7 +498,10 @@ export class AccountPoolHub {
     return this.options.affinity.observation(JSON.stringify([provider, projectId === null ? hostId : JSON.stringify([hostId, projectId]), `session:${sessionId}`]));
   }
 
-  async refreshUsage(accountId?: string, force = false, reportErrors = false): Promise<void> {
+  async refreshUsage(
+    accountId?: string, force = false, reportErrors = false,
+    geminiSummaryDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"],
+  ): Promise<void> {
     if(this.options.maintenance?.status().lease){if(reportErrors)this.options.maintenance.assertAllowed();return;}
     const accounts = (await this.options.accounts.list()).filter(
       (account) =>
@@ -494,7 +512,14 @@ export class AccountPoolHub {
         (accountId === undefined || account.id === accountId),
     );
     await Promise.all(
-      accounts.map((account) => this.refreshAccountUsage(account, force).catch((error: unknown) => { if (reportErrors) throw error; })),
+      accounts.map(async account => {
+        try {
+          const result = await this.refreshAccountUsage(account, force);
+          if (result) geminiSummaryDiagnostic?.(result);
+        } catch (error) {
+          if (reportErrors) throw error;
+        }
+      }),
     );
   }
 
@@ -540,7 +565,7 @@ export class AccountPoolHub {
   private async refreshAccountUsage(
     account: Account,
     force: boolean,
-  ): Promise<void> {
+  ): Promise<GeminiSummaryDiagnostic | undefined> {
     const adapter = this.adapter(account.provider);
     const interval = account.provider === "zai" ? ZAI_USAGE_REFRESH_INTERVAL_MS : DEFAULT_USAGE_REFRESH_INTERVAL_MS;
     if (!force) {
@@ -553,7 +578,7 @@ export class AccountPoolHub {
     await this.assertNetworkAllowed(account.provider);
     const route = await this.acquireRoute(account);
     if (!adapter.refreshesUsageWhileBusy && (this.inFlightByAccount.get(account.id) ?? 0) > 0) {
-      if (force) throw new Error("Аккаунт занят запросом. Повторите обновление квот после его завершения.");
+      if (force) throw new Error("The account has an active request. Refresh quotas after it finishes.");
       return;
     }
     const now = this.options.now();
@@ -563,13 +588,15 @@ export class AccountPoolHub {
     if (running !== undefined) return running;
     this.lastUsageRefreshAt.set(account.id, now);
     let usageSecret: AccountSecret | undefined;
+    let summaryDiagnostic: GeminiSummaryDiagnostic | undefined;
     const refresh = adapter
       .refreshUsage({
         account,
+        geminiSummaryDiagnostic: account.provider === "gemini" ? result => { summaryDiagnostic = result; } : undefined,
         freshSecret: async (rejectedAccessToken) => {
           const secret = await this.freshSecret(account, adapter, rejectedAccessToken === undefined
-            ? { kind: "normal" }
-            : { kind: "rejected", accessToken: rejectedAccessToken },route);
+            ? { kind: "normal", zaiQuotaCollection: account.provider === "zai" && account.kind === "api-key", geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" }
+            : { kind: "rejected", accessToken: rejectedAccessToken, geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" }, route);
           usageSecret = secret;
           return secret;
         },
@@ -578,12 +605,15 @@ export class AccountPoolHub {
         fetch: (input, init) => this.accountFetch(account,route)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
         now: this.options.now,
       })
-      .then(async () => { await this.settleDrain(account); })
+      .then(async () => {
+        await this.settleDrain(account);
+        return summaryDiagnostic;
+      })
       .catch(async error => {
         if (error instanceof AccountAuthorizationRequiredError) {
           const rejected = this.authorizationFailures.get(error) ?? usageSecret;
           const marked = rejected === undefined ? false : await this.markAuthError(account, rejected, error.accountMessage, this.stopped.signal);
-          if (!marked) throw new TransientOAuthRefreshError("Авторизация изменилась во время проверки квот. Повторите проверку / Authorization changed while checking quotas; retry.", 0);
+          if (!marked) throw new TransientOAuthRefreshError("Authorization changed while checking quotas; retry.", 0);
           this.options.onAccountsChanged();
           throw new Error(error.accountMessage);
         }
@@ -711,10 +741,13 @@ export class AccountPoolHub {
         "opencode-go":
           activeFor("opencode-go"),
         neuraldeep: activeFor("neuraldeep"),
+        nvidia: activeFor("nvidia"),
+        ifm: activeFor("ifm"),
         agy: activeFor("agy"),
         cursor: activeFor("cursor"),
         devin: activeFor("devin"),
         grok: activeFor("grok"),
+        gemini: activeFor("gemini"),
       },
       accounts: accounts.map((account) => {
         const quota = this.options.quotas.get(account.id);
@@ -781,6 +814,7 @@ export class AccountPoolHub {
     maintenanceSignal?: AbortSignal,
     accountScope?:ClientAccountScope,
     credential?:string|null,
+    accountKind?: Account["kind"],
   ): Promise<Response> {
     const requestLifetime = AbortSignal.any([request.signal,...(maintenanceSignal?[maintenanceSignal]:[])]);
     const signal = AbortSignal.any([requestLifetime, this.stopped.signal]);
@@ -794,7 +828,8 @@ export class AccountPoolHub {
     let lastDispatchedAccount: string | null = null;
     let failure: FailureSummary | null = null;
     const accounts = (await this.options.accounts.list()).filter(
-      (account) => account.provider === adapter.provider && inClientScope(account.id,accountScope),
+      (account) => account.provider === adapter.provider && inClientScope(account.id, accountScope) &&
+        (accountKind === undefined || account.kind === accountKind),
     );
     const candidateIds = new Set(accounts.map((account) => account.id));
     const legacyAffinityHost = projectId === null ? hostId : JSON.stringify([hostId, projectId]);
@@ -1656,7 +1691,13 @@ export class AccountPoolHub {
               };
             }
             const error = this.options.quotas.get(account.id).error;
-            if (error !== null && !isRecoverableAccessError(error)) throw new Error(error);
+            const retryZaiQuota = use.kind === "normal" && use.zaiQuotaCollection === true &&
+              account.provider === "zai" && secret.kind === "api-key" &&
+              error !== null && isRecoverableZaiQuotaNetworkError(error);
+            const retryGeminiQuota = use.geminiQuotaRecheck === true &&
+              account.provider === "gemini" && secret.kind === "oauth" &&
+              error !== null && isGeminiSubscriptionDenial(error);
+            if (error !== null && !isRecoverableAccessError(error) && !retryZaiQuota && !retryGeminiQuota) throw new Error(error);
             if (
               backoff !== undefined &&
               this.options.now() < backoff.retryAt &&
@@ -1699,7 +1740,7 @@ export class AccountPoolHub {
               });
               refreshObserved("succeeded");
               this.refreshBackoffs.delete(account.id);
-              if (result.refreshed) {
+              if (result.refreshed && !retryGeminiQuota) {
                 const quota = this.options.quotas.get(account.id);
                 this.options.quotas.put({ ...quota, error: null });
               }
@@ -2041,11 +2082,11 @@ export class AccountPoolHub {
     const upstreamHeld = !quotaBlocked && usable.length>0 && usable.every(account => (this.options.quotas.get(account.id).heldUntil??0)>now);
     const reason = providerSpent ? "POOL_QUOTA_EXHAUSTED" : quotaBlocked ? "POOL_QUOTA_THRESHOLD" : upstreamHeld ? "POOL_ACCOUNT_HELD" : "POOL_ACCOUNT_POLICY";
     let message = upstreamHeld
-      ? `${adapter.upstreamName}: пул временно не использует аккаунты / Accounts temporarily held by Pooler.`
+      ? `${adapter.upstreamName}: accounts are temporarily held by Pooler.`
       : providerSpent
-      ? `${adapter.upstreamName}: лимит провайдера исчерпан / Provider quota exhausted.`
-      : quotaBlocked ? `${adapter.upstreamName}: достигнут порог квоты в настройках пула / Pool quota threshold reached.`
-      : `${adapter.upstreamName}: нет доступных аккаунтов по настройкам пула / No eligible account under pool policy.`;
+      ? `${adapter.upstreamName}: provider quota exhausted.`
+      : quotaBlocked ? `${adapter.upstreamName}: pool quota threshold reached.`
+      : `${adapter.upstreamName}: no eligible account under pool policy.`;
     if (quotaBlocked && !providerSpent) {
       const account = usable.find(account => !isQuotaExhausted(this.options.quotas.get(account.id), family, 1, now));
       if (account) {
@@ -2058,10 +2099,10 @@ export class AccountPoolHub {
           ...q.limitWindows.map(w=>({used:w.utilization,reset:w.resetAt,limit:w.windowMinutes===300?limits.fiveHour:w.windowMinutes===10080?limits.weekly:limits.other})),
         ];
         const window = windows.find(w=>w.used!==null&&w.used>=w.limit&&(w.reset===null||w.reset>now));
-        if (window) message += ` Использовано / used ${Number((window.used!*100).toFixed(2))}%, порог / threshold ${Number((window.limit*100).toFixed(2))}%.`;
+        if (window) message += ` Used ${Number((window.used!*100).toFixed(2))}%; threshold ${Number((window.limit*100).toFixed(2))}%.`;
       }
     }
-    if (resetAt!==null) message += upstreamHeld ? ` Повторная попытка не ранее / Retry no earlier than: ${resetAt}.` : ` Сброс / reset: ${resetAt}.`;
+    if (resetAt!==null) message += upstreamHeld ? ` Retry no earlier than: ${resetAt}.` : ` Reset: ${resetAt}.`;
     return this.errorResponse(adapter, request, 403, message, {"x-bb-pool-error":reason});
   }
 
@@ -2132,6 +2173,15 @@ export function createHub(options: {
   kimiUsagesUrl?: string;
   zaiUsagesUrl?: string;
   opencodeGoUsagesUrl?: string;
+  grokChatProxyBaseUrl?: string;
+  grokRefreshUrl?: string;
+  grokUsagesUrl?: string;
+  importGrokCredentials?: () => Promise<GrokSubscriptionCredentials>;
+  geminiCloudCodeBaseUrl?: string;
+  geminiUsageUrl?: string;
+  geminiRefreshUrl?: string;
+  geminiOAuthClientSecret?: string | (() => Promise<string>);
+  importGeminiCredentials?: () => Promise<GeminiSubscriptionCredentials>;
   cursorExchangeUrl?: string;
   cursorUsageUrl?: string;
   usageUrl?: string;
@@ -2199,6 +2249,34 @@ export function createHub(options: {
       }),
     ],
     [
+      "nvidia",
+      createOpenAiCompatibleAdapter({
+        provider: "nvidia",
+        upstreamName: "NVIDIA NIM",
+        mountPrefix: "nvidia/",
+        upstreamBaseUrl: () => "https://integrate.api.nvidia.com/v1",
+        usagesUrl: "https://integrate.api.nvidia.com/v1/models",
+        collectUsage: false,
+        parseUsages: () => null,
+        guardRequestBody: (suffix, body) => suffix === "chat/completions" && !isChatCompletionsBody(body)
+          ? "NVIDIA NIM requires a Chat Completions messages array." : null,
+      }),
+    ],
+    [
+      "ifm",
+      createOpenAiCompatibleAdapter({
+        provider: "ifm",
+        upstreamName: "IFM",
+        mountPrefix: "ifm/",
+        upstreamBaseUrl: () => "https://api.ifm.ai/v1",
+        usagesUrl: "https://api.ifm.ai/v1/models",
+        collectUsage: false,
+        parseUsages: () => null,
+        guardRequestBody: (suffix, body) => suffix === "chat/completions" && !isChatCompletionsBody(body)
+          ? "IFM requires a Chat Completions messages array." : null,
+      }),
+    ],
+    [
       "neuraldeep",
       createOpenAiCompatibleAdapter({
         provider: "neuraldeep",
@@ -2214,6 +2292,36 @@ export function createHub(options: {
       }),
     ],
     [
+      "grok",
+      createOpenAiCompatibleAdapter({
+        provider: "grok",
+        upstreamName: "xAI",
+        mountPrefix: GROK_MOUNT_PREFIX,
+        normalizeUpstreamPathSuffix: suffix => suffix.replace(/^grok\//u, "").replace(/^v1\//u, ""),
+        upstreamBaseUrl: (settings) => settings.grokUpstreamBaseUrl,
+        usagesUrl: "https://api.x.ai/v1/models",
+        collectUsage: true,
+        subscription: {
+          upstreamBaseUrl: options.grokChatProxyBaseUrl ?? GROK_CHAT_PROXY_BASE_URL,
+          refreshUrl: options.grokRefreshUrl ?? GROK_REFRESH_URL,
+          usagesUrl: options.grokUsagesUrl,
+          importCredentials: options.importGrokCredentials ?? importGrokCredentials,
+        },
+        parseUsages: grokQuotaFromUsages,
+      }),
+    ],
+    [
+      "gemini",
+      createGeminiAdapter({
+        cloudCodeBaseUrl: options.geminiCloudCodeBaseUrl ?? GEMINI_CLOUD_CODE_BASE_URL,
+        apiBaseUrl: (settings) => settings.geminiUpstreamBaseUrl,
+        refreshUrl: options.geminiRefreshUrl ?? GEMINI_REFRESH_URL,
+        usagesUrl: options.geminiUsageUrl,
+        clientSecret: options.geminiOAuthClientSecret ?? readGeminiOAuthClientSecret,
+        importCredentials: options.importGeminiCredentials ?? importGeminiCredentials,
+      }),
+    ],
+    [
       "cursor",
       createCursorAdapter({
         exchangeUrl: options.cursorExchangeUrl ?? DEFAULT_CURSOR_EXCHANGE_URL,
@@ -2221,7 +2329,6 @@ export function createHub(options: {
       }),
     ],
     ["devin", createDevinAdapter()],
-    ["grok", createGrokAdapter()],
   ]);
   return new AccountPoolHub({
     maintenance: options.maintenance,

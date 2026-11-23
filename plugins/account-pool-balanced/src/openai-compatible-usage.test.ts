@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { EMPTY_FAMILY_WEEKLY, type AccountQuota } from "./contracts.js";
 import {isSharedQuotaExhausted,blockingResetAt} from './quota.js';
 import {
+  geminiQuotaFromUsages,
+  grokQuotaFromUsages,
   opencodeGoQuotaFromUsages,
   zaiQuotaFromUsages,
 } from "./openai-compatible-usage.js";
@@ -146,5 +148,94 @@ describe("OpenCode Go quota parsing", () => {
     expect(
       opencodeGoQuotaFromUsages(ACCOUNT_ID, "not json", previous(), NOW),
     ).toBe(null);
+  });
+});
+
+describe("grok and gemini quota parsing", () => {
+  it("keeps the five-hour window and stores Grok weekly credit use", () => {
+    const before = previous();
+    before.fiveHourUtilization = 0.25;
+    before.fiveHourResetAt = NOW + 1_000;
+    const quota = grokQuotaFromUsages(ACCOUNT_ID, {
+      config: {
+        currentPeriod: {
+          type: "USAGE_PERIOD_TYPE_WEEKLY",
+          end: "2026-11-11T15:08:57.657+00:00",
+        },
+        creditUsagePercent: 10,
+        productUsage: [{ product: "GrokBuild", usagePercent: 40 }],
+        billingPeriodEnd: "2026-11-11T15:08:57.657+00:00",
+      },
+    }, before, NOW);
+    expect(quota).toMatchObject({
+      fiveHourUtilization: 0.25,
+      fiveHourResetAt: NOW + 1_000,
+      sevenDayUtilization: 0.1,
+      sevenDayResetAt: Date.parse("2026-11-11T15:08:57.657+00:00"),
+      observedAt: NOW,
+      error: null,
+    });
+  });
+
+  it("falls back to the first Grok product window and ignores a payload without a percent", () => {
+    const quota = grokQuotaFromUsages(ACCOUNT_ID, {
+      config: { productUsage: [{ usagePercent: 25 }], billingPeriodEnd: "2026-11-11T15:08:57.657Z" },
+    }, previous(), NOW);
+    expect(quota?.sevenDayUtilization).toBe(0.25);
+    expect(grokQuotaFromUsages(ACCOUNT_ID, { config: {} }, previous(), NOW)).toBeNull();
+  });
+
+  it("clears an expired Grok weekly window to 0 when the new period payload omits usagePercent", () => {
+    const expired = {
+      ...previous(),
+      sevenDayUtilization: 1,
+      sevenDayResetAt: NOW - 60_000,
+    };
+    const nextReset = "2026-09-24T09:00:00.000Z";
+    const quota = grokQuotaFromUsages(
+      ACCOUNT_ID,
+      { config: { currentPeriod: { end: nextReset } } },
+      expired,
+      NOW,
+    );
+    expect(quota).toMatchObject({
+      sevenDayUtilization: 0,
+      sevenDayResetAt: Date.parse(nextReset),
+      observedAt: NOW,
+      error: null,
+    });
+  });
+
+  it("uses the busiest Gemini model bucket", () => {
+    const before = previous();
+    before.sevenDayUtilization = 0.4;
+    before.sevenDayResetAt = NOW + 2_000;
+    const quota = geminiQuotaFromUsages(ACCOUNT_ID, {
+      buckets: [
+        { resetTime: "2026-11-04T21:01:05Z", tokenType: "WTUS", modelId: "other-model", remainingFraction: 0.1 },
+        { resetTime: "2026-11-04T21:01:05Z", tokenType: "WTUS", modelId: "gemini-2.5-pro", remainingFraction: 0.9 },
+        { resetTime: "2026-11-04T22:01:05Z", tokenType: "WTUS", modelId: "gemini-3-flash", remainingFraction: 0.6683725 },
+      ],
+    }, before, NOW);
+    expect(quota).toMatchObject({
+      fiveHourUtilization: 1 - 0.6683725,
+      fiveHourResetAt: Date.parse("2026-11-04T22:01:05Z"),
+      sevenDayUtilization: 0.4,
+      sevenDayResetAt: NOW + 2_000,
+      observedAt: NOW,
+      error: null,
+    });
+  });
+
+  it("uses every valid Gemini bucket when none are named gemini-", () => {
+    const quota = geminiQuotaFromUsages(ACCOUNT_ID, {
+      buckets: [
+        { modelId: "other", remainingFraction: 0.8, resetTime: "2026-11-04T21:01:05Z" },
+        { modelId: "also", remainingFraction: 0.2 },
+        { modelId: "skipped", remainingFraction: "0" },
+      ],
+    }, previous(), NOW);
+    expect(quota?.fiveHourUtilization).toBe(0.8);
+    expect(geminiQuotaFromUsages(ACCOUNT_ID, { buckets: [] }, previous(), NOW)).toBeNull();
   });
 });

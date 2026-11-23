@@ -11,14 +11,14 @@ const content=<main data-bb-plugin="account-pool-balanced" className="space-y-6"
   <PoolUpdateView operation={{...base,state:'succeeded'}} busy={false} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={{...base,state:'succeeded',alreadyCurrent:true}} busy={false} error={null} onStart={()=>{}}/>
   <PoolUpdateView operation={{...base,state:'unknown'}} busy={true} error={null} onStart={()=>{}}/>
-  <PoolUpdateView operation={null} busy={true} statusUnavailable error="Не удалось проверить состояние обновления. Запуск пока недоступен." onStart={()=>{}}/>
+  <PoolUpdateView operation={null} busy={true} statusUnavailable error="Could not check update status. Starting is unavailable for now." onStart={()=>{}}/>
   <PoolSelectedAccounts accounts={[
     {provider:'Codex',account:'long-account-address@example.com'},
-    {provider:'Antigravity',account:'Выбирается для сеанса'},
-    {provider:'Claude',account:'Не выбран'},
+    {provider:'Antigravity',account:"Selected for the session"},
+    {provider:'Claude',account:"Not selected"},
   ]}/>
   <PoolTechnicalDetails>
-    Хаб принимает · 3 в работе · используют worker-1, worker-2, scheduler
+    Hub accepting · 3 active · used by worker-1, worker-2, scheduler
   </PoolTechnicalDetails>
 </main>;
 const css=readFileSync(new URL('../dist/app.css',import.meta.url),'utf8');

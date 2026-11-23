@@ -1,29 +1,29 @@
 
-### Индивидуальные правила аккаунта
+### Account-specific rules
 
-Откройте карточку аккаунта и включите **Индивидуальные настройки**. Изменения
-сохраняются автоматически после короткой паузы ввода. Перед закрытием карточки
-дождитесь статуса «Настройки сохранены»; при ошибке доступна кнопка повторной
-попытки. Для 5-часовой
-и недельной квот задаётся доля, которую нужно **оставить**: 50% означает, что пул
-перестанет отправлять новые запросы после расхода половины квоты. Пустое поле
-наследует общий порог переключения. Контроль 5 часов скрыт, если такое окно не
-известно провайдеру. Недельная защита также учитывает недельные квоты семейств
-моделей. Приоритет и роль меняются через существующее меню аккаунта; они не
-отменяют защиту остатка. Недельный прогрессивный потолок может остановить расход
-раньше личного порога.
+Open an account card and enable **Account-specific settings**. Changes are saved
+automatically after a short pause in editing. Before closing the card, wait for
+the “Settings saved” status; if saving fails, use the retry button. For the
+5-hour and weekly quotas, set the share to **keep**: 50% means the pool stops
+sending new requests after half of the quota has been used. An empty field
+inherits the shared switch threshold. The 5-hour control is hidden when the
+provider does not report that window. Weekly protection also accounts for
+weekly quotas by model family. Priority and role are changed from the account
+menu; neither overrides the remaining-quota protection. The progressive weekly
+cap can stop usage before the account-specific threshold.
 
-Личное расписание задаёт разрешённые дни и интервалы в выбранном часовом поясе.
-Для 20:00–08:00 выбранный день относится к началу интервала. Конец интервала
-исключён. Пустое расписание не разрешает новые запросы; выключенное расписание
-разрешает работу круглосуточно. Оно действует и для основных, и для резервных
-аккаунтов. Для резерва можно переопределить число рабочих часов до недельного
-сброса, когда он начинает использоваться вместе с основными аккаунтами; общие
-выходные продолжают применяться к этому расчёту.
+An account schedule defines allowed days and time intervals in the selected
+time zone. For 20:00–08:00, the selected day is the interval's start day. The end
+time is exclusive. An empty schedule allows no new requests; a disabled schedule
+allows use at any time. Schedules apply to both primary and reserve accounts.
+For a reserve account, you can set how many working hours before the weekly reset
+it starts being used alongside primary accounts. Shared rest days still apply
+to this calculation.
 
-Выключение индивидуальных настроек сохраняет значения, но возвращает общие
-пороги и доступность. Режим **Использовать до исчерпания** временно отменяет
-защиту квот, сохраняя расписание. После первого исчерпанного лимита личные
-пороги снова действуют. Оценка основана на последних квотах провайдера, включая
-расход вне пула; уже выполняющиеся запросы не прерываются. Это не отдельный
-счётчик расходов клиента и не гарантия точного остатка при параллельной работе.
+Disabling account-specific settings preserves their values but restores the
+shared thresholds and eligibility rules. **Use until exhausted** temporarily
+overrides quota protection while preserving the schedule. Account-specific
+thresholds take effect again after the first provider limit is exhausted.
+Estimates use the latest provider quotas, including usage outside the pool;
+requests already in progress are not interrupted. This is not a separate client
+usage counter or a guarantee of the exact remaining quota during parallel use.

@@ -5,6 +5,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import { z } from "zod";
 import type { PoolKvStorage } from "./core-storage.js";
+import { geminiUsageSchema } from "./gemini-usage.js";
 import {
   accountMetadataSchema,
   weeklyBudgetSchema,
@@ -28,6 +29,8 @@ const accountsSchema = z.array(accountMetadataSchema);
 // Keep weekly rules out of the strict v1 account array so older builds can read it after rollback.
 const WEEKLY_BUDGETS_KEY = "weekly-budgets:v1";
 const weeklyBudgetsSchema = z.record(z.string().uuid(), weeklyBudgetSchema);
+const GEMINI_SUMMARIES_KEY = "gemini-quota-summaries:v1";
+const geminiSummariesSchema = z.record(z.string().uuid(), geminiUsageSchema.pick({ observedAt: true, windows: true }));
 const HUB_TOKEN_PREFIX = "hub-token-";
 const THREAD_TOKEN_PREFIX = "hub-thread-token-";
 const HUB_TOKEN_GRACE_MS = 10 * 60 * 1_000;
@@ -90,8 +93,26 @@ export class AccountStore {
   }
 
   async list(): Promise<Account[]> {
-    const [accounts, budgets] = await Promise.all([this.listMetadata(), this.weeklyBudgets()]);
-    return accounts.map(account => budgets[account.id] === undefined ? account : { ...account, weeklyBudget: budgets[account.id] });
+    const [accounts, budgets, summaries] = await Promise.all([
+      this.listMetadata(),
+      this.weeklyBudgets(),
+      this.geminiSummaries().catch((): z.infer<typeof geminiSummariesSchema> => ({})),
+    ]);
+    return accounts.map(account => {
+      const summary = summaries[account.id];
+      const usage = account.geminiUsage;
+      return {
+        ...account,
+        ...(budgets[account.id] === undefined ? {} : { weeklyBudget: budgets[account.id] }),
+        ...(account.provider === "gemini" && usage && summary?.observedAt === usage.observedAt
+          ? { geminiUsage: { ...usage, windows: summary.windows } } : {}),
+      };
+    });
+  }
+
+  private async geminiSummaries() {
+    const result = geminiSummariesSchema.safeParse(await this.kv.get(GEMINI_SUMMARIES_KEY) ?? {});
+    return result.success ? result.data : {};
   }
 
   async get(id: string): Promise<Account | null> {
@@ -129,7 +150,7 @@ export class AccountStore {
   async addDraft(input: {label:string;email:string;priority:number}):Promise<Account> {
     return this.serialized(async()=>{
       const accounts=await this.listMetadata();
-      if(accounts.some(a=>a.provider==='claude'&&a.email?.toLowerCase()===input.email.toLowerCase()))throw Error('Этот аккаунт Claude уже добавлен.');
+      if(accounts.some(a=>a.provider==='claude'&&a.email?.toLowerCase()===input.email.toLowerCase()))throw Error("This Claude account is already added.");
       const account=accountMetadataSchema.parse({...input,id:randomUUID(),provider:'claude',kind:'oauth',draft:true,
         accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:false,createdAt:Date.now()});
       accounts.push(account);await this.kv.set(ACCOUNTS_KEY,accounts);return account;
@@ -153,7 +174,7 @@ export class AccountStore {
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<Account | null> {
-    return this.update(id, account => {if(enabled&&account.draft)throw Error('Сначала выполните вход в аккаунт.');return {...account,enabled};});
+    return this.update(id, account => {if(enabled&&account.draft)throw Error("Sign in to the account first.");return {...account,enabled};});
   }
 
   async setProjects(id: string, projects: Account["projects"], expected?: Account["projects"] | null): Promise<Account | null> {
@@ -296,6 +317,45 @@ export class AccountStore {
     return this.update(id, (account) => ({ ...account, accountUuid }));
   }
 
+  async setZaiSubscriptionType(
+    id: string,
+    subscriptionType: "lite" | "pro" | "max" | null,
+  ): Promise<Account | null> {
+    const plan = z.enum(["lite", "pro", "max"]).nullable().parse(subscriptionType);
+    return this.update(id, (account) =>
+      account.provider !== "zai" || account.subscriptionType === plan
+        ? account : { ...account, subscriptionType: plan });
+  }
+
+  async setGeminiUsage(id: string, observation: NonNullable<Account['geminiUsage']>): Promise<Account | null> {
+    const { windows, ...usage } = geminiUsageSchema.parse(observation);
+    return this.serialized(async () => {
+      const accounts = await this.listMetadata();
+      const index = accounts.findIndex(account => account.id === id);
+      const account = accounts[index];
+      if (!account || account.provider !== "gemini") return account ?? null;
+      const updated = { ...account, geminiUsage: usage };
+      if (JSON.stringify(account.geminiUsage) !== JSON.stringify(usage)) {
+        accounts[index] = updated;
+        await this.kv.set(ACCOUNTS_KEY, accounts);
+      }
+      // Older builds parse accounts:v1 strictly. Store summary data separately.
+      try {
+        const previous = await this.geminiSummaries();
+        const summaries = Object.fromEntries(accounts.flatMap(row =>
+          row.id !== id && previous[row.id] ? [[row.id, previous[row.id]]] : []));
+        if (windows?.length) summaries[id] = { observedAt: usage.observedAt, windows };
+        if (JSON.stringify(previous) !== JSON.stringify(summaries)) {
+          await this.kv.set(GEMINI_SUMMARIES_KEY, summaries);
+        }
+      } catch {
+        // The short observation is already saved. Only the optional summary failed.
+        return updated;
+      }
+      return { ...updated, geminiUsage: { ...usage, ...(windows?.length ? { windows } : {}) } };
+    });
+  }
+
   private async update(
     id: string,
     change: (account: Account) => Account,
@@ -306,7 +366,9 @@ export class AccountStore {
       const current = accounts[index];
       if (index < 0 || current === undefined) return null;
       const weeklyBudget = (await this.weeklyBudgets())[id];
-      const updated = accountMetadataSchema.parse(change(current));
+      const changed = change(current);
+      if (changed === current) return current;
+      const updated = accountMetadataSchema.parse(changed);
       accounts[index] = updated;
       await this.kv.set(ACCOUNTS_KEY, accounts);
       return weeklyBudget === undefined ? updated : { ...updated, weeklyBudget };
@@ -320,6 +382,26 @@ export class AccountStore {
     return accountSecretSchema.parse(parsed);
   }
 
+  async replaceGeminiAuthorization(id: string, email: string, secret: AccountSecret): Promise<Account> {
+    return this.serialized(async () => {
+      const account = (await this.list()).find(account => account.id === id);
+      if (!account || account.provider !== "gemini" || account.kind !== "oauth")
+        throw new Error("Gemini OAuth account no longer exists.");
+      if (!account.email || account.email.toLowerCase() !== email.toLowerCase())
+        throw new Error("Signed in to a different account. Authorize the selected subscription.");
+      if (secret.kind !== "oauth") throw new Error("Gemini OAuth authorization is required.");
+      const previous = await this.readSecret(id);
+      try { await this.writeSecret(id, secret); }
+      catch (error) {
+        try { await this.writeSecret(id, previous); }
+        catch { throw new Error("Could not save or restore authorization. Check storage and sign in again."); }
+        throw error;
+      }
+      // Account metadata and quota/access errors are deliberately unchanged.
+      return account;
+    });
+  }
+
   async replaceClaudeAuthorization(
     id: string,
     identity: { email: string | null; accountUuid: string | null; subscriptionType: string | null; rateLimitTier: string | null },
@@ -330,12 +412,12 @@ export class AccountStore {
       const index = accounts.findIndex(account => account.id === id);
       const account = accounts[index];
       if (!account || account.provider !== "claude" || account.kind !== "oauth")
-        throw new Error("Аккаунт Claude OAuth уже удалён / Claude OAuth account no longer exists.");
+        throw new Error("Claude OAuth account no longer exists.");
       const matches = account.accountUuid !== null
         ? account.accountUuid === identity.accountUuid
         : account.email !== null && identity.email !== null && account.email.toLowerCase() === identity.email.toLowerCase();
       if (!matches)
-        throw new Error("Вы вошли в другой аккаунт. Авторизуйтесь под выбранной подпиской / Signed in to a different account.");
+        throw new Error("Signed in to a different account. Authorize the selected subscription.");
       const {draft:_draft,...authorizedAccount}=account;
       const updated = accountMetadataSchema.parse({
         ...authorizedAccount,
@@ -354,7 +436,7 @@ export class AccountStore {
           if(previousSecret)await this.writeSecret(id, previousSecret);
           else await fs.rm(this.accountSecretPath(id),{force:true});
         } catch {
-          throw new Error("Не удалось сохранить или восстановить авторизацию. Проверьте хранилище и повторите вход / Authorization persistence and rollback failed; repair storage and sign in again.");
+          throw new Error("Could not save or restore authorization. Check storage and sign in again.");
         }
         throw error;
       }

@@ -1,3 +1,5 @@
+import { USAGE_PROVIDER_IDS } from "./usage-provider-ids.js";
+import {geminiPlanLabel, geminiCreditLabel, geminiSummaryRows, geminiUsageGroups} from './gemini-usage.js';
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import { PoolManagementLocked } from './management-access.js';
 import type { AccountSummary, PoolProvider } from "./contracts.js";
@@ -44,20 +46,7 @@ function accountKey(account: AccountSummary): string | null {
       : null;
 }
 
-//: Which BB provider each pooled subscription shows up as on the usage surface. Kimi
-//: serves two agent entries from one subscription, so the primary one stands for both.
-export const USAGE_PROVIDER_IDS: Record<PoolProvider, string> = {
-  claude: "claude-code",
-  codex: "codex",
-  kimi: "acp-opencode-kimi",
-  zai: "acp-opencode-zai",
-  "opencode-go": "acp-opencode-go",
-  neuraldeep: "acp-opencode-neuraldeep",
-  agy: "acp-agy",
-  cursor: "acp-oxi-cursor",
-  devin: "acp-devin",
-  grok: "acp-grok",
-};
+export { USAGE_PROVIDER_IDS } from "./usage-provider-ids.js";
 
 const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
   claude: "Claude Code",
@@ -66,19 +55,56 @@ const USAGE_FALLBACK_LABELS: Record<PoolProvider, string> = {
   zai: "Z.ai Coding Plan",
   "opencode-go": "OpenCode Go",
   neuraldeep: "NeuralDeep",
+  nvidia: "NVIDIA NIM",
+  ifm: "IFM",
   agy: "Antigravity",
   cursor: "Cursor",
   devin: "Devin",
   grok: "Grok",
+  gemini: "Gemini",
 };
 
-// Devin and Grok have no quota collector. Do not advertise an unmeasurable
-// resource as a failed collection; the account remains available for routing.
-function reportsUsage(account: Pick<AccountSummary, "provider">): boolean {
-  return account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy" && account.provider !== "grok";
+export function usageResourceLabel(
+  account: Pick<AccountSummary, "provider" | "label" | "email">,
+): string {
+  const providerLabel = USAGE_FALLBACK_LABELS[account.provider];
+  const customLabel = account.label.trim();
+  const email = (account.email ?? "").trim();
+  if (customLabel.startsWith(`${providerLabel} ·`)) return customLabel;
+  const hasCustomLabel =
+    customLabel !== "" &&
+    customLabel !== providerLabel &&
+    customLabel !== email;
+  const identity =
+    hasCustomLabel && email !== ""
+      ? `${customLabel} (${email})`
+      : hasCustomLabel
+        ? customLabel
+        : email;
+  if (identity === "" || identity === providerLabel) return providerLabel;
+  return `${providerLabel} · ${identity}`;
 }
 
-export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privateInventory = true) {
+function isExpiredAuthorizationError(error: string | null): boolean {
+  return (
+    error !== null &&
+    /^\[(?:OAUTH_REAUTH_REQUIRED|API_KEY_EXPIRED)\]/u.test(error)
+  );
+}
+
+// Devin, NeuralDeep and Antigravity have no quota collector here. Do not
+// advertise an unmeasurable resource as a failed collection; the account
+// remains available for routing.
+function reportsUsage(account: Pick<AccountSummary, "provider" | "kind">): boolean {
+  return !(account.provider === "grok" && account.kind === "api-key") && account.provider !== "ifm" && account.provider !== "nvidia" && account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy";
+}
+
+export function registerUsageSource(
+  bb: BbPluginApi,
+  hub: AccountPoolHub,
+  privateInventory = true,
+  now?: () => number,
+) {
   bb.rpc.register(
     usageSourceRpcContract,
     {
@@ -91,7 +117,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
             id: account.id,
             accountKey: accountKey(account),
             providerId: USAGE_PROVIDER_IDS[account.provider],
-            label: account.email ?? USAGE_FALLBACK_LABELS[account.provider],
+            label: [usageResourceLabel(account), account.provider === 'gemini' && account.geminiUsage ? geminiCreditLabel(account.geminiUsage) : null].filter(Boolean).join(' · '),
             scope: { kind: "shared" as const },
           })),
         };
@@ -101,11 +127,15 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
         const account = (await hub.status()).accounts.find(account => account.id === resourceId);
         if (!account) throw new Error("Usage resource no longer exists.");
         if (!reportsUsage(account)) {
-          const name = account.provider === "grok" ? "Grok" : "Devin";
-          throw new Error(`Quota reporting is not available for ${name}.`);
+          throw new Error(`Quota reporting is not available for ${USAGE_FALLBACK_LABELS[account.provider]}.`);
         }
         await hub.assertNetworkAllowed(account.provider);
-        await hub.refreshUsage(resourceId, refresh, true);
+        try {
+          await hub.refreshUsage(resourceId, refresh, true);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!isExpiredAuthorizationError(message)) throw error;
+        }
         const { accounts: allAccounts } = await hub.status();
         const accounts = allAccounts.filter(
           (account) => account.id === resourceId && reportsUsage(account),
@@ -113,6 +143,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
         if (accounts.length === 0)
           throw new Error("Usage resource no longer exists.");
         const resources: UsageResource[] = accounts.map((account) => {
+          const referenceNow = now ? now() : (account.observedAt ?? Date.now());
           const windows: Extract<
             UsageResource["usage"],
             { status: "ok" }
@@ -125,6 +156,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
             model: string | null,
           ) => {
             if (utilization === null) return;
+            if (reset !== null && reset <= referenceNow) return;
             windows.push({
               kind:
                 label === "Five-hour limit"
@@ -142,7 +174,21 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
               cost: null,
             });
           };
-          if (account.limitWindows.length > 0) {
+          const isGemini = account.provider === 'gemini';
+          const gemini = isGemini ? account.geminiUsage : undefined;
+          const geminiSummary = geminiSummaryRows(gemini, referenceNow);
+          for (const window of geminiSummary) {
+            windows.push({ kind: window.kind, id: `gemini:summary:${window.kind}`,
+              label: window.label, usedPercent: window.usedPercent,
+              resetsAt: window.resetAt === null ? null : new Date(window.resetAt).toISOString(), model: null, cost: null });
+          }
+          if (gemini && !geminiSummary.some(window => window.kind === "five-hour")) for (const model of geminiUsageGroups(gemini.models)) {
+            if (model.resetAt !== null && model.resetAt <= referenceNow) continue;
+            windows.push({kind: 'custom', id: model.id,
+              label: model.label,
+              usedPercent: model.usedPercent, resetsAt: model.resetAt === null ? null : new Date(model.resetAt).toISOString(), model: model.model, cost: null});
+          }
+          if (!isGemini && account.limitWindows.length > 0) {
             for (const window of account.limitWindows) {
               add(
                 window.slot,
@@ -153,7 +199,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
               );
             }
           }
-          if(account.limitWindows.length===0 || account.provider==='opencode-go') {
+          if(!isGemini && (account.limitWindows.length===0 || account.provider==='opencode-go')) {
             if(!account.limitWindows.some(window=>window.windowMinutes===300)) add(
               "five-hour",
               "Five-hour limit",
@@ -179,25 +225,30 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
                 family,
               );
           }
+          // Z.AI reports a plan name, not a Claude Max multiplier. Preserve
+          // stored account metadata without interpreting an unrelated tier.
+          const rateLimitTier = account.provider === "zai" ? null : account.rateLimitTier;
           const accountFields = {
-            plan: account.subscriptionType
+            plan: isGemini ? (gemini?.plan ? {id: gemini.plan.id, multiplier: null} : null) : account.subscriptionType
               ? {
                   id: account.subscriptionType.toLowerCase(),
                   multiplier:
-                    Number(account.rateLimitTier?.match(/max_(\d+)x/u)?.[1]) ||
+                    Number(rateLimitTier?.match(/max_(\d+)x/u)?.[1]) ||
                     null,
                 }
               : null,
-            accountEmail: account.email,
-            planLabel: usagePlanLabel(account),
+            accountEmail: null,
+            planLabel: isGemini ? (gemini ? geminiPlanLabel(gemini) : null) : usagePlanLabel({ ...account, rateLimitTier }),
           };
-          const error =
-            (account.error === null
-              ? null
-              : "Usage could not be collected for this account. Try refreshing usage.") ??
-            (account.observedAt === null
-              ? "Usage has not been observed for this account."
-              : null);
+          const expiredAuth = isExpiredAuthorizationError(account.error);
+          const error = expiredAuth
+            ? null
+            : (account.error === null
+                ? null
+                : "Usage could not be collected for this account. Try refreshing usage.") ??
+              (account.observedAt === null
+                ? "Usage has not been observed for this account."
+                : null);
           return {
             id: account.id,
             accountKey: accountKey(account),
@@ -205,8 +256,9 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
             label: account.label,
             scope: { kind: "shared" },
             observedAt: account.observedAt,
-            usage:
-              error === null
+            usage: expiredAuth
+              ? { status: "expired", ...accountFields }
+              : error === null
                 ? { status: "ok", ...accountFields, windows }
                 : { status: "error", ...accountFields, message: error },
           };

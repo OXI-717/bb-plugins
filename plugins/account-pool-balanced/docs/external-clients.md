@@ -63,6 +63,8 @@ Standalone model paths:
 | OpenCode Go | `POST /opencode-go/v1/chat/completions` |
 | Antigravity | `GET /agy/v1beta/models`; `POST /agy/v1beta/models/{catalog-model}:generateContent` or `:streamGenerateContent` |
 | NeuralDeep | `POST /neuraldeep/v1/chat/completions`; `GET /neuraldeep/v1/models` |
+| Grok | `GET`/`POST /grok/v1/responses`, `/grok/v1/chat/completions`, `/grok/v1/models`, `/grok/v1/settings`, `/grok/v1/feedback/config`, `/grok/v1/user`. A subscription account is sent to the Grok chat proxy. An API key stays on the paid xAI base. |
+| Gemini | OAuth subscriptions use `POST /gemini/v1internal:loadCodeAssist`, `/gemini/v1internal:fetchAvailableModels`, `/gemini/v1internal:streamGenerateContent`, `/gemini/v1internal:generateContent`, and `/gemini/v1internal:retrieveUserQuota` through Cloud Code. API-key accounts also accept `POST /gemini/v1beta/models/<model>:<method>` on the BB plugin and standalone hosts; that route selects API-key accounts only and forwards to the Generative Language host. |
 | Devin Local CLI | `POST /exa.*` Connect/protobuf RPCs (via the launcher below) |
 | Cursor CLI | `GET/POST /cursor/rpc` through `cursor-route`, or direct `/cursor/aiserver.vN.*` and `/cursor/agent.vN.*` RPC paths |
 

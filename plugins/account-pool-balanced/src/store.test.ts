@@ -5,7 +5,7 @@ import { mkdtemp } from "node:fs/promises";
 import Database from "better-sqlite3";
 import type { PluginKvStorage } from "@get-bb/plugin-sdk";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Account } from "./contracts.js";
 import { AccountStore, PoolAffinityStore, QUOTA_MIGRATIONS, QuotaStore } from "./store.js";
 
@@ -39,11 +39,11 @@ describe("AccountStore", () => {
     const a=await store.addDraft({label:'Team subscription',email:'fixture@example.com',priority:8});
     expect(a).toMatchObject({enabled:false,draft:true,provider:'claude',kind:'oauth'});
     await expect(fs.stat(path.join(dir,'secrets'))).rejects.toThrow();
-    await expect(store.setEnabled(a.id,true)).rejects.toThrow('вход');
-    await expect(store.addDraft({label:'duplicate',email:'FIXTURE@example.com',priority:9})).rejects.toThrow('уже');
+    await expect(store.setEnabled(a.id,true)).rejects.toThrow('Sign in to the account first.');
+    await expect(store.addDraft({label:'duplicate',email:'FIXTURE@example.com',priority:9})).rejects.toThrow('This Claude account is already added.');
     const identity={email:'wrong@example.com',accountUuid:'00000000-0000-4000-8000-000000000001',subscriptionType:null,rateLimitTier:null};
     const secret={kind:'oauth' as const,accessToken:'synthetic-access',refreshToken:'synthetic-refresh',expiresAt:null};
-    await expect(store.replaceClaudeAuthorization(a.id,identity,secret)).rejects.toThrow('другой');
+    await expect(store.replaceClaudeAuthorization(a.id,identity,secret)).rejects.toThrow('Signed in to a different account. Authorize the selected subscription.');
     const result=await store.replaceClaudeAuthorization(a.id,{...identity,email:a.email},secret);
     expect(result).toMatchObject({id:a.id,label:a.label,priority:8,enabled:false});
     expect(result.draft).toBeUndefined();expect(await store.readSecret(a.id)).toEqual(secret);
@@ -296,4 +296,101 @@ describe("session observations", () => {
       expect(store.observation(key)?.accountId).toBe("22222222-2222-4222-8222-222222222222");
     } finally { db.close(); }
   });
+});
+
+it('persists display-only Gemini metadata while preserving account identity and policies',async()=>{
+ const dataDir=await mkdtemp(path.join(tmpdir(),'bb-gemini-display-'));
+ const host=createFakePluginHost({pluginId:'account-pool',dataDir});
+ cleanups.push(async()=>{await host.harness.lifecycle.dispose();await fs.rm(dataDir,{recursive:true,force:true});});
+ const store=new AccountStore(host.bb.storage.kv,path.join(dataDir,'secrets'));
+ const value:Account={id:'00000000-0000-4000-8000-000000000001',provider:'gemini',kind:'oauth',label:'Synthetic',email:null,accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:false,autopilotAllowed:false,priority:7,createdAt:1,lastUsedAt:null,lastUsedHostId:null,role:'reserve',cap:null,drainOnce:true};
+ await host.bb.storage.kv.set('accounts:v1',[value]);
+ const before=await store.get(value.id);
+ const usage={observedAt:100,plan:{id:'fixture-tier',name:'Fixture'},credits:'0',models:[]};
+ await store.setGeminiUsage(value.id,usage);
+ const reloaded=await new AccountStore(host.bb.storage.kv,path.join(dataDir,'secrets')).get(value.id);
+ expect(reloaded?.geminiUsage).toEqual(usage);
+ const {geminiUsage:_usage,...rest}=reloaded!;expect(rest).toEqual(before);
+});
+
+it('replaces Gemini authorization only for the same existing identity, retaining metadata',async()=>{
+ const dataDir=await mkdtemp(path.join(tmpdir(),'bb-gemini-reauth-'));
+ const host=createFakePluginHost({pluginId:'account-pool',dataDir});
+ cleanups.push(async()=>{await host.harness.lifecycle.dispose();await fs.rm(dataDir,{recursive:true,force:true});});
+ const store=new AccountStore(host.bb.storage.kv,path.join(dataDir,'secrets'));
+ const old={kind:'oauth' as const,accessToken:'synthetic-old',refreshToken:'synthetic-refresh',expiresAt:null};
+ const a=await store.add({provider:'gemini',kind:'oauth',label:'Synthetic',email:'fixture@example.com',accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:false,priority:7},old);
+ const fresh={...old,accessToken:'synthetic-new'};
+ await expect(store.replaceGeminiAuthorization(a.id,'other@example.com',fresh)).rejects.toThrow('different account');
+ expect(await store.readSecret(a.id)).toEqual(old);
+ await store.replaceGeminiAuthorization(a.id,'FIXTURE@example.com',fresh);
+ expect(await store.get(a.id)).toEqual(a);expect(await store.readSecret(a.id)).toEqual(fresh);
+ await store.remove(a.id);
+ await expect(store.replaceGeminiAuthorization(a.id,'fixture@example.com',fresh)).rejects.toThrow('no longer exists');
+});
+
+it('restores the old Gemini secret after a failed authorization write',async()=>{
+ const dataDir=await mkdtemp(path.join(tmpdir(),'bb-gemini-write-failure-'));
+ const host=createFakePluginHost({pluginId:'account-pool',dataDir});
+ cleanups.push(async()=>{await host.harness.lifecycle.dispose();await fs.rm(dataDir,{recursive:true,force:true});});
+ const store=new AccountStore(host.bb.storage.kv,path.join(dataDir,'secrets'));
+ const old={kind:'oauth' as const,accessToken:'synthetic-old',refreshToken:'synthetic-refresh',expiresAt:null};
+ const account=await store.add({provider:'gemini',kind:'oauth',label:'Synthetic',email:'fixture@example.com',accountUuid:null,subscriptionType:null,rateLimitTier:null,enabled:false,priority:7},old);
+ const write=store.writeSecret.bind(store);
+ const spy=vi.spyOn(store,'writeSecret').mockImplementationOnce(async(id,secret)=>{await write(id,secret);throw Error('synthetic storage failure');});
+ try{
+  await expect(store.replaceGeminiAuthorization(account.id,'fixture@example.com',{...old,accessToken:'synthetic-new'})).rejects.toThrow('synthetic storage failure');
+  expect(spy).toHaveBeenCalledTimes(2);expect(await store.readSecret(account.id)).toEqual(old);expect(await store.get(account.id)).toEqual(account);
+ }finally{spy.mockRestore();}
+});
+
+it("keeps Gemini summaries readable after upgrade without changing the legacy account shape", async () => {
+  const host = createFakePluginHost({ pluginId: "account-pool" });
+  cleanups.push(async () => { await host.harness.lifecycle.dispose(); });
+  const kv = host.bb.storage.kv;
+  const id = "00000000-0000-4000-8000-000000000001";
+  await kv.set("accounts:v1", [{ id, provider: "gemini", kind: "oauth",
+    label: "Fixture", email: null, subscriptionType: null, rateLimitTier: null,
+    enabled: true, priority: 1, createdAt: 1 }]);
+  const accounts = new AccountStore(kv, "unused-fixture-directory");
+  const observation = { observedAt: 100, models: [], credits: null, plan: null };
+  const windows = [{ kind: "weekly" as const, usedPercent: 42, resetAt: 200 }];
+  await accounts.setGeminiUsage(id, { ...observation, windows });
+  expect((await kv.get<Account[]>("accounts:v1"))?.[0]?.geminiUsage).toEqual(observation);
+  expect((await accounts.get(id))?.geminiUsage?.windows).toEqual(windows);
+  await accounts.setGeminiUsage(id, { ...observation, observedAt: 101 });
+  expect((await accounts.get(id))?.geminiUsage).toEqual({ ...observation, observedAt: 101 });
+});
+
+it.each(["get", "set"] as const)("keeps account selection and Gemini refresh working if summary %s fails", async operation => {
+  const host = createFakePluginHost({ pluginId: "account-pool" });
+  cleanups.push(async () => { await host.harness.lifecycle.dispose(); });
+  const kv = host.bb.storage.kv;
+  const geminiId = "00000000-0000-4000-8000-000000000001";
+  const claudeId = "00000000-0000-4000-8000-000000000002";
+  const common = { kind: "oauth", email: null, subscriptionType: null, rateLimitTier: null,
+    enabled: true, priority: 1, createdAt: 1 };
+  await kv.set("accounts:v1", [
+    { ...common, id: geminiId, provider: "gemini", label: "Gemini fixture" },
+    { ...common, id: claudeId, provider: "claude", label: "Claude fixture" },
+  ]);
+  const originalGet = kv.get.bind(kv);
+  const originalSet = kv.set.bind(kv);
+  const auxiliary = "gemini-quota-summaries:v1";
+  vi.spyOn(kv, "get").mockImplementation(async key => {
+    if (operation === "get" && key === auxiliary) throw Error("synthetic summary read failure");
+    return originalGet(key);
+  });
+  vi.spyOn(kv, "set").mockImplementation(async (key, value) => {
+    if (operation === "set" && key === auxiliary) throw Error("synthetic summary write failure");
+    return originalSet(key, value);
+  });
+  const accounts = new AccountStore(kv, "unused-fixture-directory");
+  expect((await accounts.get(claudeId))?.enabled).toBe(true);
+  const observation = { observedAt: 100, credits: null, plan: null,
+    models: [{ modelId: "gemini-fixture", tokenType: null, usedPercent: 25, resetAt: 150 }] };
+  await expect(accounts.setGeminiUsage(geminiId, { ...observation,
+    windows: [{ kind: "weekly", usedPercent: 60, resetAt: 200 }],
+  })).resolves.toMatchObject({ geminiUsage: observation });
+  expect((await accounts.get(geminiId))?.geminiUsage).toEqual(observation);
 });

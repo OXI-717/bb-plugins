@@ -75,11 +75,7 @@ export async function registerNetworkRetry(bb:BbPluginApi,eligible:(threadId:str
   // before a late row appears, after event/startup cancellation already ran.
   const dispatchReads=new Map<string,Promise<{requestId:string|null;eligible:boolean}>>();
    bb.experimental_hooks.on('message.dispatch',async context=>{
-     // The pinned SDK (0.4.x) types only `queuedMessage`; newer hosts pass the
-     // whole dispatch group as `queuedMessages`. Read both, prefer the group.
-     const withGroup=context as typeof context&{queuedMessages?:readonly NonNullable<(typeof context)['queuedMessage']>[]};
-     const queued:readonly NonNullable<(typeof context)['queuedMessage']>[]=(withGroup.queuedMessages??[]).
-       length?withGroup.queuedMessages!:(context.queuedMessage?[context.queuedMessage]:[]);
+     const queued = context.queuedMessages;
     if(!queued.some(entry=>entry.payload.kind==='retry'))return {action:'proceed'};
     if(queued.length!==1)return {action:'reject',message:'Automatic retry cancelled because its dispatch group includes other queued work.'};
     const entry=queued[0]!;

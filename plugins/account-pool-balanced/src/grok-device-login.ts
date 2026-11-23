@@ -29,7 +29,7 @@ export interface GrokDeviceLoginOptions {
   command?: string;
   args?: string[];
   beforeSpawn?: () => Promise<void>;
-  spawnLogin?: (env: NodeJS.ProcessEnv) => LoginChild;
+  spawnLogin?: (env: NodeJS.ProcessEnv, authFile: string) => LoginChild;
   addAccount: (credentials: GrokSubscriptionCredentials) => Promise<AccountSummary>;
 }
 
@@ -65,9 +65,10 @@ export class GrokDeviceLogin {
 
   async start(): Promise<GrokDeviceLoginStart> {
     const grokHome = await mkdtemp(path.join(tmpdir(), "bb-pool-grok-login-"));
-    const env: NodeJS.ProcessEnv = { ...process.env, GROK_HOME: grokHome };
+    const env: NodeJS.ProcessEnv = { ...process.env, GROK_HOME: grokHome, GROK_AUTH_PATH: path.join(grokHome, "auth.json"), GROK_DISABLE_API_KEY_AUTH: "1" };
     for (const name of [
       "XAI_API_KEY",
+      "GROK_XAI_API_BASE_URL",
       "GROK_DEPLOYMENT_KEY",
       "GROK_CLI_CHAT_PROXY_BASE_URL",
       "GROK_MODELS_BASE_URL",
@@ -88,7 +89,7 @@ export class GrokDeviceLogin {
     let child: LoginChild;
     try {
       child = this.options.spawnLogin
-        ? this.options.spawnLogin(env)
+        ? this.options.spawnLogin(env, path.join(grokHome, "auth.json"))
         : spawn(this.command, this.args, {
             env,
             stdio: ["ignore", "pipe", "pipe"] as const,
@@ -182,6 +183,10 @@ export class GrokDeviceLogin {
 
   nextPollDelayMs(): number {
     return 1_000;
+  }
+
+  has(sessionId: string): boolean {
+    return this.sessions.has(sessionId);
   }
 
   cancel(input: { sessionId: string }): boolean {

@@ -25,6 +25,8 @@ import type {
 import type { ClaudeOAuthAccount } from "./oauth-login.js";
 import type { CodexDeviceAccount } from "./codex-device-login.js";
 import type { GrokSubscriptionCredentials } from "./grok-credentials.js";
+import type { GeminiSubscriptionCredentials } from "./gemini-credentials.js";
+import type { AdapterUsageContext } from "./provider-adapter.js";
 
 interface PoolHost {
   id: string;
@@ -57,6 +59,7 @@ export class PoolOperations {
     private readonly onAccountEnabled: (
       accountId: string,
     ) => Promise<void> = async () => {},
+    private readonly geminiSummaryDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"],
   ) {}
 
   async add(input: AccountAddInput): Promise<Account> {
@@ -64,7 +67,7 @@ export class PoolOperations {
       throw new Error("Use Antigravity login in the Pooler UI; local credentials are not imported.");
     }
     if(input.source.kind==='draft'){
-      if(input.provider!=='claude')throw Error('Предварительное добавление пока доступно для Claude.');
+      if(input.provider!=='claude')throw Error("Adding before sign-in is currently supported only for Claude.");
       const account=await this.accounts.addDraft({email:input.source.email,label:input.label??input.source.email,priority:input.priority});
       this.onAccountsChanged();return account;
     }
@@ -94,7 +97,12 @@ export class PoolOperations {
       await this.onAccountEnabled(account.id);
       return account;
     }
-    if (input.provider !== "claude" && input.provider !== "codex") {
+    if (
+      input.provider !== "claude" &&
+      input.provider !== "codex" &&
+      input.provider !== "grok" &&
+      input.provider !== "gemini"
+    ) {
       throw new Error(
         `${input.provider} accounts can only be added with --api-key-stdin.`,
       );
@@ -233,6 +241,65 @@ export class PoolOperations {
     return account;
   }
 
+  async addGeminiOAuth(
+    authenticated: GeminiSubscriptionCredentials,
+  ): Promise<AccountSummary> {
+    const account = await this.accounts.add(
+      {
+        provider: "gemini",
+        kind: "oauth",
+        label: authenticated.label,
+        email: authenticated.email,
+        accountUuid: null,
+        subscriptionType: null,
+        rateLimitTier: null,
+        enabled: true,
+        priority: 100,
+      },
+      {
+        kind: "oauth",
+        accessToken: authenticated.accessToken,
+        refreshToken: authenticated.refreshToken,
+        expiresAt: authenticated.expiresAt,
+        clientId: authenticated.clientId,
+      },
+    );
+    this.onAccountsChanged();
+    await this.onAccountEnabled(account.id);
+    const summary = (await this.list()).find((item) => item.id === account.id);
+    if (summary === undefined) {
+      throw new Error("Added Gemini account could not be read back.");
+    }
+    return summary;
+  }
+
+  async validateGeminiReauthorization(id: string): Promise<void> {
+    const account = await this.accounts.get(id);
+    if (!account || account.provider !== "gemini" || account.kind !== "oauth")
+      throw new Error("Gemini OAuth account not found.");
+    if (!account.email) throw new Error("Account identity is unknown; sign-in cannot safely replace this account.");
+  }
+
+  async reauthorizeGemini(id: string, authenticated: GeminiSubscriptionCredentials): Promise<AccountSummary> {
+    if (!authenticated.email) throw new Error("Signed-in account identity is unknown.");
+    await this.hub.replaceAccountAuthorization(id, async () => {
+      const account = await this.accounts.replaceGeminiAuthorization(id, authenticated.email!, {
+        kind: "oauth", accessToken: authenticated.accessToken, refreshToken: authenticated.refreshToken,
+        expiresAt: authenticated.expiresAt, clientId: authenticated.clientId,
+      });
+      const quota = this.quotas.get(id);
+      // A verified replacement supersedes only the old credential's expiry.
+      // Subscription, quota and other provider access denials remain in force.
+      if (quota.error?.startsWith("[OAUTH_REAUTH_REQUIRED]") && !quota.error.includes("SUBSCRIPTION_REQUIRED"))
+        this.quotas.put({...quota, error: null});
+      return account;
+    });
+    this.onAccountsChanged();
+    const summary = (await this.list()).find(account => account.id === id);
+    if (!summary) throw new Error("Reauthorized Gemini account could not be read back.");
+    return summary;
+  }
+
   async list(): Promise<AccountSummary[]> {
     return (await this.status()).accounts;
   }
@@ -329,10 +396,16 @@ export class PoolOperations {
     this.onAccountsChanged();
   }
 
-  async refreshUsage(id: string): Promise<AccountSummary | null> {
+  async refreshUsage(
+    id: string,
+    onDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"],
+  ): Promise<AccountSummary | null> {
     const account = await this.accounts.get(id);
     if (account === null) return null;
-    await this.hub.refreshUsage(id, true, true);
+    await this.hub.refreshUsage(id, true, true, result => {
+      this.geminiSummaryDiagnostic?.(result);
+      onDiagnostic?.(result);
+    });
     this.onAccountsChanged();
     return (
       (await this.status()).accounts.find((account) => account.id === id) ??
@@ -404,17 +477,20 @@ export class PoolOperations {
     ]);
     const history=this.hub.trafficHistory(0,1);
     const hostNames = new Map(hosts.map((host) => [host.id, host.name]));
-    const [claude, codex, kimi, zai, opencodeGo, neuraldeep, agy, cursor, devin, grok] = await Promise.all([
+    const [claude, codex, kimi, zai, opencodeGo, neuraldeep, nvidia, ifm, agy, cursor, devin, grok, gemini] = await Promise.all([
       this.routing.isProviderEnabled("claude"),
       this.routing.isProviderEnabled("codex"),
       this.routing.isProviderEnabled("kimi"),
       this.routing.isProviderEnabled("zai"),
       this.routing.isProviderEnabled("opencode-go"),
       this.routing.isProviderEnabled("neuraldeep"),
+      this.routing.isProviderEnabled("nvidia"),
+      this.routing.isProviderEnabled("ifm"),
       this.routing.isProviderEnabled("agy"),
       this.routing.isProviderEnabled("cursor"),
       this.routing.isProviderEnabled("devin"),
       this.routing.isProviderEnabled("grok"),
+      this.routing.isProviderEnabled("gemini"),
     ]);
     return {
       ...status,
@@ -439,10 +515,13 @@ export class PoolOperations {
         zai,
         "opencode-go": opencodeGo,
         neuraldeep,
+        nvidia,
+        ifm,
         agy,
         cursor,
         devin,
         grok,
+        gemini,
       },
     };
   }
@@ -484,16 +563,24 @@ export class PoolOperations {
   }
 
   async hasUsableEnabledAccount(provider: PoolProvider): Promise<boolean> {
+    return (await this.usableSecrets(provider)).length > 0;
+  }
+
+  async hasUsableEnabledOAuthAccount(provider: PoolProvider): Promise<boolean> {
+    return (await this.usableSecrets(provider)).some((secret) => secret.kind === "oauth");
+  }
+
+  private async usableSecrets(provider: PoolProvider) {
+    const secrets: AccountSecret[] = [];
     for (const account of await this.accounts.list()) {
       if (!account.enabled || account.provider !== provider) continue;
       try {
-        await this.accounts.readSecret(account.id);
-        return true;
+        secrets.push(await this.accounts.readSecret(account.id));
       } catch {
         continue;
       }
     }
-    return false;
+    return secrets;
   }
 
   async routedThreadsWithoutLocalLogin(): Promise<RoutedThreadStatus[]> {

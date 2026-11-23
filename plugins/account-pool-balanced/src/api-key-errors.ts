@@ -6,8 +6,8 @@ export class ApiKeyRejectedError extends AccountAuthorizationRequiredError {
   }
   override get accountMessage(): string {
     return this.expired
-      ? "[API_KEY_EXPIRED] Срок ключа истёк. Создайте новый ключ в кабинете провайдера и замените его в пуле. Повторный вход не продлевает ключ."
-      : "[API_KEY_REJECTED] Провайдер отклонил ключ. Проверьте или замените его в пуле.";
+      ? "[API_KEY_EXPIRED] The API key has expired. Create a new key in the provider console and replace it in the pool. Signing in again does not renew the key."
+      : "[API_KEY_REJECTED] The provider rejected the API key. Check it or replace it in the pool.";
   }
 }
 

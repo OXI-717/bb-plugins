@@ -1,3 +1,4 @@
+import { geminiSummaryDiagnosticSchema, type GeminiSummaryDiagnostic } from "./gemini-usage.js";
 import {type NativeProbeInput,type NativeProbeResult} from './native-probe-wire.js';
 import {maintenanceStatusSchema, type PoolMaintenance} from './maintenance.js';
 import {updateStatusSchema, type PoolUpdate} from './pool-update.js';
@@ -27,6 +28,7 @@ import {
   codexLoginPollInputSchema,
   codexLoginPollSchema,
   codexLoginStartSchema,
+  geminiLoginStartSchema,
   hubTokenSummarySchema,
   loginCompleteInputSchema,
   loginStartSchema,
@@ -42,6 +44,7 @@ import type { PoolOperations } from "./operations.js";
 import type { ClaudeOAuthLogin } from "./oauth-login.js";
 import type { CodexDeviceLogin } from "./codex-device-login.js";
 import type { GrokDeviceLogin } from "./grok-device-login.js";
+import type { GeminiLogin } from "./gemini-login.js";
 
 export const threadAccountStatusSchema = z.object({
   state: z.enum(["observed", "unobserved", "bypassed", "unsupported"]),
@@ -148,8 +151,8 @@ export const accountPoolRpcContract = defineRpcContract({
     output: z.null(),
   },
   "account.refreshUsage": {
-    input: z.object({ accountId: z.string().uuid() }).strict(),
-    output: z.object({ account: accountSummarySchema.nullable() }).strict(),
+    input: z.object({ accountId: z.string().uuid(), includeGeminiDiagnostic: z.boolean().optional() }).strict(),
+    output: z.object({ account: accountSummarySchema.nullable(), geminiDiagnostic: geminiSummaryDiagnosticSchema.optional() }).strict(),
   },
   "routing.set": {
     input: routingSetInputSchema,
@@ -209,6 +212,26 @@ export const accountPoolRpcContract = defineRpcContract({
     input: codexLoginPollInputSchema,
     output: codexLoginCancelSchema,
   },
+  "geminiLogin.reauthorize": {
+    input: z.object({accountId: z.string().uuid()}).strict(),
+    output: geminiLoginStartSchema,
+  },
+  "geminiLogin.start": {
+    input: z.null(),
+    output: geminiLoginStartSchema,
+  },
+  "geminiLogin.poll": {
+    input: codexLoginPollInputSchema,
+    output: codexLoginPollSchema,
+  },
+  "geminiLogin.submitCode": {
+    input: z.object({ sessionId: z.string().uuid(), code: z.string().min(1).max(8192) }).strict(),
+    output: z.object({ accepted: z.literal(true) }).strict(),
+  },
+  "geminiLogin.cancel": {
+    input: codexLoginPollInputSchema,
+    output: codexLoginCancelSchema,
+  },
   "status.get": {
     input: z.null(),
     output: statusSchema,
@@ -247,6 +270,7 @@ export function createRpcHandlers(
   nativeUpdateAccount:(input:NativeAccountUpdate)=>Promise<null> = async()=>{throw Error('Native settings unavailable');},
   nativeProbe:(input:NativeProbeInput)=>Promise<NativeProbeResult> = async input=>({...input,status:'runtime-unavailable',verified:false,observedAt:Date.now(),catalog:[]}),
   selection?: {choices:(threadId:string)=>Promise<ThreadAccountChoices>;switch:(threadId:string,accountId:string|null)=>Promise<ThreadAccountChoices>},
+  geminiLogin?: GeminiLogin,
 ): PluginRpcHandlers<typeof accountPoolRpcContract> {
   return {
     "maintenance.status":()=>{if(!maintenance)throw Error('Maintenance unavailable');return maintenance.status();},
@@ -272,8 +296,8 @@ export function createRpcHandlers(
     "projects.list": () => projectsList(),
     "account.setProjects": async ({ accountId, projects, expectedProjects }) => ({ account: await operations.setProjects(accountId, projects, expectedProjects) }),
     "thread.account": ({ threadId }) => threadAccount(threadId),
-    "thread.accountChoices": ({threadId})=>{if(!selection)throw Error("Выбор аккаунта недоступен");return selection.choices(threadId);},
-    "thread.switchAccount": ({threadId,accountId})=>{if(!selection)throw Error("Выбор аккаунта недоступен");return selection.switch(threadId,accountId);},
+    "thread.accountChoices": ({threadId})=>{if(!selection)throw Error("Account selection unavailable");return selection.choices(threadId);},
+    "thread.switchAccount": ({threadId,accountId})=>{if(!selection)throw Error("Account selection unavailable");return selection.switch(threadId,accountId);},
     "account.add": (input) => operations.add(input),
     "account.list": () => operations.list(),
     "account.remove": async ({ id }) => ({
@@ -303,9 +327,12 @@ export function createRpcHandlers(
     "account.setCap": async ({ accountId, cap }) => ({
       account: await operations.setCap(accountId, cap),
     }),
-    "account.refreshUsage": async ({ accountId }) => ({
-      account: await operations.refreshUsage(accountId),
-    }),
+    "account.refreshUsage": async ({ accountId, includeGeminiDiagnostic }) => {
+      let diagnostic: GeminiSummaryDiagnostic | undefined;
+      const account = await operations.refreshUsage(accountId, includeGeminiDiagnostic
+        ? result => { diagnostic = result; } : undefined);
+      return diagnostic ? { account, geminiDiagnostic: diagnostic } : { account };
+    },
     "account.reorder": async ({ provider, accountIds }) => {
       await operations.reorder(provider, accountIds);
       return null;
@@ -345,6 +372,26 @@ export function createRpcHandlers(
     },
     "grokLogin.cancel": (input) => ({
       cancelled: grokLogin === undefined ? false : grokLogin.cancel(input),
+    }),
+    "geminiLogin.reauthorize": async ({accountId}) => {
+      if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
+      await operations.validateGeminiReauthorization(accountId);
+      return geminiLogin.start(accountId);
+    },
+    "geminiLogin.start": () => {
+      if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
+      return geminiLogin.start();
+    },
+    "geminiLogin.poll": (input) => {
+      if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
+      return geminiLogin.poll(input);
+    },
+    "geminiLogin.submitCode": input => {
+      if (geminiLogin === undefined) throw new Error("Gemini sign-in is unavailable.");
+      return geminiLogin.submitCode(input);
+    },
+    "geminiLogin.cancel": (input) => ({
+      cancelled: geminiLogin === undefined ? false : geminiLogin.cancel(input),
     }),
     "status.get": () => operations.status(),
     "status.routedThreads": () => operations.routedThreadsWithoutLocalLogin(),

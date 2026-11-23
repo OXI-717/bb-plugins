@@ -17,7 +17,7 @@ export function createAccountPoolPlugin(options: AccountPoolPluginOptions = {}) 
     };
     const api: BbPluginApi = {
       ...bb,
-      rpc: { register(contract, registered, registrationOptions) {
+      rpc: { ...bb.rpc, register(contract, registered, registrationOptions) {
         if (Object.hasOwn(contract, 'management.unlock')) handlers = registered as unknown as typeof handlers;
         const wrapped = Object.fromEntries(Object.entries(registered).map(([method, handler]) => [method,
           Object.hasOwn(accountPoolRpcContract, method) ? (input: unknown) => withGrant(async token => {

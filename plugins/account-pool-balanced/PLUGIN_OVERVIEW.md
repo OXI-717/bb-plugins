@@ -1,22 +1,22 @@
-## Возможности
+## Features
 
-Пул выбирает аккаунт для запроса и показывает расход квот, дату и время сброса (МСК). Карточка аккаунта также показывает число успешных запросов через пул с момента установки версии 0.4.2; это не остаточная квота провайдера. Доступны последовательная и сбалансированная стратегии, основные и резервные аккаунты, индивидуальные потолки расхода. Поддерживаемые адаптеры: Claude, Codex, Kimi, Z.AI, OpenCode Go, Cursor, Devin Local CLI и Grok. Подписки Grok Code добавляются входом через официальный CLI (`bb pool account add --provider grok --login`) или ключом xAI API; секрет хранится на сервере пула, ACP-сессии получают только ограниченный токен пула. Для Grok и Devin пока нет числовой телеметрии квот, поэтому они не публикуются в общей панели Usage. Для Devin пока нет числовой телеметрии квот, поэтому он не публикуется в общей панели Usage; один запуск CLI закреплён за одним PAT, переключение происходит при новом запуске после ограничения аккаунта.
+The pool selects an account for each request and shows quota usage and reset times (UTC+3). Account cards also show successful requests through the pool since version 0.4.2 was installed; this is not the provider's remaining quota. Available strategies include sequential and balanced, with primary and reserve accounts and per-account usage caps. Supported adapters: Claude, Codex, Kimi, Z.AI, OpenCode Go, Cursor, Devin Local CLI, Grok, and Gemini. Devin does not yet provide numeric quota telemetry, so it is omitted from the shared Usage panel. Each CLI run is pinned to one PAT; switching happens on a new run after the account reaches a limit. Grok and Gemini sign-in and import use the subscription. An API key is only the paid fallback, used when no subscription account is enabled. Both report quota in the shared Usage panel.
 
-## Локальная настройка
+## Local setup
 
-Аккаунты добавляются в установленном BB. Секреты, порядок аккаунтов, пороги и маршрутизация остаются на сервере пользователя и не передаются с marketplace. Новый пользователь начинает с пустого пула. Для отдельного треда можно обойти пул и использовать его собственную авторизацию.
+Add accounts in the installed BB. Secrets, account order, thresholds, and routing remain on the user's server and are not sent to the marketplace. A new user starts with an empty pool. A thread can bypass the pool and use its own authentication.
 
-## Требования
+## Requirements
 
-BB 0.46.1 или новее, Node/npm для установки из Git и аккаунты провайдеров, которые вы вправе использовать. Подписки и API оплачиваются отдельно; плагин не увеличивает лимиты аккаунтов. Доступность моделей определяется провайдером.
+BB 0.46.1 or later, Node/npm for installation from Git, and provider accounts you are authorized to use. Subscriptions and APIs are billed separately; the plugin does not increase account limits. Model availability is determined by the provider.
 
-## Команды
+## Commands
 
-Настройки доступны через интерфейс и `bb pool --help`. Инструкция для Devin CLI и других внешних клиентов — [External clients](docs/external-clients.md). Проверка состояния — `bb pool status`, обновление — `bb plugin update account-pool-balanced`. Не включайте одновременно встроенный Account Pooler: оба используют команду `bb pool`.
+Settings are available in the UI and through `bb pool --help`. See [External clients](docs/external-clients.md) for Devin CLI and other clients. Check status with `bb pool status`; update with `bb plugin update account-pool-balanced`. Do not enable the built-in Account Pooler at the same time; both plugins use the `bb pool` command.
 
 `bb pool browser open <id|email|label> [--url <https-url>]` opens a persistent Helium account browser named `<Provider> · <email>`. Without a destination (including `about:blank`), Pooler requests Helium's native last-session restore and does not add an empty tab. New profiles without a saved session use the browser's normal startup page. An explicit HTTPS URL opens alongside the restored session. Before the first managed launch after upgrading, while Helium is fully closed, Pooler enables native last-session restore once for each managed profile (including secondary profiles opened later). It preserves other preferences, history, cookies and saved sessions. Later manual startup preference changes are respected; Helium decides which saved windows/tabs can be restored. URLs accept HTTPS without embedded credentials; command output shows only the site origin. `POOL_BROWSER_EXECUTABLE` overrides the Helium binary.
 
-In Pooler settings, choose **Открыть в браузере** from an account's action menu or its details. A missing profile is created on first open; later opens reuse it. Details accept an optional HTTPS link, including a provider authorization link. Existing Claude reauthorization also offers **Открыть в профиле аккаунта** for its current authorization URL. The window opens on the Pooler server machine, not on a remote dashboard device. Browser sign-in and account connection to the pool remain separate; the existing OAuth/API-key onboarding is unchanged. Authorization URLs are not saved in settings or browser-launch acknowledgements. UI navigation uses owner-only temporary local HTML documents (0700 directory, 0600 files), so the link does not appear in browser process arguments. Documents expire after five minutes or are removed on owned-browser exit; at most 32 may be outstanding. Partial writes remain owned until cleanup; failed removal retains its capacity slot and retries every minute. Abnormal supervisor termination can leave private files in the OS temporary directory. The browser runs without DevTools, automation switches or webdriver spoofing. Prefer the UI for one-time authorization links; an explicit CLI `--url` value is still visible in the caller’s command line.
+In Pooler settings, choose **Open in browser** from an account's action menu or details. A missing profile is created on first open; later opens reuse it. Details accept an optional HTTPS link, including a provider authorization link. Claude reauthorization also offers **Open in account profile** for its current authorization URL. The window opens on the Pooler server machine, not on a remote dashboard device. Browser sign-in and connecting an account to the pool remain separate; OAuth/API-key onboarding is unchanged. Authorization URLs are not saved in settings or browser-launch acknowledgements. UI navigation uses owner-only temporary local HTML documents (0700 directory, 0600 files), so the link does not appear in browser process arguments. Documents expire after five minutes or are removed when the owned browser exits; at most 32 may be outstanding. Partial writes remain owned until cleanup; failed removal retains its capacity slot and retries every minute. Abnormal supervisor termination can leave private files in the OS temporary directory. The browser runs without DevTools, automation switches, or WebDriver spoofing. Prefer the UI for one-time authorization links; an explicit CLI `--url` value is still visible in the caller's command line.
 
 All accounts use ordinary native profiles in one Helium user-data root. The native profile menu lists them together, including when Helium is opened manually. The first managed launch registers the current account list while Helium is fully closed. A newly added account needs one closed-browser window to update the list. Each account keeps a separate profile directory, cookies and site storage. The registry remains in the BB server plugin data directory under `browser-profiles/registry.json`; `bb pool browser list [--json]` reports the binding and existence of each profile.
 
@@ -32,33 +32,24 @@ The supervisor survives plugin reloads and keeps the proxy alive until the owned
 Use the provider UI for manual login, billing and [saved resets](docs/saved-resets.md). The command does not log in, export cookies or change pool routing.
 
 
-## Защита без изменения BB / Plugin-only network protection
+## Plugin-only network protection
 
-После обновления VPN Guard 0.1.2 и Pooler 0.4.14 включите `bb pool config set vpnGuardEnabled true` (галка «Подчиняться VPN Guard»). Выберите машину сервера пула в Guard. При ручном блоке или недоступном Guard защищённые вызовы самого пула получают временный локальный 503; уже удерживаемые им запросы/потоки отменяются при следующей проверке. Kimi/Z.ai остаются независимыми. Без связи ручной блок управляет только тредами BB.
+After updating VPN Guard to 0.1.2 and Pooler to 0.4.14, enable `bb pool config set vpnGuardEnabled true` (the **Follow VPN Guard** checkbox). Select the pool server machine in Guard. When manually blocked or unavailable, Guard causes protected calls from the pool itself to return a temporary local 503; requests or streams already held by the pool are cancelled at the next check. Kimi and Z.AI remain independent. Without this linkage, a manual block controls only BB threads.
 
-Enable the persisted Pooler linkage after upgrading both plugins. Guard covers Cursor/Devin Pool aliases and supplies an uncached network decision for the pool server. Missing/malformed/timed-out Guard fails closed for protected owned traffic. No BB build or system firewall changes; direct/native Send-now and independent maintenance remain outside the strict guarantee. [Реализованные гарантии и ограничения / guarantees and limits](../../docs/vpn-plugin-protection-limits.md).
+Enable the persisted Pooler linkage after upgrading both plugins. Guard covers Cursor/Devin Pool aliases and supplies an uncached network decision for the pool server. Missing, malformed, or timed-out Guard fails closed for protected traffic owned by the pool. No BB build or system firewall changes are needed; direct/native Send-now and independent maintenance remain outside the strict guarantee. See [implemented guarantees and limits](../../docs/vpn-plugin-protection-limits.md).
 
 Devin quota collection is not implemented. Its accounts remain available for routing but are omitted from the shared Usage inventory; stale quota-resource requests fail explicitly without a provider call.
 
-[Единая защита / Unified protection](../../docs/unified-protection.md): VPN evidence /2, optional automation controller, independent pause reasons and explicit recovery. Strict mode and controller integration default off.
-
-Контроллер автоматизаций не требуется для работы Pooler или его связи с VPN Guard и не входит в комплект публичных плагинов. Он нужен только для дополнительного управления расписаниями.
+[Unified protection](../../docs/unified-protection.md): VPN evidence /2, an optional automation controller, independent pause reasons, and explicit recovery. Strict mode and controller integration are off by default.
 
 An automation controller is not required for Pooler or its VPN Guard linkage and is not bundled with the public plugins. It is only needed for optional scheduler control.
 
-[Ошибки пула / Pooler errors](../../docs/pool-errors.md): stable reason codes, provider-native responses and distinct quota threshold/exhaustion messages. Коды причин и сообщения отличают настроенный порог от исчерпания лимита провайдера.
+[Pooler errors](../../docs/pool-errors.md): stable reason codes, provider-native responses, and distinct quota threshold/exhaustion messages. Reason codes and messages distinguish a configured threshold from an exhausted provider limit.
 
-Automatic recovery uses ordinary BB admission and preserves manual blocks and newer user activity. See [recovery policy / правила продолжения](../../docs/pool-errors.md).
+Automatic recovery uses ordinary BB admission and preserves manual blocks and newer user activity. See the [recovery policy](../../docs/pool-errors.md).
 
-[Аккаунт в заголовке треда](docs/account-identities.md): email или сохранённое название реально использованной подписки для всех провайдеров. Для API-ключей email можно указать в карточке; OAuth-адрес приходит от провайдера.
+[Account in the thread header](docs/account-identities.md): shows the email or saved label of the subscription actually used for every provider. For API keys, enter an email in the account card; OAuth email comes from the provider.
 
 Project-bound Codex budget clients can use the [versioned budget evidence endpoint](docs/codex-budget.md).
 
-
-Обновление запускается кнопкой «Обновить Pooler». Один процесс приостанавливает
-сессии BB и модельные запросы всех клиентов пула, включая внешние автоматизации,
-создаёт проверенную резервную копию, устанавливает выпуск и проверяет настройки.
-Затем он снимает только свою паузу и продолжает остановленные сессии.
-Пауза и состояние операции сохраняются при перезагрузке плагина; запросы не
-воспроизводятся автоматически. Подробности и восстановление описаны в
-[процессе обновления](../../scripts/UPGRADE-POOL.md#update-from-the-pool-interface).
+The native Update Pooler action pauses BB sessions and pooled model requests, verifies a state backup, installs a published release, checks settings and releases its own pause. The maintenance lease survives reloads and requests are not replayed automatically. See the [upgrade procedure](../../scripts/UPGRADE-POOL.md#update-from-the-pool-interface).

@@ -18,11 +18,12 @@ const status = {
     kimi: null,
     zai: null,
     "opencode-go": null,
-    neuraldeep: null,
+    neuraldeep: null, nvidia: null, ifm: null,
     agy: null,
     cursor: null,
     devin: null,
     grok: null,
+    gemini: null,
   },
   routing: {
     claude: true,
@@ -30,11 +31,12 @@ const status = {
     kimi: true,
     zai: true,
     "opencode-go": true,
-    neuraldeep: true,
+    neuraldeep: true, nvidia: true, ifm: true,
     agy: true,
     cursor: true,
     devin: true,
     grok: true,
+    gemini: true,
   },
 };
 

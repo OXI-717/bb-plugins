@@ -40,6 +40,7 @@ const PROVIDER_TITLE: Readonly<Record<string, string>> = {
   cursor: "Cursor",
   devin: "Devin",
   grok: "Grok",
+  gemini: "Gemini",
 };
 
 const DEFAULT_GEO_URL = "https://ipinfo.io/json";

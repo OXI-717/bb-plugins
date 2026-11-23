@@ -90,6 +90,63 @@ it("preserves VPN_REQUIRED when Devin is blocked after standalone admission", as
   } finally { gate.mockRestore(); }
 });
 
+it("accepts Grok subscription paths on GET and POST", async () => {
+  const pool = await openPool(await directory(), { vpnOnlyProviders: [] });
+  cleanups.push(() => pool.close());
+  const calls: string[] = [];
+  pool.hub.handle = async request => {
+    calls.push(`${request.method} ${new URL(request.url).pathname}`);
+    return Response.json({ ok: true });
+  };
+  const token = await pool.tokens.forHost("external-grok");
+  const server = await listenPool(pool, { port: 0 });
+  cleanups.push(() => server.close());
+  const headers = { authorization: `Bearer ${token}` };
+  const settings = await fetch(`${server.url}/grok/v1/settings`, { headers });
+  expect(settings.status).toBe(200);
+  await settings.text();
+  const responses = await fetch(`${server.url}/grok/v1/responses`, { method: "POST", headers, body: "{}" });
+  expect(responses.status).toBe(200);
+  await responses.text();
+  expect((await fetch(`${server.url}/grok/v1/responses`, { method: "PUT", headers, body: "{}" })).status).toBe(404);
+  expect(calls).toEqual(["GET /grok/v1/settings", "POST /grok/v1/responses"]);
+});
+
+it("accepts Gemini Cloud Code paths on POST", async () => {
+  const pool = await openPool(await directory(), { vpnOnlyProviders: [] });
+  cleanups.push(() => pool.close());
+  const calls: Array<{ route: string; accountKind: string | undefined }> = [];
+  pool.hub.handle = async (request, _provider, options) => {
+    calls.push({
+      route: `${request.method} ${new URL(request.url).pathname}${new URL(request.url).search}`,
+      accountKind: options?.accountKind,
+    });
+    return Response.json({ ok: true });
+  };
+  const token = await pool.tokens.forHost("external-gemini");
+  const server = await listenPool(pool, { port: 0 });
+  cleanups.push(() => server.close());
+  const headers = { authorization: `Bearer ${token}` };
+  const generated = await fetch(`${server.url}/gemini/v1internal:streamGenerateContent?alt=sse`, {
+    method: "POST",
+    headers,
+    body: "{}",
+  });
+  expect(generated.status).toBe(200);
+  await generated.text();
+  expect((await fetch(`${server.url}/gemini/v1internal:streamGenerateContent`, { headers })).status).toBe(404);
+  const apiKeyPath = await fetch(
+    `${server.url}/gemini/v1beta/models/gemini-2.5-pro:generateContent`,
+    { method: "POST", headers, body: "{}" },
+  );
+  expect(apiKeyPath.status).toBe(200);
+  await apiKeyPath.text();
+  expect(calls).toEqual([
+    { route: "POST /gemini/v1internal:streamGenerateContent?alt=sse", accountKind: undefined },
+    { route: "POST /gemini/v1beta/models/gemini-2.5-pro:generateContent", accountKind: "api-key" },
+  ]);
+});
+
 it("authenticates generic and direct Cursor routes and answers exchange locally", async () => {
   const pool = await openPool(await directory(), { vpnOnlyProviders: [] });
   cleanups.push(() => pool.close());

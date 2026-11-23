@@ -46,21 +46,21 @@ const content = (
           enabled
           badges={
             <>
-              <SettingsBadge>API-ключ</SettingsBadge>
-              <SettingsBadge>Свои настройки</SettingsBadge>
-              <SettingsBadge>Роли проектов · 3</SettingsBadge>
-              <SettingsBadge>Резерв</SettingsBadge>
+              <SettingsBadge>API key</SettingsBadge>
+              <SettingsBadge>Custom settings</SettingsBadge>
+              <SettingsBadge>Project roles · 3</SettingsBadge>
+              <SettingsBadge>Reserve</SettingsBadge>
             </>
           }
-          status={<AccountRowStatus label="В работе" dot="bg-success" />}
-          metrics={<span className="text-xs">5Ч —</span>}
+          status={<AccountRowStatus label="Active" dot="bg-success" />}
+          metrics={<span className="text-xs">5H —</span>}
           actions={null}
           onOpen={open}
         />
       </div>
     </section>
     <section className="pool-settings">
-      <h2 className="mb-2 text-sm font-semibold">Настройки · {account.label}</h2>
+      <h2 className="mb-2 text-sm font-semibold">Settings · {account.label}</h2>
       <NativeAccountSettings account={account} revision={'b'.repeat(64)} save={async () => {}} loadProjects={loadProjects} />
     </section>
   </main>
