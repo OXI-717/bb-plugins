@@ -1800,3 +1800,18 @@ it.each(['ready','disabled'] as const)('uses thread choice state %s for confirme
  await waitFor(()=>expect(ui.getByRole('button',{name:'Thread account: person@example.test · '+expected,hidden:true})).toBeTruthy());
  expect(ui.getByText(/Last confirmed request/).textContent).toContain('person@example.test · '+expected);
 });
+
+it('summarizes matching Gemini reports without inventing a shared limit or hiding the detailed identifiers',async()=>{
+ const selected=account({provider:'gemini',geminiUsage:{observedAt:100,plan:null,credits:null,models:[
+  {modelId:'gemini-fixture-a',tokenType:'WTUS',usedPercent:5,resetAt:null},
+  {modelId:'gemini-fixture-b',tokenType:'WTUS',usedPercent:5,resetAt:null},
+ ]}});
+ const slot=render([selected]);
+ await waitFor(()=>expect(slot.container.textContent).toContain('2 matching reports · WTUS'));
+ expect(slot.container.textContent).not.toContain('gemini-fixture-a');
+ fireEvent.click(slot.getByRole('button',{name:`Open ${selected.label}`}));
+ const details=await slot.findByLabelText('Gemini model quotas');
+ expect(details.textContent).toContain('gemini-fixture-a · WTUS');
+ expect(details.textContent).toContain('gemini-fixture-b · WTUS');
+ expect(details.textContent).not.toContain('skip at');
+});

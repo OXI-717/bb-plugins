@@ -1,4 +1,4 @@
-import {geminiPlanLabel, geminiCreditLabel} from './gemini-usage.js';
+import {geminiPlanLabel, geminiCreditLabel, geminiUsageGroups} from './gemini-usage.js';
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import { PoolManagementLocked } from './management-access.js';
 import type { AccountSummary, PoolProvider } from "./contracts.js";
@@ -191,11 +191,11 @@ export function registerUsageSource(
           };
           const isGemini = account.provider === 'gemini';
           const gemini = isGemini ? account.geminiUsage : undefined;
-          if (gemini) for (const [index, model] of gemini.models.entries()) {
+          if (gemini) for (const model of geminiUsageGroups(gemini.models)) {
             if (model.resetAt !== null && model.resetAt <= referenceNow) continue;
-            windows.push({kind: 'custom', id: `gemini:${model.modelId}:${model.tokenType ?? 'quota'}:${index}`,
-              label: `${model.modelId}${model.tokenType ? ` · ${model.tokenType}` : ''}`,
-              usedPercent: model.usedPercent, resetsAt: model.resetAt === null ? null : new Date(model.resetAt).toISOString(), model: model.modelId, cost: null});
+            windows.push({kind: 'custom', id: model.id,
+              label: model.label,
+              usedPercent: model.usedPercent, resetsAt: model.resetAt === null ? null : new Date(model.resetAt).toISOString(), model: model.model, cost: null});
           }
           if (!isGemini && account.limitWindows.length > 0) {
             for (const window of account.limitWindows) {

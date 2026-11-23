@@ -1,4 +1,4 @@
-import {geminiPlanLabel, geminiCreditLabel} from './src/gemini-usage.js';
+import {geminiPlanLabel, geminiCreditLabel, geminiUsageGroups} from './src/gemini-usage.js';
 import {AccountDraftForm} from './account-draft-form';
 import {NativeAccountRow, NativeAccountSettings} from './native-account-settings';
 import {AccountListRow, AccountRowStatus, SettingsBadge} from './account-list-row';
@@ -464,8 +464,8 @@ type QuotaSlot = {
 };
 
 function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
-  if(account.provider === 'gemini') return (account.geminiUsage?.models ?? []).filter(model => model.resetAt === null || model.resetAt > Date.now()).map((model,index)=>({
-    key: `gemini:${model.modelId}:${index}`, resetAt: model.resetAt, label: `${model.modelId}${model.tokenType ? ` · ${model.tokenType}` : ''}${model.resetAt === null ? "" : ` · ${resetLabel(model.resetAt)}`}`, utilization: model.usedPercent / 100, status: null, limit: 1,
+  if(account.provider === 'gemini') return geminiUsageGroups(account.geminiUsage?.models ?? []).filter(model => model.resetAt === null || model.resetAt > Date.now()).map(model=>({
+    key: model.id, resetAt: model.resetAt, label: model.label, utilization: model.usedPercent / 100, status: null, limit: 1,
   }));
   const limits = dashboardThresholds(account, threshold);
   const weeklyLimit = account.weeklySpending?.ceiling ?? Math.min(limits.weekly, account.capLimit ?? limits.weekly);

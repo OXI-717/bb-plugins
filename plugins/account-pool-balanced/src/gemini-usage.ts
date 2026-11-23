@@ -76,3 +76,25 @@ export function geminiPlanLabel(usage: GeminiUsage): string | null {
 export function geminiCreditLabel(usage: GeminiUsage): string | null {
   return usage.credits === null ? null : `Google One AI credits: ${usage.credits}`;
 }
+
+// Equal reports are grouped only for display; equality does not establish a shared allowance.
+export function geminiUsageGroups(models: GeminiUsage["models"]) {
+  const groups: Array<{id: string; label: string; usedPercent: number; resetAt: number | null; model: string | null; reports: GeminiUsage["models"]}> = [];
+  const matching = new Map<string, number>();
+  for (const [index, report] of models.entries()) {
+    const key = report.tokenType === null ? null : JSON.stringify([report.tokenType, report.usedPercent, report.resetAt]);
+    const previous = key === null ? undefined : matching.get(key);
+    if (previous !== undefined) {
+      const group = groups[previous]!;
+      group.reports.push(report);
+      group.label = `${group.reports.length} matching reports · ${report.tokenType}`;
+      group.model = null;
+    } else {
+      if (key !== null) matching.set(key, groups.length);
+      groups.push({id: `gemini:${report.modelId}:${report.tokenType ?? 'quota'}:${index}`,
+        label: `${report.modelId}${report.tokenType ? ` · ${report.tokenType}` : ''}`,
+        usedPercent: report.usedPercent, resetAt: report.resetAt, model: report.modelId, reports: [report]});
+    }
+  }
+  return groups;
+}
