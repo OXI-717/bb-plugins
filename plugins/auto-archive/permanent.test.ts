@@ -1,7 +1,12 @@
 import { it, expect, vi } from "vitest";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 const makeThreadResponse = (row: {id: string; title?: string | null; titleFallback?: string | null; archivedAt?: number}) => ({titleFallback: null, archivedAt: null, deletedAt: null, ...row});
-import { migratePermanentThreads, permanentIds } from "./permanent.js";
+import {
+  loadThreadProtectionMeta,
+  migratePermanentThreads,
+  permanentIds,
+  recordThreadUnarchived,
+} from "./permanent.js";
 
 function host() {
   const rows = [
@@ -59,4 +64,23 @@ it("invalid permanent metadata fails closed", async () => {
   const h = host(); h.values.set("thr_upper", {permanent: "true"});
   try { await expect(permanentIds(h.bb, ["thr_upper"])).rejects.toThrow("Invalid permanent"); }
   finally { await h.harness.lifecycle.dispose(); }
+});
+it("records thread unarchive count without clobbering permanent metadata", async () => {
+  const h = host();
+  h.values.set("thr_normal", { permanent: false });
+  const first = await recordThreadUnarchived(h.bb, "thr_normal", 10_000);
+  expect(first).toEqual({ unarchiveCount: 1, lastUnarchivedAt: 10_000 });
+  const second = await recordThreadUnarchived(h.bb, "thr_normal", 20_000);
+  expect(second).toEqual({ unarchiveCount: 2, lastUnarchivedAt: 20_000 });
+  expect(h.values.get("thr_normal")).toEqual({
+    permanent: false,
+    unarchiveCount: 2,
+    lastUnarchivedAt: 20_000,
+  });
+  const loaded = await loadThreadProtectionMeta(h.bb, ["thr_normal"]);
+  expect(loaded.get("thr_normal")).toEqual({
+    permanent: false,
+    unarchiveCount: 2,
+    lastUnarchivedAt: 20_000,
+  });
 });

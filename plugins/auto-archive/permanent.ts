@@ -1,21 +1,89 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { isUppercaseTitle } from "./policy.js";
 
-export async function permanentIds(bb: BbPluginApi, ids: string[], signal?: AbortSignal) {
-  const result = new Set<string>();
+export interface ThreadProtectionMeta {
+  permanent: boolean;
+  unarchiveCount: number;
+  lastUnarchivedAt: number | null;
+}
+
+export async function loadThreadProtectionMeta(
+  bb: BbPluginApi,
+  ids: string[],
+  signal?: AbortSignal,
+): Promise<Map<string, ThreadProtectionMeta>> {
+  const result = new Map<string, ThreadProtectionMeta>();
   for (let offset = 0; offset < ids.length; offset += 200) {
     signal?.throwIfAborted();
     const page = await bb.sdk.threads.experimental_listPluginMetadata({
-      threadIds: ids.slice(offset, offset + 200), signal,
+      threadIds: ids.slice(offset, offset + 200),
+      signal,
     });
     for (const row of page.threads) {
-      const value = row.metadata.permanent;
-      if (value !== undefined && typeof value !== "boolean")
-        throw new Error("Invalid permanent-thread metadata; no archive performed");
-      if (value === true) result.add(row.threadId);
+      const permanent = row.metadata.permanent;
+      if (permanent !== undefined && typeof permanent !== "boolean")
+        throw new Error(
+          "Invalid permanent-thread metadata; no archive performed",
+        );
+      const unarchiveCount = row.metadata.unarchiveCount;
+      if (
+        unarchiveCount !== undefined &&
+        (typeof unarchiveCount !== "number" ||
+          !Number.isInteger(unarchiveCount) ||
+          unarchiveCount < 0)
+      )
+        throw new Error(
+          "Invalid unarchiveCount metadata; no retention action performed",
+        );
+      const lastUnarchivedAt = row.metadata.lastUnarchivedAt;
+      if (
+        lastUnarchivedAt !== undefined &&
+        lastUnarchivedAt !== null &&
+        (typeof lastUnarchivedAt !== "number" ||
+          !Number.isFinite(lastUnarchivedAt) ||
+          lastUnarchivedAt <= 0)
+      )
+        throw new Error(
+          "Invalid lastUnarchivedAt metadata; no retention action performed",
+        );
+      result.set(row.threadId, {
+        permanent: permanent === true,
+        unarchiveCount: unarchiveCount ?? 0,
+        lastUnarchivedAt: lastUnarchivedAt ?? null,
+      });
     }
   }
   return result;
+}
+
+export async function permanentIds(
+  bb: BbPluginApi,
+  ids: string[],
+  signal?: AbortSignal,
+) {
+  const meta = await loadThreadProtectionMeta(bb, ids, signal);
+  const result = new Set<string>();
+  for (const [id, entry] of meta) {
+    if (entry.permanent) result.add(id);
+  }
+  return result;
+}
+
+export async function recordThreadUnarchived(
+  bb: BbPluginApi,
+  threadId: string,
+  now = Date.now(),
+): Promise<{ unarchiveCount: number; lastUnarchivedAt: number }> {
+  const metadata = await bb.sdk.threads.getPluginMetadata({ threadId });
+  const prev = metadata.unarchiveCount;
+  const base =
+    typeof prev === "number" && Number.isInteger(prev) && prev >= 0 ? prev : 0;
+  const unarchiveCount = base + 1;
+  await bb.sdk.threads.updatePluginMetadata({
+    threadId,
+    set: { unarchiveCount, lastUnarchivedAt: now },
+  });
+  return { unarchiveCount, lastUnarchivedAt: now };
 }
 
 /** One-time migration, completed before registering the sweeper. Retry partial writes. */

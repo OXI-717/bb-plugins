@@ -307,3 +307,28 @@ it("preserves legacy pin-prefix protection from fallback without uppercase fallb
     keepThreadIds: 0,
   });
 });
+
+describe("unarchive grace extension", () => {
+  it("extends inactivity window and resets grace from lastUnarchivedAt", () => {
+    const extConfig = { ...config, inactivityDays: 14, unarchiveGraceMultiplier: 2 };
+    // Quiet for 20 days (>14d), but unarchived once -> effective window 28d -> stays active!
+    const extended = t("ext", {
+      latestAttentionAt: now - 20 * DAY,
+      unarchiveCount: 1,
+    });
+    // Quiet for 30 days (>28d) -> eligible for re-archive
+    const expired = t("exp", {
+      latestAttentionAt: now - 30 * DAY,
+      unarchiveCount: 1,
+    });
+    // Quiet for 60 days, but freshly unarchived 2 days ago -> stays active!
+    const freshlyUnarchived = t("fresh", {
+      latestAttentionAt: now - 60 * DAY,
+      unarchiveCount: 1,
+      lastUnarchivedAt: now - 2 * DAY,
+    });
+    expect(
+      ids(planSweep([extended, expired, freshlyUnarchived], extConfig, now)),
+    ).toEqual(["exp"]);
+  });
+});
