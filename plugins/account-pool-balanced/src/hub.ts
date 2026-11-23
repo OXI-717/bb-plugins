@@ -62,7 +62,7 @@ import {
   GEMINI_REFRESH_URL,
   readGeminiOAuthClientSecret,
 } from "./gemini-oauth.js";
-import type { ProviderAdapter } from "./provider-adapter.js";
+import type { AdapterUsageContext, ProviderAdapter } from "./provider-adapter.js";
 import type { ImportedProviderAccount } from "./provider-adapter.js";
 import { TransientOAuthRefreshError } from "./provider-adapter.js";
 import type {
@@ -157,6 +157,7 @@ interface HubOptions {
   now: () => number;
   drainTimeoutMs: number;
   onAccountsChanged: () => void;
+  geminiSummaryDiagnostic?: AdapterUsageContext["geminiSummaryDiagnostic"];
   onUpstreamError: (provider: PoolProvider, error: unknown, context: { elapsedMs: number; transport: "ipv4" | "default"; stage: "fetch_headers" | "response_body"; requestId?: string; bytesRead?: number; guardReason?: "timeout" | "invalid_decision" | "rpc_failed"; operation: "model" | "auxiliary" }) => void;
 }
 
@@ -580,6 +581,7 @@ export class AccountPoolHub {
     const refresh = adapter
       .refreshUsage({
         account,
+        geminiSummaryDiagnostic: force && account.provider === "gemini" ? this.options.geminiSummaryDiagnostic : undefined,
         freshSecret: async (rejectedAccessToken) => {
           const secret = await this.freshSecret(account, adapter, rejectedAccessToken === undefined
             ? { kind: "normal", zaiQuotaCollection: account.provider === "zai" && account.kind === "api-key", geminiQuotaRecheck: force && account.provider === "gemini" && account.kind === "oauth" }
@@ -2173,6 +2175,7 @@ export function createHub(options: {
   drainTimeoutMs?: number;
   maxAffinityBindings?: number;
   onAccountsChanged?: () => void;
+  geminiSummaryDiagnostic?: HubOptions["geminiSummaryDiagnostic"];
   onUpstreamError?: HubOptions["onUpstreamError"];
   journal?: RequestJournal;
 }): AccountPoolHub {
@@ -2332,6 +2335,7 @@ export function createHub(options: {
     now: options.now ?? Date.now,
     drainTimeoutMs: options.drainTimeoutMs ?? 3_000,
     onAccountsChanged: options.onAccountsChanged ?? (() => {}),
+    geminiSummaryDiagnostic: options.geminiSummaryDiagnostic,
     onUpstreamError: options.onUpstreamError ?? (() => {}),
   });
 }

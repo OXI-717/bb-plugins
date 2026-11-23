@@ -1,3 +1,4 @@
+import type { GeminiSummaryDiagnostic } from './gemini-usage.js';
 import { VpnRequiredError } from "./vpn-policy.js";
 import type {
   Account,
@@ -76,6 +77,7 @@ export interface AdapterSecretContext {
 }
 
 export interface AdapterUsageContext {
+  geminiSummaryDiagnostic?: (result: GeminiSummaryDiagnostic) => void;
   account: Account;
   freshSecret: (rejectedAccessToken?: string) => Promise<AccountSecret>;
   accounts: AccountStore;

@@ -309,6 +309,7 @@ export function createAccountPoolPlugin(
       importGeminiCredentials: options.importGeminiCredentials,
       drainTimeoutMs: options.drainTimeoutMs,
       maxAffinityBindings: options.maxAffinityBindings,
+      geminiSummaryDiagnostic: result => bb.log.info('Gemini quota summary ' + JSON.stringify(result)),
       onUpstreamError: (provider, error, context) => {
         const diagnostic = describeTransportError(error);
         bb.log.warn(

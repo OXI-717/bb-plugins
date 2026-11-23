@@ -37,17 +37,31 @@ function safeText(value: unknown): string | null {
 
 type SummaryWindow = z.infer<typeof summaryWindowSchema>;
 
-export function geminiSummaryWindows(payload: unknown): SummaryWindow[] {
+type WeeklyValidation = "invalid-summary" | "weekly-not-declared" | "weekly-rejected" | "weekly-accepted";
+
+export interface GeminiSummaryDiagnostic {
+  enrichment: "request-failed" | "http-error" | "body-invalid" | "project-missing" | "project-present";
+  enrichmentHttpStatus: number | null;
+  summary: "not-requested" | "request-failed" | "http-error" | "body-invalid" | WeeklyValidation;
+  summaryHttpStatus: number | null;
+  weeklyStored: boolean;
+}
+
+export function geminiSummaryWindows(payload: unknown, onWeekly?: (result: WeeklyValidation) => void): SummaryWindow[] {
+  const invalidSummary = () => {
+    onWeekly?.("invalid-summary");
+    return [];
+  };
   const root = object(payload);
   const summary = object(root.response ?? root);
   if (root.error != null || summary.error != null || root.success === false || summary.success === false ||
-      !Array.isArray(summary.groups) || summary.groups.length > 8) return [];
+      !Array.isArray(summary.groups) || summary.groups.length > 8) return invalidSummary();
 
   const windows = new Map<SummaryWindow["kind"], SummaryWindow | null>();
   for (const group of summary.groups) {
     const { buckets, displayName } = object(group);
     if (displayName === "Gemini 4 Argon") continue;
-    if (!Array.isArray(buckets) || buckets.length > 16) return [];
+    if (!Array.isArray(buckets) || buckets.length > 16) return invalidSummary();
     for (const raw of buckets) {
       const bucket = object(raw);
       const kind = bucket.bucketId === "gemini-5h" ? "five-hour"
@@ -66,6 +80,8 @@ export function geminiSummaryWindows(payload: unknown): SummaryWindow[] {
         resetAt: Number.isFinite(reset) && reset >= 0 ? reset : null });
     }
   }
+  const weekly = windows.get("weekly");
+  onWeekly?.(weekly === undefined ? "weekly-not-declared" : weekly === null ? "weekly-rejected" : "weekly-accepted");
   return [...windows.values()].filter((window): window is SummaryWindow => window !== null);
 }
 

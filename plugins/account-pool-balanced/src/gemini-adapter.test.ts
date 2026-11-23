@@ -174,3 +174,42 @@ it.each([200, 403])('collects a declared Gemini quota summary or preserves short
   ]);
   expect(put.mock.calls[0]?.[0].sevenDayUtilization).toBe(previous().sevenDayUtilization);
 });
+
+it.each([
+  ['project-missing', null, 'not-requested', false],
+  ['project-present', 403, 'http-error', false],
+  ['project-present', 200, 'weekly-not-declared', false],
+  ['project-present', 201, 'weekly-rejected', false],
+  ['project-present', 202, 'weekly-accepted', true],
+  ['project-present', 203, 'weekly-accepted', false],
+] as const)('reports safe Gemini weekly evidence %s %s', async (enrichment, fixture, summary, weeklyStored) => {
+  const diagnostic = vi.fn();
+  const fetch = vi.fn(async (input: unknown) => {
+    if (String(input).endsWith(':retrieveUserQuota')) {
+      return Response.json({ buckets: [{ modelId: 'synthetic-model', remainingFraction: 0.8 }] });
+    }
+    if (String(input).endsWith(':loadCodeAssist')) {
+      return Response.json({ cloudaicompanionProject: fixture === null ? undefined : 'private-test-project' });
+    }
+    if (fixture === 403) return new Response('private-upstream-body', { status: 403 });
+    return Response.json({ groups: [{ buckets: fixture === 200 ? [] : [
+      { bucketId: 'gemini-weekly', remainingFraction: fixture === 201 ? '0' : 0.5 },
+    ] }], unknown: 'private-upstream-body' });
+  });
+  const put = vi.fn();
+  await adapter().refreshUsage({
+    account, fetch: fetch as never, freshSecret: async () => oauth, now: () => 100,
+    quotas: { get: previous, put } as never,
+    accounts: { setGeminiUsage: vi.fn(async (_id, usage) =>
+      ({ geminiUsage: { ...usage, windows: fixture === 202 ? usage.windows : undefined } })) } as never,
+    geminiSummaryDiagnostic: diagnostic,
+  });
+  expect(put).toHaveBeenCalledOnce();
+  expect(fetch).toHaveBeenCalledTimes(fixture === null ? 2 : 3);
+  expect(diagnostic).toHaveBeenCalledExactlyOnceWith({
+    enrichment, enrichmentHttpStatus: 200,
+    summary, summaryHttpStatus: fixture === null ? null : fixture === 403 ? 403 : 200,
+    weeklyStored,
+  });
+  expect(JSON.stringify(diagnostic.mock.calls)).not.toMatch(/private-|google-access|11111111/);
+});

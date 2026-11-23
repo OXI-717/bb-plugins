@@ -1,4 +1,4 @@
-import {geminiSummaryWindows, geminiUsageObservation} from './gemini-usage.js';
+import {geminiSummaryWindows, geminiUsageObservation, type GeminiSummaryDiagnostic} from './gemini-usage.js';
 import {managedProject, raceAbort, readAgyJson} from './agy-oauth-login.js';
 import type {
   AccountPoolConfig,
@@ -157,17 +157,27 @@ export function createGeminiAdapter(options: GeminiAdapterOptions): ProviderAdap
         context.quotas.put(quota);
         // Optional display metadata never invalidates a valid quota observation.
         let enrichment: Record<string, unknown> = {};
+        const diagnostic: GeminiSummaryDiagnostic = {
+          enrichment: "request-failed", enrichmentHttpStatus: null,
+          summary: "not-requested", summaryHttpStatus: null, weeklyStored: false,
+        };
         try {
           const auxiliary = await context.fetch(`${options.cloudCodeBaseUrl.replace(/\/+$/u, '')}/v1internal:loadCodeAssist`, {
             method: 'POST', headers: {authorization: `Bearer ${secret.accessToken}`, 'content-type': 'application/json', accept: 'application/json', 'user-agent': GEMINI_USER_AGENT},
             body: JSON.stringify({metadata: {}}), signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
           });
-          if (auxiliary.ok) enrichment = await readAgyJson(auxiliary, AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS));
-          else await auxiliary.body?.cancel();
+          diagnostic.enrichmentHttpStatus = auxiliary.status;
+          diagnostic.enrichment = auxiliary.ok ? "body-invalid" : "http-error";
+          if (auxiliary.ok) {
+            enrichment = await readAgyJson(auxiliary, AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS));
+            diagnostic.enrichment = "project-missing";
+          } else await auxiliary.body?.cancel();
         } catch { /* Quota remains valid when optional enrichment is unavailable. */ }
         const usage = geminiUsageObservation(payload, enrichment, context.now());
         const project = managedProject(enrichment);
         if (project !== null) {
+          diagnostic.enrichment = "project-present";
+          diagnostic.summary = "request-failed";
           const signal = AbortSignal.timeout(10_000);
           try {
             const response = await raceAbort(context.fetch(
@@ -178,13 +188,22 @@ export function createGeminiAdapter(options: GeminiAdapterOptions): ProviderAdap
                 body: JSON.stringify({ project }),
               },
             ), signal);
+            diagnostic.summaryHttpStatus = response.status;
+            diagnostic.summary = response.ok ? "body-invalid" : "http-error";
             if (response.ok) {
-              const windows = geminiSummaryWindows(await readAgyJson(response, signal));
+              const windows = geminiSummaryWindows(await readAgyJson(response, signal), result => {
+                diagnostic.summary = result;
+              });
               if (windows.length > 0) usage.windows = windows;
             } else void response.body?.cancel().catch(() => undefined);
           } catch { /* The summary is optional and cannot invalidate model usage. */ }
         }
-        await context.accounts.setGeminiUsage(context.account.id, usage);
+        try {
+          const saved = await context.accounts.setGeminiUsage(context.account.id, usage);
+          diagnostic.weeklyStored = saved?.geminiUsage?.windows?.some(window => window.kind === "weekly") === true;
+        } finally {
+          context.geminiSummaryDiagnostic?.(diagnostic);
+        }
       }
     },
     errorResponse(status, message, headers, request) {
