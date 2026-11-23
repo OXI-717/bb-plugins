@@ -62,6 +62,19 @@ def check_destination_mounted(
             raise RuntimeError(f"Required sentinel file is missing: {sentinel_path}")
 
 
+def check_distinct_local_source(source: str, dest_dir: Path) -> None:
+    """Refuse a local source that is, contains or sits inside the destination."""
+    host, root_path = parse_remote_spec(source)
+    if host is not None:
+        return
+    src = Path(root_path).resolve()
+    dst = dest_dir.resolve()
+    if src == dst or src in dst.parents or dst in src.parents:
+        raise RuntimeError(
+            f"Source and destination must be separate directories: {src} vs {dst}"
+        )
+
+
 def run_rsync(
     source: str,
     dest_dir: Path,
@@ -336,6 +349,7 @@ def pull_and_verify(
     timeout_sec: int = 300,
 ) -> dict[str, object]:
     check_destination_mounted(dest_dir, require_mount_root, require_sentinel)
+    check_distinct_local_source(source, dest_dir)
     source_archives = list_source_archives(
         source,
         ssh_cmd=ssh_cmd,

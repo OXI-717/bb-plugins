@@ -232,5 +232,20 @@ class PullExportsTests(unittest.TestCase):
             self.assertFalse(arc.exists())
             self.assertFalse(sha.exists())
 
+    def test_refuses_same_or_nested_local_source_and_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "exports"
+            root.mkdir()
+            arc, sha = make_bundle(root, "2026-08", "thr_only_copy", [])
+            alias = Path(tmp) / "alias"
+            alias.symlink_to(root, target_is_directory=True)
+            nested = root / "offload"
+            nested.mkdir()
+            for src, dst in [(root, root), (alias, root), (root, nested), (nested, root)]:
+                with self.assertRaisesRegex(RuntimeError, "separate directories"):
+                    pull_exports.pull_and_verify(source=str(src), dest_dir=dst, delete_remote=True)
+            self.assertTrue(arc.is_file())
+            self.assertTrue(sha.is_file())
+
 if __name__ == "__main__":
     unittest.main()
