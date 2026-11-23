@@ -6,6 +6,8 @@ import { DAY, effectiveRetentionDays } from "./policy.js";
 import { loadThreadProtectionMeta, type ThreadProtectionMeta } from "./permanent.js";
 import { exportAndVerifyThread, validateExportDir } from "./export.js";
 import {
+  classifyAutomatedDeletion,
+  ownerIds,
   planArchivedFileCleanup,
   planAutomatedExportDelete,
   retentionProtectionReason,
@@ -316,6 +318,49 @@ async function revalidateArchivedThread(
   return { ok: true as const, thread: freshThread, meta: freshMeta };
 }
 
+/**
+ * Re-checks, against fresh owner state, that a thread is still eligible for
+ * automated deletion. Owners missing from the initial inventory stay "missing";
+ * any owner that was known must be re-read, and a failed read fails closed.
+ */
+async function revalidateDeletionOwners(
+  bb: BbPluginApi,
+  thread: {
+    parentThreadId: string | null;
+    lifecycleOwnerThreadId: string | null;
+    sourceThreadId: string | null;
+    visibility: "visible" | "hidden";
+    originPluginId?: string | null;
+  },
+  knownThreadIds: ReadonlySet<string>,
+  config: RetentionConfig,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const fresh = {
+    parentThreadId: thread.parentThreadId ?? null,
+    lifecycleOwnerThreadId: thread.lifecycleOwnerThreadId ?? null,
+    sourceThreadId: thread.sourceThreadId ?? null,
+    visibility: thread.visibility,
+    originPluginId: thread.originPluginId ?? null,
+  };
+  const owners = new Map<string, { archivedAt: number | null; deletedAt: number | null }>();
+  for (const ownerId of ownerIds(fresh)) {
+    if (!knownThreadIds.has(ownerId)) continue;
+    try {
+      const owner = await bb.sdk.threads.get({ threadId: ownerId, signal });
+      owners.set(ownerId, {
+        archivedAt: owner.archivedAt,
+        deletedAt: owner.deletedAt,
+      });
+    } catch {
+      return "owner-recheck-failed";
+    }
+  }
+  return classifyAutomatedDeletion(fresh, owners, config)
+    ? null
+    : "owner-live-or-reclassified";
+}
+
 export async function runRetention(
   bb: BbPluginApi,
   config: RetentionConfig & { dryRun: boolean },
@@ -346,6 +391,7 @@ export async function runRetention(
 
   const filePlan = planArchivedFileCleanup(snapshots, config, now);
   const deletePlan = planAutomatedExportDelete(snapshots, config, now);
+  const knownThreadIds = new Set(snapshots.map((t) => t.id));
   const errors: string[] = [];
 
   // 1. Archived thread-storage cleanup (never touches conversation history in bb.db).
@@ -525,6 +571,18 @@ export async function runRetention(
         bumpDeleteSkipped(`recheck-${preCheck.reason}`);
         continue;
       }
+      const preOwners = await revalidateDeletionOwners(
+        bb,
+        preCheck.thread,
+        knownThreadIds,
+        config,
+        options.signal,
+      );
+      if (preOwners) {
+        failedOrSkippedIds.add(candidate.id);
+        bumpDeleteSkipped(`recheck-${preOwners}`);
+        continue;
+      }
       const preChildren = await bb.sdk.threads.childSummary({
         threadId: candidate.id,
         signal: options.signal,
@@ -563,6 +621,18 @@ export async function runRetention(
       ) {
         failedOrSkippedIds.add(candidate.id);
         bumpDeleteSkipped("changed-during-export");
+        continue;
+      }
+      const postOwners = await revalidateDeletionOwners(
+        bb,
+        postCheck.thread,
+        knownThreadIds,
+        config,
+        options.signal,
+      );
+      if (postOwners) {
+        failedOrSkippedIds.add(candidate.id);
+        bumpDeleteSkipped(`owner-changed-during-export`);
         continue;
       }
       const postChildren = await bb.sdk.threads.childSummary({

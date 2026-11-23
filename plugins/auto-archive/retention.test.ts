@@ -428,4 +428,58 @@ describe("runRetention", () => {
     expect(r3.exportDelete.skipped["has-non-deleted-children"]).toBe(1);
     expect(h3.deleteCalls).toHaveLength(0);
   });
+
+  it("rechecks owners against fresh state before export and before delete", async () => {
+    const dataDir = await makeTempDir("aa-owner-data-");
+    const exportDir = await makeTempDir("aa-owner-out-");
+    const config = makeConfig({ dryRun: false, enableAutomatedExportDelete: true, exportDir });
+
+    // Parent is unarchived during the child's first fresh read: no export, no delete.
+    const parentA = makeRow("thr_parent_a", { archivedAt: NOW - 45 * DAY });
+    const childA = makeRow("thr_child_a", { parentThreadId: "thr_parent_a", archivedAt: NOW - 45 * DAY });
+    const hA = makeHarness([parentA, childA], {
+      dataDir,
+      onBeforeGet: (id, callIndex) => {
+        if (id === "thr_child_a" && callIndex === 1) parentA.archivedAt = null;
+      },
+    });
+    const rA = await runRetention(hA.bb, config, { now: NOW });
+    expect(rA.exportDelete.exportedCount).toBe(0);
+    expect(rA.exportDelete.skipped["recheck-owner-live-or-reclassified"]).toBe(1);
+    expect(hA.deleteCalls).toHaveLength(0);
+
+    // Parent is unarchived while the child is being exported: export kept, delete refused.
+    const parentB = makeRow("thr_parent_b", { archivedAt: NOW - 45 * DAY });
+    const childB = makeRow("thr_child_b", { parentThreadId: "thr_parent_b", archivedAt: NOW - 45 * DAY });
+    const hB = makeHarness([parentB, childB], {
+      dataDir,
+      onBeforeGet: (id, callIndex) => {
+        if (id === "thr_child_b" && callIndex === 2) parentB.archivedAt = null;
+      },
+    });
+    const rB = await runRetention(hB.bb, config, { now: NOW });
+    expect(rB.exportDelete.exportedCount).toBe(1);
+    expect(rB.exportDelete.skipped["owner-changed-during-export"]).toBe(1);
+    expect(hB.deleteCalls).toHaveLength(0);
+
+    // A known owner that can no longer be read fails closed.
+    const parentC = makeRow("thr_parent_c", { archivedAt: NOW - 45 * DAY });
+    const childC = makeRow("thr_child_c", { parentThreadId: "thr_parent_c", archivedAt: NOW - 45 * DAY });
+    const hC = makeHarness([parentC, childC], {
+      dataDir,
+      onBeforeGet: (id) => {
+        if (id === "thr_parent_c") throw new Error("transient");
+      },
+    });
+    const rC = await runRetention(hC.bb, config, { now: NOW });
+    expect(rC.exportDelete.skipped["recheck-owner-recheck-failed"]).toBe(1);
+    expect(hC.deleteCalls).toHaveLength(0);
+
+    // An owner missing from the inventory stays missing: the orphan child is deleted.
+    const childD = makeRow("thr_child_d", { parentThreadId: "thr_gone", archivedAt: NOW - 45 * DAY });
+    const hD = makeHarness([childD], { dataDir });
+    const rD = await runRetention(hD.bb, config, { now: NOW });
+    expect(rD.exportDelete.deletedCount).toBe(1);
+    expect(hD.deleteCalls.map((c) => c.threadId)).toEqual(["thr_child_d"]);
+  });
 });

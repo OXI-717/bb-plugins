@@ -10,7 +10,9 @@ Workflow (fail-closed):
    - matching `.jsonl.gz.sha256` checksum
    - valid gzip stream whose first line is JSON with format `oxi-bb-thread-export/v1`
 4. Only when `--delete-remote` is passed (and NOT `--dry-run`), remove ONLY the
-   verified `.jsonl.gz` and `.jsonl.gz.sha256` files from the source outbox.
+   verified `.jsonl.gz` and `.jsonl.gz.sha256` files from the source outbox, and
+   only while the source archive still hashes to the verified digest. A bundle that
+   was re-exported after the copy is kept for the next run.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 
@@ -145,56 +148,123 @@ def verify_archive_pair(dest_dir: Path, archive_path: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
+# Deletion program shared by local and remote (SSH) cleanup, so both paths run the
+# same code. Input on stdin: NUL-delimited pairs `<relative archive path>\0<sha256>`.
+# Each archive is first renamed to a private temp name (so a concurrent re-export
+# lands on the original name untouched), then hashed. Only a file whose SHA-256
+# equals the destination-verified digest is deleted, together with a checksum file
+# that names that same digest. Anything else is restored or left in place.
+DELETE_PROGRAM = r"""
+import hashlib, os, pathlib, sys
+base = pathlib.Path(sys.argv[1]).resolve()
+raw = sys.stdin.buffer.read().split(b"\0")
+if raw and raw[-1] == b"":
+    raw.pop()
+if len(raw) % 2:
+    raise SystemExit(3)
+
+def inside(p):
+    return str(p).startswith(str(base) + os.sep)
+
+def claim(path):
+    tmp = path.with_name(path.name + ".tmp.pull-delete." + str(os.getpid()))
+    try:
+        os.rename(path, tmp)
+    except FileNotFoundError:
+        return None
+    return tmp
+
+def release(tmp, path):
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        return
+    os.unlink(tmp)
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+removed = 0
+kept = 0
+for i in range(0, len(raw), 2):
+    rel = raw[i].decode("utf-8")
+    expected = raw[i + 1].decode("ascii")
+    archive = (base / rel).resolve()
+    checksum = archive.with_name(archive.name + ".sha256")
+    if not inside(archive) or not inside(checksum):
+        raise SystemExit(2)
+    if archive.is_symlink() or not archive.is_file():
+        kept += 1
+        continue
+    tmp = claim(archive)
+    if tmp is None:
+        kept += 1
+        continue
+    if sha256(tmp) != expected:
+        release(tmp, archive)
+        kept += 1
+        continue
+    os.unlink(tmp)
+    removed += 1
+    if checksum.is_symlink() or not checksum.is_file():
+        continue
+    tmp_sum = claim(checksum)
+    if tmp_sum is None:
+        continue
+    line = tmp_sum.read_text(encoding="utf-8").strip()
+    if line.split("  ", 1)[0] == expected:
+        os.unlink(tmp_sum)
+        removed += 1
+    else:
+        release(tmp_sum, checksum)
+print(removed, kept)
+"""
+
+
+def verified_digest(archive_path: Path) -> str:
+    """Digest recorded next to an archive that `verify_archive_pair` accepted."""
+    checksum_path = archive_path.with_name(archive_path.name + ".sha256")
+    m = SHA256_LINE_RE.match(checksum_path.read_text(encoding="utf-8").strip())
+    if not m:
+        raise RuntimeError(f"checksum changed after verification: {checksum_path}")
+    return m.group(1)
+
+
 def delete_verified_from_source(
     source: str,
-    verified_rel_archives: list[str],
+    verified: dict[str, str],
     *,
     ssh_cmd: str | None,
     timeout_sec: int,
-) -> int:
-    if not verified_rel_archives:
-        return 0
-    rel_files: list[str] = []
-    for rel in verified_rel_archives:
-        sha_rel = rel + ".sha256"
-        if not SAFE_REL_RE.match(rel) or not SAFE_REL_RE.match(sha_rel):
+) -> tuple[int, int]:
+    """Delete source bundles whose archive still hashes to the verified digest.
+
+    Returns `(removed_files, kept_archives)`.
+    """
+    if not verified:
+        return 0, 0
+    payload_parts: list[bytes] = []
+    for rel, digest in sorted(verified.items()):
+        if not SAFE_REL_RE.match(rel) or not SAFE_REL_RE.match(rel + ".sha256"):
             raise ValueError(f"Refusing unsafe relative path: {rel!r}")
-        rel_files.append(rel)
-        rel_files.append(sha_rel)
+        if not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise ValueError(f"Refusing malformed digest for {rel!r}")
+        payload_parts.extend([rel.encode("utf-8"), digest.encode("ascii")])
+    payload = b"\0".join(payload_parts) + b"\0"
 
     host, root_path = parse_remote_spec(source)
     if host is None:
-        base = Path(root_path).resolve()
-        removed = 0
-        for rel in rel_files:
-            target = (base / rel).resolve()
-            if not str(target).startswith(str(base) + os.sep):
-                raise ValueError(f"Path escape refused: {target}")
-            if target.is_file() or target.is_symlink():
-                target.unlink()
-                removed += 1
-        return removed
-
-    # Remote deletion: pass root + NUL-delimited safe relative paths over stdin to python3
-    # on the remote host — zero shell interpolation, strict containment check.
-    remote_script = (
-        "import os, pathlib, sys; "
-        "base = pathlib.Path(sys.argv[1]).resolve(); "
-        "raw = sys.stdin.buffer.read().split(b'\\0'); "
-        "removed = 0\n"
-        "for item in raw:\n"
-        "  if not item: continue\n"
-        "  rel = item.decode('utf-8')\n"
-        "  target = (base / rel).resolve()\n"
-        "  if not str(target).startswith(str(base) + os.sep): raise SystemExit(2)\n"
-        "  if target.is_file():\n"
-        "    target.unlink()\n"
-        "    removed += 1\n"
-        "print(removed)\n"
-    )
-    ssh_parts = ssh_cmd.split() if ssh_cmd else ["ssh"]
-    cmd = [*ssh_parts, host, "python3", "-c", remote_script, root_path]
-    payload = b"\0".join(p.encode("utf-8") for p in rel_files)
+        cmd = [sys.executable, "-I", "-c", DELETE_PROGRAM, root_path]
+    else:
+        # OpenSSH joins remote arguments with spaces and hands them to a shell,
+        # so the remote command must be a single shell-quoted string.
+        ssh_parts = shlex.split(ssh_cmd) if ssh_cmd else ["ssh"]
+        remote = shlex.join(["python3", "-I", "-c", DELETE_PROGRAM, root_path])
+        cmd = [*ssh_parts, host, remote]
     res = subprocess.run(
         cmd,
         input=payload,
@@ -204,9 +274,10 @@ def delete_verified_from_source(
     )
     if res.returncode != 0:
         raise RuntimeError(
-            f"remote delete failed (exit {res.returncode}): {res.stderr.decode('utf-8', 'replace').strip()}"
+            f"source delete failed (exit {res.returncode}): {res.stderr.decode('utf-8', 'replace').strip()}"
         )
-    return int(res.stdout.decode("utf-8").strip() or "0")
+    removed, kept = res.stdout.decode("utf-8").split()
+    return int(removed), int(kept)
 
 
 def list_source_archives(
@@ -288,7 +359,7 @@ def pull_and_verify(
     else:
         targets = source_archives
 
-    verified_all: list[str] = []
+    verified_all: dict[str, str] = {}
     failed: dict[str, str] = {}
     for rel in targets:
         archive_path = dest_dir / rel
@@ -299,15 +370,18 @@ def pull_and_verify(
             continue
         ok, reason = verify_archive_pair(dest_dir, archive_path)
         if ok:
-            verified_all.append(rel)
+            verified_all[rel] = verified_digest(archive_path)
         else:
             failed[rel] = reason
 
     source_set = set(source_archives)
-    verified_for_delete = [rel for rel in verified_all if rel in source_set]
+    verified_for_delete = {
+        rel: digest for rel, digest in verified_all.items() if rel in source_set
+    }
     deleted_remote_files = 0
+    kept_changed_sources = 0
     if delete_remote and not dry_run and verified_for_delete:
-        deleted_remote_files = delete_verified_from_source(
+        deleted_remote_files, kept_changed_sources = delete_verified_from_source(
             source,
             verified_for_delete,
             ssh_cmd=ssh_cmd,
@@ -320,6 +394,7 @@ def pull_and_verify(
         "verifiedCount": len(verified_all),
         "failedVerification": failed,
         "deletedSourceFiles": deleted_remote_files,
+        "keptChangedSourceArchives": kept_changed_sources,
         "deleteRemoteRequested": delete_remote,
     }
 

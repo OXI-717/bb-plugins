@@ -70,7 +70,12 @@ export interface ExportDeleteCandidate {
   visibility: "visible" | "hidden";
 }
 
-function ownerIds(t: RetentionSnapshot): string[] {
+type OwnerFields = Pick<
+  RetentionSnapshot,
+  "parentThreadId" | "lifecycleOwnerThreadId" | "sourceThreadId" | "visibility"
+>;
+
+export function ownerIds(t: OwnerFields): string[] {
   return [
     ...new Set(
       [
@@ -82,7 +87,9 @@ function ownerIds(t: RetentionSnapshot): string[] {
   ];
 }
 
-function isLive(t: RetentionSnapshot | undefined): boolean {
+function isLive(
+  t: Pick<RetentionSnapshot, "archivedAt" | "deletedAt"> | undefined,
+): boolean {
   return t !== undefined && t.archivedAt === null && t.deletedAt === null;
 }
 
@@ -121,8 +128,8 @@ export function retentionProtectionReason(
  * plugins such as handoff / oxi-projects) are NEVER eligible for deletion.
  */
 export function classifyAutomatedDeletion(
-  t: RetentionSnapshot,
-  byId: ReadonlyMap<string, RetentionSnapshot>,
+  t: OwnerFields & Pick<RetentionSnapshot, "originPluginId">,
+  byId: ReadonlyMap<string, Pick<RetentionSnapshot, "archivedAt" | "deletedAt">>,
   config: Pick<RetentionConfig, "automatedOriginPluginIds">,
 ): AutomatedDeletionReason | null {
   // Never delete a thread while any direct owner/parent/source is still live.

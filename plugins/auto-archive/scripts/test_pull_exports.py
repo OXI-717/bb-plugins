@@ -2,6 +2,8 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import os
+import stat
 from pathlib import Path
 import tempfile
 import unittest
@@ -166,6 +168,69 @@ class PullExportsTests(unittest.TestCase):
             )
             self.assertIn("2026-01/thr_old_hist.jsonl.gz", scrub["failedVerification"])
 
+
+    def test_keeps_source_bundle_republished_after_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src"
+            dst = Path(tmp) / "dst"
+            src.mkdir()
+            dst.mkdir()
+            make_bundle(src, "2026-08", "thr_race", [{"seq": 1}])
+            make_bundle(dst, "2026-08", "thr_race", [{"seq": 1}])
+            rel = "2026-08/thr_race.jsonl.gz"
+            ok, _ = pull_exports.verify_archive_pair(dst, dst / rel)
+            self.assertTrue(ok)
+            verified = {rel: pull_exports.verified_digest(dst / rel)}
+
+            # Retention republishes a newer export after the copy was verified.
+            new_arc, new_sha = make_bundle(src, "2026-08", "thr_race", [{"seq": 1}, {"seq": 2}])
+            new_bytes = new_arc.read_bytes()
+
+            removed, kept = pull_exports.delete_verified_from_source(
+                str(src), verified, ssh_cmd=None, timeout_sec=30
+            )
+            self.assertEqual((removed, kept), (0, 1))
+            self.assertEqual(new_arc.read_bytes(), new_bytes)
+            self.assertTrue(new_sha.is_file())
+            self.assertEqual(sorted(p.name for p in (src / "2026-08").iterdir()),
+                             ["thr_race.jsonl.gz", "thr_race.jsonl.gz.sha256"])
+
+    def test_keeps_checksum_that_names_a_different_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src"
+            src.mkdir()
+            arc, sha = make_bundle(src, "2026-08", "thr_sum", [])
+            digest = hashlib.sha256(arc.read_bytes()).hexdigest()
+            sha.write_text(f"{'1' * 64}  {arc.name}\n", encoding="utf-8")
+
+            removed, kept = pull_exports.delete_verified_from_source(
+                str(src), {"2026-08/thr_sum.jsonl.gz": digest}, ssh_cmd=None, timeout_sec=30
+            )
+            self.assertEqual((removed, kept), (1, 0))
+            self.assertFalse(arc.exists())
+            self.assertTrue(sha.is_file())
+
+    def test_remote_delete_survives_shell_word_splitting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src dir"
+            src.mkdir()
+            arc, sha = make_bundle(src, "2026-08", "thr_remote", [])
+            digest = hashlib.sha256(arc.read_bytes()).hexdigest()
+            # Fake ssh with OpenSSH semantics: drop the host, join the remaining
+            # arguments with spaces and run them through a shell.
+            fake_ssh = Path(tmp) / "fake-ssh"
+            fake_ssh.write_text('#!/bin/sh\nshift\nexec /bin/sh -c "$*"\n', encoding="utf-8")
+            fake_ssh.chmod(fake_ssh.stat().st_mode | stat.S_IXUSR)
+
+            removed, kept = pull_exports.delete_verified_from_source(
+                f"archive-host:{src}",
+                {"2026-08/thr_remote.jsonl.gz": digest},
+                ssh_cmd=str(fake_ssh),
+                timeout_sec=30,
+            )
+            self.assertEqual((removed, kept), (2, 0))
+            self.assertFalse(arc.exists())
+            self.assertFalse(sha.exists())
 
 if __name__ == "__main__":
     unittest.main()

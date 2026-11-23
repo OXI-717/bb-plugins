@@ -132,7 +132,9 @@ python3 plugins/auto-archive/scripts/pull-exports.py \
 The script refuses to run if the external volume is not mounted or the sentinel
 file is missing, syncs completed `.jsonl.gz` + `.sha256` pairs via `rsync`
 (ignoring `*.tmp*`), verifies SHA-256 + gzip + event count locally on the
-external drive, and removes ONLY verified files from the server outbox.
+external drive, and removes ONLY verified files from the server outbox. A source
+archive is removed only while it still hashes to the verified digest; a bundle
+re-exported after the copy stays for the next run (`keptChangedSourceArchives`).
 Pass `--dry-run` to preview without deleting source files, or `--verify-all` to
 scrub the entire destination archive.
 
