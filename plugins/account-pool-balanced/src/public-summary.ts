@@ -1,20 +1,16 @@
 import { policyThresholds } from './account-policy.js';
 import { codexBudgetQuota } from './codex-budget.js';
-import type { Account, AccountQuota } from './contracts.js';
+import { providerSchema, type PoolProvider, type Account, type AccountQuota } from './contracts.js';
 import { providerBudgetQuota } from './provider-budget.js';
 import { accountStatus } from './quota.js';
 import { zaiBudgetQuota } from './zai-budget.js';
 
-const providers = ['claude', 'codex', 'gemini', 'grok', 'zai', 'ifm'] as const;
-type Provider = typeof providers[number];
-
-function usedPercent(provider: Provider, quota: AccountQuota, now: number): number | null {
-  if (provider === 'claude') {
+function usedPercent(provider: PoolProvider, quota: AccountQuota, now: number): number | null {
+  if (provider !== 'codex' && provider !== 'zai') {
     const evidence = providerBudgetQuota(provider, quota, now);
     if (!evidence.budgetReady || !evidence.windows.length) return null;
     return Math.max(...evidence.windows.map(window => 100 - window.remainingPercent));
   }
-  if (provider !== 'codex' && provider !== 'zai') return null;
   const evidence = provider === 'codex' ? codexBudgetQuota(quota, now) : zaiBudgetQuota(quota, now);
   if (!evidence.budgetReady) return null;
   const windows = Object.values(evidence.windows).flatMap(window =>
@@ -30,7 +26,7 @@ export function publicPoolSummary(
 ) {
   return {
     generatedAt: new Date(now).toISOString(),
-    providers: Object.fromEntries(providers.map(provider => {
+    providers: Object.fromEntries(providerSchema.options.map(provider => {
       const enabled = accounts.filter(account => account.enabled && account.provider === provider);
       let exhaustedCount = 0;
       const usage: Array<number | null> = [];

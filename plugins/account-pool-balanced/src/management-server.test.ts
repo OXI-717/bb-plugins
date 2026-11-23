@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createFakePluginHost } from '@get-bb/plugin-sdk/testing';
 import ts from 'typescript';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { providerSchema } from './contracts.js';
 import { createAccountPoolPlugin } from './server.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -26,7 +27,7 @@ it('keeps owner RPCs available while CLI and delegated management remain guarded
   const empty = { readyCount: 0, totalEnabled: 0, minUsedPercent: null, exhausted: false };
   expect(JSON.parse(summary.stdout)).toEqual({
     generatedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
-    providers: { claude: empty, codex: empty, gemini: empty, grok: empty, zai: empty, ifm: empty },
+    providers: Object.fromEntries(providerSchema.options.map(provider => [provider, empty])),
   });
   expect((await host.harness.behavior.runCli(['status', '--summary', '--json'])).exitCode).toBe(1);
   await expect(call('provider-usage.v1.listResources', {})).resolves.toEqual({ label: 'Account Pooler', resources: [] });

@@ -27,8 +27,10 @@
 ### Cached quota summary
 
 `bb pool status --summary` is a read-only JSON command available without a
-management grant. It returns a server timestamp and fixed quota signals for
-Claude, Codex, Gemini, Grok, Z.AI and IFM. Readiness here describes cached
+management grant. It returns a server timestamp and one row for each provider
+supported by this Pooler version, including providers with no enabled accounts.
+Provider keys can change as versions add or retire providers. Consumers should
+validate each row independently and only select eligible, approved models. Readiness here describes cached
 quota status. It does not evaluate project or network admission.
 
 The summary contains counts and an exhaustion flag. The minimum usage
