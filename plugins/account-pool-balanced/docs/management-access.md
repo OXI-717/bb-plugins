@@ -23,3 +23,15 @@
 Штатный обновлятор использует приватный ключ локально и короткие допуски. После0.4.82 management RPC сохранены, поэтому обновление и снятие паузы совместимы. Старый парный upgrade-protection.sh не адаптирован.
 
 Ядро BB не менялось. Same-UID файлы/процессы, общие API BB и старые provider.env-resolved журналы вне гарантий. Токены не отзываются и журналы не удаляются этим выпуском.
+
+### Cached quota summary
+
+`bb pool status --summary` is a read-only JSON command available without a
+management grant. It returns a server timestamp and fixed quota signals for
+Claude, Codex, Gemini, Grok, Z.AI and IFM. Readiness here describes cached
+quota status. It does not evaluate project or network admission.
+
+The summary contains counts and an exhaustion flag. The minimum usage
+percentage is null unless at least two quota-ready accounts have complete,
+fresh numeric evidence. Counts and repeated samples can reveal operational
+activity. The command does not refresh quotas or return account identifiers.

@@ -1,3 +1,4 @@
+import {publicPoolSummary} from './public-summary.js';
 import {startLoopDelay} from './loop-delay.js';
 import {ThreadAccountSelection} from './thread-account-selection.js';
 import {projectTier} from './project-policy.js';
@@ -514,7 +515,10 @@ export function createAccountPoolPlugin(
     );
     operations.uncertainNativeLeases=()=>nativeSessions.uncertainLeases();
     operations.routeTracking=async()=>{await egress.cleanup();return egress.capacity();};
-    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})),()=>update.status(),geminiLogin);
+    registerPoolCli(managementCli(bb, management, async () => {
+      const snapshot = await accounts.list();
+      return publicPoolSummary(snapshot, id => quotas.get(id), currentSettings.switchThreshold, now());
+    }), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})),()=>update.status(),geminiLogin);
     registerUsageSource(bb, hub, false, now);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);

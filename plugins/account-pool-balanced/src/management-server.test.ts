@@ -21,6 +21,14 @@ it('keeps owner RPCs available while CLI and delegated management remain guarded
   for (const method of ['account.list', 'status.get', 'config.get', 'egress.status', 'native.accounts']) await expect(call(method, null)).resolves.toBeDefined();
   expect((await host.harness.behavior.runCli(['egress', 'status', '--json'])).exitCode).toBe(1);
   expect(JSON.parse((await host.harness.behavior.runCli(['status', '--json'])).stdout)).toEqual({ management: 'locked' });
+  const summary = await host.harness.behavior.runCli(['status', '--summary']);
+  expect(summary.exitCode).toBe(0);
+  const empty = { readyCount: 0, totalEnabled: 0, minUsedPercent: null, exhausted: false };
+  expect(JSON.parse(summary.stdout)).toEqual({
+    generatedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
+    providers: { claude: empty, codex: empty, gemini: empty, grok: empty, zai: empty, ifm: empty },
+  });
+  expect((await host.harness.behavior.runCli(['status', '--summary', '--json'])).exitCode).toBe(1);
   await expect(call('provider-usage.v1.listResources', {})).resolves.toEqual({ label: 'Account Pooler', resources: [] });
   const key = (await fs.readFile(path.join(dataDir, 'plugins', 'pool-test', 'secrets', 'accounts', 'management', 'operator.env'), 'utf8')).trim().split('=')[1]!;
   const grant = await call('management.unlock', { key, scope: 'manage', ttlSeconds: 60 }) as { token: string };

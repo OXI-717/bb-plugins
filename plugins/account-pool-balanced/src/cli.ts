@@ -80,7 +80,7 @@ const HELP = [
   "  bb pool account cap <id> off",
   "  bb pool account reorder <claude|codex|kimi|zai|opencode-go|neuraldeep|nvidia|ifm|agy|cursor|devin|grok|gemini> <id>...",
   "  bb pool account refresh <id>",
-  "  bb pool status [--json]",
+  "  bb pool status [--json|--summary]",
   "  bb pool readiness [--project <id>] [--json]",
   '  bb pool native status --json',
   '  bb pool native preflight <target-json>',
@@ -475,7 +475,7 @@ export function registerPoolCli(
       {
         name: "status",
         summary: "Show hub, machine token, routing, and account status",
-        usage: "bb pool status [--json]",
+        usage: "bb pool status [--json|--summary]",
       },
       {
         name: "routing",

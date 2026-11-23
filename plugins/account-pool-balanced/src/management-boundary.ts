@@ -1,3 +1,4 @@
+import type { publicPoolSummary } from './public-summary.js';
 import fs from 'node:fs/promises';
 import type { BbPluginApi, PluginRpcHandlers } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
@@ -70,7 +71,7 @@ export function registerManagementRpc(bb: Pick<BbPluginApi, 'rpc'>, access: Mana
 const cliUnlockSchema = managementUnlockSchema.extend({ output: z.string().min(1).max(4096) }).strict();
 const cliExecuteSchema = z.object({ token: z.string().max(256), argv: z.array(z.string()).min(1).max(128) }).strict();
 
-export function managementCli(bb: Pick<BbPluginApi, 'cli' | 'server' | 'pluginId'>, access: ManagementAccess): Pick<BbPluginApi, 'cli' | 'server' | 'pluginId'> {
+export function managementCli(bb: Pick<BbPluginApi, 'cli' | 'server' | 'pluginId'>, access: ManagementAccess, summary?: () => Promise<ReturnType<typeof publicPoolSummary>>): Pick<BbPluginApi, 'cli' | 'server' | 'pluginId'> {
   return {
     server: bb.server, pluginId: bb.pluginId,
     cli: { register(registration) {
@@ -82,9 +83,16 @@ export function managementCli(bb: Pick<BbPluginApi, 'cli' | 'server' | 'pluginId
         }],
         async run(argv, context) {
           try {
+            if (summary && argv.length === 2 && argv[0] === 'status' && argv[1] === '--summary') {
+              try {
+                return { exitCode: 0, stdout: JSON.stringify(await summary()) + '\n' };
+              } catch {
+                return { exitCode: 1, stderr: 'Pool summary unavailable.\n' };
+              }
+            }
             if (argv[0] !== 'management') {
               if ((argv[0] === 'status' || argv[0] === 'readiness') && argv.slice(1).every(arg => arg === '--json')) return { exitCode: 0, stdout: JSON.stringify({ management: 'locked' }) + '\n' };
-              if (argv.length === 0 || argv.includes('--help')) return { exitCode: 0, stdout: 'Pool management requires an operator-issued grant.\nUse: bb pool management <unlock|execute|lock> --request-stdin\nPublic status: bb pool status --json\n' };
+              if (argv.length === 0 || argv.includes('--help')) return { exitCode: 0, stdout: 'Pool management requires an operator-issued grant.\nUse: bb pool management <unlock|execute|lock> --request-stdin\nPublic status: bb pool status [--json|--summary]\n' };
               throw new PoolManagementLocked();
             }
             if (argv.length !== 4 || argv[2] !== '--request') throw new Error('Use management <unlock|execute|lock> --request-stdin.');
