@@ -1,4 +1,4 @@
-import {geminiPlanLabel, geminiCreditLabel, geminiUsageGroups} from './gemini-usage.js';
+import {geminiPlanLabel, geminiCreditLabel, geminiSummaryRows, geminiUsageGroups} from './gemini-usage.js';
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import { PoolManagementLocked } from './management-access.js';
 import type { AccountSummary, PoolProvider } from "./contracts.js";
@@ -191,7 +191,13 @@ export function registerUsageSource(
           };
           const isGemini = account.provider === 'gemini';
           const gemini = isGemini ? account.geminiUsage : undefined;
-          if (gemini) for (const model of geminiUsageGroups(gemini.models)) {
+          const geminiSummary = geminiSummaryRows(gemini, referenceNow);
+          for (const window of geminiSummary) {
+            windows.push({ kind: window.kind, id: `gemini:summary:${window.kind}`,
+              label: window.label, usedPercent: window.usedPercent,
+              resetsAt: window.resetAt === null ? null : new Date(window.resetAt).toISOString(), model: null, cost: null });
+          }
+          if (gemini && !geminiSummary.some(window => window.kind === "five-hour")) for (const model of geminiUsageGroups(gemini.models)) {
             if (model.resetAt !== null && model.resetAt <= referenceNow) continue;
             windows.push({kind: 'custom', id: model.id,
               label: model.label,

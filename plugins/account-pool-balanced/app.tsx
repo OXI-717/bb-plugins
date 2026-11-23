@@ -1,4 +1,4 @@
-import {geminiPlanLabel, geminiCreditLabel, geminiUsageGroups} from './src/gemini-usage.js';
+import {geminiPlanLabel, geminiCreditLabel, geminiSummaryRows, geminiUsageGroups} from './src/gemini-usage.js';
 import {AccountDraftForm} from './account-draft-form';
 import {NativeAccountRow, NativeAccountSettings} from './native-account-settings';
 import {AccountListRow, AccountRowStatus, SettingsBadge} from './account-list-row';
@@ -464,9 +464,17 @@ type QuotaSlot = {
 };
 
 function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
-  if(account.provider === 'gemini') return geminiUsageGroups(account.geminiUsage?.models ?? []).filter(model => model.resetAt === null || model.resetAt > Date.now()).map(model=>({
-    key: model.id, resetAt: model.resetAt, label: model.label, utilization: model.usedPercent / 100, status: null, limit: 1,
-  }));
+  if (account.provider === "gemini") {
+    const now = Date.now();
+    const summary = geminiSummaryRows(account.geminiUsage, now);
+    const models = summary.some(window => window.kind === "five-hour") ? []
+      : geminiUsageGroups(account.geminiUsage?.models ?? []).filter(model => model.resetAt === null || model.resetAt > now);
+    return [
+      ...summary.map(window => ({ key: window.kind, ...window })),
+      ...models.map(model => ({ key: model.id, ...model })),
+    ].map(row => ({ key: row.key, resetAt: row.resetAt, label: row.label,
+      utilization: row.usedPercent / 100, status: null, limit: 1 }));
+  }
   const limits = dashboardThresholds(account, threshold);
   const weeklyLimit = account.weeklySpending?.ceiling ?? Math.min(limits.weekly, account.capLimit ?? limits.weekly);
   const generic = account.limitWindows.map(window => {
@@ -2621,6 +2629,10 @@ function AccountCard({
       </div>
       <div className="space-y-3">
         {account.provider === "gemini" ? <div aria-label="Gemini model quotas">
+          {geminiSummaryRows(account.geminiUsage, Date.now()).map(window =>
+            <QuotaDetail key={window.kind} label={window.label}
+              quota={shared(window.usedPercent / 100, window.resetAt, null)} threshold={1} showSkipAt={false} />
+          )}
           {account.geminiUsage?.models.length ? account.geminiUsage.models.map((model,index) =>
             <QuotaDetail key={`${model.modelId}:${index}`} label={`${model.modelId}${model.tokenType ? ` · ${model.tokenType}` : ""}`}
               quota={{...shared(model.usedPercent / 100, model.resetAt, null),source:"usage",observedAt:account.geminiUsage!.observedAt}} threshold={1} showSkipAt={false} />

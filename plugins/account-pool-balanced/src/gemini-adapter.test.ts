@@ -144,3 +144,33 @@ describe('Gemini optional enrichment',()=>{
   expect(fetch).toHaveBeenCalledOnce();expect(setGeminiUsage).not.toHaveBeenCalled();expect(put).not.toHaveBeenCalled();
  });
 });
+
+it.each([200, 403])('collects a declared Gemini quota summary or preserves short usage on HTTP %i', async status => {
+  const setGeminiUsage = vi.fn();
+  const put = vi.fn();
+  const resetTime = '2030-01-02T00:00:00Z';
+  const fetch = vi.fn(async (input: unknown) => {
+    if (String(input).endsWith(':retrieveUserQuota')) {
+      return Response.json({ buckets: [{ modelId: 'gemini-fixture', remainingFraction: 0.8 }] });
+    }
+    if (String(input).endsWith(':loadCodeAssist')) {
+      return Response.json({ cloudaicompanionProject: { id: 'fixture-project' } });
+    }
+    if (status === 403) return new Response(null, { status });
+    return Response.json({ response: { groups: [{ buckets: [
+      { bucketId: 'gemini-5h', remainingFraction: 0.75, resetTime },
+      { bucketId: 'gemini-weekly', remainingFraction: 0.5 },
+    ] }] } });
+  });
+  await adapter().refreshUsage({ account, freshSecret: async () => oauth,
+    accounts: { setGeminiUsage } as never, quotas: { get: previous, put } as never,
+    fetch: fetch as never, now: () => 100 });
+  expect(fetch.mock.calls.map(([url]) => String(url).split(':').at(-1))).toEqual([
+    'retrieveUserQuota', 'loadCodeAssist', 'retrieveUserQuotaSummary',
+  ]);
+  expect(setGeminiUsage.mock.calls[0]?.[1].windows).toEqual(status === 403 ? undefined : [
+    { kind: 'five-hour', usedPercent: 25, resetAt: Date.parse(resetTime) },
+    { kind: 'weekly', usedPercent: 50, resetAt: null },
+  ]);
+  expect(put.mock.calls[0]?.[0].sevenDayUtilization).toBe(previous().sevenDayUtilization);
+});

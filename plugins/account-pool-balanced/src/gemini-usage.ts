@@ -3,11 +3,18 @@ import { z } from "zod";
 const displayText = z.string().min(1).max(100)
   .regex(/^[A-Za-z0-9][A-Za-z0-9 ._()+/-]*$/u);
 
+const summaryWindowSchema = z.object({
+  kind: z.enum(["five-hour", "weekly"]),
+  usedPercent: z.number().min(0).max(100),
+  resetAt: z.number().int().nonnegative().nullable(),
+}).strict();
+
 export const geminiUsageSchema = z.object({
   observedAt: z.number().int().nonnegative(),
   plan: z.object({ id: displayText, name: displayText.nullable() }).strict().nullable(),
   // Preserve the provider's int64 string without rounding or inventing a limit.
   credits: z.string().regex(/^(0|[1-9][0-9]{0,18})$/u).nullable(),
+  windows: z.array(summaryWindowSchema).max(2).optional(),
   models: z.array(z.object({
     modelId: displayText,
     tokenType: z.enum(["REQUESTS", "WTUS"]).nullable(),
@@ -26,6 +33,46 @@ function object(value: unknown): Record<string, unknown> {
 function safeText(value: unknown): string | null {
   const parsed = displayText.safeParse(value);
   return parsed.success ? parsed.data : null;
+}
+
+type SummaryWindow = z.infer<typeof summaryWindowSchema>;
+
+export function geminiSummaryWindows(payload: unknown): SummaryWindow[] {
+  const root = object(payload);
+  const summary = object(root.response ?? root);
+  if (root.error != null || summary.error != null || root.success === false || summary.success === false ||
+      !Array.isArray(summary.groups) || summary.groups.length > 8) return [];
+
+  const windows = new Map<SummaryWindow["kind"], SummaryWindow | null>();
+  for (const group of summary.groups) {
+    const { buckets, displayName } = object(group);
+    if (displayName === "Gemini 4 Argon") continue;
+    if (!Array.isArray(buckets) || buckets.length > 16) return [];
+    for (const raw of buckets) {
+      const bucket = object(raw);
+      const kind = bucket.bucketId === "gemini-5h" ? "five-hour"
+        : bucket.bucketId === "gemini-weekly" ? "weekly" : null;
+      if (kind === null) continue;
+      const fraction = bucket.remainingFraction;
+      if (windows.has(kind) ||
+          (bucket.disabled !== undefined && bucket.disabled !== false) ||
+          (bucket.window !== undefined && bucket.window !== (kind === "weekly" ? "weekly" : "5h")) ||
+          typeof fraction !== "number" || !Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+        windows.set(kind, null);
+        continue;
+      }
+      const reset = typeof bucket.resetTime === "string" ? Date.parse(bucket.resetTime) : NaN;
+      windows.set(kind, { kind, usedPercent: (1 - fraction) * 100,
+        resetAt: Number.isFinite(reset) && reset >= 0 ? reset : null });
+    }
+  }
+  return [...windows.values()].filter((window): window is SummaryWindow => window !== null);
+}
+
+export function geminiSummaryRows(usage: GeminiUsage | undefined, now: number) {
+  return (usage?.windows ?? [])
+    .filter(window => window.resetAt === null || window.resetAt > now)
+    .map(window => ({ ...window, label: window.kind === "weekly" ? "Gemini · 7d" : "Gemini · 5h" }));
 }
 
 export function geminiUsageObservation(

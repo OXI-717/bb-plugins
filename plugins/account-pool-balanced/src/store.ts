@@ -5,6 +5,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import { z } from "zod";
 import type { PoolKvStorage } from "./core-storage.js";
+import { geminiUsageSchema } from "./gemini-usage.js";
 import {
   accountMetadataSchema,
   weeklyBudgetSchema,
@@ -28,6 +29,8 @@ const accountsSchema = z.array(accountMetadataSchema);
 // Keep weekly rules out of the strict v1 account array so older builds can read it after rollback.
 const WEEKLY_BUDGETS_KEY = "weekly-budgets:v1";
 const weeklyBudgetsSchema = z.record(z.string().uuid(), weeklyBudgetSchema);
+const GEMINI_SUMMARIES_KEY = "gemini-quota-summaries:v1";
+const geminiSummariesSchema = z.record(z.string().uuid(), geminiUsageSchema.pick({ observedAt: true, windows: true }));
 const HUB_TOKEN_PREFIX = "hub-token-";
 const THREAD_TOKEN_PREFIX = "hub-thread-token-";
 const HUB_TOKEN_GRACE_MS = 10 * 60 * 1_000;
@@ -90,8 +93,24 @@ export class AccountStore {
   }
 
   async list(): Promise<Account[]> {
-    const [accounts, budgets] = await Promise.all([this.listMetadata(), this.weeklyBudgets()]);
-    return accounts.map(account => budgets[account.id] === undefined ? account : { ...account, weeklyBudget: budgets[account.id] });
+    const [accounts, budgets, summaries] = await Promise.all([
+      this.listMetadata(), this.weeklyBudgets(), this.geminiSummaries(),
+    ]);
+    return accounts.map(account => {
+      const summary = summaries[account.id];
+      const usage = account.geminiUsage;
+      return {
+        ...account,
+        ...(budgets[account.id] === undefined ? {} : { weeklyBudget: budgets[account.id] }),
+        ...(account.provider === "gemini" && usage && summary?.observedAt === usage.observedAt
+          ? { geminiUsage: { ...usage, windows: summary.windows } } : {}),
+      };
+    });
+  }
+
+  private async geminiSummaries() {
+    const result = geminiSummariesSchema.safeParse(await this.kv.get(GEMINI_SUMMARIES_KEY) ?? {});
+    return result.success ? result.data : {};
   }
 
   async get(id: string): Promise<Account | null> {
@@ -307,8 +326,27 @@ export class AccountStore {
   }
 
   async setGeminiUsage(id: string, observation: NonNullable<Account['geminiUsage']>): Promise<Account | null> {
-    return this.update(id, account => account.provider !== 'gemini' || JSON.stringify(account.geminiUsage) === JSON.stringify(observation)
-      ? account : {...account, geminiUsage: observation});
+    const { windows, ...usage } = geminiUsageSchema.parse(observation);
+    return this.serialized(async () => {
+      const accounts = await this.listMetadata();
+      const index = accounts.findIndex(account => account.id === id);
+      const account = accounts[index];
+      if (!account || account.provider !== "gemini") return account ?? null;
+      const updated = { ...account, geminiUsage: usage };
+      if (JSON.stringify(account.geminiUsage) !== JSON.stringify(usage)) {
+        accounts[index] = updated;
+        await this.kv.set(ACCOUNTS_KEY, accounts);
+      }
+      // Older builds parse accounts:v1 strictly. Store summary data separately.
+      const previous = await this.geminiSummaries();
+      const summaries = Object.fromEntries(accounts.flatMap(row =>
+        row.id !== id && previous[row.id] ? [[row.id, previous[row.id]]] : []));
+      if (windows?.length) summaries[id] = { observedAt: usage.observedAt, windows };
+      if (JSON.stringify(previous) !== JSON.stringify(summaries)) {
+        await this.kv.set(GEMINI_SUMMARIES_KEY, summaries);
+      }
+      return { ...updated, geminiUsage: { ...usage, ...(windows?.length ? { windows } : {}) } };
+    });
   }
 
   private async update(

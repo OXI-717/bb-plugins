@@ -343,3 +343,21 @@ it('restores the old Gemini secret after a failed authorization write',async()=>
   expect(spy).toHaveBeenCalledTimes(2);expect(await store.readSecret(account.id)).toEqual(old);expect(await store.get(account.id)).toEqual(account);
  }finally{spy.mockRestore();}
 });
+
+it("keeps Gemini summaries readable after upgrade without changing the legacy account shape", async () => {
+  const host = createFakePluginHost({ pluginId: "account-pool" });
+  cleanups.push(async () => { await host.harness.lifecycle.dispose(); });
+  const kv = host.bb.storage.kv;
+  const id = "00000000-0000-4000-8000-000000000001";
+  await kv.set("accounts:v1", [{ id, provider: "gemini", kind: "oauth",
+    label: "Fixture", email: null, subscriptionType: null, rateLimitTier: null,
+    enabled: true, priority: 1, createdAt: 1 }]);
+  const accounts = new AccountStore(kv, "unused-fixture-directory");
+  const observation = { observedAt: 100, models: [], credits: null, plan: null };
+  const windows = [{ kind: "weekly" as const, usedPercent: 42, resetAt: 200 }];
+  await accounts.setGeminiUsage(id, { ...observation, windows });
+  expect((await kv.get<Account[]>("accounts:v1"))?.[0]?.geminiUsage).toEqual(observation);
+  expect((await accounts.get(id))?.geminiUsage?.windows).toEqual(windows);
+  await accounts.setGeminiUsage(id, { ...observation, observedAt: 101 });
+  expect((await accounts.get(id))?.geminiUsage).toEqual({ ...observation, observedAt: 101 });
+});

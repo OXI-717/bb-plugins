@@ -1,4 +1,5 @@
-import {geminiUsageObservation} from './gemini-usage.js';
+import {geminiSummaryWindows, geminiUsageObservation} from './gemini-usage.js';
+import {managedProject, raceAbort, readAgyJson} from './agy-oauth-login.js';
 import type {
   AccountPoolConfig,
   AccountSecret,
@@ -155,16 +156,35 @@ export function createGeminiAdapter(options: GeminiAdapterOptions): ProviderAdap
       if (quota !== null) {
         context.quotas.put(quota);
         // Optional display metadata never invalidates a valid quota observation.
-        let enrichment: unknown = null;
+        let enrichment: Record<string, unknown> = {};
         try {
           const auxiliary = await context.fetch(`${options.cloudCodeBaseUrl.replace(/\/+$/u, '')}/v1internal:loadCodeAssist`, {
             method: 'POST', headers: {authorization: `Bearer ${secret.accessToken}`, 'content-type': 'application/json', accept: 'application/json', 'user-agent': GEMINI_USER_AGENT},
             body: JSON.stringify({metadata: {}}), signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS),
           });
-          if (auxiliary.ok) enrichment = await auxiliary.json().catch(() => null);
+          if (auxiliary.ok) enrichment = await readAgyJson(auxiliary, AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS));
           else await auxiliary.body?.cancel();
         } catch { /* Quota remains valid when optional enrichment is unavailable. */ }
-        await context.accounts.setGeminiUsage(context.account.id, geminiUsageObservation(payload, enrichment, context.now()));
+        const usage = geminiUsageObservation(payload, enrichment, context.now());
+        const project = managedProject(enrichment);
+        if (project !== null) {
+          const signal = AbortSignal.timeout(10_000);
+          try {
+            const response = await raceAbort(context.fetch(
+              `${options.cloudCodeBaseUrl.replace(/\/+$/u, '')}/v1internal:retrieveUserQuotaSummary`,
+              {
+                method: "POST", redirect: "error", signal,
+                headers: { authorization: `Bearer ${secret.accessToken}`, "content-type": "application/json", "user-agent": GEMINI_USER_AGENT },
+                body: JSON.stringify({ project }),
+              },
+            ), signal);
+            if (response.ok) {
+              const windows = geminiSummaryWindows(await readAgyJson(response, signal));
+              if (windows.length > 0) usage.windows = windows;
+            } else void response.body?.cancel().catch(() => undefined);
+          } catch { /* The summary is optional and cannot invalidate model usage. */ }
+        }
+        await context.accounts.setGeminiUsage(context.account.id, usage);
       }
     },
     errorResponse(status, message, headers, request) {

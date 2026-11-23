@@ -218,25 +218,28 @@ it('exposes Gemini models and declared plan, with absolute credits in the existi
 });
 
 it.each([
- {name:'matching reports',changes:{},expected:1},
+ {name:'matching reports',changes:{},expected:1, summary:false},
+ {name:'declared five-hour and weekly windows',changes:{},expected:2, summary:true},
  {name:'different token types',changes:{tokenType:'REQUESTS'},expected:2},
  {name:'different percentages',changes:{usedPercent:6},expected:2},
  {name:'different resets',changes:{resetAt:300},expected:2},
  {name:'unknown token type',changes:{tokenType:null},expected:2},
-])('groups Gemini $name only as a display summary',async({changes,expected})=>{
+])('groups Gemini $name only as a display summary',async({changes,expected,summary})=>{
  let handlers:Record<string,(input:{resourceId:string;refresh:boolean})=>Promise<unknown>>={};
  const bb={rpc:{register:(_contract:unknown,methods:typeof handlers)=>{handlers=methods;}}} as unknown as BbPluginApi;
  const first={modelId:'gemini-fixture-a',tokenType:'WTUS',usedPercent:5,resetAt:200};
  const second={...first,modelId:'gemini-fixture-b',...changes};
  const account={id:'00000000-0000-4000-8000-000000000001',provider:'gemini',label:'Synthetic',email:null,accountUuid:null,subscriptionType:null,rateLimitTier:null,observedAt:100,error:null,limitWindows:[],familyWeekly:EMPTY_FAMILY_WEEKLY,
-  geminiUsage:{observedAt:100,plan:null,credits:null,models:[first,second]}};
+  geminiUsage:{observedAt:100,plan:null,credits:null,models:[first,second], ...(summary ? {windows:[{kind:'five-hour',usedPercent:9,resetAt:200},{kind:'weekly',usedPercent:42,resetAt:400}]} : {})}};
  const original=JSON.stringify(account);
  const hub={status:async()=>({accounts:[account]}),assertNetworkAllowed:vi.fn(),refreshUsage:vi.fn()} as unknown as AccountPoolHub;
  registerUsageSource(bb,hub,false,()=>100);
  const result=usageMeasurementSchema.parse(await handlers[usageFetchMethod]!({resourceId:account.id,refresh:false}));
  if(result.usage.status!=='ok')throw Error('measurement failed');
  expect(result.usage.windows).toHaveLength(expected);
- if(expected===1){
+ if(summary){
+  expect(result.usage.windows.map(w=>[w.kind,w.usedPercent])).toEqual([['five-hour',9],['weekly',42]]);
+ }else if(expected===1){
   expect(result.usage.windows[0]).toMatchObject({label:'2 matching reports · WTUS',usedPercent:5,model:null,resetsAt:new Date(200).toISOString()});
  }else expect(result.usage.windows.map(w=>w.model)).toEqual([first.modelId,second.modelId]);
  expect(JSON.stringify(account)).toBe(original);
