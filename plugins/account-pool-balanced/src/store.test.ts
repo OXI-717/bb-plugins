@@ -361,3 +361,36 @@ it("keeps Gemini summaries readable after upgrade without changing the legacy ac
   await accounts.setGeminiUsage(id, { ...observation, observedAt: 101 });
   expect((await accounts.get(id))?.geminiUsage).toEqual({ ...observation, observedAt: 101 });
 });
+
+it.each(["get", "set"] as const)("keeps account selection and Gemini refresh working if summary %s fails", async operation => {
+  const host = createFakePluginHost({ pluginId: "account-pool" });
+  cleanups.push(async () => { await host.harness.lifecycle.dispose(); });
+  const kv = host.bb.storage.kv;
+  const geminiId = "00000000-0000-4000-8000-000000000001";
+  const claudeId = "00000000-0000-4000-8000-000000000002";
+  const common = { kind: "oauth", email: null, subscriptionType: null, rateLimitTier: null,
+    enabled: true, priority: 1, createdAt: 1 };
+  await kv.set("accounts:v1", [
+    { ...common, id: geminiId, provider: "gemini", label: "Gemini fixture" },
+    { ...common, id: claudeId, provider: "claude", label: "Claude fixture" },
+  ]);
+  const originalGet = kv.get.bind(kv);
+  const originalSet = kv.set.bind(kv);
+  const auxiliary = "gemini-quota-summaries:v1";
+  vi.spyOn(kv, "get").mockImplementation(async key => {
+    if (operation === "get" && key === auxiliary) throw Error("synthetic summary read failure");
+    return originalGet(key);
+  });
+  vi.spyOn(kv, "set").mockImplementation(async (key, value) => {
+    if (operation === "set" && key === auxiliary) throw Error("synthetic summary write failure");
+    return originalSet(key, value);
+  });
+  const accounts = new AccountStore(kv, "unused-fixture-directory");
+  expect((await accounts.get(claudeId))?.enabled).toBe(true);
+  const observation = { observedAt: 100, credits: null, plan: null,
+    models: [{ modelId: "gemini-fixture", tokenType: null, usedPercent: 25, resetAt: 150 }] };
+  await expect(accounts.setGeminiUsage(geminiId, { ...observation,
+    windows: [{ kind: "weekly", usedPercent: 60, resetAt: 200 }],
+  })).resolves.toMatchObject({ geminiUsage: observation });
+  expect((await accounts.get(geminiId))?.geminiUsage).toEqual(observation);
+});

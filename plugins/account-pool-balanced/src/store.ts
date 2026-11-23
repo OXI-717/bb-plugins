@@ -94,7 +94,9 @@ export class AccountStore {
 
   async list(): Promise<Account[]> {
     const [accounts, budgets, summaries] = await Promise.all([
-      this.listMetadata(), this.weeklyBudgets(), this.geminiSummaries(),
+      this.listMetadata(),
+      this.weeklyBudgets(),
+      this.geminiSummaries().catch((): z.infer<typeof geminiSummariesSchema> => ({})),
     ]);
     return accounts.map(account => {
       const summary = summaries[account.id];
@@ -338,12 +340,17 @@ export class AccountStore {
         await this.kv.set(ACCOUNTS_KEY, accounts);
       }
       // Older builds parse accounts:v1 strictly. Store summary data separately.
-      const previous = await this.geminiSummaries();
-      const summaries = Object.fromEntries(accounts.flatMap(row =>
-        row.id !== id && previous[row.id] ? [[row.id, previous[row.id]]] : []));
-      if (windows?.length) summaries[id] = { observedAt: usage.observedAt, windows };
-      if (JSON.stringify(previous) !== JSON.stringify(summaries)) {
-        await this.kv.set(GEMINI_SUMMARIES_KEY, summaries);
+      try {
+        const previous = await this.geminiSummaries();
+        const summaries = Object.fromEntries(accounts.flatMap(row =>
+          row.id !== id && previous[row.id] ? [[row.id, previous[row.id]]] : []));
+        if (windows?.length) summaries[id] = { observedAt: usage.observedAt, windows };
+        if (JSON.stringify(previous) !== JSON.stringify(summaries)) {
+          await this.kv.set(GEMINI_SUMMARIES_KEY, summaries);
+        }
+      } catch {
+        // The short observation is already saved. Only the optional summary failed.
+        return updated;
       }
       return { ...updated, geminiUsage: { ...usage, ...(windows?.length ? { windows } : {}) } };
     });
