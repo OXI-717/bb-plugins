@@ -95,6 +95,8 @@ Google still applies its own account limits. Raise the limit during active
 sessions or while requests are queued. Lower it when the account is idle. A host that retains its lease for a warm ACP process
 uses a slot until the process stops, even between prompts. With more than one
 slot configured, a second process for the same BB thread and account is refused.
+A waiter already queued for an active thread waits until that thread frees its slot.
+Other threads retain their order among eligible waiters.
 Diagnostics remain exclusive, and an unconfirmed stop blocks new admission for
 that account. A queued prompt is never forwarded; cancellation never replays it.
 Headless holds its lease until the owned process group has stopped. Failed or

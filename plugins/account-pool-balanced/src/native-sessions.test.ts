@@ -169,6 +169,21 @@ describe('official native session admission',()=>{
     expect((await restored.request(caller,acquire())).state).toBe('active');
     expect((await restored.request(secondCaller,acquire('lw-official'))).state).toBe('queued');
   });
+  it('leaves a pre-existing same-thread waiter queued when raising account capacity',async()=>{
+    const {sessions}=await fixture();
+    const first=await sessions.request(caller,acquire());
+    const duplicate=await sessions.request(caller,acquire());
+    const other={...caller,threadId:'thread-two'};
+    const next=await sessions.request(other,acquire());
+    expect([first.state,duplicate.state,next.state]).toEqual(['active','queued','queued']);
+    const expectedRevision=(await sessions.accounts()).selectionRevision;
+    await sessions.updateAccount({accountId:executor.accountId,expectedRevision,maxConcurrentSessions:2});
+    expect((await sessions.request(caller,poll(duplicate.leaseId!))).state).toBe('queued');
+    expect((await sessions.request(other,poll(next.leaseId!))).state).toBe('active');
+    expect((await sessions.request(caller,poll(first.leaseId!))).state).toBe('active');
+    await sessions.request(caller,release(first.leaseId!));
+    expect((await sessions.request(caller,poll(duplicate.leaseId!))).state).toBe('active');
+  });
   it('won’t start a duplicate thread or refill capacity while a stop is unconfirmed',async()=>{
     const {sessions,clock}=await fixture();
     await sessions.updateAccount({accountId:executor.accountId,expectedRevision:(await sessions.accounts()).selectionRevision,maxConcurrentSessions:2});
