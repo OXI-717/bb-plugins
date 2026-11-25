@@ -300,6 +300,21 @@ describe("Account Pool settings", () => {
     await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',maxConcurrentSessions:2,expectedRevision:'b'.repeat(64)}}));
   });
 
+  it('offers higher native concurrency while sessions are active or queued',async()=>{
+    const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'c'.repeat(64),accounts:[{
+      accountId:'subscription-two',label:'Second Google',projects:{onlySelected:false,rules:[]},projectsRevision:'a'.repeat(64),mixedProjects:false,
+      executors:[{id:'second-host',enabled:true,autopilotAllowed:false}],active:2,queued:1,uncertain:0,maxConcurrentSessions:2,
+    }]}),"native.updateAccount":()=>null});
+    fireEvent.click(await slot.findByRole('button',{name:'Открыть Second Google'}));
+    const concurrency=await slot.findByLabelText('Одновременных сеансов') as HTMLSelectElement;
+    await waitFor(()=>expect(concurrency.disabled).toBe(false));
+    expect(concurrency.value).toBe('2');
+    expect((await slot.findByRole('option',{name:'1'}) as HTMLOptionElement).disabled).toBe(true);
+    expect((await slot.findByRole('option',{name:'3'}) as HTMLOptionElement).disabled).toBe(false);
+    fireEvent.change(concurrency,{target:{value:'3'}});
+    await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:'native.updateAccount',input:{accountId:'subscription-two',maxConcurrentSessions:3,expectedRevision:'c'.repeat(64)}}));
+  });
+
   it('saves native role, project role and automation switches in the same account settings without legacy preference calls',async()=>{
     const item={accountId:'subscription-two',label:'Second Google',role:'primary',priority:1,projects:{onlySelected:false,rules:[{projectId:'project-one',role:'inherit'}]},projectsRevision:'a'.repeat(64),mixedProjects:false,executors:[{id:'second-host',enabled:true,autopilotAllowed:false}],active:0,queued:0,uncertain:0};
     const slot=render([],{"native.accounts":()=>({managed:true,selectionRevision:'b'.repeat(64),accounts:[item]}),"native.updateAccount":()=>null});

@@ -202,7 +202,8 @@ export class NativeSessions {
       const group=this.state.executors.filter(e=>e.accountId===input.accountId);
       if(!group.length)throw new NativeSessionError(404,'native-account-not-found');
       if(input.executor&&!group.some(e=>e.id===input.executor!.id))throw new NativeSessionError(403,'native-executor-denied');
-      if((input.projects||input.executor||input.maxConcurrentSessions!==undefined)&&this.state.leases.some(l=>l.executor.accountId===input.accountId))throw new NativeSessionError(409,'native-executor-busy');
+      const reducesCapacity=input.maxConcurrentSessions!==undefined&&input.maxConcurrentSessions<this.accountCapacity(input.accountId);
+      if((input.projects||input.executor||reducesCapacity)&&this.state.leases.some(l=>l.executor.accountId===input.accountId))throw new NativeSessionError(409,'native-executor-busy');
       const previous=this.routing(group.find(e=>this.state.preferredExecutors[e.hostId]===e.id)??group[0]);
       const routing={...previous,role:input.role??previous.role,priority:input.priority??previous.priority,...(input.label?{label:input.label}:{})};
       const next=this.state.executors.map(e=>e.accountId!==input.accountId?e:{...e,

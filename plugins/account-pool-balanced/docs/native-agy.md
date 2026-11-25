@@ -91,8 +91,8 @@ POST `/native/agy` uses the existing project/purpose bearer. Actions:
 An account has one shared queue across machines, catalog reads, interactive
 sessions and headless tasks. In the account settings, **Одновременных сеансов**
 sets the number of available slots (1–4, default 1). It is a Pooler setting;
-Google still applies its own account limits. Change it only while the account
-has no sessions or waiters. A host that retains its lease for a warm ACP process
+Google still applies its own account limits. Raise the limit during active
+sessions or while requests are queued. Lower it when the account is idle. A host that retains its lease for a warm ACP process
 uses a slot until the process stops, even between prompts. With more than one
 slot configured, a second process for the same BB thread and account is refused.
 Diagnostics remain exclusive, and an unconfirmed stop blocks new admission for
