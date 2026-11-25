@@ -9,8 +9,10 @@ from ci_versions import coherent_version_paths, git, metadata_paths, version_onl
 PLUGINS = ['account-pool-balanced', 'automation-catalog', 'vpn-guard', 'oxi-projects',
            'model-connections', 'federation-pilot', 'pool-maintenance']
 REQUIRED_CHECK_PLUGINS = {'account-pool-balanced', 'automation-catalog'}
+# The hub uses portable Node HTTP APIs. Its server suite uses injected host
+# services or localhost. Host entrypoints and their own suites stay on Mac.
 PORTABLE = {'balancer', 'account-policy', 'project-policy', 'purpose-affinity',
-            'provider-budget', 'codex-budget', 'zai-budget', 'usage-error'}
+            'provider-budget', 'codex-budget', 'zai-budget', 'usage-error', 'hub'}
 # OP's native task integration fixture loads these Pooler modules directly.
 OP_POOL_MODULES = {'native-sessions', 'native-probe-wire', 'native-accounts',
                    'native-unlock-rpc', 'contracts', 'project-policy', 'network-errors'}
@@ -57,8 +59,10 @@ def cursor_required(paths, version_paths=()):
 
 def mac_required(path):
     # The settings suite covers a macOS timing regression in Codex device login.
-    if path == 'plugins/account-pool-balanced/app.test.tsx':
+    if path == POOL + 'app.test.tsx':
         return True
+    if path == POOL + 'src/server.test.ts':
+        return False
     name = Path(path).name
     if any(word in name for word in ('browser', 'host', 'launcher', 'native', 'device')):
         return True
@@ -170,14 +174,11 @@ def tag_baseline(ref, head):
 
 def event_plan(event, ref, head, pr_base, push_before):
     if event == 'push' and ref == 'refs/heads/main':
-        result = plan([], full=True)
-        paths = linear_diff(push_before, head)
-        if paths is not None:
-            versions = coherent_version_paths(paths, push_before, head, KNOWN_PLUGINS)
-            result['cursor'] = cursor_required(paths, versions)
-        return result
-
-    if event == 'pull_request':
+        base = push_before
+        paths = linear_diff(base, head)
+        if paths is None:
+            return plan([], full=True)
+    elif event == 'pull_request':
         if not pr_base:
             raise SystemExit('Missing pull request base')
         base = git('merge-base', pr_base, head)

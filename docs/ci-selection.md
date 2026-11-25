@@ -19,7 +19,9 @@ build with the published BB CLI. Linux means `ubuntu-latest`. Mac means
 
 `plan`, `public-hygiene`, `secrets`, `session-tree` and `release-gate` always
 run in CI. Linux and Mac `check` contexts for Pool and Catalog always exist
-for branch protection. Their steps run only when selected. Publication hygiene
+for branch protection. Unselected contexts report success on Linux without
+checkout or build steps. A Mac runner is assigned only when the job runs tests.
+Publication hygiene
 checks tracked files, manifest identity, the VPN contract, release contracts and
 doc links once per workflow. Secrets scans all fetched history. The separate `Plugin tracking migration`
 workflow runs Linux tests on PRs touching its script, tests or workflow, and on
@@ -30,7 +32,7 @@ manual request.
 | Event | Range and scope |
 |---|---|
 | Pull request | Compare the tested head with its merge base. Select affected plugin and auxiliary jobs. |
-| Push to `main` | Run the established full plugin and upgrade matrix. Select Cursor from the push's before-to-head range. |
+| Push to `main` | Select affected checks from the push's before-to-head range when it has a verified linear baseline. Missing or divergent baselines run all checks. |
 | Plugin release tag | Compare against the highest lower reachable version of the same plugin. Select affected jobs and apply the metadata rules below. |
 | Manual `CI` | Run all jobs, including Cursor on both platforms and Session Tree on Linux. |
 | `Extended compatibility` | Run the cross-platform matrix, upgrade rehearsal, Cursor, Auto Archive, OP, hygiene and secrets on manual request and pushes to `release/account-pool-0.4.x`. The main push does not also trigger this workflow. |
@@ -41,8 +43,9 @@ needs only the always-run jobs on PRs. Missing main or tag baselines retain the
 full plan. Invalid PR ranges fail planning and therefore the release gate.
 
 For Pool, UI/CSS and an explicit list of portable modules use Linux when CI
-selects by path. Browser, host, native, launcher, dependency and other backend
-changes keep Mac. The upgrade rehearsal covers the upgrade scripts, Pool
+selects by path. The portable HTTP hub and its synthetic server suite use Linux.
+Browser, host, native, launcher, dependency and unclassified backend changes
+keep Mac. The upgrade rehearsal covers the upgrade scripts, Pool
 backend and package changes, the update panel, and Pool releases. UI and CSS
 changes elsewhere use the package suite. The rehearsal exercises the updater
 against synthetic commands and a synthetic state database. The Cursor wrapper
