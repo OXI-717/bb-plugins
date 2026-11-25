@@ -1174,6 +1174,52 @@ describe("Account Pool plugin", () => {
     expect(requests).toHaveLength(0);
   });
 
+  it("keeps the Kimi pool ceiling visible in BB without changing external client responses", async () => {
+    const resetAt = new Date(Date.now() + 5 * 86_400_000).toISOString();
+    const modelFetch = vi.fn(async () => Response.json({ id: "unexpected-model-response" }));
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "kimi",
+      options: {
+        kimiUsagesUrl: "https://usage.example/usages",
+        fetch: async (input) => {
+          if (String(input) === "https://usage.example/usages") {
+            return Response.json({ usage: { limit: "100", used: "92", resetTime: resetAt } });
+          }
+          return modelFetch();
+        },
+      },
+    });
+    await fixture.host.harness.behavior.callRpc("config.set", { switchThreshold: 0.9 });
+    await fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id });
+
+    const tokenFile = path.join(fixture.dataDir, "kimi-client.token");
+    const issued = await fixture.host.harness.behavior.runCli([
+      "client", "add", "kimi-fixture", "--project", "project-one", "--output", tokenFile,
+    ]);
+    expect(issued.exitCode).toBe(0);
+    const externalToken = (await fs.readFile(tokenFile, "utf8")).trim();
+    const request = (token: string) => fixture.host.harness.behavior.fetchHttp("POST", "/kimi/v1/messages", {
+      headers: { "content-type": "application/json", "x-api-key": token },
+      body: JSON.stringify({ model: "k3-256k", messages: [] }),
+    });
+
+    for (const [token, status] of [[fixture.key, 400], [externalToken, 403]] as const) {
+      const response = await request(token);
+      expect(response.status).toBe(status);
+      expect(response.headers.get("x-bb-pool-error")).toBe("POOL_QUOTA_THRESHOLD");
+      expect(response.headers.get("retry-after")).toBeNull();
+      const payload = await response.json();
+      expect(payload).toMatchObject({
+        type: "error",
+        error: { code: "POOL_QUOTA_THRESHOLD" },
+      });
+      expect(payload.error.message).toContain("used 92%, порог / threshold 90%");
+      expect(payload.error.message).toContain(resetAt);
+    }
+    expect(modelFetch).not.toHaveBeenCalled();
+  });
+
   it.each(["application/proto", "application/connect+proto"])("reports Cursor pool threshold in %s without contacting model upstream", async contentType => {
     const modelCalls: string[] = [];
     const fixture = await createFixture({upstreamUrl:"https://upstream.example",provider:"cursor",source:"api-key",apiKey:"synthetic-cursor-key",options:{

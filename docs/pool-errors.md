@@ -22,6 +22,8 @@ Pooler-owned failures have a stable reason in `x-bb-pool-error`, in the message 
 
 A configured threshold refusal is not proof that the provider has spent the whole quota. For example, a synthetic account at 93.5% with a 90% threshold gets `POOL_QUOTA_THRESHOLD`, with both values in the message. Pool policy and provider exhaustion refusals retain HTTP 403 without Retry-After for ordinary requests, so they do not turn into silent multi-day automatic retries. Connect streaming uses its required HTTP 200 envelope while carrying the same explicit failure.
 
+For Kimi Coding in a native BB thread, `POOL_QUOTA_THRESHOLD` uses HTTP 400 without Retry-After. This keeps the usage, configured threshold and known reset time visible in OpenCode ACP, which discards the body of an HTTP 403. External Kimi clients still receive HTTP 403 for this refusal.
+
 У каждой причины свой код. Настроенный запас квоты отличается от полного исчерпания. Проценты и известное время сброса отображаются без email, ключей и идентификаторов аккаунтов. Ошибки сохранённой авторизации не выдаются за исчерпанный лимит.
 
 For Claude OAuth refusal, use [reauthorization in the existing card / повторный вход в ту же карточку](claude-reauthorization.md). Removing the subscription is unnecessary.
