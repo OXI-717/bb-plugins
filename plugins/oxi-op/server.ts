@@ -26,7 +26,7 @@ export default function plugin(bb: BbPluginApi) {
         if (requestSignal?.aborted || thread.id!==notice.threadId || thread.projectId!==notice.projectId || thread.archivedAt!=null || thread.deletedAt!=null || thread.status==='stopping') return false;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-            await Promise.race([bb.sdk.threads.send({threadId:notice.threadId,mode:'queue-if-active',input:[{type:'text',text:completionText(row),mentions:[]}]}), new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('Completion delivery timed out')),10_000);})]);
+            await Promise.race([bb.sdk.threads.send({threadId:notice.threadId,mode:'steer-if-active',input:[{type:'text',text:completionText(row),mentions:[]}]}), new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('Completion delivery timed out')),10_000);})]);
         } finally {clearTimeout(timer);}
         return true;
     });

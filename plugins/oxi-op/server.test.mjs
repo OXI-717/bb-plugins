@@ -430,7 +430,7 @@ test('CLI operation uses the same approval gate and accepts no arbitrary command
   assert(!result.stdout.includes('op://'));
 });
 
-test('interactive CLI can return completion to the same session without sending secret values', async t => {
+test('interactive CLI requests immediate delivery to the same session without sending secret values', async t => {
   const notices = [];
   const h = setup(t, {}, undefined, async input => {notices.push(input); return {delivery: 'sent'};});
   const pending = h.behavior.runCli(['run', 'example-operation', '--notify'], context);
@@ -441,7 +441,7 @@ test('interactive CLI can return completion to the same session without sending 
   assert.equal((await pending).exitCode, 0);
   assert.equal(notices.length, 1);
   assert.equal(notices[0].threadId, context.threadId);
-  assert.equal(notices[0].mode, 'queue-if-active');
+  assert.equal(notices[0].mode, 'steer-if-active');
   assert(!JSON.stringify(notices).includes('op://'));
 });
 
