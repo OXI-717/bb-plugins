@@ -71,7 +71,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
+    # Keep the protected check name, but only assign a Mac when its tests run.
+    runs-on: ${{ matrix.run && matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 20
     env:
       OXI_TEST_REMOTE_EXECUTION: '1'

@@ -119,6 +119,17 @@ class PlanTests(unittest.TestCase):
             p = plan(['plugins/account-pool-balanced/src/' + name])
             self.assertEqual(len(active_rows(p)), 1)
 
+    def test_portable_pool_server_change_runs_linux_rehearsal_and_keeps_mac_context(self):
+        result = plan([POOL + 'src/hub.ts', POOL + 'src/server.test.ts'])
+        self.assertEqual(active_rows(result), [
+            {'os': 'ubuntu-latest', 'plugin': 'account-pool-balanced'},
+        ])
+        self.assertIn({'os': 'macos-latest', 'plugin': 'account-pool-balanced', 'run': False},
+                      result['matrix']['include'])
+        self.assertTrue(result['upgrade'])
+        self.assertFalse(result['upgrade_mac'])
+        self.assertFalse(result['cursor'])
+
     def test_op_pool_dependencies_require_cross_plugin_integration(self):
         root = Path(__file__).resolve().parent.parent
         fixture = (root / 'plugins/oxi-op/test/native-task-host.mjs').read_text()
@@ -180,6 +191,7 @@ class RequiredContextTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/ci.yml').read_text()
         job = workflow.split('\n  check:\n')[1].split('\n  session-tree:')[0]
         self.assertIn('name: check (${{ matrix.os }}, ${{ matrix.plugin }})', job)
+        self.assertIn("runs-on: ${{ matrix.run && matrix.os || 'ubuntu-latest' }}", job)
         self.assertNotIn('    if:', job.split('    strategy:')[0])
         # Every expensive step, including checkout/setup, must be conditional.
         for step in job.split('      - ')[1:]:
@@ -350,6 +362,22 @@ class CliTests(unittest.TestCase):
             self.assertTrue(event('workflow_dispatch', main, base)['cursor'])
 
             before = git('rev-parse', 'HEAD')
+            hub = root / POOL / 'src/hub.ts'
+            hub.write_text('// portable server behavior\n')
+            git('add', str(hub))
+            git('-c', 'user.name=Synthetic', '-c', 'user.email=test@example.invalid',
+                'commit', '-qm', 'fixture portable pool')
+            result = event('push', main, before)
+            self.assertEqual(active_rows(result), [
+                {'os': 'ubuntu-latest', 'plugin': 'account-pool-balanced'},
+            ])
+            self.assertTrue(result['upgrade'])
+            self.assertFalse(result['upgrade_mac'])
+            self.assertFalse(result['cursor'])
+            git('tag', 'account-pool-balanced/v0.0.3')
+            self.assertEqual(event('push', 'refs/tags/account-pool-balanced/v0.0.3'), result)
+
+            before = git('rev-parse', 'HEAD')
             git('tag', 'automation-catalog/v0.0.1')
             self.assertTrue(event('push', 'refs/tags/automation-catalog/v0.0.1')['cursor'])
 
@@ -392,14 +420,14 @@ class CoverageTests(unittest.TestCase):
 
 
 class TriggerOverlapTests(unittest.TestCase):
-    def test_main_full_ci_does_not_also_trigger_extended(self):
+    def test_main_ci_does_not_also_trigger_extended(self):
         root = Path(__file__).resolve().parent.parent
         critical = (root / '.github/workflows/ci.yml').read_text()
         extended = (root / '.github/workflows/ci-extended.yml').read_text()
         self.assertIn('branches: [main]', critical)
         self.assertIn('branches: [release/account-pool-0.4.x]', extended)
         self.assertNotIn('branches: [main', extended)
-        # Normal non-PR builds retain all required platform/plugin checks.
+        # Manual and fallback plans retain all required platform/plugin checks.
         full = plan([], full=True)
         self.assertEqual(len(full['matrix']['include']), 14)
         self.assertTrue(full['upgrade_mac'])
