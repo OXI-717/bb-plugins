@@ -202,7 +202,8 @@ export class NativeSessions {
       const group=this.state.executors.filter(e=>e.accountId===input.accountId);
       if(!group.length)throw new NativeSessionError(404,'native-account-not-found');
       if(input.executor&&!group.some(e=>e.id===input.executor!.id))throw new NativeSessionError(403,'native-executor-denied');
-      if((input.projects||input.executor||input.maxConcurrentSessions!==undefined)&&this.state.leases.some(l=>l.executor.accountId===input.accountId))throw new NativeSessionError(409,'native-executor-busy');
+      const reducesCapacity=input.maxConcurrentSessions!==undefined&&input.maxConcurrentSessions<this.accountCapacity(input.accountId);
+      if((input.projects||input.executor||reducesCapacity)&&this.state.leases.some(l=>l.executor.accountId===input.accountId))throw new NativeSessionError(409,'native-executor-busy');
       const previous=this.routing(group.find(e=>this.state.preferredExecutors[e.hostId]===e.id)??group[0]);
       const routing={...previous,role:input.role??previous.role,priority:input.priority??previous.priority,...(input.label?{label:input.label}:{})};
       const next=this.state.executors.map(e=>e.accountId!==input.accountId?e:{...e,
@@ -321,8 +322,14 @@ export class NativeSessions {
     if(JSON.stringify(executor)!==JSON.stringify(lease.executor))throw new NativeSessionError(409,'native-executor-changed');
     const same=this.state.leases.filter(l=>l.executor.accountId===lease.executor.accountId);
     const capacity=this.accountCapacity(executor.accountId);
+    const active=same.filter(l=>l.state==='active');
     const exclusive=same.some(l=>l.state==='uncertain'||(l.kind==='diagnostic'&&l.state==='active'));
-    if(lease.state==='queued'&&!exclusive&&same.filter(l=>l.state==='active').length<capacity&&same.find(l=>l.state==='queued')===lease){
+    // Waiters created at capacity 1 may already share a thread with an active task.
+    const next=same.find(l=>l.state==='queued'&&(
+      l.kind!=='task'||l.caller.threadId===undefined||
+      !active.some(task=>task.kind==='task'&&task.caller.threadId===l.caller.threadId)
+    ));
+    if(lease.state==='queued'&&!exclusive&&active.length<capacity&&next===lease){
       lease.state='active';this.event(lease,'active');
     }
     lease.deadline=this.now()+NATIVE_LEASE_MS;

@@ -72,6 +72,7 @@ export function NativeAccountRow({
 }
 export function NativeAccountSettings({account,revision,save,loadProjects,probe}:{probe?:(input:NativeProbeInput)=>Promise<NativeProbeResult>;account:Account;revision:string;save:(input:NativeAccountUpdate)=>Promise<void>;loadProjects:()=>Promise<Projects>}) {
   const priority=account.priority??(account.executors.some(e=>e.preferred)?0:10);
+  const capacity=account.maxConcurrentSessions??1;
   const busy=account.active+account.queued+account.uncertain>0;
   const [draft,setDraft]=useState(String(priority));
   const [label,setLabel]=useState(account.label??'');
@@ -99,7 +100,7 @@ export function NativeAccountSettings({account,revision,save,loadProjects,probe}
     try{await save({accountId:account.accountId,expectedRevision:revision,...patch});}
     catch(reason){
       const text=reason instanceof Error?reason.message:'';
-      setError(text.includes('native-executor-busy')?'Проекты, места запуска и число сеансов можно изменить, когда аккаунт освободится.':text.includes('native-selection-changed')?'Настройки изменились в другой сессии. Обновите данные и повторите.':'Не удалось сохранить настройки. Обновите данные и повторите.');
+      setError(text.includes('native-executor-busy')?'Изменить проекты, места запуска или снизить предел можно, когда аккаунт освободится.':text.includes('native-selection-changed')?'Настройки изменились в другой сессии. Обновите данные и повторите.':'Не удалось сохранить настройки. Обновите данные и повторите.');
       throw reason;
     }finally{setPending(false);}
   };
@@ -119,11 +120,11 @@ export function NativeAccountSettings({account,revision,save,loadProjects,probe}
       </fieldset>
       <p className="pool-settings-help">Меньшее число выбирается раньше среди аккаунтов с одинаковой ролью и привязкой к проекту. Изменения действуют на новые сессии; текущие продолжаются на прежнем аккаунте.</p>
       <label className="pool-settings-field pool-settings-inline">Одновременных сеансов
-        <select className="pool-settings-control" disabled={pending||busy} value={account.maxConcurrentSessions??1} onChange={event=>apply({maxConcurrentSessions:Number(event.target.value)})}>
-          {Array.from({length:NATIVE_MAX_CONCURRENT_SESSIONS},(_,index)=><option key={index+1} value={index+1}>{index+1}</option>)}
+        <select className="pool-settings-control" disabled={pending||(busy&&capacity===NATIVE_MAX_CONCURRENT_SESSIONS)} value={capacity} onChange={event=>apply({maxConcurrentSessions:Number(event.target.value)})}>
+          {Array.from({length:NATIVE_MAX_CONCURRENT_SESSIONS},(_,index)=>index+1).map(value=><option key={value} value={value} disabled={busy&&value<capacity}>{value}</option>)}
         </select>
       </label>
-      <p className="pool-settings-help">Общий предел для этого аккаунта на всех машинах, включая автопилот. Изменяется, когда очередь пуста и сеансы остановлены.</p>
+      <p className="pool-settings-help">Общий предел для этого аккаунта на всех машинах, включая автопилот. Повышение действует сразу, в том числе для очереди. Снизить предел можно, когда аккаунт освободится.</p>
     </section>
     <section className="pool-settings-section" aria-label="Доступ Google и модель">
       <h3 className="pool-settings-heading">Доступ Google и модель</h3>

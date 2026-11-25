@@ -827,7 +827,7 @@ export class AccountPoolHub {
       // A manual choice of an account this caller can no longer use (removed, other scope) is ignored.
       const manualAccountId=routeSessionKey===null?null:(await this.options.manualRouteAccount?.(routeSessionKey))??null;
       const pinnedRouteAccountId=routeSessionKey===null?null:(manualAccountId!==null&&candidateIds.has(manualAccountId)?manualAccountId:null)??this.options.pinnedRouteAccount?.(routeSessionKey)??null;
-      if(pinnedRouteAccountId && !this.options.getSettings().pinnedFailover && !candidateIds.has(pinnedRouteAccountId))return result(this.noEligibleResponse(accounts.filter(a=>a.id===pinnedRouteAccountId),family,adapter,projectId,request,purpose));
+      if(pinnedRouteAccountId && !this.options.getSettings().pinnedFailover && !candidateIds.has(pinnedRouteAccountId))return result(this.noEligibleResponse(accounts.filter(a=>a.id===pinnedRouteAccountId),family,adapter,projectId,request,threadId,purpose));
       while (attempted.size < candidateIds.size) {
         signal.throwIfAborted();
         this.options.maintenance?.assertAllowed();
@@ -1127,7 +1127,7 @@ export class AccountPoolHub {
       }
       signal.throwIfAborted();
       return result(failure === null
-        ? this.noEligibleResponse(!this.options.getSettings().pinnedFailover && pinnedRouteAccountId ? accounts.filter(a=>a.id===pinnedRouteAccountId) : accounts, family, adapter, projectId, request, purpose)
+        ? this.noEligibleResponse(!this.options.getSettings().pinnedFailover && pinnedRouteAccountId ? accounts.filter(a=>a.id===pinnedRouteAccountId) : accounts, family, adapter, projectId, request, threadId, purpose)
         : this.errorResponse(adapter, request,
             failure.status,
             failure.message,
@@ -1982,6 +1982,7 @@ export class AccountPoolHub {
     adapter: ProviderAdapter,
     projectId: string | null,
     request: Request,
+    threadId: string | null,
     purpose?: "autopilot",
   ): Response {
     accounts = accounts.filter(account => purpose !== "autopilot" || account.autopilotAllowed);
@@ -2062,7 +2063,10 @@ export class AccountPoolHub {
       }
     }
     if (resetAt!==null) message += upstreamHeld ? ` Повторная попытка не ранее / Retry no earlier than: ${resetAt}.` : ` Сброс / reset: ${resetAt}.`;
-    return this.errorResponse(adapter, request, 403, message, {"x-bb-pool-error":reason});
+    // OpenCode ACP maps HTTP 403 to an authentication failure and discards the body.
+    // A terminal 400 lets native Kimi turns show the pool's quota reason.
+    const status = adapter.provider === "kimi" && threadId !== null && reason === "POOL_QUOTA_THRESHOLD" ? 400 : 403;
+    return this.errorResponse(adapter, request, status, message, {"x-bb-pool-error":reason});
   }
 
   private markError(accountId: string, message: string): void {
