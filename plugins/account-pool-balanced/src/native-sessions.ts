@@ -1,4 +1,4 @@
-import {type NativeProbeInput,type NativeProbeLaunch,type NativeProbeResult,nativeProbeResultSchema} from './native-probe-wire.js';
+import {nativeCatalogProcessSchema,type NativeCatalogProcess,type NativeProbeInput,type NativeProbeLaunch,type NativeProbeResult,nativeProbeResultSchema} from './native-probe-wire.js';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { z } from 'zod';
 import {accountProjectsSchema, nativeLeaseKindSchema, NATIVE_MAX_CONCURRENT_SESSIONS, type AccountProjects} from './contracts.js';
@@ -39,6 +39,7 @@ const leaseSchema = z.object({
   kind: nativeLeaseKindSchema.default('task'),
   caller: z.object({hostId:id,projectId:id.nullable(),threadId:id.optional(),purpose:z.literal('autopilot').optional()}).strict(),
   state: z.enum(['queued','active','uncertain']), deadline: z.number(), createdAt: z.number(),
+  catalogProcess:nativeCatalogProcessSchema.optional(),
   unlock:z.object({requestId:z.string().uuid(),deadline:z.number(),state:z.enum(['issued','consumed','completed','uncertain'])}).strict().optional(),
 }).strict();
 type Lease = z.infer<typeof leaseSchema>;
@@ -58,7 +59,7 @@ export const NATIVE_REQUEST_BODY_TIMEOUT_MS=5_000;
 const NATIVE_ACTIONS=new Set(['acquire','poll','release','unlock-start','unlock-cancel']);
 export interface NativeHttpRejection {status:number;code:string;action:string|null;hostId:string|null;}
 export const nativeRequestSchema=z.discriminatedUnion('action',[
-  z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid(),kind:nativeLeaseKindSchema.default('task')}).strict(),
+  z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid(),kind:nativeLeaseKindSchema.default('task'),catalogProcess:nativeCatalogProcessSchema.optional()}).strict(),
   z.object({action:z.literal('poll'),leaseId:z.string().uuid()}).strict(),
   z.object({action:z.literal('unlock-start'),leaseId:z.string().uuid()}).strict(),
   z.object({action:z.literal('unlock-cancel'),leaseId:z.string().uuid()}).strict(),
@@ -69,7 +70,7 @@ export class NativeSessionError extends Error {constructor(readonly status:numbe
 
 /** Admission for official processes, not an OAuth or model proxy.
  * Expiry never frees an active slot: a disconnected process could still run.
- * Only acknowledged termination or explicit operator attestation releases it.
+ * Release requires termination evidence from the caller, the assigned host, or an operator.
  */
 export class NativeSessions {
   private state:State={managed:false,executors:[],leases:[],events:[],preferredExecutors:{},accountRouting:{}};
@@ -254,8 +255,39 @@ export class NativeSessions {
     if(!lease||lease.state!=='uncertain')throw new NativeSessionError(409,'native-not-uncertain');
     this.event(lease,'attested-stopped');this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
   });}
+  async reconcileCatalogProcesses(verify:(hostId:string,binding:NativeCatalogProcess)=>Promise<boolean>){
+    await this.tail;
+    const now = this.now();
+    // Use the assigned execution host, which can differ from the catalog caller ID.
+    const candidates = this.state.leases.flatMap(lease =>
+      lease.kind==='catalog' && lease.catalogProcess &&
+      (lease.state==='uncertain' || (lease.state==='active' && lease.deadline<=now))
+        ? [{id:lease.id,hostId:lease.executor.hostId,binding:structuredClone(lease.catalogProcess)}]
+        : [],
+    );
+    if (!candidates.length) return 0;
+    const results = await Promise.allSettled(candidates.map(({hostId,binding})=>verify(hostId,binding)));
+    const stopped = new Set(candidates.filter((_candidate,index)=>{
+      const result=results[index];
+      return result?.status==='fulfilled' && result.value===true;
+    }).map(({id})=>id));
+    if (!stopped.size) return 0;
+    return this.serial(()=>{
+      let released = 0;
+      this.state.leases=this.state.leases.filter(lease=>{
+        if (!stopped.has(lease.id) || lease.state!=='uncertain' || lease.kind!=='catalog') return true;
+        this.event(lease,'released');
+        released++;
+        return false;
+      });
+      return released;
+    });
+  }
+
   admissionCheck: () => void = () => {};
   async request(caller:NativeCaller,raw:unknown,diagnosticToken?:string):Promise<NativeReply>{const input=nativeRequestSchema.parse(raw);
+    if(input.action==='acquire'&&input.catalogProcess&&input.kind!=='catalog')
+      throw new NativeSessionError(400,'native-catalog-process-only');
     if(input.action!=='release'&&input.action!=='unlock-cancel')this.admissionCheck();
     if(diagnosticToken&&(input.action==='unlock-start'||input.action==='unlock-cancel'))throw new NativeSessionError(403,'native-diagnostic-only');
     if(input.action==='unlock-start')return this.startUnlock(caller,input.leaseId);
@@ -301,7 +333,9 @@ export class NativeSessions {
       }
       // Idempotent acquisition prevents losing a slot on an uncertain response.
       const existing=this.state.leases.find(l=>l.sessionId===input.sessionId&&sameCaller(l.caller,caller));
-      if(existing&&(existing.executor.id!==executor.id||existing.kind!==input.kind))throw new NativeSessionError(409,'native-session-bound');
+      if(existing&&(existing.executor.id!==executor.id||existing.kind!==input.kind||
+        existing.catalogProcess?.groupId!==input.catalogProcess?.groupId||
+        existing.catalogProcess?.bootId!==input.catalogProcess?.bootId))throw new NativeSessionError(409,'native-session-bound');
       if(existing)lease=existing;
       else{
         if(input.kind==='task'&&caller.threadId!==undefined&&this.accountCapacity(executor.accountId)>1&&
@@ -310,7 +344,8 @@ export class NativeSessions {
         }
         if(this.state.leases.length>=128)throw new NativeSessionError(429,'native-queue-full');
         const now=this.now();
-        lease={id:randomUUID(),sessionId:input.sessionId,executor:structuredClone(executor),caller:structuredClone(caller),kind:input.kind,state:'queued',createdAt:now,deadline:now+NATIVE_LEASE_MS};
+        lease={id:randomUUID(),sessionId:input.sessionId,executor:structuredClone(executor),caller:structuredClone(caller),kind:input.kind,state:'queued',createdAt:now,deadline:now+NATIVE_LEASE_MS,
+          ...(input.catalogProcess?{catalogProcess:input.catalogProcess}:{})};
         this.state.leases.push(lease);this.event(lease,'queued');
       }
     }else lease=this.owned(caller,input.leaseId);
