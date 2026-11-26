@@ -25,6 +25,11 @@ function rawHealth(
   const completedOnce = task.scheduleKind === "once" && task.state === "paused" && task.lastRun?.status === "succeeded";
   const finding = registryFinding(task);
   const paused = task.state === "paused" && !completedOnce && !task.missing && !finding;
+  // A verified one-off systemd execution is retained evidence, not a schedule
+  // incident: its outcome and history stay visible in the one-off executions
+  // view, so it must not flood the failures list. The classifier derives this
+  // from systemd properties upstream; the name is never inspected here.
+  const oneOffExecution = task.scheduler === "systemd" && task.scheduleKind === "once" && task.executionId != null;
   const result = (
     label: string,
     reason: string,
@@ -68,6 +73,14 @@ function rawHealth(
       "Планировщик сообщает о блокировке выполнения",
       1,
       true,
+      "danger",
+    );
+  if (oneOffExecution && (task.state === "failed" || task.lastRun?.status === "failed"))
+    return result(
+      task.state === "failed" ? "Ошибка" : "Последний запуск завершился ошибкой",
+      "Разовое исполнение systemd. Результат и история сохранены в разделе «Разовые исполнения»; это не авария расписания.",
+      2,
+      false,
       "danger",
     );
   if (task.state === "failed")
