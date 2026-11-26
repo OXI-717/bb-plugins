@@ -111,7 +111,14 @@ Expiry or a plugin restart quarantines ACTIVE leases; it never proves process
 termination. Queued leases expire normally. A disconnected active process keeps
 its slot unavailable until the same caller confirms termination. If the wrapper
 has died, an operator must first establish actual process cleanup, then use
-`bb pool native attest-stopped <lease-id> --confirmed`. An expired active lease
+`bb pool native attest-stopped <lease-id> --confirmed`. Pooler can also reconcile a macOS catalog lease that carries the registered
+process group and boot identity from a current launcher. BB checks the exact
+assigned host. Only an absent group or a new host boot allows release. A live
+or unreachable host group, legacy catalog and unconfirmed task keep their
+existing hold. Drain tracked catalog leases before downgrading Pooler to a
+version that does not understand their process binding.
+
+An expired active lease
 cannot be freed by completed=true. There is no automatic uncertain-slot reset.
 
 Registry: at most 32 executors, 128 leases, 256 events retained for 14 days.

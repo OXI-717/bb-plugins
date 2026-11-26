@@ -247,6 +247,39 @@ describe('official native session admission',()=>{
     await sessions.request(catalog,release(first.leaseId!));
     expect((await sessions.request(catalog,poll(second.leaseId!))).state).toBe('active');
   });
+  it('releases only the uncertain catalog bound to a stopped host process group',async()=>{
+    const {sessions,clock}=await fixture();
+    await sessions.configure({...executor,catalogCallerIds:['catalog-one']});
+    const catalog={hostId:'catalog-one',projectId:'project-one'};
+    const process={groupId:4321,bootId:'00000000-0000-0000-0000-000000000001'};
+    const input={...acquire(),kind:'catalog',catalogProcess:process};
+    await expect(sessions.request(caller,{...input,kind:'task'})).rejects.toThrow();
+    const tracked=await sessions.request(catalog,input);
+    await expect(sessions.request(catalog,{...input,catalogProcess:{...process,groupId:5678}})).rejects.toThrow('native-session-bound');
+    clock(1001+NATIVE_LEASE_MS);
+    const checked:unknown[]=[];
+    await sessions.reconcileCatalogProcesses(async(hostId,binding)=>{
+      checked.push({hostId,binding});return false;
+    });
+    expect(checked).toEqual([{hostId:executor.hostId,binding:process}]);
+    expect((await sessions.uncertainLeases())[0].leaseId).toBe(tracked.leaseId);
+    await sessions.reconcileCatalogProcesses(async()=>{throw new Error('offline')});
+    expect(await sessions.uncertainLeases()).toHaveLength(1);
+    expect(await sessions.reconcileCatalogProcesses(async()=>true)).toBe(1);
+    expect(await sessions.uncertainLeases()).toEqual([]);
+    expect((await sessions.snapshot()).events.at(-1)?.event).toBe('released');
+  });
+  it('keeps legacy catalog and task holds out of automatic recovery',async()=>{
+    const {sessions,clock}=await fixture();
+    await sessions.configure({...executor,catalogCallerIds:['catalog-one']});
+    await sessions.request({hostId:'catalog-one',projectId:'project-one'},{...acquire(),kind:'catalog'});
+    await sessions.request(caller,acquire());
+    clock(1001+NATIVE_LEASE_MS);
+    let called=false;
+    await sessions.reconcileCatalogProcesses(async()=>{called=true;return true});
+    expect(called).toBe(false);
+    expect(await sessions.uncertainLeases()).toHaveLength(2);
+  });
   it('retains the account-wide hold for an expired task even when discovery has a free slot',async()=>{
     const {sessions,clock}=await fixture();
     await sessions.configure({...executor,catalogCallerIds:['catalog-one']});
