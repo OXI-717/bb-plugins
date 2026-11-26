@@ -199,7 +199,24 @@ export function createAccountPoolPlugin(
     nativeSessions.admissionCheck=()=>{if(maintenance.status().lease)throw new NativeSessionError(503,'POOL_MAINTENANCE');};
     await nativeSessions.initialize();
     registerNativeUnlockRpc(bb,nativeSessions);
-    bb.onDispose(()=>nativeSessions.close());
+    let catalogReconcileInFlight:Promise<void>|null=null;
+    let catalogReconcileClosed=false;
+    const catalogReconcileTimer=setInterval(()=>{
+      if(catalogReconcileInFlight)return;
+      catalogReconcileInFlight=nativeSessions.reconcileCatalogProcesses(async(hostId,binding)=>{
+        const result=await browserHost.call('catalogProcessStatus',binding,{hostId,timeoutMs:5000});
+        return !catalogReconcileClosed && result.stopped;
+      }).then(count=>{
+        if(count)bb.log.info('Account Pooler reconciled stopped native catalog leases '+JSON.stringify({count}));
+      }).catch(()=>bb.log.warn('Account Pooler native catalog reconciliation unavailable.'))
+        .finally(()=>{catalogReconcileInFlight=null;});
+    },15_000);
+    catalogReconcileTimer.unref();
+    bb.onDispose(()=>{
+      catalogReconcileClosed=true;
+      clearInterval(catalogReconcileTimer);
+      return nativeSessions.close();
+    });
     const hubTokens = new HubTokenStore(secretDir, now);
     await hubTokens.initialize();
     const enrolledHosts = await bb.sdk.hosts.list();
