@@ -56,7 +56,7 @@ appear in cards and host filters and are searchable without rewriting run keys.
 
 The overview’s “Разобрать проблемы” button opens a parent-bound draft for problem diagnosis and cleanup, without starting an agent. It respects search/source/host/project/scope filters across all status sections and pages. The draft includes at most 40 metadata records and asks the agent to re-read the current inventory before changes; an intentional pause alone is not a cleanup reason. Model and project remain editable before submission.
 
-The triage button and attention section select exactly the same unresolved execution incidents. Unknown state and missing entries have separate sections. Source freshness is displayed separately. Age alone never resolves a failure.
+The triage button and attention section select exactly the same unresolved execution incidents. Unknown state and missing entries have separate sections. Source freshness is displayed separately. Age alone never resolves a failure. Verified one-off systemd executions are retained evidence: they stay in the executions section with their outcome and never join the attention list or the triage draft; only their evidence-queue overflow demands attention.
 
 Use catalog_forget_missing with a key object to remove a confirmed missing entry after preserving its history. Do not guess RPC names or edit the database.
 

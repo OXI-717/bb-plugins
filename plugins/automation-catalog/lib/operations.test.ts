@@ -70,6 +70,35 @@ describe("operational state", () => {
       }),
     ).toMatchObject({ attention: true, paused: true });
   });
+  it("keeps a failed one-off systemd execution visible but out of the failures list", () => {
+    const execution = {
+      ...task,
+      scheduler: "systemd",
+      scheduleKind: "once" as const,
+      executionId: "systemd:demo-invocation",
+      state: "failed" as const,
+      history: "available" as const,
+      lastRun: { id: "run-x", status: "failed", finishedAt: 1, exitCode: 70 } as CatalogTask["lastRun"],
+    } as CatalogTask;
+    expect(health(execution)).toMatchObject({ label: "Ошибка", attention: false, tone: "danger" });
+    expect(health(execution).reason).toContain("Разовые исполнения");
+  });
+  it("keeps an evidence overflow on a one-off execution actionable", () => {
+    const execution = {
+      ...task,
+      scheduler: "systemd",
+      scheduleKind: "once" as const,
+      executionId: "systemd:demo-invocation",
+      state: "blocked" as const,
+      history: "available" as const,
+    } as CatalogTask;
+    expect(health(execution)).toMatchObject({ label: "Заблокирована", attention: true, tone: "danger" });
+  });
+  it("keeps a real recurring schedule failure in the failures list", () => {
+    expect(
+      health({ ...task, scheduler: "systemd", state: "failed", history: "available" }),
+    ).toMatchObject({ label: "Ошибка", attention: true, tone: "danger" });
+  });
   it("does not invent healthy state without monitoring", () => {
     expect(
       health({ ...task, state: "unknown", history: "not-connected", declaredState: "active" }),
