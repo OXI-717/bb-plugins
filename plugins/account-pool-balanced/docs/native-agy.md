@@ -88,17 +88,19 @@ POST `/native/agy` uses the existing project/purpose bearer. Actions:
 - `release`: leaseId and exactly one of stopped=true or completed=true.
   Completion acknowledges an ACP response; stopped acknowledges process cleanup.
 
-An account has one shared queue across machines, catalog reads, interactive
-sessions and headless tasks. In the account settings, **Одновременных сеансов**
-sets the number of available slots (1–4, default 1). It is a Pooler setting;
-Google still applies its own account limits. Raise the limit during active
+An account shares one queue for interactive sessions and headless tasks across
+machines. In the account settings, **Одновременных сеансов** sets the number of
+task slots (1–4, default 1). Catalog discovery has one additional slot per
+account, shared across machines. Google still applies its own account limits. Raise the limit during active
 sessions or while requests are queued. Lower it when the account is idle. A host that retains its lease for a warm ACP process
 uses a slot until the process stops, even between prompts. With more than one
 slot configured, a second process for the same BB thread and account is refused.
 A waiter already queued for an active thread waits until that thread frees its slot.
 Other threads retain their order among eligible waiters.
-Diagnostics remain exclusive, and an unconfirmed stop blocks new admission for
-that account. A queued prompt is never forwarded; cancellation never replays it.
+Diagnostics remain exclusive across both queues. An unconfirmed catalog stop
+continues to block discovery for that account and stays visible to operators.
+An unconfirmed task or diagnostic stop blocks all new admission for that
+account. A queued prompt is never forwarded; cancellation never replays it.
 Headless holds its lease until the owned process group has stopped. Failed or
 changed admission still stops the wrapper without switching accounts.
 
