@@ -216,6 +216,48 @@ describe('official native session admission',()=>{
     await sessions.request(caller,{...input,sessionId:input.sessionId});
     await expect(sessions.request(caller,{...input,kind:'task'})).rejects.toThrow('native-session-bound');
   });
+  it('keeps an expired catalog lease visible without blocking task admission on either host',async()=>{
+    const {sessions,clock}=await fixture();
+    await sessions.configure({...executor,catalogCallerIds:['catalog-one']});
+    await sessions.configure({...executor,id:'worker-official',hostId:'worker',callerIds:['worker'],catalogCallerIds:['catalog-two']});
+    const catalog={hostId:'catalog-one',projectId:'project-one'};
+    const discover={hostId:'catalog-two',projectId:'project-one'};
+    const worker={hostId:'worker',projectId:'project-one',threadId:'thread-two'};
+    const first=await sessions.request(catalog,{...acquire(),kind:'catalog'});
+    clock(1001+NATIVE_LEASE_MS);
+    const blocked=await sessions.request(discover,{...acquire('worker-official'),kind:'catalog'});
+    expect(blocked.state).toBe('queued');
+    expect((await sessions.request(worker,acquire('worker-official'))).state).toBe('active');
+    expect((await sessions.request(caller,acquire())).state).toBe('queued');
+    expect(await sessions.uncertainLeases()).toEqual([expect.objectContaining({leaseId:first.leaseId,kind:'catalog'})]);
+    await expect(sessions.request(catalog,{action:'release',leaseId:first.leaseId!,completed:true})).rejects.toThrow('native-stop-unconfirmed');
+    await sessions.request(catalog,release(first.leaseId!));
+    expect((await sessions.request(discover,poll(blocked.leaseId!))).state).toBe('active');
+  });
+  it('limits discovery to one catalog process without consuming the task limit',async()=>{
+    const {sessions}=await fixture();
+    await sessions.configure({...executor,catalogCallerIds:['catalog-one']});
+    const catalog={hostId:'catalog-one',projectId:'project-one'};
+    const task=await sessions.request(caller,acquire());
+    const first=await sessions.request(catalog,{...acquire(),kind:'catalog'});
+    expect(task.state).toBe('active');
+    expect(first.state).toBe('active');
+    const second=await sessions.request(catalog,{...acquire(),kind:'catalog'});
+    expect(second.state).toBe('queued');
+    await sessions.request(catalog,release(first.leaseId!));
+    expect((await sessions.request(catalog,poll(second.leaseId!))).state).toBe('active');
+  });
+  it('retains the account-wide hold for an expired task even when discovery has a free slot',async()=>{
+    const {sessions,clock}=await fixture();
+    await sessions.configure({...executor,catalogCallerIds:['catalog-one']});
+    const catalog={hostId:'catalog-one',projectId:'project-one'};
+    const task=await sessions.request(caller,acquire());
+    clock(1001+NATIVE_LEASE_MS);
+    const lookup=await sessions.request(catalog,{...acquire(),kind:'catalog'});
+    expect(lookup.state).toBe('queued');
+    await sessions.request(caller,release(task.leaseId!));
+    expect((await sessions.request(catalog,poll(lookup.leaseId!))).state).toBe('active');
+  });
   it('expiry quarantines active capacity instead of starting a competing process',async()=>{
     const {sessions,clock}=await fixture();const first=await sessions.request(caller,acquire());
     clock(1001+NATIVE_LEASE_MS);

@@ -321,11 +321,16 @@ export class NativeSessions {
     this.validateExecution(lease.executor);
     if(JSON.stringify(executor)!==JSON.stringify(lease.executor))throw new NativeSessionError(409,'native-executor-changed');
     const same=this.state.leases.filter(l=>l.executor.accountId===lease.executor.accountId);
-    const capacity=this.accountCapacity(executor.accountId);
-    const active=same.filter(l=>l.state==='active');
-    const exclusive=same.some(l=>l.state==='uncertain'||(l.kind==='diagnostic'&&l.state==='active'));
+    const catalog=lease.kind==='catalog';
+    const lane=same.filter(l=>(l.kind==='catalog')===catalog);
+    const capacity=catalog?1:this.accountCapacity(executor.accountId);
+    const active=lane.filter(l=>l.state==='active');
+    // An unconfirmed catalog process must not block model work. Keep discovery
+    // quarantined until it is stopped and preserve account-wide task/diagnostic holds.
+    const exclusive=same.some(l=>(l.state==='uncertain'&&(l.kind!=='catalog'||catalog))||
+      (l.kind==='diagnostic'&&l.state==='active'));
     // Waiters created at capacity 1 may already share a thread with an active task.
-    const next=same.find(l=>l.state==='queued'&&(
+    const next=lane.find(l=>l.state==='queued'&&(
       l.kind!=='task'||l.caller.threadId===undefined||
       !active.some(task=>task.kind==='task'&&task.caller.threadId===l.caller.threadId)
     ));
