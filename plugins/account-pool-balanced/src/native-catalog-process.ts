@@ -1,14 +1,6 @@
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {z} from 'zod';
-
-const bootIdSchema = z.string().regex(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
-
-export const nativeCatalogProcessSchema = z.object({
-  groupId: z.number().int().min(2).max(2_147_483_647),
-  bootId: bootIdSchema,
-}).strict();
-export type NativeCatalogProcess = z.infer<typeof nativeCatalogProcessSchema>;
+import {nativeCatalogBootIdSchema,type NativeCatalogProcess} from './native-probe-wire.js';
 
 const run = promisify(execFile);
 
@@ -20,7 +12,7 @@ export async function isNativeCatalogProcessStopped(binding: NativeCatalogProces
     const {stdout} = await run('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], {
       encoding: 'utf8', timeout: 1500, maxBuffer: 1024,
     });
-    boot = bootIdSchema.parse(stdout.trim().toLowerCase());
+    boot = nativeCatalogBootIdSchema.parse(stdout.trim().toLowerCase());
   } catch {
     return false;
   }

@@ -1,5 +1,4 @@
-import {nativeCatalogProcessSchema,type NativeCatalogProcess} from './native-catalog-process.js';
-import {type NativeProbeInput,type NativeProbeLaunch,type NativeProbeResult,nativeProbeResultSchema} from './native-probe-wire.js';
+import {nativeCatalogProcessSchema,type NativeCatalogProcess,type NativeProbeInput,type NativeProbeLaunch,type NativeProbeResult,nativeProbeResultSchema} from './native-probe-wire.js';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { z } from 'zod';
 import {accountProjectsSchema, nativeLeaseKindSchema, NATIVE_MAX_CONCURRENT_SESSIONS, type AccountProjects} from './contracts.js';

@@ -1,5 +1,4 @@
-import {nativeCatalogProcessSchema} from './native-catalog-process.js';
-import {nativeProbeLaunchSchema,nativeProbeResultSchema} from './native-probe-wire.js';
+import {nativeCatalogProcessSchema,nativeProbeLaunchSchema,nativeProbeResultSchema} from './native-probe-wire.js';
 import {defineRpcContract} from '@get-bb/plugin-sdk';
 import {z} from 'zod';
 import {access} from 'node:fs/promises';

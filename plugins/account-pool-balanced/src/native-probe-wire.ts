@@ -10,3 +10,11 @@ export const nativeProbeLaunchSchema=nativeProbeInputSchema.extend({protocol:z.l
 export type NativeProbeInput=z.infer<typeof nativeProbeInputSchema>;
 export type NativeProbeResult=z.infer<typeof nativeProbeResultSchema>;
 export type NativeProbeLaunch=z.infer<typeof nativeProbeLaunchSchema>;
+
+export const nativeCatalogBootIdSchema = z.string().regex(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+
+export const nativeCatalogProcessSchema = z.object({
+  groupId: z.number().int().min(2).max(2_147_483_647),
+  bootId: nativeCatalogBootIdSchema,
+}).strict();
+export type NativeCatalogProcess = z.infer<typeof nativeCatalogProcessSchema>;
