@@ -1279,6 +1279,90 @@ describe("Account Pool plugin", () => {
     expect(await blocked.text()).toContain("threshold 60%");
   });
 
+  it("blocks Cursor after billing-cycle usage rises above 100 percent", async () => {
+    let used: unknown = 65;
+    const cycleEnd = Date.now() + 86_400_000;
+    const modelFetch = vi.fn(async () =>
+      new Response(new Uint8Array(), { headers: { "content-type": "application/proto" } }),
+    );
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "cursor",
+      initialConfig: { switchThreshold: .85 },
+      options: {
+        cursorExchangeUrl: "https://exchange.example/token",
+        cursorUsageUrl: "https://usage.example/usage",
+        fetch: async input => {
+          const url = String(input);
+          if (url.startsWith("https://exchange.example/")) return Response.json({accessToken:"synthetic"});
+          if (url.startsWith("https://usage.example/")) {
+            return Response.json({ billingCycleEnd: cycleEnd, planUsage: { totalPercentUsed: used } });
+          }
+          return modelFetch();
+        },
+      },
+    });
+    const {callRpc, fetchHttp} = fixture.host.harness.behavior;
+    const refresh = async () => (await callRpc("account.refreshUsage", {accountId:fixture.account.id}) as {account:AccountSummary}).account;
+    const readiness = async () => (await callRpc("readiness.get", {projectId:"project-one"}) as Array<{provider:string}>)
+      .find(row => row.provider === "cursor");
+    const route = () => fetchHttp("POST", "/cursor/agent.v1.AgentService/Run", {
+      headers:{authorization:`Bearer ${fixture.key}`, "content-type":"application/proto"},body:new Uint8Array(),
+    });
+    expect(await refresh()).toMatchObject({sevenDayUtilization:.65, eligible:true});
+    expect(await readiness()).toMatchObject({ready:true});
+    const allowed = await route();
+    expect(allowed.status).toBe(200);
+    await allowed.arrayBuffer();
+    expect(modelFetch).toHaveBeenCalledTimes(1);
+
+    used = 123.5;
+    const saturated = await refresh();
+    expect(saturated).toMatchObject({sevenDayUtilization:1, sevenDayResetAt:cycleEnd, eligible:false});
+    expect(saturated.quotaCollection).toBeUndefined();
+    expect(saturated.providerBudgetEvidence).toBeUndefined();
+    expect(await readiness()).toMatchObject({ready:false});
+    const blocked = await route();
+    expect(blocked.headers.get("x-bb-pool-error")).toBe("POOL_QUOTA_EXHAUSTED");
+    await blocked.arrayBuffer();
+    expect(modelFetch).toHaveBeenCalledTimes(1);
+
+    used = undefined;
+    expect(await refresh()).toMatchObject({sevenDayUtilization:1, eligible:false, quotaCollection:"no-data"});
+    used = "unavailable";
+    expect(await refresh()).toMatchObject({sevenDayUtilization:1, eligible:false, quotaCollection:"error"});
+  });
+
+  it.each(["claude", "kimi"] as const)("distinguishes malformed 2xx %s usage JSON from an empty payload", async provider => {
+    const resetAt = Date.now() + 86_400_000;
+    const known = provider === "claude"
+      ? {seven_day:{utilization:35,resets_at:resetAt}}
+      : {usage:{limit:100,used:35,resetTime:resetAt}};
+    let usageBody = JSON.stringify(known);
+    const fixture = await createFixture({
+      upstreamUrl:"https://upstream.example", provider, source:provider === "claude" ? "import" : "api-key",
+      options:{
+        usageUrl:"https://usage.example/status",
+        kimiUsagesUrl:"https://usage.example/status",
+        importCredentials:async () => importedCredentials(),
+        fetch:async input => {
+          if (new URL(String(input)).hostname !== "usage.example") throw Error("Unexpected fixture request");
+          return new Response(usageBody, {status:200, headers:{"content-type":"application/json"}});
+        },
+      },
+    });
+    const refresh = async () => (await fixture.host.harness.behavior.callRpc("account.refreshUsage", {accountId:fixture.account.id}) as {account:AccountSummary}).account;
+    expect(await refresh()).toMatchObject({sevenDayUtilization:.35, sevenDayResetAt:resetAt, eligible:true});
+    usageBody = '{"usage":';
+    expect(await refresh()).toMatchObject({
+      quotaCollection:"error", sevenDayUtilization:.35, sevenDayResetAt:resetAt, error:null, eligible:true,
+    });
+    usageBody = "{}";
+    expect(await refresh()).toMatchObject({
+      quotaCollection:"no-data", sevenDayUtilization:.35, sevenDayResetAt:resetAt, error:null, eligible:true,
+    });
+  });
+
   it.each(["application/proto", "application/connect+proto"])("reports Cursor pool threshold in %s without contacting model upstream", async contentType => {
     const modelCalls: string[] = [];
     const fixture = await createFixture({upstreamUrl:"https://upstream.example",provider:"cursor",source:"api-key",apiKey:"synthetic-cursor-key",options:{

@@ -1,6 +1,7 @@
 import {AccountDraftForm} from './account-draft-form';
-import {NativeAccountRow, NativeAccountSettings} from './native-account-settings';
-import {AccountListRow, AccountRowStatus, SettingsBadge} from './account-list-row';
+import { PROVIDER_BUDGET_MAX_AGE_MS } from "./src/contracts";
+import {NativeAccountRow, NativeAccountSettings, nativePriority} from './native-account-settings';
+import {AccountListRow, AccountRowStatus, QuotaEmpty, SettingsBadge} from './account-list-row';
 import {PoolSelectedAccounts, PoolTechnicalDetails, PoolUpdatePanel} from './pool-update-panel';
 import type { NativeAccounts } from "./src/native-accounts.js";
 import {AccountEgressForm} from "./account-egress-form";
@@ -304,15 +305,23 @@ function resetLabel(timestamp: number | null, now = Date.now()): string {
   return `сброс ${exact} · через ${duration}`;
 }
 
-function ResetTime({ timestamp }: { timestamp: number | null }) {
+function useResetClock(timestamp: number | null) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (timestamp === null) return;
-    setNow(Date.now());
-    if (timestamp <= Date.now()) return;
-    const timer = setInterval(() => setNow(Date.now()), 15_000);
-    return () => clearInterval(timer);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = () => {
+      const current = Date.now();
+      setNow(current);
+      if (current < timestamp) timer = setTimeout(tick, Math.min(15_000, timestamp - current));
+    };
+    tick();
+    return () => clearTimeout(timer);
   }, [timestamp]);
+  return now;
+}
+
+function ResetTime({ timestamp, now }: { timestamp: number | null; now: number }) {
   return timestamp === null
     ? <span>Сброс неизвестен</span>
     : <time dateTime={new Date(timestamp).toISOString()}>{resetLabel(timestamp, now)}</time>;
@@ -440,7 +449,47 @@ type QuotaSlot = {
   limit: number;
   resetAt: number | null;
   weekly?: boolean;
+  requests?: { remaining: number; limit: number };
 };
+
+function hasQuotaValue(slot: Pick<QuotaSlot, "utilization" | "resetAt" | "status">) {
+  return slot.utilization !== null || slot.resetAt !== null || slot.status !== null;
+}
+
+function quotaCollectionState(account: AccountSummary, slots: QuotaSlot[]) {
+  if (account.quotaCollection === "error" || account.status === "error") return "error";
+  if (account.quotaCollection === "no-data" || account.provider === "devin" || account.provider === "grok") return "no-data";
+  return slots.some(hasQuotaValue) ? null : "pending";
+}
+
+function usesScopedQuota(account: AccountSummary) {
+  return account.provider === "neuraldeep" || account.provider === "agy";
+}
+
+function scopedQuotaSlots(account: AccountSummary, now = Date.now()): QuotaSlot[] {
+  const proof = account.providerBudgetEvidence;
+  if (proof?.provider !== account.provider || now < proof.observedAt || now - proof.observedAt > PROVIDER_BUDGET_MAX_AGE_MS) return [];
+  return proof.windows.map((window, index) => {
+    const session = window.id === "session";
+    return {
+      key: window.id,
+      label: account.provider === "agy" ? `Окно ${index + 1}` : session ? "Сессия" : "Неделя",
+      utilization: 1 - window.remainingPercent / 100,
+      status: null,
+      limit: 1,
+      resetAt: window.resetAt,
+      requests: account.provider === "neuraldeep" ? proof.chatRequests?.[session ? "session" : "weekly"] : undefined,
+    };
+  });
+}
+
+function remainingQuota(utilization: number | null): string | null {
+  if (utilization === null) return null;
+  const remaining = Math.min(100, Math.max(0, (1 - utilization) * 100));
+  if (remaining === 0) return "0%";
+  if (remaining < 1) return "<1%";
+  return `${Math.floor(remaining + 1e-10)}%`;
+}
 
 function quotaSlots(account: AccountSummary, threshold: PoolThresholdConfig): QuotaSlot[] {
   const limits = dashboardThresholds(account, threshold);
@@ -466,21 +515,30 @@ function quotaSlots(account: AccountSummary, threshold: PoolThresholdConfig): Qu
     key: "seven-day", label: account.provider === "cursor" ? "ЦИКЛ" : "7Д", utilization: account.sevenDayUtilization, status: account.sevenDayStatus,
     limit: weeklyLimit, resetAt: account.sevenDayResetAt, weekly: true,
   };
-  const present = (slot: QuotaSlot) => slot.utilization !== null || slot.resetAt !== null || slot.status !== null;
+  const hasShortWindow = generic.some(slot => slot.label === "5Ч") || (account.provider === "kimi" && generic.length > 0);
   const fable = account.familyWeekly.fable;
-  return [
+  const slots = [
     ...generic,
-    ...(!generic.some(slot => slot.label === "5Ч") && (present(fiveHour) || account.provider === "claude") ? [fiveHour] : []),
-    ...(!generic.some(slot => slot.weekly) && (present(weekly) || account.provider === "claude") ? [weekly] : []),
+    ...(!hasShortWindow && (hasQuotaValue(fiveHour) || account.provider === "claude") ? [fiveHour] : []),
+    ...(!generic.some(slot => slot.weekly) && (hasQuotaValue(weekly) || account.provider === "claude") ? [weekly] : []),
     ...(fable ? [{
       key: "fable", label: "FABLE", utilization: fable.utilization, status: fable.status,
       limit: limits.familyWeekly ?? limits.weekly, resetAt: fable.resetAt,
     }] : []),
   ];
+  if (account.provider !== "claude" || slots.some(hasQuotaValue)) return slots;
+  const familySlots = modelFamilySchema.options.flatMap(family => {
+    const quota = account.familyWeekly[family];
+    return quota && hasQuotaValue(quota) ? [{
+      key: family, label: FAMILY_LABELS[family], utilization: quota.utilization, status: quota.status,
+      limit: limits.familyWeekly ?? limits.weekly, resetAt: quota.resetAt,
+    }] : [];
+  });
+  return familySlots.length > 0 ? familySlots : slots;
 }
 
-function quotaToneClass(slot: QuotaSlot): string {
-  if (slot.resetAt !== null && slot.resetAt <= Date.now()) return "text-muted-foreground";
+function quotaToneClass(slot: QuotaSlot, expired: boolean): string {
+  if (expired) return "text-muted-foreground";
   if (
     slot.status?.toLowerCase() === "rejected" ||
     (slot.utilization !== null && slot.utilization >= slot.limit)
@@ -500,8 +558,15 @@ function QuotaValue({
   slot: QuotaSlot;
   refreshing: boolean;
 }) {
-  const blocked = quotaToneClass(slot) === "text-destructive-text";
-  const ratio = slot.weekly && slot.utilization !== null && slot.limit > 0 ? percent(slot.utilization / slot.limit) : null;
+  const now = useResetClock(slot.resetAt);
+  const expired = slot.resetAt !== null && slot.resetAt <= now;
+  const tone = quotaToneClass(slot, expired);
+  const blocked = tone === "text-destructive-text";
+  const exhausted = !expired && (slot.status?.toLowerCase() === "rejected" || (slot.utilization ?? 0) >= 1);
+  const remaining = expired ? null : slot.requests
+    ? `${slot.requests.remaining} из ${slot.requests.limit} запр.`
+    : remainingQuota(slot.utilization);
+  const ratio = !expired && slot.weekly && slot.utilization !== null && slot.limit > 0 ? percent(slot.utilization / slot.limit) : null;
   return (
     <div
       className={cn(
@@ -513,11 +578,13 @@ function QuotaValue({
         {slot.label}
       </div>
       <div className="text-xs font-semibold">
-        <span className={quotaToneClass(slot)}>{percent(slot.utilization)}</span>
+        <span className={tone}>{percent(expired ? null : slot.utilization)}</span>
         {slot.weekly && <> · потолок {percent(slot.limit)}{ratio === null ? "" : ` · ${ratio} от потолка`}</>}
-        {blocked && <span className="ml-1">· лимит достигнут</span>}
+        {exhausted && <span className="ml-1">· лимит достигнут</span>}
+        {blocked && !exhausted && <span className="ml-1">· потолок достигнут</span>}
       </div>
-      <div className="text-2xs text-muted-foreground"><ResetTime timestamp={slot.resetAt} /></div>
+      {remaining !== null && <div className="text-xs text-foreground">Осталось {remaining}</div>}
+      <div className="text-2xs text-muted-foreground"><ResetTime timestamp={slot.resetAt} now={now} /></div>
     </div>
   );
 }
@@ -572,7 +639,11 @@ function AccountRow({
 }) {
   const cap = !account.weeklySpending ? capText(account) : null;
   const status = statusPresentation(account, threshold);
-  const slots = quotaSlots(account, threshold);
+  const slots = usesScopedQuota(account) ? scopedQuotaSlots(account) : quotaSlots(account, threshold);
+  const collection = quotaCollectionState(account, slots);
+  const proof = account.providerBudgetEvidence;
+  const cooldown = slots.length > 0 && proof?.provider === "neuraldeep" && account.provider === "neuraldeep"
+    ? proof.chatRequests?.cooldownSeconds ?? 0 : 0;
   const {
     attributes,
     isDragging,
@@ -628,11 +699,11 @@ function AccountRow({
               <span>использован {relative(account.lastUsedAt)}</span>
             )}
             {cap === null ? null : <span>{cap}</span>}
+            {collection === null && cooldown > 0 && <span>Пауза при сборе · {cooldown} с</span>}
             {refreshing ? <span>обновляю квоты…</span> : null}
           </>
         }
-        metrics={slots.length === 0
-          ? <span className="text-xs text-muted-foreground">Данных о квотах пока нет</span>
+        metrics={collection !== null ? <QuotaEmpty state={collection} />
           : slots.map(slot => <QuotaValue key={slot.key} slot={slot} refreshing={refreshing} />)}
         actions={
           <DropdownMenu>
@@ -799,7 +870,9 @@ function QuotaDetail({
   threshold: number;
   skipAt?: number;
 }) {
-  const utilization = quota?.utilization ?? null;
+  const resetAt = quota?.resetAt ?? null;
+  const now = useResetClock(resetAt);
+  const utilization = resetAt !== null && resetAt <= now ? null : quota?.utilization ?? null;
   const limit = skipAt ?? threshold;
   return (
     <div className="grid grid-cols-[7rem_1fr] items-center gap-3 text-sm">
@@ -823,7 +896,8 @@ function QuotaDetail({
         </div>
         <div className="text-xs text-muted-foreground">
           {percent(utilization)}
-          {" · "}<ResetTime timestamp={quota?.resetAt ?? null} />
+          {utilization !== null ? ` · осталось ${remainingQuota(utilization)}` : ""}
+          {" · "}<ResetTime timestamp={resetAt} now={now} />
           {" · потолок "}{percent(limit)}
           {utilization !== null && limit > 0 ? ` · ${percent(utilization / limit)} от потолка` : ""}
         </div>
@@ -1586,7 +1660,11 @@ function UnlockedAccountPoolSettings() {
         </div>
       ) : null}
       {PROVIDERS.map((provider) => {
-        const serverAccounts = accounts.filter(
+        const managedAgy = provider.id === "agy" && nativeAccounts?.managed !== false;
+        const nativeRows = managedAgy ? [...(nativeAccounts?.accounts ?? [])].sort((left, right) =>
+          Number(left.role === "reserve") - Number(right.role === "reserve") || nativePriority(left) - nativePriority(right)
+        ) : [];
+        const serverAccounts = managedAgy ? [] : accounts.filter(
           (account) => account.provider === provider.id,
         );
         const order =
@@ -1605,7 +1683,10 @@ function UnlockedAccountPoolSettings() {
           <SettingsSection
             key={provider.id}
             title={provider.title}
-            description={provider.id === "agy" && nativeAccounts?.managed !== false ? "Вход Google на машинах. Предел сеансов общий для каждой подписки." : `${provider.description} В работе: ${providerAccounts.reduce((n,a)=>n+a.inFlight,0)}; в очереди: ${providerAccounts.reduce((n,a)=>n+a.queuedRequests,0)}. Предел на аккаунт: ${config?.maxConcurrentRequestsPerAccount ?? 2}.`}
+            description={managedAgy ? nativeAccounts === null
+              ? "Вход Google на машинах."
+              : `Активные допуски: ${nativeRows.reduce((sum, account) => sum + account.active, 0)}; в очереди: ${nativeRows.reduce((sum, account) => sum + account.queued, 0)}. Предел сеансов общий для каждой подписки.`
+              : `${provider.description} В работе: ${providerAccounts.reduce((n,a)=>n+a.inFlight,0)}; в очереди: ${providerAccounts.reduce((n,a)=>n+a.queuedRequests,0)}. Предел на аккаунт: ${config?.maxConcurrentRequestsPerAccount ?? 2}.`}
             action={
               <div className="flex flex-wrap items-center gap-2">
                 <Switch
@@ -1635,19 +1716,18 @@ function UnlockedAccountPoolSettings() {
             }
           >
             {provider.id === "agy" && nativeError !== null ? <p role="alert" className="py-2.5 text-sm text-destructive-text">Не удалось загрузить исполнителей: {nativeError}</p> : null}
-            {provider.id === "agy" && nativeAccounts?.accounts.length ? (
+            {nativeRows.length > 0 ? (
               <div className="divide-y divide-border">
-                {nativeAccounts.accounts.map((account) => (
+                {nativeRows.map((account) => (
                   <div key={account.accountId}>
                     <NativeAccountRow
-                      managed={nativeAccounts.managed}
+                      canEditPriority={!!nativeAccounts?.selectionRevision}
                       account={account}
                       expanded={nativeSettings === account.accountId}
                       open={() => setNativeSettings(current => current === account.accountId ? null : account.accountId)}
                     />
-                    {nativeSettings === account.accountId && nativeAccounts.selectionRevision && (
+                    {nativeSettings === account.accountId && nativeAccounts?.selectionRevision && (
                       <section id={`pool-native-${account.accountId}`} aria-label={account.label ?? "Google Antigravity"} className="pool-settings pool-account-card mb-3">
-                        <p className="pool-settings-help">Официальный клиент пока не передаёт сведения о расходе и времени сброса квоты.</p>
                         <NativeAccountSettings account={account} revision={nativeAccounts.selectionRevision}
                           loadProjects={() => rpc.call("projects.list", null)}
                           save={async input => { await rpc.call("native.updateAccount", input); await refreshNative(); }}
@@ -1661,7 +1741,7 @@ function UnlockedAccountPoolSettings() {
             {status === null ? (
               <p className="py-2.5 text-sm text-muted-foreground">Загрузка…</p>
             ) : providerAccounts.length === 0 ? (
-              provider.id === "agy" && (nativeAccounts?.accounts.length || nativeError) ? null : <p className="py-2.5 text-sm text-subtle-foreground">
+              managedAgy && (nativeRows.length || nativeError || nativeAccounts === null) ? null : <p className="py-2.5 text-sm text-subtle-foreground">
                 Аккаунтов пока нет.
               </p>
             ) : (
@@ -2493,6 +2573,9 @@ function AccountCard({
       ? account.accountUuid
       : account.codexAccountId;
   const role = account.role === "reserve" ? "Резерв" : "Основной";
+  const scoped = usesScopedQuota(account);
+  const slots = scoped ? scopedQuotaSlots(account) : quotaSlots(account, threshold);
+  const collection = quotaCollectionState(account, slots);
   const projectAccess = account.projects?.onlySelected ? "Только выбранные проекты" : "Все проекты";
   return (
     <section id={`pool-account-${account.id}`} aria-label={accountFullName(account)} className="pool-settings pool-account-card mb-3 space-y-3">
@@ -2508,26 +2591,33 @@ function AccountCard({
         {current && <SettingsBadge>Текущий</SettingsBadge>}
       </div>
       <div className="space-y-3">
-        {account.limitWindows.map(window => (
-          <QuotaDetail
-            key={window.slot}
-            label={windowLongLabel(window, account.provider)}
-            quota={window}
-            threshold={thresholdFor(limits, window.windowMinutes)}
-            skipAt={window.windowMinutes === 10080 ? weeklySkipAt
-              : (window.windowMinutes ?? 0) >= 1_440 && account.capLimit !== null ? Math.min(limits.other, account.capLimit) : undefined}
-          />
-        ))}
-        {!account.limitWindows.some(window => window.windowMinutes === 300 || (window.windowMinutes === null && account.provider === "codex" && window.slot === "primary")) &&
-          (account.fiveHourUtilization !== null || account.fiveHourResetAt !== null || account.fiveHourStatus !== null) &&
-          <QuotaDetail label="5 часов" quota={shared(account.fiveHourUtilization, account.fiveHourResetAt, account.fiveHourStatus)} threshold={limits.fiveHour} />}
-        {!account.limitWindows.some(window => window.windowMinutes === 10080 || (window.windowMinutes === null && account.provider === "codex" && window.slot === "secondary")) &&
-          (account.sevenDayUtilization !== null || account.sevenDayResetAt !== null || account.sevenDayStatus !== null) &&
-          <QuotaDetail label={account.provider === "cursor" ? "Расчётный период" : "7 дней"} quota={shared(account.sevenDayUtilization, account.sevenDayResetAt, account.sevenDayStatus)} threshold={weeklySkipAt} />}
-        {modelFamilySchema.options.map(family => {
-          const quota = account.familyWeekly[family];
-          return quota && <QuotaDetail key={family} label={FAMILY_LABELS[family]} quota={quota} threshold={limits.familyWeekly ?? limits.weekly} />;
-        })}
+        {collection !== null ? <QuotaEmpty state={collection} /> : scoped ? (
+          <div className="flex flex-wrap gap-2">
+            {slots.map(slot => <QuotaValue key={slot.key} slot={slot} refreshing={false} />)}
+          </div>
+        ) : <>
+          {account.limitWindows.map(window => (
+            <QuotaDetail
+              key={window.slot}
+              label={windowLongLabel(window, account.provider)}
+              quota={window}
+              threshold={thresholdFor(limits, window.windowMinutes)}
+              skipAt={window.windowMinutes === 10080 ? weeklySkipAt
+                : (window.windowMinutes ?? 0) >= 1_440 && account.capLimit !== null ? Math.min(limits.other, account.capLimit) : undefined}
+            />
+          ))}
+          {!(account.provider === "kimi" && account.limitWindows.length > 0) &&
+            !account.limitWindows.some(window => window.windowMinutes === 300 || (window.windowMinutes === null && account.provider === "codex" && window.slot === "primary")) &&
+            (account.fiveHourUtilization !== null || account.fiveHourResetAt !== null || account.fiveHourStatus !== null) &&
+            <QuotaDetail label="5 часов" quota={shared(account.fiveHourUtilization, account.fiveHourResetAt, account.fiveHourStatus)} threshold={limits.fiveHour} />}
+          {!account.limitWindows.some(window => window.windowMinutes === 10080 || (window.windowMinutes === null && account.provider === "codex" && window.slot === "secondary")) &&
+            (account.sevenDayUtilization !== null || account.sevenDayResetAt !== null || account.sevenDayStatus !== null) &&
+            <QuotaDetail label={account.provider === "cursor" ? "Расчётный период" : "7 дней"} quota={shared(account.sevenDayUtilization, account.sevenDayResetAt, account.sevenDayStatus)} threshold={weeklySkipAt} />}
+          {modelFamilySchema.options.map(family => {
+            const quota = account.familyWeekly[family];
+            return quota && <QuotaDetail key={family} label={FAMILY_LABELS[family]} quota={quota} threshold={limits.familyWeekly ?? limits.weekly} />;
+          })}
+        </>}
       </div>
       <WeeklyBudgetForm account={account} save={saveWeekly} deadline={timestamp => moment(timestamp) + " МСК"} />
       <details>

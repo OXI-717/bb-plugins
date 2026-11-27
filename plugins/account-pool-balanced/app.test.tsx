@@ -385,6 +385,114 @@ describe("Account Pool settings", () => {
     expect(slot.getByText(`bb pool native attest-stopped ${leaseId} --confirmed`)).toBeTruthy();
   });
 
+  it("sorts managed priorities without presenting an active admission as usage or copying OAuth quota", async () => {
+    const native = {
+      projects: {onlySelected:false, rules:[]}, projectsRevision: "a".repeat(64), mixedProjects:false,
+      executors: [{id:"fixture", enabled:true, autopilotAllowed:false}], queued: 0, uncertain: 0,
+    };
+    const slot = render([account({provider:"agy", label:"OAuth only", email:"oauth@example.com"})], {
+      "native.accounts": () => ({managed:true, selectionRevision:"b".repeat(64), accounts:[
+        {...native, accountId:"second", label:"Google second", priority:20, active:0},
+        {...native, accountId:"first", label:"Google first", priority:2, active:1, queued:2},
+      ]}),
+      "native.updateAccount": () => null,
+    });
+    const first = await slot.findByRole("button", {name:"Открыть Google first"});
+    const second = slot.getByRole("button", {name:"Открыть Google second"});
+    expect(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(first).getByText("Приоритет 2")).toBeTruthy();
+    expect(within(first).getByText("Активные допуски: 1")).toBeTruthy();
+    expect(within(second).queryByText(/Активные допуски/)).toBeNull();
+    for (const row of [first, second]) {
+      const metrics = within(row).getByTitle("Сеансы в работе / предел");
+      expect(within(metrics).getByText("Pooler пока не получает квоты", {exact: true})).toBeTruthy();
+      expect(within(row).queryByText("Источник не отдаёт данные о квотах")).toBeNull();
+    }
+    expect(slot.getByText(/Активные допуски: 1; в очереди: 2/)).toBeTruthy();
+    expect(slot.queryByText("Текущий")).toBeNull();
+    expect(slot.queryByText(/использован/)).toBeNull();
+    expect(slot.queryByRole("button", {name:"Открыть oauth@example.com"})).toBeNull();
+    fireEvent.click(slot.getByRole("button", {name:"Настроить приоритет: Google first"}));
+    const priority = await slot.findByRole("spinbutton", {name:"Приоритет аккаунта"});
+    fireEvent.change(priority, {target:{value:"4"}});
+    fireEvent.blur(priority);
+    await waitFor(() => expect(slot.rpcCalls).toContainEqual({
+      method:"native.updateAccount", input:{accountId:"first", expectedRevision:"b".repeat(64), priority:4},
+    }));
+  });
+
+  it("shows counts, real cycle reset, zero and distinct quota collection states", async () => {
+    const empty = {fiveHourUtilization:null, observedAt:null, lastUsedAt:null};
+    const row = (suffix: number, label: string, props: Partial<AccountSummary>) => account({
+      ...empty, id:`11111111-1111-4111-8111-11111111111${suffix}`, email:label, label, ...props,
+    });
+    const slot = render([
+      row(1, "neural@example.com", {provider:"neuraldeep", providerBudgetEvidence:{
+        provider:"neuraldeep", source:"usage", observedAt:Date.now(),
+        windows:[
+          {id:"session", remainingPercent:0, resetAt:null, durationMinutes:null},
+          {id:"weekly", remainingPercent:65, resetAt:null, durationMinutes:10080},
+        ],
+        chatRequests:{session:{remaining:0, limit:20}, weekly:{remaining:65, limit:100}, cooldownSeconds:30},
+      }}),
+      row(2, "cycle@example.com", {provider:"cursor", sevenDayUtilization:0.38, sevenDayResetAt:Date.now() + 3_600_000}),
+      row(3, "error@example.com", {provider:"cursor", quotaCollection:"error", sevenDayUtilization:0.81}),
+      row(4, "pending@example.com", {provider:"cursor"}),
+      row(5, "grok@example.com", {provider:"grok"}),
+    ]);
+    const neural = within(await slot.findByRole("button", {name:"Открыть neural@example.com"}));
+    expect(neural.getByText("Осталось 0 из 20 запр.")).toBeTruthy();
+    expect(neural.getByText("Осталось 65 из 100 запр.")).toBeTruthy();
+    expect(neural.getByText(/лимит достигнут/)).toBeTruthy();
+    expect(neural.getAllByText("Сброс неизвестен")).toHaveLength(2);
+    const cycle = within(slot.getByRole("button", {name:"Открыть cycle@example.com"}));
+    expect(cycle.getByText("ЦИКЛ")).toBeTruthy();
+    expect(cycle.getByText("Осталось 62%")).toBeTruthy();
+    expect(cycle.getByText(/через 1 ч/)).toBeTruthy();
+    expect(within(slot.getByRole("button", {name:"Открыть error@example.com"})).getByText("Ошибка сбора квот")).toBeTruthy();
+    expect(within(slot.getByRole("button", {name:"Открыть pending@example.com"})).getByText("Данные о квотах ещё не получены")).toBeTruthy();
+    expect(within(slot.getByRole("button", {name:"Открыть grok@example.com"})).getByText("Источник не отдаёт данные о квотах")).toBeTruthy();
+    expect(slot.queryByText("Pooler пока не получает квоты")).toBeNull();
+  });
+
+  it("uses only fresh matching OAuth Antigravity evidence and clears each value at its real reset", async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.now();
+      const proof = {
+        provider: "agy" as const, source: "usage" as const, observedAt: now,
+        windows: [
+          {id:"group:aaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbb", remainingPercent:0, resetAt:now + 5000, durationMinutes:null},
+          {id:"group:aaaaaaaaaaaaaaaa:cccccccccccccccc", remainingPercent:72, resetAt:now + 600_000, durationMinutes:null},
+        ],
+      };
+      const foreign = {...proof, provider:"cursor" as const};
+      const stale = {...proof, observedAt:now - 600_001};
+      const fixtures = [proof, foreign, stale].map((providerBudgetEvidence, index) =>
+        account({
+          id:`22222222-2222-4222-8222-22222222222${index}`, provider:"agy",
+          email:`oauth-${index}@example.com`, fiveHourUtilization:null, providerBudgetEvidence,
+        }),
+      );
+      const slot = render(fixtures);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const scope = (index: number) => within(slot.getByRole("button", {name:`Открыть oauth-${index}@example.com`}));
+      expect(scope(0).getByText("Осталось 0%")).toBeTruthy();
+      expect(scope(0).getByText("Осталось 72%")).toBeTruthy();
+      expect(scope(1).getByText("Данные о квотах ещё не получены")).toBeTruthy();
+      expect(scope(2).getByText("Данные о квотах ещё не получены")).toBeTruthy();
+      expect(slot.queryByText("Текущий")).toBeNull();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(scope(0).getByText(/ждём свежих квот/)).toBeTruthy();
+      expect(scope(0).queryByText("Осталось 0%")).toBeNull();
+      expect(scope(0).queryByText(/лимит достигнут/)).toBeNull();
+      expect(scope(0).getByText("Осталось 72%")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks uncertain execution and does not present it as ready", async () => {
     const slot = render([], {"native.accounts": () => ({managed: true, accounts: [{accountId: "subscription-one", executors: [
       {id: "official-desktop", enabled: true, autopilotAllowed: false},
@@ -686,6 +794,30 @@ describe("Account Pool settings", () => {
     expect(slot.getByText("7Д")).toBeTruthy();
     expect(slot.queryByText("FABLE")).toBeNull();
     expect(slot.getByText("—")).toBeTruthy();
+  });
+
+  it("shows Claude family-only quotas in the row and in account details", async () => {
+    const resetAt = Date.now() + 3_600_000;
+    const family = (utilization: number) => ({
+      utilization, resetAt, status:null, observedAt:Date.now(), source:"usage" as const,
+    });
+    const slot = render([account({
+      fiveHourUtilization:null,
+      familyWeekly:{fable:null, sonnet:family(.25), opus:family(.5), haiku:family(.75), other:null},
+    })], {"projects.list":() => []});
+    const button = await slot.findByRole("button", {name:"Открыть person@example.com"});
+    const row = within(button);
+    expect(row.queryByText("Данные о квотах ещё не получены")).toBeNull();
+    expect(row.getByText("Осталось 75%")).toBeTruthy();
+    expect(row.getByText("Осталось 50%")).toBeTruthy();
+    expect(row.getByText("Осталось 25%")).toBeTruthy();
+    fireEvent.click(button);
+    const details = within(slot.getByRole("region", {name:"person@example.com"}));
+    for (const [label, remaining] of [["Sonnet",75],["Opus",50],["Haiku",25]] as const) {
+      const familyRow = details.getByText(`${label}, неделя`).parentElement!;
+      expect(within(familyRow).getByText(new RegExp(`осталось ${remaining}%`))).toBeTruthy();
+    }
+    expect(details.queryByText("Данные о квотах ещё не получены")).toBeNull();
   });
 
   it("keeps the quota slots visible at mobile widths", async () => {

@@ -75,6 +75,16 @@ export function AccountListRow({
   );
 }
 
+export function QuotaEmpty({ state }: { state: "error" | "no-data" | "pending" | "not-connected" }) {
+  const labels = {
+    error: "Ошибка сбора квот",
+    "no-data": "Источник не отдаёт данные о квотах",
+    pending: "Данные о квотах ещё не получены",
+    "not-connected": "Pooler пока не получает квоты",
+  };
+  return <span className={cn("text-xs", state === "error" ? "text-destructive-text" : "text-muted-foreground")}>{labels[state]}</span>;
+}
+
 export function AccountRowStatus({ label, dot }: { label: string; dot: string }) {
   return (
     <span className="inline-flex items-center gap-1.5">

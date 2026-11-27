@@ -206,11 +206,12 @@ export function createOpenAiCompatibleAdapter(
       if (!response.ok) {
         const failure = await apiKeyFailure(response);
         if (failure) throw failure;
-        return;
+        return "error";
       }
+      const payload: unknown = await response.json().catch(() => null);
       const quota = options.parseUsages(
         context.account.id,
-        await response.json().catch(() => null),
+        payload,
         context.quotas.get(context.account.id),
         context.now(),
       );
@@ -218,6 +219,8 @@ export function createOpenAiCompatibleAdapter(
       else if (options.provider === 'zai') context.quotas.put({
         ...context.quotas.get(context.account.id), zaiUsageEvidence:undefined,
       });
+      if (payload === null) return "error";
+      if (options.provider === "neuraldeep") return quota?.providerBudgetEvidence ? "observed" : "no-data";
     },
     errorResponse(status, message, headers, request) {
       return poolErrorResponse(options.provider, status, message, headers, request);

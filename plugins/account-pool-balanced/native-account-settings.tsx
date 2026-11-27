@@ -1,23 +1,30 @@
 import type {NativeProbeInput,NativeProbeResult} from './src/native-probe-wire';
 import {useEffect, useState} from 'react';
+import {Icon} from './ui/components/ui/icon';
 import {Button} from './ui/components/ui/button';
 import {ResourceOverflowMenu} from './ui/components/ui/resource/row';
-import {AccountListRow, AccountRowStatus, SettingsBadge} from './account-list-row';
+import {AccountListRow, AccountRowStatus, QuotaEmpty, SettingsBadge} from './account-list-row';
 import {AccountProjectsForm} from './account-projects-form';
 import type {NativeAccounts, NativeAccountUpdate} from './src/native-accounts.js';
 import {NATIVE_MAX_CONCURRENT_SESSIONS} from './src/contracts.js';
 type Account=NativeAccounts['accounts'][number];
 type Projects=Array<{id:string;name:string}>;
 type Patch=Omit<NativeAccountUpdate,'accountId'|'expectedRevision'>;
+export function nativePriority(account: Account) {
+  return account.priority ?? (account.executors.some(executor => executor.preferred) ? 0 : 10);
+}
+
 export function NativeAccountRow({
   account,
   open,
   expanded,
+  canEditPriority = false,
   managed = true,
 }: {
   account: Account;
   open: () => void;
   expanded?: boolean;
+  canEditPriority?: boolean;
   managed?: boolean;
 }) {
   const name = account.label ?? 'Аккаунт Google';
@@ -36,6 +43,12 @@ export function NativeAccountRow({
     <AccountListRow
       name={name}
       enabled={enabled}
+      leading={canEditPriority ? (
+        <Button type="button" variant="ghost" size="icon" className="mt-1.5 size-8 shrink-0 text-muted-foreground"
+          aria-label={`Настроить приоритет: ${name}`} aria-expanded={expanded} onClick={open}>
+          <Icon name="ListView" aria-hidden="true" />
+        </Button>
+      ) : undefined}
       badges={
         <>
           {projects?.rules.length ? (
@@ -44,18 +57,20 @@ export function NativeAccountRow({
             </SettingsBadge>
           ) : null}
           {account.role === 'reserve' ? <SettingsBadge>Резерв</SettingsBadge> : null}
+          <SettingsBadge>Приоритет {nativePriority(account)}</SettingsBadge>
         </>
       }
       status={
         <>
           <AccountRowStatus {...status} />
+          {account.active > 0 && <span>Активные допуски: {account.active}</span>}
           {account.queued > 0 ? <span>В очереди: {account.queued}</span> : null}
         </>
       }
       metrics={
         <div className="text-left text-xs tabular-nums" title="Сеансы в работе / предел">
           <div className="font-semibold text-foreground">Сеансы <span>{account.active} / {maxSessions}</span></div>
-          <div className="text-muted-foreground">Данных о квотах пока нет</div>
+          <QuotaEmpty state={managed ? "not-connected" : "no-data"} />
         </div>
       }
       actions={
@@ -71,7 +86,7 @@ export function NativeAccountRow({
   );
 }
 export function NativeAccountSettings({account,revision,save,loadProjects,probe}:{probe?:(input:NativeProbeInput)=>Promise<NativeProbeResult>;account:Account;revision:string;save:(input:NativeAccountUpdate)=>Promise<void>;loadProjects:()=>Promise<Projects>}) {
-  const priority=account.priority??(account.executors.some(e=>e.preferred)?0:10);
+  const priority = nativePriority(account);
   const capacity=account.maxConcurrentSessions??1;
   const busy=account.active+account.queued+account.uncertain>0;
   const [draft,setDraft]=useState(String(priority));
@@ -131,7 +146,6 @@ export function NativeAccountSettings({account,revision,save,loadProjects,probe}
       <p className="pool-settings-help">{account.executors.some(e=>e.enabled)?'Запуск разрешён настройками пула. Ответ Google пока не проверен этой страницей.':'Обычные сессии выключены. Адресная проверка запускается отдельно кнопкой ниже.'}</p>
       <p className="pool-settings-help">Модель выбирается в форме новой сессии BB для Antigravity. Сохранённый каталог не подтверждает доступ этой подписки к модели; он проверяется при запросе.</p>
       <p className="pool-settings-help">При Verification Required завершите проверку Google в браузере с владельцем. Успешный вход и оплата сами по себе не подтверждают доступ к модели.</p>
-      <p className="pool-settings-help">Измеренный лимит и состояние оплаты недоступны. Страница не запускает повторный вход.</p>
     </section>
     {account.mixedProjects&&<p role="status">У мест запуска разные проекты. Сохранение проектов применит одну настройку ко всему аккаунту.</p>}
     <fieldset disabled={pending}><AccountProjectsForm account={{role:account.role??'primary',projects:account.projects}} showQuotaHelp={false} loadProjects={loadProjects} save={projects=>change({projects})}/></fieldset>
