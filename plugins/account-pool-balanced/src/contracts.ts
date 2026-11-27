@@ -323,6 +323,19 @@ export const accountProjectsSchema = z.object({
   "Include each project only once");
 export type AccountProjects = z.infer<typeof accountProjectsSchema>;
 
+/** Per-account rules for which models an account may serve: `pin` sends a model to this account first,
+ * `allow` limits the account to the listed models, `deny` keeps a model off the account. A pattern is an
+ * exact model id or an id ending in `*` (a prefix). */
+export const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\*?$/u;
+export const modelRulesSchema = z.array(z.object({
+  pattern: z.string().regex(MODEL_PATTERN),
+  mode: z.enum(["pin", "allow", "deny"]),
+  /** `pin` only: when the pinned account cannot serve now, let other accounts take the request. */
+  fallback: z.boolean().optional(),
+}).strict()).max(32).refine(rules => new Set(rules.map(rule => rule.pattern + "\u0000" + rule.mode)).size === rules.length,
+  "Repeat each pattern and mode only once");
+export type ModelRules = z.infer<typeof modelRulesSchema>;
+
 export const accountMetadataSchema = z
   .object({
     id: z.string().uuid(),
@@ -345,6 +358,7 @@ export const accountMetadataSchema = z
     cap: accountCapSchema.default(null),
     policy: accountPolicySchema.optional(),
     projects: accountProjectsSchema.optional(),
+    modelRules: modelRulesSchema.optional(),
     drainOnce: z.boolean().optional(),
     drainGeneration: z.string().uuid().nullable().optional(),
   })

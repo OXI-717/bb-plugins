@@ -270,6 +270,12 @@ export class PoolOperations {
     return account;
   }
 
+  async setModelRules(id: string, modelRules: Account["modelRules"], expected?: Account["modelRules"] | null): Promise<Account | null> {
+    const account = await this.accounts.setModelRules(id, modelRules, expected);
+    if (account !== null) this.onAccountsChanged();
+    return account;
+  }
+
   async setProjects(id: string, projects: Account["projects"], expected?: Account["projects"] | null): Promise<Account | null> {
     const account = await this.accounts.setProjects(id, projects, expected);
     if (account !== null) this.onAccountsChanged();
