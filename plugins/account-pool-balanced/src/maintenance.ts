@@ -6,6 +6,7 @@ export const maintenanceLeaseSchema = z.object({
 }).strict().refine(value => value.expiresAt > value.createdAt && value.expiresAt - value.createdAt <= 1_800_000);
 export const maintenanceStatusSchema = z.object({
   schemaVersion: z.literal(1), scope: z.literal('all-model-clients'), transportInFlight:z.number().int().nonnegative(), lease: maintenanceLeaseSchema.nullable(),
+  nativeDrain: z.literal(true).optional(),
 }).strict();
 type Lease = z.infer<typeof maintenanceLeaseSchema>;
 
@@ -17,6 +18,7 @@ export class PoolMaintenanceError extends Error {
 /** Persist before acknowledging admission changes; never clear a foreign pause. */
 export class PoolMaintenance {
   private lease: Lease | null = null;
+  private acquiringUpgrade = false;
   private controller = new AbortController();
   private readonly upgradeWaiters = new Set<() => void>();
   private writer: Promise<unknown> = Promise.resolve();
@@ -33,7 +35,12 @@ export class PoolMaintenance {
   }
   status(): z.infer<typeof maintenanceStatusSchema> {
     const lease = this.currentLease();
-    return {schemaVersion: 1, scope: 'all-model-clients', transportInFlight:this.activity(), lease: lease ? {...lease} : null};
+    return {schemaVersion: 1, scope: 'all-model-clients', transportInFlight:this.activity(), nativeDrain:true, lease: lease ? {...lease} : null};
+  }
+  get nativeAdmission() {
+    const lease = this.currentLease();
+    if (lease) return lease.upgrade ?? 'paused';
+    return this.acquiringUpgrade ? 'draining' : 'open';
   }
   get signal(): AbortSignal {
     if (!this.currentLease() && this.controller.signal.aborted) this.controller = new AbortController();
@@ -73,8 +80,13 @@ export class PoolMaintenance {
     if (current) { if (current.owner !== owner || !!current.upgrade !== !!upgrade) throw Error('Another operation owns pool maintenance'); return this.status(); }
     if (this.controller.signal.aborted) this.controller = new AbortController();
     const now = this.now(); const lease = {owner, createdAt: now, expiresAt: now + 1_800_000, ...(upgrade ? {upgrade} : {})};
-    await this.persist(lease);
-    this.lease = lease;
+    this.acquiringUpgrade = upgrade === 'draining';
+    try {
+      await this.persist(lease);
+      this.lease = lease;
+    } finally {
+      this.acquiringUpgrade = false;
+    }
     if (interrupt) this.controller.abort(new PoolMaintenanceError());
     return this.status();
   }); }
