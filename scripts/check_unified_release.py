@@ -61,7 +61,7 @@ def main():
         'plugins/account-pool-balanced/src/host.ts': ['grokHome:', 'nativeProbeCapabilities:', 'nativeProbe:'],
         'plugins/account-pool-balanced/src/server.ts': ['egress,grokLogin,()=>nativeSessions.accounts()', 'nativeSessions.probe(', 'selection)', 'registerUsageSource(bb, hub, false)'],
         'plugins/account-pool-balanced/src/cli.ts': ['grokLogin', 'nativePreflight'],
-        'plugins/account-pool-balanced/app.tsx': ['"grok-login"', 'NativeAccountCard', 'thread.switchAccount'],
+        'plugins/account-pool-balanced/app.tsx': ['"grok-login"', '<NativeAccountRow', 'thread.switchAccount'],
         'plugins/account-pool-balanced/src/grok-acp-home.ts': ['ensureGrokAcpHome'],
         'plugins/account-pool-balanced/src/loop-delay.ts': [''],
         'plugins/vpn-guard/observation-grace.test.ts': [''],
