@@ -2062,10 +2062,19 @@ export class AccountPoolHub {
         if (window) message += ` Использовано / used ${Number((window.used!*100).toFixed(2))}%, порог / threshold ${Number((window.limit*100).toFixed(2))}%.`;
       }
     }
-    if (resetAt!==null) message += upstreamHeld ? ` Повторная попытка не ранее / Retry no earlier than: ${resetAt}.` : ` Сброс / reset: ${resetAt}.`;
-    // OpenCode ACP maps HTTP 403 to an authentication failure and discards the body.
-    // A terminal 400 lets native Kimi turns show the pool's quota reason.
-    const status = adapter.provider === "kimi" && threadId !== null && reason === "POOL_QUOTA_THRESHOLD" ? 400 : 403;
+    // OpenCode ACP treats 403 as an authentication failure. Only known quota
+    // refusals for pooled OpenCode threads use a terminal, non-retryable 400.
+    const openCodeQuota = threadId !== null && quotaBlocked &&
+      (adapter.provider === "kimi" || adapter.provider === "zai");
+    if (resetAt !== null) {
+      const resetText = openCodeQuota
+        ? `${resetAt.slice(0, 10)} ${resetAt.slice(11, 16)} UTC`
+        : resetAt;
+      message += upstreamHeld
+        ? ` Повторная попытка не ранее / Retry no earlier than: ${resetText}.`
+        : ` Сброс / reset: ${resetText}.`;
+    }
+    const status = openCodeQuota ? 400 : 403;
     return this.errorResponse(adapter, request, status, message, {"x-bb-pool-error":reason});
   }
 
