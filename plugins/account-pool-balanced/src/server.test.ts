@@ -1174,17 +1174,27 @@ describe("Account Pool plugin", () => {
     expect(requests).toHaveLength(0);
   });
 
-  it("keeps the Kimi pool ceiling visible in BB without changing external client responses", async () => {
+  it.each([
+    { provider: "kimi", used: 92, reason: "POOL_QUOTA_THRESHOLD" },
+    { provider: "kimi", used: 100, reason: "POOL_QUOTA_EXHAUSTED" },
+    { provider: "zai", used: 92, reason: "POOL_QUOTA_THRESHOLD" },
+    { provider: "zai", used: 100, reason: "POOL_QUOTA_EXHAUSTED" },
+  ] as const)("explains $provider $reason on BB threads without changing external client responses", async ({ provider, used, reason }) => {
     const resetAt = new Date(Date.now() + 5 * 86_400_000).toISOString();
     const modelFetch = vi.fn(async () => Response.json({ id: "unexpected-model-response" }));
     const fixture = await createFixture({
       upstreamUrl: "https://upstream.example",
-      provider: "kimi",
+      provider,
+      source: "api-key",
+      apiKey: "fixture-provider-key",
       options: {
         kimiUsagesUrl: "https://usage.example/usages",
+        zaiUsagesUrl: "https://usage.example/usages",
         fetch: async (input) => {
           if (String(input) === "https://usage.example/usages") {
-            return Response.json({ usage: { limit: "100", used: "92", resetTime: resetAt } });
+            return Response.json(provider === "kimi"
+              ? { usage: { limit: "100", used: String(used), resetTime: resetAt } }
+              : { data: { limits: [{ type: "TOKENS_LIMIT", unit: 3, percentage: used, nextResetTime: Date.parse(resetAt) }] } });
           }
           return modelFetch();
         },
@@ -1193,30 +1203,33 @@ describe("Account Pool plugin", () => {
     await fixture.host.harness.behavior.callRpc("config.set", { switchThreshold: 0.9 });
     await fixture.host.harness.behavior.callRpc("account.refreshUsage", { accountId: fixture.account.id });
 
-    const tokenFile = path.join(fixture.dataDir, "kimi-client.token");
+    const tokenFile = path.join(fixture.dataDir, "client.token");
     const issued = await fixture.host.harness.behavior.runCli([
-      "client", "add", "kimi-fixture", "--project", "project-one", "--output", tokenFile,
+      "client", "add", "quota-fixture", "--project", "project-one", "--output", tokenFile,
     ]);
     expect(issued.exitCode).toBe(0);
     const externalToken = (await fs.readFile(tokenFile, "utf8")).trim();
-    const request = (token: string) => fixture.host.harness.behavior.fetchHttp("POST", "/kimi/v1/messages", {
-      headers: { "content-type": "application/json", "x-api-key": token },
-      body: JSON.stringify({ model: "k3-256k", messages: [] }),
+    const route = provider === "kimi" ? "/kimi/v1/messages" : "/zai/v1/chat/completions";
+    const request = (token: string) => fixture.host.harness.behavior.fetchHttp("POST", route, {
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ model: provider === "kimi" ? "k3-256k" : "glm-5.3", messages: [] }),
     });
 
-    for (const [token, status] of [[fixture.key, 400], [externalToken, 403]] as const) {
+    const displayTime = `${resetAt.slice(0, 10)} ${resetAt.slice(11, 16)} UTC`;
+    for (const [token, status, reset] of [[fixture.key, 400, displayTime], [externalToken, 403, resetAt]] as const) {
       const response = await request(token);
       expect(response.status).toBe(status);
-      expect(response.headers.get("x-bb-pool-error")).toBe("POOL_QUOTA_THRESHOLD");
+      expect(response.headers.get("x-bb-pool-error")).toBe(reason);
       expect(response.headers.get("retry-after")).toBeNull();
       const payload = await response.json();
-      expect(payload).toMatchObject({
-        type: "error",
-        error: { code: "POOL_QUOTA_THRESHOLD" },
-      });
-      expect(payload.error.message).toContain("used 92%, порог / threshold 90%");
-      expect(payload.error.message).toContain(resetAt);
+      expect(payload).toMatchObject({ error: { code: reason, message: expect.stringContaining(reset) } });
+      if (provider === "kimi") expect(payload.type).toBe("error");
+      if (reason === "POOL_QUOTA_THRESHOLD") expect(payload.error.message).toContain("used 92%, порог / threshold 90%");
     }
+
+    const unauthorized = await request("invalid-client-token");
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get("x-bb-pool-error")).toBe("POOL_AUTH_REQUIRED");
     expect(modelFetch).not.toHaveBeenCalled();
   });
 
