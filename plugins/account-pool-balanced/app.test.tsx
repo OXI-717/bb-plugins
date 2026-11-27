@@ -1803,3 +1803,22 @@ it.each(['ready','disabled'] as const)('uses thread choice state %s for confirme
  await waitFor(()=>expect(ui.getByRole('button',{name:'Подписка треда: person@example.test · '+expected,hidden:true})).toBeTruthy());
  expect(ui.getByText(/Последний подтверждённый запрос/).textContent).toContain('person@example.test · '+expected);
 });
+
+it("opens machine tokens independently and keeps the existing rotation action", async () => {
+  const rotate = vi.fn(() => ({ token: "synthetic-unshown-value" }));
+  const slot = render(undefined, { "token.rotate": rotate });
+  const trigger = await slot.findByRole("button", { name: "Токены машин" });
+  const advanced = slot.getByRole("button", { name: "Дополнительно" });
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(slot.queryByRole("button", { name: "Обновить bee" })).toBeNull();
+
+  fireEvent.click(trigger);
+  expect(advanced.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(await slot.findByRole("button", { name: "Обновить bee" }));
+  await waitFor(() => expect(rotate).toHaveBeenCalledWith({ machine: "host-one" }));
+  expect(slot.queryByText("synthetic-unshown-value")).toBeNull();
+
+  fireEvent.click(trigger);
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(slot.queryByRole("button", { name: "Обновить bee" })).toBeNull();
+});

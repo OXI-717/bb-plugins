@@ -87,7 +87,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
         const { accounts } = await hub.status();
         return {
           label: "Account Pooler",
-          resources: accounts.filter(reportsUsage).map((account) => ({
+          resources: accounts.filter(account => account.enabled && reportsUsage(account)).map((account) => ({
             id: account.id,
             accountKey: accountKey(account),
             providerId: USAGE_PROVIDER_IDS[account.provider],
@@ -99,7 +99,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
       async [usageFetchMethod]({ resourceId, refresh }) {
         if (privateInventory) throw new PoolManagementLocked();
         const account = (await hub.status()).accounts.find(account => account.id === resourceId);
-        if (!account) throw new Error("Usage resource no longer exists.");
+        if (!account?.enabled) throw new Error("Usage resource no longer exists.");
         if (!reportsUsage(account)) {
           const name = account.provider === "grok" ? "Grok" : "Devin";
           throw new Error(`Quota reporting is not available for ${name}.`);
@@ -108,7 +108,7 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
         await hub.refreshUsage(resourceId, refresh, true);
         const { accounts: allAccounts } = await hub.status();
         const accounts = allAccounts.filter(
-          (account) => account.id === resourceId && reportsUsage(account),
+          (account) => account.id === resourceId && account.enabled && reportsUsage(account),
         );
         if (accounts.length === 0)
           throw new Error("Usage resource no longer exists.");
