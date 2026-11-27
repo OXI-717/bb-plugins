@@ -393,6 +393,8 @@ export const zaiUsageEvidenceSchema = z.object({
 }).strict();
 export type ZaiUsageEvidence = z.infer<typeof zaiUsageEvidenceSchema>;
 
+// Two existing collection intervals. Shared by the API and quota display.
+export const PROVIDER_BUDGET_MAX_AGE_MS = 600_000;
 export const providerBudgetWindowSchema = z.object({
   id: z.string().regex(/^(fiveHour|weekly|monthly|billingCycle|session|rolling:[1-9][0-9]*|family:(fable|sonnet|opus|haiku|other)|group:[a-f0-9]{16}:[a-f0-9]{16})$/u),
   remainingPercent: z.number().finite().min(0).max(100),
@@ -402,6 +404,12 @@ export const providerBudgetWindowSchema = z.object({
 export const providerBudgetEvidenceSchema = z.object({
   provider: z.enum(['claude','kimi','opencode-go','cursor','agy','neuraldeep']),
   canRequest: z.boolean().optional(),
+  // UI metadata. The budget endpoint still returns only its existing windows.
+  chatRequests: z.object({
+    session: z.object({remaining: z.number().nonnegative(), limit: z.number().positive()}).strict(),
+    weekly: z.object({remaining: z.number().nonnegative(), limit: z.number().positive()}).strict(),
+    cooldownSeconds: z.number().nonnegative(),
+  }).strict().optional(),
   source: z.literal('usage'), observedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   windows: z.array(providerBudgetWindowSchema).min(1).max(16),
 }).strict();
@@ -436,6 +444,7 @@ export type AccountQuota = z.infer<typeof quotaSchema>;
 
 export const accountSummarySchema = accountSchema.extend({
   lastUsedHostName: z.string().min(1).nullable(),
+  quotaCollection: z.enum(["error", "no-data"]).optional(),
   ...quotaFieldsShape,
   successfulRequests: z.number().int().nonnegative(),
   resetCredits: resetCreditsSchema.nullable(),

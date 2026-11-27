@@ -127,6 +127,7 @@ it('AGY existing scheduler collector uses only server-bound subscription and gua
 
 it('NeuralDeep retains native session/week ratios and provider decision without fabricating reset timestamps',()=>{
  const v=payload('neuraldeep'),proof=evidence('neuraldeep',v,now)!;
+ expect(proof.chatRequests).toEqual({session:{remaining:75,limit:100},weekly:{remaining:600,limit:1000},cooldownSeconds:0});
  expect(proof.windows).toEqual([{id:'session',remainingPercent:75,resetAt:null,durationMinutes:null},{id:'weekly',remainingPercent:60,resetAt:null,durationMinutes:10080}]);
  expect(budget('neuraldeep',{...store().get(id),providerBudgetEvidence:proof},now)).toMatchObject({budgetReady:true,providerAllowed:true});
  for(const kind of ['missing','denied','cooldown','key','boolean','over-limit','negative','missing-week']){
@@ -154,6 +155,22 @@ it('actual existing NeuralDeep collector stores numeric evidence and cached read
  expect(fetch).toHaveBeenCalledTimes(1);expect(fetch.mock.calls[0]?.[0]).toBe('https://api.neuraldeep.ru/v1/limits');
  const quotas=new QuotaStore(host.bb.storage.database());expect(budget('neuraldeep',quotas.get(account.id),now).budgetReady).toBe(true);
  expect(quotas.get(account.id).fiveHourUtilization).toBeNull();expect(quotas.get(account.id).sevenDayUtilization).toBeNull();
+ expect(quotas.get(account.id).providerBudgetEvidence?.chatRequests?.session).toEqual({remaining:75,limit:100});
+
+ fetch.mockResolvedValueOnce(Response.json({}, {status:503}));
+ await host.harness.behavior.runCli(['account','refresh',account.id]);
+ expect(await host.harness.behavior.callRpc('status.get',null)).toMatchObject({accounts:[{id:account.id,quotaCollection:'error',error:null}]});
+ expect(quotas.get(account.id).providerBudgetEvidence).toBeUndefined();
+
+ fetch.mockResolvedValueOnce(Response.json({}));
+ await host.harness.behavior.runCli(['account','refresh',account.id]);
+ expect(await host.harness.behavior.callRpc('status.get',null)).toMatchObject({accounts:[{id:account.id,quotaCollection:'no-data',error:null}]});
+
+ await host.harness.behavior.runCli(['account','refresh',account.id]);
+ expect(quotas.get(account.id).providerBudgetEvidence?.chatRequests?.session.remaining).toBe(75);
+ const status = await host.harness.behavior.callRpc('status.get',null) as {accounts:Array<{quotaCollection?: string}>};
+ expect(status.accounts[0]?.quotaCollection).toBeUndefined();
+ expect(fetch).toHaveBeenCalledTimes(4);
 });
 
 it('Claude rejection status cannot become positive numeric headroom, including scoped limits',()=>{

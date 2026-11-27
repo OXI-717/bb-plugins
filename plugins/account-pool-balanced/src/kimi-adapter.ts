@@ -72,7 +72,7 @@ export function createKimiAdapter(options: { usagesUrl: string }): ProviderAdapt
       });
       if (!response.ok) {
         await response.body?.cancel();
-        return;
+        return "error";
       }
       const quota = kimiQuotaFromUsages(
         context.account.id,

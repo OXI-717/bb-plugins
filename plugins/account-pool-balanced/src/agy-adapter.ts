@@ -69,9 +69,11 @@ export function createAgyAdapter(onModels?:(ids:string[])=>Promise<void>):Provid
     method:'POST',redirect:'error',signal,headers:{'content-type':'application/json',authorization:`Bearer ${secret.accessToken}`},
     body:JSON.stringify({project:secret.agy.projectId}),
    });
-   if(!response.ok){void response.body?.cancel().catch(()=>undefined);return;}
+   if(!response.ok){void response.body?.cancel().catch(()=>undefined);return "error";}
    const payload=await readAgyJson(response,signal);
-   context.quotas.put({...context.quotas.get(context.account.id),providerBudgetEvidence:providerEvidenceFromUsage('agy',payload,context.now())});
+   const proof = providerEvidenceFromUsage('agy',payload,context.now());
+   context.quotas.put({...context.quotas.get(context.account.id),providerBudgetEvidence:proof});
+   return proof ? 'observed' : 'no-data';
   },
   errorResponse:(status,message,headers,request)=>poolErrorResponse('agy',status,message,headers,request),
  };

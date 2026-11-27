@@ -222,6 +222,7 @@ export class AccountPoolHub {
   private stopping: Promise<void> | null = null;
   private readonly usageRefreshes = new Map<string, Promise<void>>();
   private readonly lastUsageRefreshAt = new Map<string, number>();
+  private readonly quotaCollection = new Map<string, "error" | "no-data">();
   private readonly drainWaiters = new Set<() => void>();
 
   private readonly vpn;
@@ -486,7 +487,12 @@ export class AccountPoolHub {
 
   async refreshUsage(accountId?: string, force = false, reportErrors = false): Promise<void> {
     if(this.options.maintenance?.status().lease){if(reportErrors)this.options.maintenance.assertAllowed();return;}
-    const accounts = (await this.options.accounts.list()).filter(
+    const allAccounts = await this.options.accounts.list();
+    const ids = new Set(allAccounts.map(account => account.id));
+    for (const id of this.quotaCollection.keys()) {
+      if (!ids.has(id)) this.quotaCollection.delete(id);
+    }
+    const accounts = allAccounts.filter(
       (account) =>
         !(account.provider==='agy'&&this.options.nativeAgyManaged?.())&&
         (account.enabled || (force && accountId !== undefined)) &&
@@ -564,6 +570,7 @@ export class AccountPoolHub {
     if (running !== undefined) return running;
     this.lastUsageRefreshAt.set(account.id, now);
     let usageSecret: AccountSecret | undefined;
+    const previousObservation = this.options.quotas.get(account.id).observedAt;
     const refresh = adapter
       .refreshUsage({
         account,
@@ -579,8 +586,14 @@ export class AccountPoolHub {
         fetch: (input, init) => this.accountFetch(account,route)(input, { ...init, signal: AbortSignal.any([this.stopped.signal, ...(init?.signal ? [init.signal] : [])]) }),
         now: this.options.now,
       })
-      .then(async () => { await this.settleDrain(account); })
+      .then(result => {
+        const quota = this.options.quotas.get(account.id);
+        const state = result ?? (quota.providerBudgetEvidence || quota.observedAt !== previousObservation ? "observed" : "no-data");
+        if (state === "observed") this.quotaCollection.delete(account.id);
+        else this.quotaCollection.set(account.id, state);
+      })
       .catch(async error => {
+        this.quotaCollection.set(account.id, "error");
         if (error instanceof AccountAuthorizationRequiredError) {
           const rejected = this.authorizationFailures.get(error) ?? usageSecret;
           const marked = rejected === undefined ? false : await this.markAuthError(account, rejected, error.accountMessage, this.stopped.signal);
@@ -590,6 +603,7 @@ export class AccountPoolHub {
         }
         throw error;
       })
+      .then(async () => { await this.settleDrain(account); })
       .finally(() => this.usageRefreshes.delete(account.id));
     this.usageRefreshes.set(account.id, refresh);
     return refresh;
@@ -720,6 +734,7 @@ export class AccountPoolHub {
       accounts: accounts.map((account) => {
         const quota = this.options.quotas.get(account.id);
         const { accountId: _accountId, ...quotaFields } = quota;
+        const quotaCollection = this.quotaCollection.get(account.id);
         const budget = currentWeeklyBudget(account, quota, now);
         const limits = policyThresholds(account, settings, quota, now);
         const limit = capLimit(account, quota, now, workWeek);
@@ -729,6 +744,7 @@ export class AccountPoolHub {
           ...account,
           lastUsedHostName: null,
           ...quotaFields,
+          ...(quotaCollection ? { quotaCollection } : {}),
           successfulRequests: this.options.quotas.successfulRequests(account.id),
           resetCredits: account.provider === "codex" || account.provider === "claude" ? this.options.quotas.resetCredits(account.id) : null,
           inFlight: this.inFlightByAccount.get(account.id) ?? 0,

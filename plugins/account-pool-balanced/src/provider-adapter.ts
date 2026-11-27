@@ -139,7 +139,7 @@ export interface ProviderAdapter {
   refreshSecret(
     context: AdapterSecretContext,
   ): Promise<{ secret: AccountSecret; refreshed: boolean }>;
-  refreshUsage(context: AdapterUsageContext): Promise<void>;
+  refreshUsage(context: AdapterUsageContext): Promise<void | "observed" | "no-data" | "error">;
   errorResponse(
     status: number,
     message: string,

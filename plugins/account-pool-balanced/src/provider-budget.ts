@@ -1,10 +1,8 @@
 import {createHash} from 'node:crypto';
-import { providerBudgetEvidenceSchema, type ProviderBudgetEvidence, type PoolProvider, type AccountQuota } from './contracts.js';
+import { PROVIDER_BUDGET_MAX_AGE_MS, providerBudgetEvidenceSchema, type ProviderBudgetEvidence, type PoolProvider, type AccountQuota } from './contracts.js';
 import { parseReset, modelFamily } from './quota.js';
 
-// Existing non-ZAI collectors run every five minutes. This separate contract
-// allows two collection intervals; it changes neither existing budget TTL.
-export const PROVIDER_BUDGET_MAX_AGE_MS = 600_000;
+export { PROVIDER_BUDGET_MAX_AGE_MS } from './contracts.js';
 export const NUMERIC_BUDGET_PROVIDERS = ['claude','kimi','opencode-go','cursor','agy','neuraldeep'] as const;
 export const ADDITIONAL_BUDGET_PROVIDERS = [...NUMERIC_BUDGET_PROVIDERS,'devin'] as const;
 type Window = ProviderBudgetEvidence['windows'][number];
@@ -25,6 +23,7 @@ function window(id:string,percent:unknown,reset:unknown,durationMinutes:number|n
 /** New, complete provider payloads only. No legacy-cache or header promotion. */
 export function providerEvidenceFromUsage(provider:PoolProvider,payload:unknown,now:number):ProviderBudgetEvidence|undefined {
   const p=object(payload),windows:Array<Window|null>=[];
+  let chatRequests: ProviderBudgetEvidence['chatRequests'];
   if(p.error!=null||p.success===false)return undefined;
   const statusAllowed=(status:unknown)=>status==null||status==='allowed'||status==='ok';
   if(provider==='claude') {
@@ -67,6 +66,11 @@ export function providerEvidenceFromUsage(provider:PoolProvider,payload:unknown,
       // that unknown instead of inventing a reset or a five-hour session.
       windows.push({id,remainingPercent:remaining/limit*100,resetAt:null,durationMinutes:duration});
     }
+    const counts = (key: 'session' | 'week') => {
+      const bucket = object(chat[key]);
+      return {remaining: Number(bucket.remaining), limit: Number(bucket.limit)};
+    };
+    chatRequests = {session: counts('session'), weekly: counts('week'), cooldownSeconds: Number(chat.cooldown_sec)};
   } else if(provider==='agy') {
     // Native CCPA retrieveUserQuotaSummary: all reported groups/buckets, without
     // assuming their names mean weekly or mapping them to arbitrary model IDs.
@@ -86,7 +90,7 @@ export function providerEvidenceFromUsage(provider:PoolProvider,payload:unknown,
   if(windows.some(w=>w===null))return undefined;
   const valid=windows as Window[];
   if(new Set(valid.map(w=>w.id)).size!==valid.length)return undefined;
-  const parsed=providerBudgetEvidenceSchema.safeParse({provider,source:'usage',observedAt:now,windows:valid,...(provider==='neuraldeep'?{canRequest:object(p.decision).can_request===true&&Number(object(p.chat).cooldown_sec)===0}:{})});
+  const parsed=providerBudgetEvidenceSchema.safeParse({provider,source:'usage',observedAt:now,windows:valid,...(chatRequests ? {chatRequests} : {}),...(provider==='neuraldeep'?{canRequest:object(p.decision).can_request===true&&Number(object(p.chat).cooldown_sec)===0}:{})});
   return parsed.success?parsed.data:undefined;
 }
 export function providerBudgetQuota(provider:PoolProvider,quota:AccountQuota,now:number) {

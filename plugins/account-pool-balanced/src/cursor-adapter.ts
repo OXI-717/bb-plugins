@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { AccountSecret } from "./contracts.js";
 import type { ProviderAdapter } from "./provider-adapter.js";
 import { filterRequestHeaders, mountedUpstreamUrl } from "./provider-adapter.js";
-import { isQuotaRejection, modelFamily, quotaFromHeaders } from "./quota.js";
+import { isQuotaRejection, modelFamily, parseReset, quotaFromHeaders } from "./quota.js";
 import { CURSOR_RPC_PATH_HEADER, isCursorRpcPath } from "./cursor-rpc.js";
 
 export const CURSOR_MOUNT_PREFIX = "cursor/";
@@ -239,15 +239,17 @@ export function createCursorAdapter(options: {
       });
       if (!response.ok) {
         await response.body?.cancel();
-        return;
+        return "error";
       }
       const parsed = usageResponseSchema.safeParse(
         await response.json().catch(() => null),
       );
-      if (!parsed.success) return;
-      const used = Number(parsed.data.planUsage?.totalPercentUsed);
-      if (!Number.isFinite(used)) return;
-      const cycleEnd = Number(parsed.data.billingCycleEnd);
+      if (!parsed.success) return "error";
+      const rawUsed = parsed.data.planUsage?.totalPercentUsed;
+      if (rawUsed == null) return "no-data";
+      const used = Number(rawUsed);
+      if (String(rawUsed).trim() === "" || !Number.isFinite(used) || used < 0 || used > 100) return "error";
+      const cycleEnd = parseReset(parsed.data.billingCycleEnd ?? null);
       const previous = context.quotas.get(context.account.id);
       context.quotas.put({
         ...previous,
@@ -255,11 +257,12 @@ export function createCursorAdapter(options: {
         // Cursor meters one billing cycle rather than a rolling week; it lands in the
         // long-window slot because that is the one the gate paces against.
         sevenDayUtilization: Math.min(Math.max(used / 100, 0), 1),
-        sevenDayResetAt: Number.isFinite(cycleEnd) ? cycleEnd : null,
+        sevenDayResetAt: cycleEnd !== null && cycleEnd > 0 && cycleEnd <= 8.64e15 ? cycleEnd : null,
         sevenDayStatus: null,
         observedAt: context.now(),
         error: null,
       });
+      return "observed";
     },
     errorResponse(status, message, headers, request) {
       return poolErrorResponse("cursor", status, message, headers, request);
