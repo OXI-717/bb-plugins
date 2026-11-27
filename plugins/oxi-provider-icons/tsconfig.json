@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "esModuleInterop": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": [
+      "node",
+      "vitest/globals"
+    ],
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "icons.tsx",
+    "app.tsx",
+    "server.ts",
+    "app.test.tsx",
+    "icons.test.tsx",
+    "preview.test.tsx",
+    "preview/main.tsx",
+    "preview/sdk.tsx"
+  ]
+}

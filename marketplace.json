@@ -248,6 +248,30 @@
           "tagPrefix": "oxi-thread-list/"
         }
       }
+    },
+    {
+      "id": "oxi-provider-icons",
+      "icon": {
+        "url": "./icons/oxi-provider-icons.svg"
+      },
+      "displayName": "OXI Provider Icons",
+      "description": "Draw local theme-aware marks for OXI agent providers in BB's model picker and provider usage rows.",
+      "author": {
+        "name": "OXI",
+        "github": "OXI-717"
+      },
+      "tags": [
+        "agents",
+        "icons"
+      ],
+      "source": {
+        "git": {
+          "url": "https://github.com/OXI-717/bb-plugins.git",
+          "subdir": "plugins/oxi-provider-icons",
+          "range": "^0.1.0",
+          "tagPrefix": "oxi-provider-icons/"
+        }
+      }
     }
   ]
 }

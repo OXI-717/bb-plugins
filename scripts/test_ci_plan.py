@@ -202,12 +202,12 @@ class ReleaseGateTests(unittest.TestCase):
     def test_selected_skips_fail_and_unselected_skips_pass(self):
         from ci_release_gate import validate
         needs = {name: {'result': 'success'} for name in ['plan', 'public-hygiene', 'secrets', 'session-tree',
-                 'check', 'upgrade-script', 'auto-archive', 'oxi-op', 'cursor-gateway']}
-        needs['plan']['outputs'] = dict(check='true', upgrade='true', archive='false', op='false', cursor='true')
+                 'check', 'upgrade-script', 'auto-archive', 'oxi-op', 'cursor-gateway', 'provider-icons']}
+        needs['plan']['outputs'] = dict(check='true', upgrade='true', archive='false', op='false', cursor='true', provider_icons='true')
         needs['auto-archive']['result'] = 'skipped'
         needs['oxi-op']['result'] = 'skipped'
         validate(needs)
-        for name in ['plan', 'public-hygiene', 'secrets', 'session-tree', 'check', 'upgrade-script', 'cursor-gateway']:
+        for name in ['plan', 'public-hygiene', 'secrets', 'session-tree', 'check', 'upgrade-script', 'cursor-gateway', 'provider-icons']:
             with self.subTest(name=name):
                 original = needs[name]['result']
                 for bad in ['skipped', 'cancelled', 'failure']:
@@ -218,6 +218,11 @@ class ReleaseGateTests(unittest.TestCase):
         needs['plan']['outputs']['cursor'] = 'false'
         needs['cursor-gateway']['result'] = 'skipped'
         validate(needs)
+        needs['plan']['outputs']['provider_icons'] = 'false'
+        needs['provider-icons']['result'] = 'skipped'
+        validate(needs)
+        needs['plan']['outputs']['provider_icons'] = 'true'
+        needs['provider-icons']['result'] = 'success'
         needs['plan']['outputs']['cursor'] = 'invalid'
         with self.assertRaises(ValueError):
             validate(needs)
@@ -250,7 +255,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("if: needs.plan.outputs.cursor == 'true'", critical)
         self.assertIn('steps.select.outputs.cursor', critical)
         self.assertIn('release-gate:\n    if: always()', critical)
-        self.assertIn('session-tree, cursor-gateway]', critical)
+        self.assertIn('session-tree, cursor-gateway, provider-icons]', critical)
         self.assertNotIn('    if:', extended.split('\n  cursor-gateway:\n')[1].split('\n  secrets:')[0])
 
     def test_projects_suite_and_repository_checks_run_once_per_scope(self):
@@ -269,6 +274,20 @@ class WorkflowContractTests(unittest.TestCase):
                 projects = json.loads((root / 'plugins/oxi-projects/package.json').read_text())
                 self.assertIn('test/*.test.ts', projects['scripts']['test'])
                 self.assertIn("'test/**'", (root / 'plugins/oxi-projects/vitest.config.ts').read_text())
+
+    def test_provider_icons_selects_its_own_job_only(self):
+        result = plan(['plugins/oxi-provider-icons/app.tsx'])
+        self.assertTrue(result['provider_icons'])
+        self.assertEqual(active_rows(result), [])
+        self.assertFalse(result['session_tree'])
+        for path in ('plugins/oxi-thread-list/app.tsx', 'plugins/account-pool-balanced/app.tsx'):
+            with self.subTest(path=path):
+                self.assertFalse(plan([path])['provider_icons'])
+        # Catalog and shared repository changes keep the full plan.
+        for path in ('marketplace.json', '.bb/plugins.json', 'scripts/ci_plan.py'):
+            with self.subTest(path=path):
+                self.assertTrue(plan([path])['provider_icons'])
+        self.assertTrue(plan([], full=True)['provider_icons'])
 
     def test_session_tree_keeps_its_context_and_gates_expensive_steps(self):
         root = Path(__file__).resolve().parent.parent
@@ -291,7 +310,8 @@ class WorkflowContractTests(unittest.TestCase):
         rows = re.findall(r'^\| `([a-z-]+)` \| `([a-z-]+)`', docs, re.MULTILINE)
         self.assertEqual(len(rows), len(inventory))
         expected = {plugin: 'check' for plugin in PLUGINS}
-        expected.update({'oxi-thread-list': 'session-tree', 'oxi-op': 'oxi-op', 'auto-archive': 'auto-archive'})
+        expected.update({'oxi-thread-list': 'session-tree', 'oxi-op': 'oxi-op', 'auto-archive': 'auto-archive',
+                         'oxi-provider-icons': 'provider-icons'})
         self.assertEqual(set(expected), inventory)
         self.assertEqual(set(expected), market)
         self.assertEqual(dict(rows), expected)
