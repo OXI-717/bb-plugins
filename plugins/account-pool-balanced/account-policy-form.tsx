@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { accountPolicySchema, type AccountPolicy, type AccountSummary } from './src/contracts.js';
-import { policySummary } from './src/account-policy.js';
+import { policySummary, type QuotaThresholds } from './src/account-policy.js';
 import { Button } from './ui/components/ui/button';
 
-export function AccountPolicyForm({ account, threshold, drainHours, save, onUnsavedChange }: {
-  account: AccountSummary; threshold: number; drainHours: number;
+export function AccountPolicyForm({ account, thresholds, drainHours, save, onUnsavedChange }: {
+  account: AccountSummary; thresholds: Pick<QuotaThresholds, "fiveHour" | "weekly">; drainHours: number;
   save: (policy: AccountPolicy) => Promise<void>;
   onUnsavedChange?: (unsaved: boolean) => void;
 }) {
-  const inheritedKeep = Number(((1 - threshold) * 100).toFixed(10));
+  const percent = (value: number) => Number(value.toFixed(10));
   const initialPolicy = () => account.policy ?? accountPolicySchema.parse({
-    enabled: false, fiveHourKeep: inheritedKeep, weeklyKeep: inheritedKeep, reserveDrainHours: drainHours,
+    enabled: false, reserveDrainHours: drainHours,
   });
   const [draft, setDraft] = useState<AccountPolicy>(initialPolicy);
   const [pending, setPending] = useState(false);
@@ -35,22 +35,35 @@ export function AccountPolicyForm({ account, threshold, drainHours, save, onUnsa
     return () => clearTimeout(timer);
   }, [draft, dirty, pending, error]);
   const change = (patch: Partial<AccountPolicy>) => { setDraft(p => ({ ...p, ...patch })); setSaved(false); setDirty(true); setError(''); onUnsavedChange?.(true); };
-  const hasFiveHour = account.provider === 'claude' || account.fiveHourUtilization !== null || account.limitWindows.some(w => w.windowMinutes === 300);
-  const numberField = (field: 'fiveHourKeep' | 'weeklyKeep' | 'reserveDrainHours', label: string, fallback: number) => (
-    <label className="pool-settings-field pool-settings-inline pool-settings-number">
-      <span>{label}</span>
-      <input className="pool-settings-control" type="number" min={field === 'reserveDrainHours' ? 1 : 0} max={field === 'reserveDrainHours' ? 168 : 100}
-        value={draft[field] ?? fallback} onChange={e => change({ [field]: e.target.value === '' ? null : Number(e.target.value) })} />
-      <span className="pool-settings-help">{draft[field] === null ? `Общее значение: ${fallback}` : `Личное значение: ${draft[field]}`}. Очистить поле — наследовать общее значение.</span>
-    </label>
-  );
+  const numberField = (field: 'fiveHourKeep' | 'weeklyKeep' | 'reserveDrainHours', label: string, fallback: number) => {
+    const reserve = field === 'reserveDrainHours';
+    const stored = draft[field];
+    const value = stored === null || reserve ? stored : percent(100 - stored);
+    const inherited = !draft.enabled || value === null;
+    const source = inherited ? 'Унаследован' : 'Переопределён';
+    return (
+      <label className="pool-settings-field pool-settings-inline pool-settings-number">
+        <span>{label}</span>
+        <input className="pool-settings-control" type="number" min={reserve ? 1 : 0} max={reserve ? 168 : 100}
+          placeholder={String(fallback)} value={value ?? ''}
+          onChange={event => {
+            const raw = event.target.value;
+            const display = Number(raw);
+            change({ [field]: raw === '' ? null : reserve ? display : percent(100 - display) });
+          }} />
+        <span className="pool-settings-help">{reserve
+          ? (inherited ? `Общее значение: ${fallback}` : `Личное значение: ${value}`)
+          : `${source} фиксированный потолок ${inherited ? fallback : value}%`}. Пустое поле наследует общее значение.</span>
+      </label>
+    );
+  };
   return <section className="pool-settings-section">
     <label className="pool-settings-toggle"><input type="checkbox" checked={draft.enabled} disabled={pending} onChange={e => change({ enabled: e.target.checked })} />Индивидуальные настройки</label>
     <p className="pool-settings-help">{draft.enabled ? policySummary(draft, account.weeklyBudget !== undefined) : 'Действуют общие правила. Личные значения сохраняются.'}</p>
-    {!account.policy && <p className="pool-settings-help">Поля заполнены текущими общими значениями. При включении они сохранятся как индивидуальные.</p>}
     <fieldset disabled={!draft.enabled || pending} className="pool-settings-fields">
-      {hasFiveHour && numberField('fiveHourKeep', 'Оставлять квоту 5 часов, %', inheritedKeep)}
-      {numberField('weeklyKeep', account.weeklyBudget ? 'Оставлять квоту моделей, %' : 'Оставлять недельную квоту, %', inheritedKeep)}
+      {numberField('fiveHourKeep', 'Фиксированный потолок 5 ч, %', percent(thresholds.fiveHour * 100))}
+      {numberField('weeklyKeep', 'Фиксированный потолок 7 д, %', percent(thresholds.weekly * 100))}
+      {account.weeklyBudget && <p className="pool-settings-help">Недельное правило и временный потолок имеют приоритет для общего окна 7 д. Фиксированный недельный потолок применяется к квотам семейств моделей.</p>}
       {account.role === 'reserve' && numberField('reserveDrainHours', 'Подключать резерв за рабочих часов до сброса', drainHours)}
       <label className="pool-settings-toggle"><input type="checkbox" checked={draft.schedule !== null} onChange={e => change({ schedule: e.target.checked ? { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, intervals: [{ days: [1,2,3,4,5], start: '09:00', end: '18:00' }] } : null })} />Личное расписание</label>
       {draft.schedule && <div className="pool-settings-fields pool-settings-schedule-fields">

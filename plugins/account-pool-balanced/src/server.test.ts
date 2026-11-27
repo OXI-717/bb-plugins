@@ -292,6 +292,7 @@ async function createFixture(args: {
   apiKey?: string;
   priority?: number;
   beforePlugin?: (host: Fixture["host"]) => void;
+  initialConfig?: import("./contracts.js").AccountPoolConfigSetInput;
   callBrowserHost?: (request: {hostId:string;method:string;input:unknown})=>Promise<unknown>;
 }): Promise<Fixture> {
   const dataDir = await mkdtemp(path.join(tmpdir(), "bb-account-pool-"));
@@ -315,6 +316,7 @@ async function createFixture(args: {
     cursorUpstreamBaseUrl: args.upstreamUrl,
     devinUpstreamBaseUrl: args.upstreamUrl,
     grokUpstreamBaseUrl: args.upstreamUrl,
+    ...args.initialConfig,
   });
   const plugin = createAccountPoolPlugin({
     vpnPayload: async (timestamp) => vpnProof(timestamp, "connected"),
@@ -511,6 +513,8 @@ describe("Account Pool config schema", () => {
       busyOverflow: true,
       pinnedFailover: false,
       switchThreshold: 0.98,
+      fiveHourSwitchThreshold: null,
+      weeklySwitchThreshold: null,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
       restDays: [0, 6],
@@ -626,6 +630,8 @@ describe("Account Pool plugin", () => {
       busyOverflow: true,
       pinnedFailover: false,
       switchThreshold: 0.75,
+      fiveHourSwitchThreshold: null,
+      weeklySwitchThreshold: null,
       routingStrategy: "sequential",
       reserveDrainHours: 24,
       restDays: [0, 6],
@@ -8853,6 +8859,64 @@ describe('Claude service-error continuity and bounded auth evidence',()=>{
 
 
 describe("cached provider readiness", () => {
+  it("persists independent fixed ceilings and uses them for readiness, routing and status", async () => {
+    const upstream = vi.fn(async () => Response.json({ ok: true }));
+    const f = await createFixture({ upstreamUrl: "https://upstream.example", initialConfig: { switchThreshold: .85 }, options: { fetch: upstream } });
+    const { callRpc: rpc, fetchHttp } = f.host.harness.behavior;
+    const id = f.account.id;
+    const q = new QuotaStore(f.host.bb.storage.database());
+    const setUsage = (fiveHourUtilization: number, sevenDayUtilization: number) => {
+      q.put({ ...q.get(id), fiveHourUtilization, sevenDayUtilization,
+        fiveHourResetAt: Date.now() + 600_000, sevenDayResetAt: Date.now() + 3_600_000 });
+    };
+    const ready = async () => (await rpc("readiness.get", { projectId: "project-one" }) as Array<{ provider: string; ready: boolean }>).find(row => row.provider === "claude");
+    const status = async () => statusSchema.parse(await rpc("status.get", null)).accounts.find(account => account.id === id);
+    const request = () => fetchHttp("POST", "/v1/messages", {
+      headers: { authorization: `Bearer ${f.key}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-5", messages: [] }),
+    });
+
+    setUsage(.86, .6);
+    expect(await ready()).toMatchObject({ ready: false });
+    setUsage(.6, .86);
+    expect(await ready()).toMatchObject({ ready: false });
+
+    await Promise.all([
+      rpc("config.set", { fiveHourSwitchThreshold: .5 }),
+      rpc("config.set", { weeklySwitchThreshold: .8 }),
+    ]);
+    const fixed = { switchThreshold: .85, fiveHourSwitchThreshold: .5, weeklySwitchThreshold: .8 };
+    expect(await rpc("config.get", null)).toMatchObject(fixed);
+    expect(await f.host.bb.storage.kv.get("config")).toMatchObject(fixed);
+
+    setUsage(.6, .7);
+    expect(await ready()).toMatchObject({ ready: false });
+    expect(await status()).toMatchObject({ eligible: false, weeklySpending: { ceiling: .8 } });
+    const short = await request();
+    expect(short.headers.get("x-bb-pool-error")).toBe("POOL_QUOTA_THRESHOLD");
+    expect(await short.text()).toContain("threshold 50%");
+    expect(upstream).not.toHaveBeenCalled();
+
+    await rpc("account.setPolicy", { accountId: id, policy: { enabled: true, fiveHourKeep: 25 } });
+    expect(await ready()).toMatchObject({ ready: true });
+    expect(await status()).toMatchObject({ eligible: true, policy: { fiveHourKeep: 25, weeklyKeep: null } });
+    const allowed = await request();
+    expect(allowed.status).toBe(200);
+    await allowed.text();
+
+    setUsage(.6, .81);
+    expect(await ready()).toMatchObject({ ready: false });
+    const week = await request();
+    expect(week.headers.get("x-bb-pool-error")).toBe("POOL_QUOTA_THRESHOLD");
+    expect(await week.text()).toContain("threshold 80%");
+
+    const cli = await f.host.harness.behavior.runCli(["config", "set", "fiveHourSwitchThreshold", "inherit"]);
+    expect(cli.exitCode).toBe(0);
+    expect(cli.stdout).toContain("fiveHourSwitchThreshold: inherit");
+    expect(cli.stdout).toContain("weeklySwitchThreshold: 0.8");
+    expect(await rpc("config.get", null)).toMatchObject({ ...fixed, fiveHourSwitchThreshold: null });
+  });
+
   it("shares project/quota admission and preserves flags across inspection and reset", async () => {
     let clock=Date.now(),calls=0;
     const f=await createFixture({upstreamUrl:"https://upstream.example",options:{now:()=>clock,fetch:async()=>{calls++;return Response.json({});}}});

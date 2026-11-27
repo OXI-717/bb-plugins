@@ -11,7 +11,7 @@ import { AccountProjectsForm } from "./account-projects-form";
 import { WeeklyBudgetForm, weeklyModeLabel } from "./weekly-budget-form";
 import type { WeeklyBudgetChange } from "./src/contracts.js";
 import { AccountPolicyForm } from "./account-policy-form";
-import { policyThresholds, reserveHours, scheduleAllows } from "./src/account-policy.js";
+import { policyThresholds, poolThresholds, reserveHours, scheduleAllows, type PoolThresholdConfig } from "./src/account-policy.js";
 import type { AccountPolicy } from "./src/contracts.js";
 import {
   useCallback,
@@ -88,7 +88,7 @@ import {
   statusSchema,
   attestNativeLeaseCommand,
 } from "./src/contracts.js";
-import { blockingResetAt } from "./src/quota.js";
+import { blockingResetAt, thresholdFor } from "./src/quota.js";
 import { DEFAULT_RESERVE_CAP } from "./src/balancer.js";
 import {
   ACCOUNT_POOL_ACCOUNTS_CHANGED,
@@ -209,7 +209,12 @@ function configDrafts(config: AccountPoolConfig): Record<ConfigField, string> {
     grokUpstreamBaseUrl: config.grokUpstreamBaseUrl,
     maxConcurrentRequestsPerAccount: String(config.maxConcurrentRequestsPerAccount),
     switchThreshold: String(config.switchThreshold),
+    fiveHourSwitchThreshold: config.fiveHourSwitchThreshold == null ? "" : thresholdPercent(config.fiveHourSwitchThreshold),
+    weeklySwitchThreshold: config.weeklySwitchThreshold == null ? "" : thresholdPercent(config.weeklySwitchThreshold),
   };
+}
+function thresholdPercent(value: number): string {
+  return String(Number((value * 100).toFixed(10)));
 }
 function percent(value: number | null): string {
   return value === null ? "—" : `${Math.round(value * 100)}%`;
@@ -313,7 +318,7 @@ function ResetTime({ timestamp }: { timestamp: number | null }) {
     : <time dateTime={new Date(timestamp).toISOString()}>{resetLabel(timestamp, now)}</time>;
 }
 
-function dashboardThresholds(account: AccountSummary, threshold: number) {
+function dashboardThresholds(account: AccountSummary, threshold: PoolThresholdConfig) {
   return policyThresholds(account, threshold, account);
 }
 
@@ -356,13 +361,12 @@ function longestCodexWindow(account: AccountSummary): LimitWindow | null {
 
 function statusPresentation(
   account: AccountSummary,
-  threshold: number,
+  threshold: PoolThresholdConfig,
 ): {
   label: string;
   dot: string;
 } {
   if(account.draft)return {label:"Ожидает входа",dot:"bg-muted-foreground"};
-  if (account.drainOnce) threshold = 1;
   if (account.enabled && !account.drainOnce && !scheduleAllows(account.policy, Date.now())) return { label: "Вне расписания", dot: "bg-muted-foreground" };
   if (account.status === "ready" && account.capReached) {
     const resetAt = weeklyResetAt(account);
@@ -438,7 +442,7 @@ type QuotaSlot = {
   weekly?: boolean;
 };
 
-function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
+function quotaSlots(account: AccountSummary, threshold: PoolThresholdConfig): QuotaSlot[] {
   const limits = dashboardThresholds(account, threshold);
   const weeklyLimit = account.weeklySpending?.ceiling ?? Math.min(limits.weekly, account.capLimit ?? limits.weekly);
   const generic = account.limitWindows.map(window => {
@@ -448,8 +452,8 @@ function quotaSlots(account: AccountSummary, threshold: number): QuotaSlot[] {
       label: windowShortLabel(window, account.provider),
       utilization: window.utilization,
       status: window.status,
-      limit: weekly ? weeklyLimit : window.windowMinutes === 300 ? limits.fiveHour
-        : (window.windowMinutes ?? 0) >= 1_440 ? Math.min(limits.other, account.capLimit ?? 1) : limits.other,
+      limit: weekly ? weeklyLimit : (window.windowMinutes ?? 0) >= 1_440
+        ? Math.min(limits.other, account.capLimit ?? 1) : thresholdFor(limits, window.windowMinutes),
       resetAt: window.resetAt,
       weekly,
     };
@@ -556,7 +560,7 @@ function AccountRow({
   reorderDisabled,
 }: {
   account: AccountSummary;
-  threshold: number;
+  threshold: PoolThresholdConfig;
   current: boolean;
   pending: boolean;
   refreshing: boolean;
@@ -1046,6 +1050,8 @@ function UnlockedAccountPoolSettings() {
     grokUpstreamBaseUrl: "",
     maxConcurrentRequestsPerAccount: "",
     switchThreshold: "",
+    fiveHourSwitchThreshold: "",
+    weeklySwitchThreshold: "",
   });
   const [configErrors, setConfigErrors] = useState<
     Record<ConfigField, string | null>
@@ -1062,6 +1068,8 @@ function UnlockedAccountPoolSettings() {
     grokUpstreamBaseUrl: null,
     maxConcurrentRequestsPerAccount: null,
     switchThreshold: null,
+    fiveHourSwitchThreshold: null,
+    weeklySwitchThreshold: null,
   });
   const [dialog, setDialog] = useState<DialogState>(null);
   const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
@@ -1100,8 +1108,7 @@ function UnlockedAccountPoolSettings() {
   const [routingError, setRoutingError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState(0);
   const mounted = useRef(true);
-  const threshold =
-    config?.switchThreshold ?? DEFAULT_ACCOUNT_POOL_CONFIG.switchThreshold;
+  const threshold = config ?? DEFAULT_ACCOUNT_POOL_CONFIG;
   const applyConfig = useCallback((next: AccountPoolConfig) => {
     setConfig(next);
     setDrafts(configDrafts(next));
@@ -1155,6 +1162,7 @@ function UnlockedAccountPoolSettings() {
   }, [refresh]);
   useRealtime(ACCOUNT_POOL_CONFIG_CHANGED, () => {
     void refreshConfig();
+    void refresh();
   });
   useEffect(() => {
     if (codexStep === null || loginDone !== null) return;
@@ -1265,23 +1273,16 @@ function UnlockedAccountPoolSettings() {
         return;
       }
       update = {maxConcurrentRequestsPerAccount:value};
-    } else if (field === "switchThreshold") {
-      const raw = drafts.switchThreshold.trim();
-      const value = Number(raw);
-      if (
-        raw.length === 0 ||
-        !Number.isFinite(value) ||
-        value <= 0 ||
-        value > 1
-      ) {
-        setConfigErrors((current) => ({
-          ...current,
-          switchThreshold: "Должно быть больше 0 и не больше 1.",
-        }));
+    } else if (field === "switchThreshold" || field === "fiveHourSwitchThreshold" || field === "weeklySwitchThreshold") {
+      const raw = drafts[field].trim();
+      const legacy = field === "switchThreshold";
+      const value = raw === "" && !legacy ? null : Number(raw) / (legacy ? 1 : 100);
+      if (value !== null && (!Number.isFinite(value) || value <= 0 || value > 1)) {
+        setConfigErrors(current => ({ ...current, [field]: legacy ? "Должно быть больше 0 и не больше 1." : "Должно быть больше 0 и не больше 100%." }));
         return;
       }
-      if (value === config.switchThreshold) return;
-      update = { switchThreshold: value };
+      if (value === config[field]) return;
+      update = { [field]: value };
     } else {
       const value = drafts[field].trim();
       const validationError = httpUrlError(value);
@@ -1302,6 +1303,7 @@ function UnlockedAccountPoolSettings() {
     setConfigErrors((current) => ({ ...current, [field]: null }));
     try {
       applyConfig(await rpc.call("config.set", update));
+      if (field === "switchThreshold" || field === "fiveHourSwitchThreshold" || field === "weeklySwitchThreshold") await refresh();
     } catch (saveError) {
       setConfigErrors((current) => ({
         ...current,
@@ -1977,31 +1979,33 @@ function UnlockedAccountPoolSettings() {
                 onBlur={() => void saveConfigField("maxConcurrentRequestsPerAccount")}
                 onKeyDown={event => {if(event.key === "Enter") event.currentTarget.blur();}} />
             </ConfigFieldRow>
-            <ConfigFieldRow
-              label="Порог переключения по квоте"
-              description="Не выбирать аккаунт при этой доле израсходованной квоты."
-              error={configErrors.switchThreshold}
-            >
-              <Input
-                type="number"
-                min="0.01"
-                max="1"
-                step="0.01"
-                aria-label="Порог переключения по квоте"
-                aria-invalid={
-                  configErrors.switchThreshold === null ? undefined : true
-                }
-                disabled={config === null || pending !== null}
-                value={drafts.switchThreshold}
-                onChange={(event) =>
-                  updateConfigDraft("switchThreshold", event.target.value)
-                }
-                onBlur={() => void saveConfigField("switchThreshold")}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") event.currentTarget.blur();
-                }}
-              />
-            </ConfigFieldRow>
+            {([
+              ["fiveHourSwitchThreshold", "Фиксированный потолок 5 ч, %"],
+              ["weeklySwitchThreshold", "Фиксированный потолок 7 д, %"],
+              ["switchThreshold", "Порог для остальных окон"],
+            ] as const).map(([field, label]) => (
+              <ConfigFieldRow key={field} label={label}
+                description={field === "switchThreshold"
+                  ? "Доля использованной квоты. Применяется также к окнам 5 ч и 7 д без отдельного потолка."
+                  : `${config?.[field] == null ? `Унаследован потолок ${thresholdPercent(threshold.switchThreshold)}%.` : "Задан отдельный потолок."} Пустое поле возвращает общий порог.`}
+                error={configErrors[field]}>
+                <Input type="number" min="0" max={field === "switchThreshold" ? 1 : 100} step="any" aria-label={label}
+                  className={field === "switchThreshold" ? undefined : "min-w-0 max-w-full box-border"}
+                  aria-invalid={configErrors[field] === null ? undefined : true}
+                  disabled={config === null || pending !== null}
+                  placeholder={field === "switchThreshold" ? undefined : thresholdPercent(threshold.switchThreshold)}
+                  value={drafts[field]}
+                  onChange={event => updateConfigDraft(field, event.target.value)}
+                  onBlur={event => {
+                    if (event.currentTarget.validity.badInput) {
+                      setConfigErrors(current => ({ ...current, [field]: "Введите число." }));
+                      return;
+                    }
+                    void saveConfigField(field);
+                  }}
+                  onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+              </ConfigFieldRow>
+            ))}
           </div>
         </CollapsibleContent>
       </Collapsible>
@@ -2449,7 +2453,7 @@ function AccountCard({
   saveWeekly: (change: WeeklyBudgetChange["change"], expected: WeeklyBudgetChange["expected"]) => Promise<void>;
   onPolicyUnsavedChange: (unsaved: boolean) => void;
   refreshError: string | null;
-  threshold: number;
+  threshold: PoolThresholdConfig;
   current: boolean;
   drainHours: number;
   close: () => void;
@@ -2466,10 +2470,8 @@ function AccountCard({
   const [quotaUnsaved, setQuotaUnsaved] = useState(false);
   useEffect(() => { onPolicyUnsavedChange(projectsUnsaved || quotaUnsaved || emailUnsaved); }, [projectsUnsaved, quotaUnsaved,emailUnsaved, onPolicyUnsavedChange]);
   const limits = dashboardThresholds(account, threshold);
-  const inheritedThreshold = threshold;
   const inheritedDrainHours = drainHours;
   drainHours = reserveHours(account, drainHours);
-  if (account.drainOnce) threshold = 1;
   const cap = capSummary(account);
   const weeklySkipAt = account.weeklySpending?.ceiling ?? Math.min(limits.weekly, account.capLimit ?? limits.weekly);
   const shared = (
@@ -2508,8 +2510,7 @@ function AccountCard({
             key={window.slot}
             label={windowLongLabel(window, account.provider)}
             quota={window}
-            threshold={window.windowMinutes === 300 ? limits.fiveHour
-              : window.windowMinutes === 10080 ? limits.weekly : limits.other}
+            threshold={thresholdFor(limits, window.windowMinutes)}
             skipAt={window.windowMinutes === 10080 ? weeklySkipAt
               : (window.windowMinutes ?? 0) >= 1_440 && account.capLimit !== null ? Math.min(limits.other, account.capLimit) : undefined}
           />
@@ -2551,7 +2552,7 @@ function AccountCard({
           </section>
           <AccountEgressForm key={account.id} accountId={account.id} provider={account.provider} />
           <AccountProjectsForm account={account} loadProjects={loadProjects} save={saveProjects} onUnsavedChange={setProjectsUnsaved} />
-          <AccountPolicyForm account={account} threshold={inheritedThreshold} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
+          <AccountPolicyForm account={account} thresholds={poolThresholds(threshold)} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
           <section className="pool-settings-section">
           <label className="pool-settings-toggle">
             <input type="checkbox" checked={account.drainOnce === true} disabled={pending}

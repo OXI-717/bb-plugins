@@ -151,6 +151,8 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
     maxConcurrentRequestsPerAccount: 2,
     claudeRequestStartIntervalMs: 0,
     switchThreshold: 0.98,
+    fiveHourSwitchThreshold: null,
+    weeklySwitchThreshold: null,
     routingStrategy: "sequential",
     reserveDrainHours: 24,
     restDays: [0, 6],
@@ -166,7 +168,7 @@ function config(overrides: Partial<AccountPoolConfig> = {}): AccountPoolConfig {
 
 function render(
   accounts = [account()],
-  extraRpc: Record<string, () => object | null | Promise<object | null>> = {},
+  extraRpc: Record<string, (input: any) => object | null | Promise<object | null>> = {},
 ) {
   return renderSlot(
     app.settingsSections[0]!,
@@ -871,6 +873,33 @@ describe("Account Pool settings", () => {
     await waitFor(()=>expect(slot.rpcCalls).toContainEqual({method:"config.set",input:{maxConcurrentRequestsPerAccount:1}}));
   });
 
+  it("writes independent fixed ceilings and restores both after reopening settings", async () => {
+    let persisted = config({ switchThreshold: .85 });
+    const rpc = {
+      "config.get": () => persisted,
+      "config.set": (patch: Partial<AccountPoolConfig>) => persisted = { ...persisted, ...patch },
+    };
+    const slot = render([account()], rpc);
+    fireEvent.click(await slot.findByRole("button", { name: "Дополнительно" }));
+    const short = slot.getByLabelText("Фиксированный потолок 5 ч, %") as HTMLInputElement;
+    const week = slot.getByLabelText("Фиксированный потолок 7 д, %") as HTMLInputElement;
+    expect(short.placeholder).toBe("85");
+    expect(week.placeholder).toBe("85");
+    fireEvent.change(short, { target: { value: "50" } });
+    fireEvent.blur(short);
+    await waitFor(() => expect(week.disabled).toBe(false));
+    fireEvent.change(week, { target: { value: "80" } });
+    fireEvent.blur(week);
+    await waitFor(() => expect(persisted).toMatchObject({ fiveHourSwitchThreshold: .5, weeklySwitchThreshold: .8 }));
+    slot.unmount();
+    const reopened = render([account()], rpc);
+    fireEvent.click(await reopened.findByRole("button", { name: "Дополнительно" }));
+    await waitFor(() => {
+      expect((reopened.getByLabelText("Фиксированный потолок 5 ч, %") as HTMLInputElement).value).toBe("50");
+      expect((reopened.getByLabelText("Фиксированный потолок 7 д, %") as HTMLInputElement).value).toBe("80");
+    });
+  });
+
   it("edits Advanced config fields and shows URL validation inline", async () => {
     const nextConfig = config({
       anthropicUpstreamBaseUrl: "https://proxy.example.com",
@@ -889,7 +918,7 @@ describe("Account Pool settings", () => {
       expect(anthropic.value).toBe("https://api.anthropic.com"),
     );
     expect(slot.getByLabelText("Базовый URL upstream Codex")).toBeTruthy();
-    expect(slot.getByLabelText("Порог переключения по квоте")).toBeTruthy();
+    expect(slot.getByLabelText("Порог для остальных окон")).toBeTruthy();
 
     fireEvent.change(anthropic, { target: { value: "ftp://invalid.example" } });
     fireEvent.blur(anthropic);
