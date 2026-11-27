@@ -40,9 +40,25 @@ const leaseSchema = z.object({
   caller: z.object({hostId:id,projectId:id.nullable(),threadId:id.optional(),purpose:z.literal('autopilot').optional()}).strict(),
   state: z.enum(['queued','active','uncertain']), deadline: z.number(), createdAt: z.number(),
   catalogProcess:nativeCatalogProcessSchema.optional(),
+  taskProcess:nativeCatalogProcessSchema.optional(),
   unlock:z.object({requestId:z.string().uuid(),deadline:z.number(),state:z.enum(['issued','consumed','completed','uncertain'])}).strict().optional(),
 }).strict();
 type Lease = z.infer<typeof leaseSchema>;
+function localTaskProcessScope(caller:NativeCaller,executor:Executor){
+  // The launcher already has authority to report a stop for its own scoped lease.
+  // A header must not extend that authority to another host or runtime.
+  return caller.threadId!==undefined&&caller.projectId!==null&&caller.hostId===executor.hostId&&!executor.execution&&!executor.unlock;
+}
+function sameProcess(a:NativeCatalogProcess|undefined,b:NativeCatalogProcess|undefined){
+  return a?.groupId===b?.groupId&&a?.bootId===b?.bootId;
+}
+function reconcileBinding(lease:Lease,now:number){
+  if(lease.kind==='catalog')return lease.catalogProcess;
+  if(lease.kind==='task'&&lease.deadline<=now&&localTaskProcessScope(lease.caller,lease.executor)&&
+    (!lease.unlock||lease.unlock.state==='completed'))return lease.taskProcess;
+  return undefined;
+}
+
 const eventSchema = z.object({at:z.number(),event:z.enum(['queued','active','uncertain','released','cancelled','attested-stopped']),executorId:id,accountId:id,hostId:id,projectId:id.nullable()});
 const stateSchema = z.object({
   managed:z.boolean(), executors:z.array(nativeExecutorSchema).max(32),
@@ -56,8 +72,9 @@ interface Storage {get<T>(key:string):Promise<T|null|undefined>;set(key:string,v
 const KEY='native-agy-sessions-v1';
 export const NATIVE_LEASE_MS=30_000;
 export const NATIVE_REQUEST_BODY_TIMEOUT_MS=5_000;
+const nativeRequestIdSchema=z.uuid();
 const NATIVE_ACTIONS=new Set(['acquire','poll','release','unlock-start','unlock-cancel']);
-export interface NativeHttpRejection {status:number;code:string;action:string|null;hostId:string|null;}
+export interface NativeHttpRejection {status:number;code:string;action:string|null;hostId:string|null;requestId?:string;}
 export const nativeRequestSchema=z.discriminatedUnion('action',[
   z.object({action:z.literal('acquire'),executorId:id,sessionId:z.string().uuid(),kind:nativeLeaseKindSchema.default('task'),catalogProcess:nativeCatalogProcessSchema.optional()}).strict(),
   z.object({action:z.literal('poll'),leaseId:z.string().uuid()}).strict(),
@@ -77,6 +94,7 @@ export class NativeSessions {
   private diagnostics=new Map<string,{input:NativeProbeInput;caller:NativeCaller;deadline:number;reservationId:string;sessionId?:string;finished?:boolean}>();
   private tail:Promise<unknown>=Promise.resolve();
   private failed=false;
+  private reconcileClosed=false;
   private persistedBlockers=0;
   private unlockJobs=new Map<string,{abort:AbortController;done:Promise<void>}>();
   constructor(private storage:Storage,private now=Date.now,private admit: (hostId:string,caller:NativeCaller)=>Promise<void>=async()=>{},
@@ -276,27 +294,38 @@ export class NativeSessions {
     if(!lease||lease.state!=='uncertain')throw new NativeSessionError(409,'native-not-uncertain');
     this.event(lease,'attested-stopped');this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
   });}
-  async reconcileCatalogProcesses(verify:(hostId:string,binding:NativeCatalogProcess)=>Promise<boolean>){
-    await this.tail;
-    const now = this.now();
-    // Use the assigned execution host, which can differ from the catalog caller ID.
-    const candidates = this.state.leases.flatMap(lease =>
-      lease.kind==='catalog' && lease.catalogProcess &&
-      (lease.state==='uncertain' || (lease.state==='active' && lease.deadline<=now))
-        ? [{id:lease.id,hostId:lease.executor.hostId,binding:structuredClone(lease.catalogProcess)}]
-        : [],
-    );
-    if (!candidates.length) return 0;
-    const results = await Promise.allSettled(candidates.map(({hostId,binding})=>verify(hostId,binding)));
-    const stopped = new Set(candidates.filter((_candidate,index)=>{
+  async reconcileNativeProcesses(verify:(hostId:string,binding:NativeCatalogProcess)=>Promise<boolean>){
+    const needsCheck=await this.enqueue(async()=>{
+      const now=this.now();
+      return this.state.leases.some(lease=>
+        (lease.state==='uncertain'||(lease.state==='active'&&lease.deadline<=now))&&reconcileBinding(lease,now));
+    });
+    if(!needsCheck||this.reconcileClosed)return 0;
+    // Persist the expiry transition before taking evidence from the assigned host.
+    const candidates=await this.serial(()=>{
+      const now=this.now();
+      return this.state.leases.flatMap(lease=>{
+        const binding=lease.state==='uncertain'?reconcileBinding(lease,now):undefined;
+        return binding?[{id:lease.id,kind:lease.kind,sessionId:lease.sessionId,deadline:lease.deadline,
+          hostId:lease.executor.hostId,binding:structuredClone(binding)}]:[];
+      });
+    });
+    if(this.reconcileClosed)return 0;
+    const results=await Promise.allSettled(candidates.map(async({hostId,binding})=>verify(hostId,{...binding})));
+    const stopped=new Map(candidates.flatMap((candidate,index)=>{
       const result=results[index];
-      return result?.status==='fulfilled' && result.value===true;
-    }).map(({id})=>id));
-    if (!stopped.size) return 0;
+      return result.status==='fulfilled'&&result.value===true?[[candidate.id,candidate] as const]:[];
+    }));
+    if(!stopped.size||this.reconcileClosed)return 0;
     return this.serial(()=>{
-      let released = 0;
+      if(this.reconcileClosed)return 0;
+      let released=0;
+      const now=this.now();
       this.state.leases=this.state.leases.filter(lease=>{
-        if (!stopped.has(lease.id) || lease.state!=='uncertain' || lease.kind!=='catalog') return true;
+        const evidence=stopped.get(lease.id);
+        if(!evidence||lease.state!=='uncertain'||lease.kind!==evidence.kind||lease.sessionId!==evidence.sessionId||
+          lease.deadline!==evidence.deadline||lease.executor.hostId!==evidence.hostId||
+          !sameProcess(reconcileBinding(lease,now),evidence.binding))return true;
         this.event(lease,'released');
         released++;
         return false;
@@ -306,10 +335,12 @@ export class NativeSessions {
   }
 
   admissionCheck: (activePoll?:()=>boolean) => void = () => {};
-  async request(caller:NativeCaller,raw:unknown,diagnosticToken?:string):Promise<NativeReply>{
-    return this.handleRequest(caller,nativeRequestSchema.parse(raw),diagnosticToken,true);
+  async request(caller:NativeCaller,raw:unknown,diagnosticToken?:string,taskProcess?:NativeCatalogProcess):Promise<NativeReply>{
+    return this.handleRequest(caller,nativeRequestSchema.parse(raw),diagnosticToken,true,taskProcess);
   }
-  private async handleRequest(caller:NativeCaller,input:z.infer<typeof nativeRequestSchema>,diagnosticToken:string|undefined,allowDrainPoll:boolean):Promise<NativeReply>{
+  private async handleRequest(caller:NativeCaller,input:z.infer<typeof nativeRequestSchema>,diagnosticToken:string|undefined,allowDrainPoll:boolean,taskProcess?:NativeCatalogProcess):Promise<NativeReply>{
+    if(taskProcess&&(input.action!=='acquire'||input.kind!=='task'||diagnosticToken))
+      throw new NativeSessionError(403,'native-task-process-denied');
     if(input.action==='acquire'&&input.catalogProcess&&input.kind!=='catalog')
       throw new NativeSessionError(400,'native-catalog-process-only');
     const activePoll=allowDrainPoll&&input.action==='poll'?()=>{
@@ -332,6 +363,7 @@ export class NativeSessions {
       const previous=input.action==='poll'?this.owned(caller,input.leaseId):undefined;
       const executor=input.action==='acquire'?this.state.executors.find(e=>e.id===input.executorId):previous!.executor;
       if(!executor||!this.allowed(executor,caller,input.action==='acquire'?input.kind:previous!.kind))throw new NativeSessionError(403,'native-executor-denied');
+      if(taskProcess&&!localTaskProcessScope(caller,executor))throw new NativeSessionError(403,'native-task-process-denied');
       checkedHost=executor.hostId;
       // Do network I/O outside the serialization lane, then repeat policy below.
       await this.admit(checkedHost,caller);
@@ -352,6 +384,8 @@ export class NativeSessions {
     if(input.action==='acquire'){
       const executor=this.state.executors.find(e=>e.id===input.executorId);
       if(!executor||!this.allowed(executor,caller,input.kind))throw new NativeSessionError(403,'native-executor-denied');
+      if(taskProcess&&(executor.hostId!==checkedHost||!localTaskProcessScope(caller,executor)))
+        throw new NativeSessionError(403,'native-task-process-denied');
       if(input.kind==='diagnostic'){
         if(reservation&&reservation.deadline<=this.now())throw new NativeSessionError(403,'native-diagnostic-expired');
         if(!reservation||reservation.sessionId||executor.id!==reservation.input.executorId||executor.accountId!==reservation.input.accountId||executor.hostId!==reservation.input.hostId)
@@ -362,8 +396,7 @@ export class NativeSessions {
       // Idempotent acquisition prevents losing a slot on an uncertain response.
       const existing=this.state.leases.find(l=>l.sessionId===input.sessionId&&sameCaller(l.caller,caller));
       if(existing&&(existing.executor.id!==executor.id||existing.kind!==input.kind||
-        existing.catalogProcess?.groupId!==input.catalogProcess?.groupId||
-        existing.catalogProcess?.bootId!==input.catalogProcess?.bootId))throw new NativeSessionError(409,'native-session-bound');
+        !sameProcess(existing.catalogProcess,input.catalogProcess)||!sameProcess(existing.taskProcess,taskProcess)))throw new NativeSessionError(409,'native-session-bound');
       if(existing)lease=existing;
       else{
         if(input.kind==='task'&&caller.threadId!==undefined&&this.accountCapacity(executor.accountId)>1&&
@@ -373,7 +406,7 @@ export class NativeSessions {
         if(this.state.leases.length>=128)throw new NativeSessionError(429,'native-queue-full');
         const now=this.now();
         lease={id:randomUUID(),sessionId:input.sessionId,executor:structuredClone(executor),caller:structuredClone(caller),kind:input.kind,state:'queued',createdAt:now,deadline:now+NATIVE_LEASE_MS,
-          ...(input.catalogProcess?{catalogProcess:input.catalogProcess}:{})};
+          ...(input.catalogProcess?{catalogProcess:input.catalogProcess}:{}),...(taskProcess?{taskProcess:structuredClone(taskProcess)}:{})};
         this.state.leases.push(lease);this.event(lease,'queued');
       }
     }else lease=this.owned(caller,input.leaseId);
@@ -536,6 +569,7 @@ export class NativeSessions {
   }
   diagnosticCaller(token:string){const r=this.diagnostics.get(createHash('sha256').update(token).digest('hex'));return r?.caller??null;}
   async close(){
+    this.reconcileClosed=true;
     const jobs=[...this.unlockJobs.values()];for(const job of jobs)job.abort.abort();
     await this.waitJobs(jobs.map(j=>j.done));
   }
@@ -551,23 +585,33 @@ export class NativeSessions {
   }
 }
 
+function parseTaskProcessHeader(header:string|null){
+  if(header===null)return undefined;
+  const match=/^([a-f0-9-]{36})\/([1-9][0-9]{0,9})$/.exec(header);
+  if(!match)throw new NativeSessionError(400,'native-invalid-request');
+  return nativeCatalogProcessSchema.parse({bootId:match[1],groupId:Number(match[2])});
+}
+
 export async function nativeHttp(
   request:Request,
   sessions:NativeSessions,
   authenticate:(token:string|null)=>Promise<NativeCaller|null>,
   observe?:(event:NativeHttpRejection)=>void,
 ){
+  const correlation=request.headers.get('x-request-id');
+  const requestId=correlation?.length===36&&correlation===correlation.toLowerCase()&&nativeRequestIdSchema.safeParse(correlation).success?correlation:undefined;
+  const headers=requestId?{'x-request-id':requestId}:undefined;
   let callerHostId:string|null=null;
   let action:string|null=null;
   const emit=(status:number,code:string)=>{
-    try{observe?.({status,code,action,hostId:callerHostId});}catch{/* Diagnostics cannot alter admission. */}
+    try{observe?.({status,code,action,hostId:callerHostId,...(requestId?{requestId}:{})});}catch{/* Diagnostics cannot alter admission. */}
   };
   try{
     const bearer=request.headers.get('authorization');
     const token=bearer?.startsWith('Bearer ')?bearer.slice(7):null;
     const diagnosticCaller=token?sessions.diagnosticCaller(token):null;
     const caller=diagnosticCaller??await authenticate(token);
-    if(!caller){emit(401,'native-unauthorized');return Response.json({error:'native-unauthorized'},{status:401});}
+    if(!caller){emit(401,'native-unauthorized');return Response.json({error:'native-unauthorized'},{status:401,headers});}
     callerHostId=caller.hostId;
     // Stream-bound input, independent of Content-Length and chunking.
     const reader=request.body?.getReader();let body='';let length=0;
@@ -583,7 +627,8 @@ export async function nativeHttp(
     if(parsed&&typeof parsed==='object'&&typeof (parsed as {action?:unknown}).action==='string'&&NATIVE_ACTIONS.has((parsed as {action:string}).action)){
       action=(parsed as {action:string}).action;
     }
-    return Response.json(await sessions.request(caller,parsed,diagnosticCaller?token!:undefined));
+    const taskProcess=parseTaskProcessHeader(request.headers.get('x-bb-native-task-process'));
+    return Response.json(await sessions.request(caller,parsed,diagnosticCaller?token!:undefined,taskProcess),{headers});
   }catch(error){
     let status=400,code='native-invalid-request';
     if(error instanceof NativeSessionError){status=error.status;code=error.code;}
@@ -592,6 +637,6 @@ export async function nativeHttp(
       else{status=503;code='native-guard-unavailable';}
     }
     emit(status,code);
-    return Response.json({error:code},{status});
+    return Response.json({error:code},{status,headers});
   }
 }

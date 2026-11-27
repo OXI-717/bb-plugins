@@ -107,19 +107,41 @@ changed admission still stops the wrapper without switching accounts.
 Before downgrading to a release without this setting, drain the affected
 accounts and reset their slot counts to 1. This removes the persisted override.
 
-Expiry or a plugin restart quarantines ACTIVE leases; it never proves process
-termination. Queued leases expire normally. A disconnected active process keeps
-its slot unavailable until the same caller confirms termination. If the wrapper
-has died, an operator must first establish actual process cleanup, then use
-`bb pool native attest-stopped <lease-id> --confirmed`. Pooler can also reconcile a macOS catalog lease that carries the registered
-process group and boot identity from a current launcher. BB checks the exact
-assigned host. Only an absent group or a new host boot allows release. A live
-or unreachable host group, legacy catalog and unconfirmed task keep their
-existing hold. Drain tracked catalog leases before downgrading Pooler to a
-version that does not understand their process binding.
+Expiry or a plugin restart quarantines active leases. Queued leases expire
+normally. A caller may confirm its own process cleanup with `stopped=true`.
+If the wrapper has died, an operator can establish actual cleanup and then use
+`bb pool native attest-stopped <lease-id> --confirmed`.
 
-An expired active lease
-cannot be freed by completed=true. There is no automatic uncertain-slot reset.
+For local macOS tasks, the trusted scoped launcher creates an inert process
+group before the initial acquire. Every retry for that session must send the
+same `X-BB-Native-Task-Process: <lowercase-boot-uuid>/<decimal-pgid>`. The
+launcher must run the task inside that exact group and discard it if admission
+fails. The bearer supplies the host, project and thread scope. Pooler accepts
+the header only for a task whose caller and assigned executor share a host,
+outside prepared execution. Malformed or out-of-scope headers are rejected.
+A retry of an existing lease cannot add, replace or remove the stored binding. The binding is
+internal to the persisted lease.
+
+Every 15 seconds Pooler can reconcile an uncertain bound task whose deadline
+has elapsed. It uses the existing catalog RPC on the assigned host and checks
+the same lease and binding again before committing the release. On macOS, a
+changed boot UUID or ESRCH for the entire group confirms that the recorded
+group is gone. A live group, EPERM, unavailable host or RPC failure preserves
+the hold. Legacy tasks, incompatible hosts and unconfirmed unlocks also
+preserve their holds. An expired lease cannot be freed by `completed=true`.
+Catalog reconciliation continues to use its existing binding and policy.
+
+Before rolling back to a Pooler version without task process binding, drain
+bound task leases using the current version so its older storage reader sees
+no task binding fields. If a bound process has already stopped and automatic
+verification is unavailable, confirm actual cleanup and attest it manually
+before rollback. An older Pooler ignores the launcher header. For disconnected
+tasks admitted during rollback, use manual attestation after verifying cleanup.
+Drain tracked catalog leases before downgrading to a version that predates
+their binding.
+
+A canonical lowercase UUID in `X-Request-ID` is echoed in the response and
+included in rejection logs, including authentication and request-shape errors.
 
 Registry: at most 32 executors, 128 leases, 256 events retained for 14 days.
 Metadata serialization is bounded independently of request history. No additional

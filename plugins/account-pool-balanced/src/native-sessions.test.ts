@@ -258,14 +258,14 @@ describe('official native session admission',()=>{
     await expect(sessions.request(catalog,{...input,catalogProcess:{...process,groupId:5678}})).rejects.toThrow('native-session-bound');
     clock(1001+NATIVE_LEASE_MS);
     const checked:unknown[]=[];
-    await sessions.reconcileCatalogProcesses(async(hostId,binding)=>{
+    await sessions.reconcileNativeProcesses(async(hostId,binding)=>{
       checked.push({hostId,binding});return false;
     });
     expect(checked).toEqual([{hostId:executor.hostId,binding:process}]);
     expect((await sessions.uncertainLeases())[0].leaseId).toBe(tracked.leaseId);
-    await sessions.reconcileCatalogProcesses(async()=>{throw new Error('offline')});
+    await sessions.reconcileNativeProcesses(async()=>{throw new Error('offline')});
     expect(await sessions.uncertainLeases()).toHaveLength(1);
-    expect(await sessions.reconcileCatalogProcesses(async()=>true)).toBe(1);
+    expect(await sessions.reconcileNativeProcesses(async()=>true)).toBe(1);
     expect(await sessions.uncertainLeases()).toEqual([]);
     expect((await sessions.snapshot()).events.at(-1)?.event).toBe('released');
   });
@@ -276,7 +276,7 @@ describe('official native session admission',()=>{
     await sessions.request(caller,acquire());
     clock(1001+NATIVE_LEASE_MS);
     let called=false;
-    await sessions.reconcileCatalogProcesses(async()=>{called=true;return true});
+    await sessions.reconcileNativeProcesses(async()=>{called=true;return true});
     expect(called).toBe(false);
     expect(await sessions.uncertainLeases()).toHaveLength(2);
   });
@@ -537,4 +537,124 @@ it('maps Guard block and unavailability distinctly and reports safe structured H
   mode='blocked';
   const resilient=await nativeHttp(req(JSON.stringify(poll(leaseId))),sessions,auth,()=>{throw Error('log-failed');});
   expect(resilient.status).toBe(403);
+});
+
+describe('task process reconciliation',()=>{
+  const binding={groupId:23456,bootId:'1858e38e-2aa0-4f82-a565-1e154b3adcf9'};
+  const processHeader=`${binding.bootId}/${binding.groupId}`;
+  const requestId='fbcbd81a-9cf1-4e68-86c2-540cf3bf47af';
+  function post(sessions:NativeSessions,input:unknown,identity:NativeCaller|null=caller,process:string|null=processHeader,correlation=requestId,observe?:(event:NativeHttpRejection)=>void){
+    const headers=new Headers({authorization:'Bearer fixture-credential','x-request-id':correlation});
+    if(process!==null)headers.set('x-bb-native-task-process',process);
+    return nativeHttp(new Request('https://pool.example/native/agy',{method:'POST',headers,body:JSON.stringify(input)}),sessions,
+      async token=>token==='fixture-credential'?identity:null,observe);
+  }
+
+  it('stores the exact binding and lets the same thread acquire only after verified expiry',async()=>{
+    const {sessions,kv,clock}=await fixture();
+    await sessions.updateAccount({accountId:executor.accountId,expectedRevision:(await sessions.accounts()).selectionRevision,maxConcurrentSessions:2});
+    const input=acquire();
+    const admitted=await post(sessions,input);
+    expect(admitted.headers.get('x-request-id')).toBe(requestId);
+    const active=await admitted.json();
+    expect(active).toMatchObject({state:'active'});
+    expect(active).not.toHaveProperty('taskProcess');
+    expect((await post(sessions,input)).status).toBe(200);
+    for(const changed of [null,`${binding.bootId}/23457`,`${requestId}/23456`]){
+      expect(await (await post(sessions,input,caller,changed)).json()).toEqual({error:'native-session-bound'});
+    }
+    expect((await sessions.snapshot()).leases[0]).not.toHaveProperty('taskProcess');
+
+    let now=1001;
+    const restarted=new NativeSessions(kv,()=>now);
+    await restarted.initialize();
+    const checked:unknown[]=[];
+    const stopped=async(hostId:string,process:typeof binding)=>{
+      checked.push({hostId,process});
+      expect(await restarted.uncertainLeases()).toHaveLength(1);
+      return true;
+    };
+    expect(await restarted.reconcileNativeProcesses(stopped)).toBe(0);
+    expect(checked).toEqual([]);
+    now=clock(1000+NATIVE_LEASE_MS+1);
+    expect(await (await post(restarted,acquire())).json()).toEqual({error:'native-thread-already-bound'});
+    expect(await restarted.reconcileNativeProcesses(async()=>false)).toBe(0);
+    expect(await restarted.reconcileNativeProcesses(async()=>{throw Error('offline');})).toBe(0);
+    expect(await restarted.reconcileNativeProcesses(stopped)).toBe(1);
+    expect(checked).toEqual([{hostId:executor.hostId,process:binding}]);
+    const reacquired=await (await post(restarted,acquire(),caller,`${binding.bootId}/23457`)).json();
+    expect(reacquired).toMatchObject({state:'active'});
+    expect(reacquired.leaseId).not.toBe(active.leaseId);
+  });
+
+  it('rejects task evidence outside the authenticated local task scope and validates the header',async()=>{
+    const {sessions}=await fixture();
+    await sessions.configure({...executor,callerIds:['mac','remote'],catalogCallerIds:['mac']});
+    for(const identity of [{hostId:'mac',projectId:'project-one'},{...caller,hostId:'remote'}]){
+      expect((await post(sessions,acquire(),identity)).status).toBe(403);
+    }
+    for(const kind of ['catalog','diagnostic']){
+      expect((await post(sessions,{...acquire(),kind})).status).toBe(403);
+    }
+    for(const invalid of [binding.bootId.toUpperCase()+'/23456',binding.bootId+'/0',binding.bootId+'/1',binding.bootId+'/023456',
+      binding.bootId+'/2147483648',processHeader+', '+processHeader]){
+      expect((await post(sessions,acquire(),caller,invalid)).status).toBe(400);
+    }
+    expect((await sessions.snapshot()).leases).toEqual([]);
+  });
+
+  it('correlates auth and shape rejections without reflecting invalid input',async()=>{
+    const {sessions}=await fixture();
+    const observed:NativeHttpRejection[]=[];
+    const observe=(event:NativeHttpRejection)=>observed.push(event);
+    const unauthorized=await post(sessions,{action:'private-body'},null,processHeader,requestId,observe);
+    const invalid=await post(sessions,{action:'private-body'},caller,processHeader,requestId,observe);
+    const unsafe=await post(sessions,{action:'private-body'},caller,processHeader,'private-correlation',observe);
+    expect(unauthorized.status).toBe(401);
+    expect(invalid.status).toBe(400);
+    expect(unauthorized.headers.get('x-request-id')).toBe(requestId);
+    expect(invalid.headers.get('x-request-id')).toBe(requestId);
+    expect(unsafe.headers.has('x-request-id')).toBe(false);
+    expect(observed).toEqual([
+      {status:401,code:'native-unauthorized',action:null,hostId:null,requestId},
+      {status:400,code:'native-invalid-request',action:null,hostId:'mac',requestId},
+      {status:400,code:'native-invalid-request',action:null,hostId:'mac'},
+    ]);
+  });
+
+  it('does not apply delayed proof to a replacement lease or block concurrent native writes',async()=>{
+    const {sessions,clock}=await fixture();
+    const input=acquire();
+    const old=await (await post(sessions,input)).json();
+    clock(1001+NATIVE_LEASE_MS);
+    let finish!:(value:boolean)=>void;
+    let entered!:()=>void;
+    const checking=new Promise<void>(resolve=>{entered=resolve;});
+    const reconciled=sessions.reconcileNativeProcesses(async()=>{
+      entered();
+      return new Promise<boolean>(resolve=>{finish=resolve;});
+    });
+    // On base there is no check. Fail immediately if reconciliation returns first.
+    expect(await Promise.race([checking.then(()=>true),reconciled.then(()=>false)])).toBe(true);
+    expect(await sessions.withUpgradeSeal(async()=>sessions.upgradeBlockers())).toBe(1);
+    await sessions.attestStopped(old.leaseId);
+    const next=await (await post(sessions,acquire(),caller,`${binding.bootId}/23457`)).json();
+    clock(1002+2*NATIVE_LEASE_MS);
+    finish(true);
+    expect(await reconciled).toBe(0);
+    expect(await sessions.uncertainLeases()).toEqual([expect.objectContaining({leaseId:next.leaseId})]);
+  });
+
+  it('never checks a legacy task after restart or retrofits its binding',async()=>{
+    const {sessions,kv}=await fixture();
+    const input=acquire();
+    const lease=await sessions.request(caller,input);
+    const restarted=new NativeSessions(kv,()=>1001+NATIVE_LEASE_MS);
+    await restarted.initialize();
+    expect(await (await post(restarted,input)).json()).toEqual({error:'native-session-bound'});
+    const checked:string[]=[];
+    expect(await restarted.reconcileNativeProcesses(async hostId=>{checked.push(hostId);return true;})).toBe(0);
+    expect(checked).toEqual([]);
+    expect(await restarted.uncertainLeases()).toEqual([expect.objectContaining({leaseId:lease.leaseId})]);
+  });
 });
