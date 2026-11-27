@@ -9,6 +9,8 @@ import {AccountEmailForm} from './account-email-form';
 import { AccountSettingsStyle } from './account-settings-style';
 import type { AccountProjects } from "./src/contracts.js";
 import { AccountProjectsForm } from "./account-projects-form";
+import { AccountModelRulesForm } from "./account-model-rules-form";
+import type { ModelRules } from "./src/model-rules.js";
 import { WeeklyBudgetForm, weeklyModeLabel } from "./weekly-budget-form";
 import type { WeeklyBudgetChange } from "./src/contracts.js";
 import { AccountPolicyForm } from "./account-policy-form";
@@ -1783,6 +1785,13 @@ function UnlockedAccountPoolSettings() {
                                 if (!result.account) throw Error("Account removed");
                               } finally { await refresh(); }
                             }}
+                            saveModelRules={async (modelRules, expectedModelRules) => {
+                              let result;
+                              try { result = await rpc.call("account.setModelRules", { accountId: account.id, modelRules, expectedModelRules }); }
+                              catch (error) { await refresh(); throw error; }
+                              if (!result.account) throw new Error("Account removed");
+                              await refresh();
+                            }}
                             saveProjects={async (projects, expectedProjects) => {
                               let result;
                               try { result = await rpc.call("account.setProjects", { accountId: account.id, projects, expectedProjects }); }
@@ -2512,6 +2521,7 @@ function AccountCard({
   savePolicy,
   saveWeekly,
   saveProjects,
+  saveModelRules,
   saveAutopilot,
   loadProjects,
   onPolicyUnsavedChange,
@@ -2531,6 +2541,7 @@ function AccountCard({
   saveEmail:(email:string|null,expectedEmail:string|null)=>Promise<void>;
   saveAutopilot: (allowed:boolean, expectedAllowed:boolean) => Promise<void>;
   saveProjects: (projects: AccountProjects, expectedProjects: AccountProjects | null) => Promise<void>;
+  saveModelRules: (rules: ModelRules, expected: ModelRules | null) => Promise<void>;
   loadProjects: () => Promise<Array<{ id: string; name: string }>>;
   savePolicy: (policy: AccountPolicy) => Promise<void>;
   saveWeekly: (change: WeeklyBudgetChange["change"], expected: WeeklyBudgetChange["expected"]) => Promise<void>;
@@ -2550,8 +2561,9 @@ function AccountCard({
   const [showBrowserUrl, setShowBrowserUrl] = useState(false);
   const [emailUnsaved,setEmailUnsaved]=useState(false);
   const [projectsUnsaved, setProjectsUnsaved] = useState(false);
+  const [rulesUnsaved, setRulesUnsaved] = useState(false);
   const [quotaUnsaved, setQuotaUnsaved] = useState(false);
-  useEffect(() => { onPolicyUnsavedChange(projectsUnsaved || quotaUnsaved || emailUnsaved); }, [projectsUnsaved, quotaUnsaved,emailUnsaved, onPolicyUnsavedChange]);
+  useEffect(() => { onPolicyUnsavedChange(projectsUnsaved || rulesUnsaved || quotaUnsaved || emailUnsaved); }, [projectsUnsaved, rulesUnsaved, quotaUnsaved,emailUnsaved, onPolicyUnsavedChange]);
   const limits = dashboardThresholds(account, threshold);
   const inheritedDrainHours = drainHours;
   drainHours = reserveHours(account, drainHours);
@@ -2644,6 +2656,7 @@ function AccountCard({
             {autopilotError && <p role="alert">{autopilotError}</p>}
           </section>
           <AccountEgressForm key={account.id} accountId={account.id} provider={account.provider} />
+          <AccountModelRulesForm account={account} save={saveModelRules} onUnsavedChange={setRulesUnsaved} />
           <AccountProjectsForm account={account} loadProjects={loadProjects} save={saveProjects} onUnsavedChange={setProjectsUnsaved} />
           <AccountPolicyForm account={account} thresholds={poolThresholds(threshold, account.provider)} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
           <section className="pool-settings-section">

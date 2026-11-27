@@ -156,6 +156,15 @@ export class AccountStore {
     return this.update(id, account => {if(enabled&&account.draft)throw Error('Сначала выполните вход в аккаунт.');return {...account,enabled};});
   }
 
+  async setModelRules(id: string, modelRules: Account["modelRules"], expected?: Account["modelRules"] | null): Promise<Account | null> {
+    return this.update(id, account => {
+      if (expected !== undefined && JSON.stringify(account.modelRules ?? null) !== JSON.stringify(expected)) {
+        throw new Error("Model rules changed; refresh before saving.");
+      }
+      return { ...account, modelRules };
+    });
+  }
+
   async setProjects(id: string, projects: Account["projects"], expected?: Account["projects"] | null): Promise<Account | null> {
     return this.update(id, account => {
       if (expected !== undefined && JSON.stringify(account.projects ?? null) !== JSON.stringify(expected)) {

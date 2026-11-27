@@ -17,6 +17,7 @@ import { AccountAuthorizationRequiredError } from "./provider-adapter.js";
 import { createVpnPolicy, VpnRequiredError } from "./vpn-policy.js";
 import { isRecoverableAccessError } from "./recoverable-access.js";
 import { projectTier, projectRole } from "./project-policy.js";
+import { resolveModelRules } from "./model-rules.js";
 import { currentWeeklyBudget, observedWeek } from "./weekly-budget.js";
 import { policyThresholds, reserveHours, scheduleAllows } from "./account-policy.js";
 import type {
@@ -840,6 +841,18 @@ export class AccountPoolHub {
         ? null
         : JSON.stringify([adapter.provider, affinityHost, parsed.parentAffinityId]);
     const routeSessionKey=threadId===null?affinityKey:JSON.stringify([accountScope?affinityHost:hostId,projectId,threadId,adapter.provider]);
+    // Per-account model rules: a denied or not-allowed account never serves the model, and a pinned model goes
+    // to its account(s) alone unless the rule lets the others take over once those cannot serve.
+    const deferredByRule: string[] = [];
+    let rulePinned: Account[] = [];
+    if (parsed.model) {
+      const outcome = resolveModelRules(parsed.model, accounts);
+      for (const [accountId, reason] of outcome.excluded) {
+        candidateIds.delete(accountId);
+        if (reason === "model-rule-pinned-elsewhere" && outcome.fallback) deferredByRule.push(accountId);
+      }
+      rulePinned = accounts.filter(account => outcome.pinned.includes(account.id));
+    }
     try {
       // A manual choice of an account this caller can no longer use (removed, other scope) is ignored.
       const manualAccountId=routeSessionKey===null?null:(await this.options.manualRouteAccount?.(routeSessionKey))??null;
@@ -865,6 +878,11 @@ export class AccountPoolHub {
           accountScope ? affinityHost : undefined,
           routeSessionKey,
         );
+        if (selected === null && deferredByRule.length > 0) {
+          // The pinned account(s) cannot serve now and the rule allows a fallback: widen once.
+          for (const accountId of deferredByRule.splice(0)) candidateIds.add(accountId);
+          continue;
+        }
         if (selected === null) break;
         const acquired=await this.acquireRoute(selected.account,routeSessionKey);
         const assertScope=()=>{
@@ -1143,6 +1161,9 @@ export class AccountPoolHub {
         if (route.assigned && authRetried) break;
       }
       signal.throwIfAborted();
+      if (failure === null && rulePinned.length > 0) {
+        return result(this.pinnedUnavailableResponse(adapter, request, parsed.model ?? "", rulePinned, family));
+      }
       return result(failure === null
         ? this.noEligibleResponse(!this.options.getSettings().pinnedFailover && pinnedRouteAccountId ? accounts.filter(a=>a.id===pinnedRouteAccountId) : accounts, family, adapter, projectId, request, threadId, purpose)
         : this.errorResponse(adapter, request,
@@ -1989,6 +2010,27 @@ export class AccountPoolHub {
 
   private errorResponse(adapter: ProviderAdapter, request: Request, status: number, message: string, headers?: HeadersInit): Response {
     return adapter.errorResponse(status, message, headers, request);
+  }
+
+  /** The model is pinned by a rule and no pinned account can serve now: say so, with the reason and when it
+   * clears, so the caller knows it was the pinned account's quota and can start something else. */
+  private pinnedUnavailableResponse(adapter: ProviderAdapter, request: Request, model: string, pinned: readonly Account[], family: ModelFamily): Response {
+    const now = this.options.now();
+    const settings = this.options.getSettings();
+    const details = pinned.map(account => {
+      const quota = this.options.quotas.get(account.id);
+      const reset = quota.error !== null ? null : blockingResetAt(quota, family, policyThresholds(account, settings, quota, now), now);
+      const held = quota.heldUntil !== null && quota.heldUntil > now ? quota.heldUntil : null;
+      const reason = !account.enabled ? "disabled" : quota.error !== null ? "account error" : held !== null ? "temporarily held" : "no quota";
+      const until = reset ?? held;
+      return { label: account.label, reason, until: until !== null && until > now ? until : null };
+    });
+    const soonest = Math.min(...details.map(item => item.until ?? Number.POSITIVE_INFINITY));
+    const text = details.map(item => `${item.label} (${item.reason}${item.until === null ? "" : " until " + new Date(item.until).toISOString()})`).join(", ");
+    return this.errorResponse(adapter, request, 429,
+      `Model ${model} is pinned by a model rule to ${text}; no other account may serve it. Wait for that account or choose another model.`,
+      { "x-bb-pool-error": "POOL_MODEL_PINNED_UNAVAILABLE",
+        ...(Number.isFinite(soonest) ? { "retry-after": String(Math.max(1, Math.ceil((soonest - now) / 1000))) } : {}) });
   }
 
   private noEligibleResponse(

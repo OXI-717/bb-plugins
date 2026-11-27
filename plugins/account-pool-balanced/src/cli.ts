@@ -1,3 +1,4 @@
+import { modelRulesSchema } from "./model-rules.js";
 import {nativeProbeInputSchema} from './native-probe-wire.js';
 import { clientAccountScopeSchema } from "./client-scope.js";
 import type {PoolMaintenance} from './maintenance.js';
@@ -449,6 +450,11 @@ export function registerPoolCli(
         usage: "bb pool account priority <id> <n>",
       },
       {
+        name: "account-model-rules",
+        summary: "Pin, allow or deny models on one account",
+        usage: "bb pool account model-rules <id> [JSON|off]",
+      },
+      {
         name: "account-projects",
         summary: "Set project scope and per-project account roles",
         usage: "bb pool account projects <id> <JSON|off>",
@@ -574,6 +580,19 @@ export function registerPoolCli(
             exitCode: 0,
             stdout: `Set ${account.label} priority to ${account.priority}.\n`,
           };
+        }
+        if (argv[0] === "account" && argv[1] === "model-rules") {
+          if (argv.length < 3 || argv.length > 4) throw new Error(HELP);
+          const { id } = accountIdInputSchema.parse({ id: argv[2] });
+          if (argv.length === 3) {
+            const account = (await operations.list()).find(item => item.id === id);
+            if (account === undefined) throw new Error("Account not found.");
+            return { exitCode: 0, stdout: JSON.stringify(account.modelRules ?? []) + "\n" };
+          }
+          const rules = modelRulesSchema.parse(argv[3] === "off" ? [] : JSON.parse(argv[3]!));
+          const account = await operations.setModelRules(id, rules);
+          if (account === null) throw new Error("Account not found.");
+          return { exitCode: 0, stdout: "Account model rules updated.\n" };
         }
         if (argv[0] === "account" && argv[1] === "projects") {
           if (argv.length !== 4) throw new Error(HELP);

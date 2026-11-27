@@ -1,3 +1,4 @@
+import { modelRulesSchema } from "./model-rules.js";
 import {type NativeProbeInput,type NativeProbeResult} from './native-probe-wire.js';
 import {maintenanceStatusSchema, type PoolMaintenance} from './maintenance.js';
 import {updateStatusSchema, type PoolUpdate} from './pool-update.js';
@@ -107,6 +108,10 @@ export const accountPoolRpcContract = defineRpcContract({
     output: z.object({ account: accountSchema.nullable() }).strict(),
   },
   "projects.list": { input: z.null(), output: z.array(z.object({ id: z.string(), name: z.string() }).strict()) },
+  "account.setModelRules": {
+    input: z.object({ accountId: z.string().uuid(), modelRules: modelRulesSchema, expectedModelRules: modelRulesSchema.nullable().optional() }).strict(),
+    output: z.object({ account: accountSchema.nullable() }).strict(),
+  },
   "account.setProjects": {
     input: z.object({ accountId: z.string().uuid(), projects: accountProjectsSchema, expectedProjects: accountProjectsSchema.nullable().optional() }).strict(),
     output: z.object({ account: accountSchema.nullable() }).strict(),
@@ -270,6 +275,7 @@ export function createRpcHandlers(
     "readiness.get": ({projectId}) => operations.readiness(projectId),
     "browser.open": input => openBrowser(input),
     "projects.list": () => projectsList(),
+    "account.setModelRules": async ({ accountId, modelRules, expectedModelRules }) => ({ account: await operations.setModelRules(accountId, modelRules, expectedModelRules) }),
     "account.setProjects": async ({ accountId, projects, expectedProjects }) => ({ account: await operations.setProjects(accountId, projects, expectedProjects) }),
     "thread.account": ({ threadId }) => threadAccount(threadId),
     "thread.accountChoices": ({threadId})=>{if(!selection)throw Error("Выбор аккаунта недоступен");return selection.choices(threadId);},
