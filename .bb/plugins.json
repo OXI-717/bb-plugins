@@ -42,6 +42,10 @@
     {
       "name": "oxi-thread-list",
       "source": "./plugins/oxi-thread-list"
+    },
+    {
+      "name": "oxi-provider-icons",
+      "source": "./plugins/oxi-provider-icons"
     }
   ]
 }
