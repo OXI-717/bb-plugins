@@ -16,3 +16,13 @@ in [plugins/oxi-projects/LICENSE](plugins/oxi-projects/LICENSE).
 `plugins/auto-archive` derives from `bb-plugin-auto-archive` 0.1.0 by Shane Logsdon
 (https://github.com/slogsdon/bb-plugin-auto-archive), MIT. The original license is
 preserved in `plugins/auto-archive/LICENSE`.
+
+## Provider Icons
+
+`plugins/oxi-provider-icons` reuses upstream BB (get-bb/bb, MIT License,
+Copyright (c) 2026 Michael Yong) `provider-acp` registry icon geometry for five
+marks: `registry-antigravity-acp.svg`, `registry-kimi-code.svg`, `cursor.svg`,
+`registry-devin.svg` and `opencode.svg` (the last two with a small local pool
+and go badge). The badges and the Z.ai and NeuralDeep monograms are local
+original geometry, not official logos. The upstream MIT notice is preserved in
+`plugins/oxi-provider-icons/LICENSE`.

@@ -1,0 +1,48 @@
+{
+  "name": "bb-plugin-oxi-provider-icons",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Draw local theme-aware marks for OXI agent providers in BB's model picker and provider usage rows.",
+  "engines": {
+    "bb": ">=0.50.1",
+    "bbPluginSdk": ">=0.6.157 <0.7.0"
+  },
+  "bb": {
+    "name": "OXI Provider Icons",
+    "description": "Draw local theme-aware marks for OXI agent providers in BB's model picker and provider usage rows.",
+    "branding": {
+      "icon": "Palette"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --maxWorkers=2",
+    "build": "bb plugin build .",
+    "preview:build": "node preview/build.mjs"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.157",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "jsdom": "^29.0.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  }
+}

@@ -16,6 +16,7 @@ build with the published BB CLI. Linux means `ubuntu-latest`. Mac means
 | `auto-archive` | `auto-archive` | Linux | Auto Archive files select the package suite. No hosted Mac job. |
 | `oxi-op` | `oxi-op` | Linux and Mac | OP files and the six Pool modules loaded by its native-task fixture select the package suite. |
 | `oxi-thread-list` | `session-tree` | Linux | Runs for Session Tree changes and full plans. Otherwise its job reports an unchanged plugin. No hosted Mac job or Session Tree job in Extended compatibility. |
+| `oxi-provider-icons` | `provider-icons` | Linux | Provider Icons files select the package suite. No hosted Mac job. |
 
 `plan`, `public-hygiene`, `secrets`, `session-tree` and `release-gate` always
 run in CI. Linux and Mac `check` contexts for Pool and Catalog always exist
