@@ -208,22 +208,20 @@ export function createAccountPoolPlugin(
     };
     await nativeSessions.initialize();
     registerNativeUnlockRpc(bb,nativeSessions);
-    let catalogReconcileInFlight:Promise<void>|null=null;
-    let catalogReconcileClosed=false;
-    const catalogReconcileTimer=setInterval(()=>{
-      if(catalogReconcileInFlight)return;
-      catalogReconcileInFlight=nativeSessions.reconcileCatalogProcesses(async(hostId,binding)=>{
+    let nativeReconcileInFlight:Promise<void>|null=null;
+    const nativeReconcileTimer=setInterval(()=>{
+      if(nativeReconcileInFlight)return;
+      nativeReconcileInFlight=nativeSessions.reconcileNativeProcesses(async(hostId,binding)=>{
         const result=await browserHost.call('catalogProcessStatus',binding,{hostId,timeoutMs:5000});
-        return !catalogReconcileClosed && result.stopped;
+        return result.stopped;
       }).then(count=>{
-        if(count)bb.log.info('Account Pooler reconciled stopped native catalog leases '+JSON.stringify({count}));
-      }).catch(()=>bb.log.warn('Account Pooler native catalog reconciliation unavailable.'))
-        .finally(()=>{catalogReconcileInFlight=null;});
+        if(count)bb.log.info('Account Pooler reconciled stopped native leases '+JSON.stringify({count}));
+      }).catch(()=>bb.log.warn('Account Pooler native reconciliation unavailable.'))
+        .finally(()=>{nativeReconcileInFlight=null;});
     },15_000);
-    catalogReconcileTimer.unref();
+    nativeReconcileTimer.unref();
     bb.onDispose(()=>{
-      catalogReconcileClosed=true;
-      clearInterval(catalogReconcileTimer);
+      clearInterval(nativeReconcileTimer);
       return nativeSessions.close();
     });
     const hubTokens = new HubTokenStore(secretDir, now);

@@ -25,6 +25,11 @@ it('authenticates prepared runtime grants against the server profile registry be
     const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
     const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
     const sessionId=randomUUID();
+    const denied=await host.harness.behavior.fetchHttp('POST','/native/agy',{
+      headers:{authorization:`Bearer ${token}`,'x-bb-native-task-process':'1858e38e-2aa0-4f82-a565-1e154b3adcf9/23456'},
+      body:JSON.stringify({action:'acquire',executorId:'native-one',sessionId}),
+    });
+    expect(await denied.json()).toEqual({error:'native-task-process-denied'});
     const response=await host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${token}`},body:JSON.stringify({action:'acquire',executorId:'native-one',sessionId})});
     expect(response.status).toBe(200);
     expect((await response.json()).binding).toMatchObject({...execution,schema:'bb-account-pool/native-execution/1',sessionId,accountId:'subscription-one',hostId:'host-one',kind:'task',caller:{hostId:'host-one',projectId:'project-one',threadId:'thread-one'}});
@@ -426,4 +431,54 @@ it('reload quarantines active leases and refuses to seal a persisted drain',asyn
     expect((await cli('native','attest-stopped',leaseId,'--confirmed')).exitCode).toBe(0);
     expect((await cli('maintenance','seal-upgrade','--owner',upgradeOwner,'--json')).exitCode).toBe(0);
   } finally {await host.harness.lifecycle.dispose();}
+});
+
+it('reconciles an authenticated route lease through the assigned host on the native timer',async()=>{
+  vi.useFakeTimers({toFake:['setInterval','clearInterval']});
+  let now=1000;
+  const bootId='1858e38e-2aa0-4f82-a565-1e154b3adcf9';
+  const groupId=23456;
+  const host=createFakePluginHost({
+    pluginId:'account-pool',
+    sdk:{hosts:{list:async()=>[{id:'executor-host',name:'Fixture'}]}},
+    experimental_callHostRpc:async()=>({stopped:true}),
+  });
+  try{
+    await createAccountPoolPlugin({now:()=>now,fetch:vi.fn(async()=>new Response('{}'))})(host.bb);
+    const cli=(...args:string[])=>host.harness.behavior.runCli(args);
+    expect((await cli('native','configure',JSON.stringify({
+      id:'native-one',accountId:'subscription-one',hostId:'executor-host',
+      callerIds:['executor-host'],projectIds:['project-one'],enabled:true,
+    }))).exitCode).toBe(0);
+    expect((await cli('native','mode','managed')).exitCode).toBe(0);
+    const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{
+      hostId:'executor-host',projectId:'project-one',threadId:'thread-one',
+    });
+    const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
+    const requestId=randomUUID();
+    const post=(sessionId:string,callerToken=token)=>host.harness.behavior.fetchHttp('POST','/native/agy',{
+      headers:{authorization:`Bearer ${callerToken}`,'x-request-id':requestId,'x-bb-native-task-process':`${bootId}/${groupId}`},
+      body:JSON.stringify({action:'acquire',executorId:'native-one',sessionId}),
+    });
+    const unauthorized=await post(randomUUID(),'fixture-unauthorized');
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get('x-request-id')).toBe(requestId);
+    const reject=host.harness.inspection.logEntries.find(e=>JSON.stringify(e).includes('native admission rejected'));
+    expect(JSON.stringify(reject)).toContain(requestId);
+    expect(JSON.stringify(reject)).not.toMatch(/fixture-unauthorized|23456|sessionId/);
+    const first=await (await post(randomUUID())).json();
+    expect(first.state).toBe('active');
+    now+=15_000;
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual([]);
+    now+=15_001;
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual([
+      {method:'catalogProcessStatus',hostId:'executor-host',input:{bootId,groupId}},
+    ]);
+    expect((await (await post(randomUUID())).json()).state).toBe('active');
+  }finally{
+    await host.harness.lifecycle.dispose();
+    vi.useRealTimers();
+  }
 });
