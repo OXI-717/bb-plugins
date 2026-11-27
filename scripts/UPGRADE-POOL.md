@@ -164,7 +164,7 @@ the existing management client issues and revokes a fresh 60-second grant for
 each command, including post-reload validation and hold release. The interface
 passes only a fixed server-owned file path, never its contents; the browser
 cannot choose a path or command. The two credential flags are mutually exclusive.
-In CLI mode, the natural drain waits up to 600 seconds by default. The update
+Both drain phases share one deadline, 600 seconds by default in CLI mode. The update
 button uses 2400 seconds to give BB's default 30-minute idle-provider reaper time
 to close warm runtimes. A drain longer than 600 seconds takes a bounded one-hour
 dispatch hold instead of the normal 30-minute hold. The updater verifies the

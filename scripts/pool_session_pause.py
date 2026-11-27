@@ -117,26 +117,30 @@ class SessionPause:
             self.state['modelAdmission'] = 'not-owned-or-expired'
         self.save()
 
-    def drain(self, idle, deadline_seconds=600):
+    def drain(self, idle, deadline_seconds=600, *, deadline=None):
         """Hold dispatch, wait for natural completion; never stop or continue turns."""
         self.state['mode'] = 'graceful'
         self.state['phase'] = 'draining'
         self.save()
-        deadline = self.clock() + deadline_seconds
+        if deadline is None:
+            deadline = self.clock() + deadline_seconds
         next_report = self.clock()
         stable = 0
         while self.clock() < deadline:
             verify_hold(self.bb('pool-maintenance', 'status'), self.state['operationId'])
             rows = self.running()
             stable = stable + 1 if not rows and idle() else 0
+            now = self.clock()
+            if now >= deadline:
+                break
             if stable == 3:
                 self.state['phase'] = 'drained'
                 self.save()
                 return
-            if self.clock() >= next_report:
+            if now >= next_report:
                 self.say(f'Waiting for existing work and warm runtimes to finish ({len(rows)} running BB sessions).')
-                next_report = self.clock() + 60
-            self.sleep(3)
+                next_report = now + 60
+            self.sleep(min(3, deadline - now))
         raise RuntimeError('Natural session drain expired; no sessions interrupted, nothing updated')
 
     def stop(self):

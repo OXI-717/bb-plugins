@@ -214,6 +214,21 @@ class UpgradeTests(unittest.TestCase):
             self.assertFalse(u.wait_idle(lambda _: None))
             confirm.assert_not_called()
 
+    def test_second_idle_phase_uses_remaining_shared_drain_budget(self):
+        clock = [98.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with patch.object(u.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(u.time, 'sleep', side_effect=sleep), \
+             patch.object(u, 'pool_status', return_value={'inFlight': 0}) as reads, \
+             patch.object(u, 'report_pool'):
+            with self.assertRaisesRegex(u.UpgradeError, 'Idle wait expired'):
+                u.wait_idle(lambda _: None, deadline_seconds=90, deadline=100.0)
+        self.assertEqual(clock[0], 100.0)
+        reads.assert_called_once()
+
     def test_interruption_requires_explicit_answer_and_timeout_cancels(self):
         with patch.object(u, 'bb', return_value={'inFlight':1}), patch.object(u,'report_pool'), patch.object(u,'confirm_interrupt',return_value=True):
             self.assertTrue(u.wait_idle(lambda _: None, prompt_now=True))
