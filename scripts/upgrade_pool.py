@@ -255,7 +255,7 @@ def wait_idle(say, prompt_now=False, *, offer_interrupt=True, deadline_seconds=9
         count = pool['inFlight']
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             raise UpgradeError('Invalid in-flight request count')
-        native_leases_waiting = native_leases() if include_native else []
+        native_leases_waiting = native_blockers() if include_native else []
         native_count = len(native_leases_waiting)
         transport_count = model_activity() if include_native else 0
         count += native_count + transport_count
@@ -323,8 +323,12 @@ def native_leases():
     return leases
 
 
-def native_in_flight():
-    return len(native_leases())
+def native_blockers():
+    leases = native_leases()
+    if any(not isinstance(lease, dict) or lease.get('state') not in ('queued', 'active', 'uncertain')
+           for lease in leases):
+        raise UpgradeError('Invalid native executor state; update refused')
+    return [lease for lease in leases if lease['state'] != 'queued']
 
 
 def uncertain_lease_details(leases):
@@ -350,7 +354,7 @@ def verify_pause(args, *, sealed=False):
         from pool_session_pause import verify_hold, verify_model_hold
         model = bb('pool', 'maintenance', 'status')
         verify_model_hold(model, args.maintenance_owner)
-        if sealed and getattr(args, 'pause_sessions', False) and model['lease'].get('upgrade') != 'sealed':
+        if sealed and model['lease'].get('upgrade') != 'sealed':
             raise UpgradeError('Model admission is not sealed; update refused')
         verify_hold(bb('pool-maintenance', 'status'), args.maintenance_owner)
 
@@ -376,7 +380,7 @@ def perform(args, data, output, say):
     paused = getattr(args, 'pause_sessions', False) or getattr(args, 'drain_sessions', False)
     forced = wait_idle(say, args.interrupt_now, offer_interrupt=not paused,
                        deadline_seconds=90 if paused else 900, include_native=paused)
-    if getattr(args, 'pause_sessions', False):
+    if paused:
         from pool_session_pause import verify_model_hold
         sealed = bb('pool', 'maintenance', 'seal-upgrade', '--owner', args.maintenance_owner)
         verify_model_hold(sealed, args.maintenance_owner)
@@ -388,7 +392,7 @@ def perform(args, data, output, say):
         raise UpgradeError('Pool state changed; retry after requests finish')
     verify_pause(args, sealed=True)
     if paused:
-        leases = native_leases()
+        leases = native_blockers()
         if leases or model_activity():
             raise UpgradeError('Native processes or auxiliary work have not stopped; update refused'
                                + uncertain_lease_details(leases))
@@ -404,7 +408,7 @@ def perform(args, data, output, say):
         raise UpgradeError('New requests arrived during backup; retry')
     verify_pause(args, sealed=True)
     if paused:
-        leases = native_leases()
+        leases = native_blockers()
         if leases or model_activity():
             raise UpgradeError('Native processes or auxiliary work appeared during backup; update refused'
                                + uncertain_lease_details(leases))
@@ -441,7 +445,7 @@ def main():
     parser.add_argument('--version', help='Require this to be the latest compatible release; not a downgrade selector')
     parser.add_argument('--interrupt-now', action='store_true', help='Offer the interactive interruption prompt immediately')
     parser.add_argument('--drain-sessions', action='store_true', help='Hold dispatch and await natural session completion; never cancel active work')
-    parser.add_argument('--drain-timeout', type=int, default=600, help='Natural drain deadline in seconds (1..600)')
+    parser.add_argument('--drain-timeout', type=int, default=600, help='Natural drain deadline in seconds (1..2400)')
     parser.add_argument('--operator-key-file', help='Explicit private operator key for durable per-command grants across reload; no autodiscovery')
     parser.add_argument('--grant-file', help='Explicit private operator-issued management grant JSON; no automatic root-key access')
     parser.add_argument('--pause-sessions', action='store_true', help='Stop active sessions on ALL hosts, update, then continue the same sessions; history retained, current turns interrupted')
@@ -458,8 +462,8 @@ def main():
         result = preflight(args.candidate_preflight, args.receipt_output)
         print(json.dumps(result))
         return 0 if result['status'] == 'pass' else 2
-    if not 1 <= args.drain_timeout <= 600:
-        parser.error('--drain-timeout must be 1..600')
+    if not 1 <= args.drain_timeout <= 2400:
+        parser.error('--drain-timeout must be 1..2400')
     if args.drain_sessions and (args.pause_sessions or args.check or args.wait_idle or args.interrupt_now or args.resume_sessions or args.sandbox):
         parser.error('--drain-sessions cannot combine with other operation modes')
     if args.sandbox:
@@ -522,16 +526,17 @@ def main():
                         if checked == 'ALREADY_CURRENT':
                             result = checked
                         else:
+                            maintenance = bb('pool', 'maintenance', 'status')
+                            if not isinstance(maintenance, dict) or maintenance.get('nativeDrain') is not True:
+                                raise UpgradeError('Native drain API unavailable; use a coordinated idle window for first installation')
                             pause = SessionPause(output / 'sessions.json', bb, say)
                             try:
-                                pause.acquire_hold()
+                                pause.acquire_hold(drain_timeout=args.drain_timeout)
                                 args.maintenance_owner = pause.state['operationId']
-                                def idle():
-                                    return (pool_status(('inFlight',))['inFlight'] == 0
-                                            and native_in_flight() == 0 and model_activity() == 0)
-                                pause.drain(idle, args.drain_timeout)
-                                # Requires the explicit non-cancelling API; no fallback.
-                                pause.acquire_graceful_model_hold()
+                                # Existing BB turns may still need to start model requests.
+                                # Let them finish and let BB reap warm idle runtimes first.
+                                pause.drain(lambda: not native_blockers(), args.drain_timeout)
+                                pause.acquire_model_hold('acquire-upgrade')
                                 result = perform(args, data, output, say)
                             finally:
                                 try:

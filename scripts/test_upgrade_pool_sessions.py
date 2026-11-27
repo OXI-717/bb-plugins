@@ -44,10 +44,11 @@ class FakeBB:
             elif args[2] == 'interrupt':
                 if not self.model_lease or self.model_lease['owner'] != args[4]:
                     raise RuntimeError('foreign pause')
-            return {'schemaVersion': 1, 'scope': 'all-model-clients', 'transportInFlight': 0, 'lease': self.model_lease}
+            return {'schemaVersion': 1, 'scope': 'all-model-clients', 'transportInFlight': 0, 'lease': self.model_lease, 'nativeDrain': True}
         if args[0] == 'pool-maintenance':
-            if args[1] == 'acquire':
-                self.lease = {'owner': args[3], 'expiresAt': time.time()*1000+1_800_000}
+            if args[1] in ('acquire', 'acquire-drain'):
+                duration = 3_600_000 if args[1] == 'acquire-drain' else 1_800_000
+                self.lease = {'owner': args[3], 'expiresAt': time.time()*1000+duration}
             if args[1] == 'release':
                 self.lease = None
                 for t in self.threads.values():
@@ -511,38 +512,71 @@ class GracefulDrainTests(unittest.TestCase):
         self.assertFalse(any(c[:2] == ('thread', 'stop') or c[:3] == ('pool', 'maintenance', 'acquire') for c in self.bb.calls))
         self.pause.release_hold()
 
-    def test_graceful_model_command_has_no_interrupt_fallback(self):
+    def test_model_drain_has_no_interrupt_fallback(self):
         def unsupported(*args):
-            if args[:3] == ('pool', 'maintenance', 'acquire-graceful'):
+            if args[:3] == ('pool', 'maintenance', 'acquire-upgrade'):
                 raise RuntimeError('unsupported')
             return self.bb(*args)
         self.pause.bb = unsupported
         with self.assertRaisesRegex(RuntimeError, 'unsupported'):
-            self.pause.acquire_graceful_model_hold()
+            self.pause.acquire_model_hold('acquire-upgrade')
         self.assertEqual(self.pause.state['modelAdmission'], 'acquire-intent')
         self.assertFalse(any(c[:3] in [('pool', 'maintenance', 'acquire'), ('pool', 'maintenance', 'interrupt')] for c in self.bb.calls))
 
 
 class GracefulMainTests(unittest.TestCase):
-    def test_cli_drain_uses_non_cancelling_command_and_releases_both_holds(self):
+    def run_drain(self, *, legacy=False):
         with tempfile.TemporaryDirectory() as directory:
-            data=Path(directory)/'plugins'/upgrade.PLUGIN
-            data.mkdir(parents=True);(data/'data.db').touch()
-            fake=FakeBB()
-            fake.threads['thread-a']['status']='idle'
+            data = Path(directory) / 'plugins' / upgrade.PLUGIN
+            data.mkdir(parents=True)
+            (data / 'data.db').touch()
+            fake = FakeBB()
+            fake.threads['thread-a']['status'] = 'idle'
+            native_checks = 0
+
             def bb(*args):
-                if args==('status',):return {'dataDir':directory}
-                if args==('pool','status'):return {'inFlight':0}
-                if args==('pool','native','status'):return {'leases':[]}
-                if args[:3]==('pool','maintenance','acquire-graceful'):
-                    fake.calls.append(args)
-                    fake.model_lease={'owner':args[4],'expiresAt':time.time()*1000+1_800_000}
-                    return {'schemaVersion':1,'scope':'all-model-clients','transportInFlight':0,'lease':fake.model_lease}
+                nonlocal native_checks
+                if args == ('status',):
+                    return {'dataDir': directory}
+                if args == ('pool', 'maintenance', 'status') and legacy:
+                    return {'schemaVersion': 1, 'scope': 'all-model-clients', 'transportInFlight': 0, 'lease': None}
+                if args == ('pool', 'native', 'status'):
+                    native_checks += 1
+                    state = 'active' if native_checks == 1 else 'queued'
+                    return {'leases': [{'state': state}]}
+                if args[:3] == ('pool', 'maintenance', 'acquire-upgrade'):
+                    self.assertEqual(native_checks, 4)
+                    self.assertIsNotNone(fake.lease)
                 return fake(*args)
-            with patch.object(upgrade,'bb',side_effect=bb), patch.object(upgrade,'perform',side_effect=lambda a,*r:'PREFLIGHT_PASS' if a.check else 'PASS'), patch('pool_session_pause.running_threads',fake.running), patch('pool_session_pause.time.sleep'), patch.object(upgrade.sys,'argv',['upgrade','--drain-sessions']), patch.dict(upgrade.os.environ,{'BB_SERVER_URL':'http://127.0.0.1'}),contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(upgrade.main(),0)
-            self.assertFalse(any(c[:2] in [('thread','stop'),('thread','tell')] or c[:3] in [('pool','maintenance','acquire'),('pool','maintenance','interrupt')] for c in fake.calls))
-            self.assertIsNone(fake.lease);self.assertIsNone(fake.model_lease)
+
+            def perform(args, *_rest):
+                if args.check:
+                    return 'PREFLIGHT_PASS'
+                self.assertEqual(fake.model_lease.get('upgrade'), 'draining')
+                return 'PASS'
+
+            with patch.object(upgrade, 'bb', side_effect=bb), \
+                 patch.object(upgrade, 'perform', side_effect=perform) as install, \
+                 patch('pool_session_pause.running_threads', fake.running), \
+                 patch('pool_session_pause.time.sleep'), \
+                 patch.object(upgrade.sys, 'argv', ['upgrade', '--drain-sessions', '--drain-timeout', '2400']), \
+                 patch.dict(upgrade.os.environ, {'BB_SERVER_URL': 'http://127.0.0.1'}), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(upgrade.main(), int(legacy))
+                self.assertEqual(install.call_count, 1 if legacy else 2)
+            self.assertIsNone(fake.lease)
+            self.assertIsNone(fake.model_lease)
+            return fake.calls
+
+    def test_drain_waits_for_warm_native_cleanup_without_stopping_or_replaying(self):
+        calls = self.run_drain()
+        self.assertTrue(any(c[:2] == ('pool-maintenance', 'acquire-drain') for c in calls))
+        self.assertTrue(any(c[:3] == ('pool', 'maintenance', 'acquire-upgrade') for c in calls))
+        self.assertFalse(any(c[:2] in [('thread', 'stop'), ('thread', 'tell')] for c in calls))
+
+    def test_legacy_pool_is_refused_before_taking_a_hold(self):
+        self.assertEqual(self.run_drain(legacy=True), [])
+
 
 if __name__ == '__main__':
     unittest.main()

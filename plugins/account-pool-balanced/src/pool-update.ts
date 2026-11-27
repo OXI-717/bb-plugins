@@ -71,7 +71,7 @@ export class PoolUpdate {
     if (!(await fs.stat(script)).isFile()) throw Error('Installed pool updater is missing');
     const loopback = new URL(bb.server.loopbackBaseUrl);
     if (loopback.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(loopback.hostname)) throw Error('Pool update requires the local server');
-    // Check the independent session queue barrier before any interruption.
+    // Check the independent session queue barrier before starting the updater.
     if (!(await bb.sdk.plugins.list()).plugins.some(value=>value.id==='pool-maintenance'&&value.enabled))
       throw Error('Enable the session maintenance plugin before updating the pool');
     const value: UpdateState = {operationId: randomUUID(), startedAt: this.now(), hostId, terminalId: null, state: 'starting'};
@@ -91,7 +91,7 @@ export class PoolUpdate {
       const terminal = await bb.sdk.terminals.create({cols:100,rows:28,
         title:`Pool update ${value.operationId}`,
         scope:{kind:'host_path',hostId,cwd:operationRoot},
-        start:{mode:'command',command:`env BB_SERVER_URL=${quote(loopback.origin)} bash ${quote(frozenScript)} --pause-sessions --operator-key-file ${quote(operatorKeyFile)}`}});
+        start:{mode:'command',command:`env BB_SERVER_URL=${quote(loopback.origin)} bash ${quote(frozenScript)} --drain-sessions --drain-timeout 2400 --operator-key-file ${quote(operatorKeyFile)}`}});
       const next: UpdateState = {...value,terminalId:terminal.id,state:'running'};
       await bb.storage.kv.set(KEY,next);
       return next;

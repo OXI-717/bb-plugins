@@ -13,6 +13,7 @@ export default async function plugin(bb:BbPluginApi){
   bb.cli.register(defineCli({name:'pool-maintenance',summary:'Queue session messages during bounded pool maintenance',commands:{
     status:cliCommand({summary:'Inspect maintenance pause metadata',options:{json:{type:'boolean',description:'Emit JSON'}},async run(){return {exitCode:0,stdout:JSON.stringify(output())};}}),
     acquire:cliCommand({summary:'Pause dispatch on all hosts for at most 30 minutes',options:owner,async run(input){await lease.acquire(z.uuid().parse(input.options.owner));return {exitCode:0,stdout:JSON.stringify(output())};}}),
+    'acquire-drain':cliCommand({summary:'Hold dispatch while waiting for idle providers for at most 60 minutes',options:owner,async run(input){await lease.acquire(z.uuid().parse(input.options.owner),true);return {exitCode:0,stdout:JSON.stringify(output())};}}),
     release:cliCommand({summary:'Release only this operation pause and continue queued messages',options:owner,async run(input){await lease.release(z.uuid().parse(input.options.owner));await bb.experimental_hooks.recheck('message.dispatch');return {exitCode:0,stdout:JSON.stringify(output())};}})
   }}));
 }

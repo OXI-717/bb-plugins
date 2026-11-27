@@ -63,7 +63,7 @@ export function PoolUpdateView({operation,busy,error,statusUnavailable=false,onS
       </div>
       <Button size="sm" disabled={busy} onClick={onStart}>{busy&&!statusUnavailable?'Проверяю обновление…':'Обновить Pooler'}</Button>
     </div>
-    <p className="text-xs text-muted-foreground">Приостановит сессии и запросы автопилота на всех машинах, сохранит резервную копию, установит новую версию и возобновит работу. Текущие ответы могут быть прерваны.</p>
+    <p className="text-xs text-muted-foreground">Новые сообщения подождут в очереди. Обновление начнётся после завершения текущей работы и освобождения допусков Antigravity.</p>
     {operation?<p role="status" className="text-xs text-muted-foreground">
       {operation.alreadyCurrent ? 'Уже установлена последняя версия.' : labels[operation.state]}
     </p>:null}

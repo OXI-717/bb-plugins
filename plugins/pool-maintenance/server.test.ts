@@ -59,6 +59,29 @@ describe('BB dispatch queue integration',()=>{
       expect(harness.inspection.sdk.calls).toEqual([]);
     }finally{await harness.lifecycle.dispose();}
   });
+  it('persists a bounded extended drain without renewing an existing pause', async () => {
+    let now = 1000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let {bb, harness} = createFakePluginHost({pluginId: 'pool-maintenance'});
+    try {
+      await plugin(bb);
+      const acquire = (owner: string) => harness.behavior.runCli(['acquire-drain', '--owner', owner, '--json']);
+      expect((await acquire(A)).exitCode).toBe(0);
+      expect(await harness.registrations.hooks['message.dispatch']!(makeMessageDispatchHookContext()))
+        .toMatchObject({action: 'wait', sendAt: 3601000});
+      now += 1000;
+      expect((await acquire(A)).exitCode).toBe(0);
+      expect((await acquire(B)).exitCode).not.toBe(0);
+      ({bb, harness} = await harness.lifecycle.reload(plugin));
+      expect(await harness.registrations.hooks['message.dispatch']!(makeMessageDispatchHookContext()))
+        .toMatchObject({action: 'wait', sendAt: 3601000});
+      now = 3601001;
+      expect(await harness.registrations.hooks['message.dispatch']!(makeMessageDispatchHookContext()))
+        .toEqual({action: 'proceed'});
+    } finally {
+      await harness.lifecycle.dispose();
+    }
+  });
   it('clock expiry clears dispatch decision without a watchdog or model call',async()=>{
     let now=1000;vi.spyOn(Date,'now').mockImplementation(()=>now);
     let {bb,harness}=createFakePluginHost({pluginId:'pool-maintenance'});
