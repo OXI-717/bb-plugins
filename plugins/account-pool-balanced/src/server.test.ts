@@ -1239,6 +1239,46 @@ describe("Account Pool plugin", () => {
     expect(modelFetch).not.toHaveBeenCalled();
   });
 
+  it("routes Cursor billing-cycle usage under the legacy ceiling and preserves its personal override", async () => {
+    const fixture = await createFixture({
+      upstreamUrl: "https://upstream.example",
+      provider: "cursor",
+      initialConfig: { switchThreshold: .85, weeklySwitchThreshold: .6 },
+      options: {
+        cursorExchangeUrl: "https://exchange.example/auth/exchange_user_api_key",
+        cursorUsageUrl: "https://usage.example/GetCurrentPeriodUsage",
+        fetch: async input => {
+          const url = String(input);
+          if (url.startsWith("https://exchange.example/")) return Response.json({ accessToken: "synthetic-token" });
+          if (url.startsWith("https://usage.example/")) return Response.json({
+            billingCycleEnd: Date.now() + 86400000, planUsage: { totalPercentUsed: 65 },
+          });
+          return new Response(new Uint8Array(), { headers: { "content-type": "application/proto" } });
+        },
+      },
+    });
+    const { callRpc: rpc, fetchHttp } = fixture.host.harness.behavior;
+    const accountId = fixture.account.id;
+    await rpc("account.refreshUsage", { accountId });
+    const readiness = async () => (await rpc("readiness.get", { projectId: "project-one" }) as Array<{ provider: string }>).find(row => row.provider === "cursor");
+    const current = async () => statusSchema.parse(await rpc("status.get", null)).accounts.find(row => row.id === accountId);
+    const route = () => fetchHttp("POST", "/cursor/agent.v1.AgentService/Run", {
+      headers: { authorization: `Bearer ${fixture.key}`, "content-type": "application/proto" }, body: new Uint8Array(),
+    });
+    expect(await readiness()).toMatchObject({ ready: true });
+    expect(await current()).toMatchObject({ eligible: true, weeklySpending: { ceiling: .85 } });
+    const allowed = await route();
+    expect(allowed.status).toBe(200);
+    await allowed.arrayBuffer();
+
+    await rpc("account.setPolicy", { accountId, policy: { enabled: true, weeklyKeep: 40 } });
+    expect(await readiness()).toMatchObject({ ready: false });
+    expect(await current()).toMatchObject({ eligible: false, weeklySpending: { ceiling: .6 } });
+    const blocked = await route();
+    expect(blocked.headers.get("x-bb-pool-error")).toBe("POOL_QUOTA_THRESHOLD");
+    expect(await blocked.text()).toContain("threshold 60%");
+  });
+
   it.each(["application/proto", "application/connect+proto"])("reports Cursor pool threshold in %s without contacting model upstream", async contentType => {
     const modelCalls: string[] = [];
     const fixture = await createFixture({upstreamUrl:"https://upstream.example",provider:"cursor",source:"api-key",apiKey:"synthetic-cursor-key",options:{

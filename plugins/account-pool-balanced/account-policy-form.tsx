@@ -8,6 +8,7 @@ export function AccountPolicyForm({ account, thresholds, drainHours, save, onUns
   save: (policy: AccountPolicy) => Promise<void>;
   onUnsavedChange?: (unsaved: boolean) => void;
 }) {
+  const isBillingCycle = account.provider === 'cursor';
   const percent = (value: number) => Number(value.toFixed(10));
   const initialPolicy = () => account.policy ?? accountPolicySchema.parse({
     enabled: false, reserveDrainHours: drainHours,
@@ -59,11 +60,13 @@ export function AccountPolicyForm({ account, thresholds, drainHours, save, onUns
   };
   return <section className="pool-settings-section">
     <label className="pool-settings-toggle"><input type="checkbox" checked={draft.enabled} disabled={pending} onChange={e => change({ enabled: e.target.checked })} />Индивидуальные настройки</label>
-    <p className="pool-settings-help">{draft.enabled ? policySummary(draft, account.weeklyBudget !== undefined) : 'Действуют общие правила. Личные значения сохраняются.'}</p>
+    <p className="pool-settings-help">{draft.enabled ? policySummary(draft, account.weeklyBudget !== undefined, account.provider) : 'Действуют общие правила. Личные значения сохраняются.'}</p>
     <fieldset disabled={!draft.enabled || pending} className="pool-settings-fields">
       {numberField('fiveHourKeep', 'Фиксированный потолок 5 ч, %', percent(thresholds.fiveHour * 100))}
-      {numberField('weeklyKeep', 'Фиксированный потолок 7 д, %', percent(thresholds.weekly * 100))}
-      {account.weeklyBudget && <p className="pool-settings-help">Недельное правило и временный потолок имеют приоритет для общего окна 7 д. Фиксированный недельный потолок применяется к квотам семейств моделей.</p>}
+      {numberField('weeklyKeep', isBillingCycle ? 'Фиксированный потолок на расчётный цикл, %' : 'Фиксированный потолок 7 д, %', percent(thresholds.weekly * 100))}
+      {account.weeklyBudget && <p className="pool-settings-help">{isBillingCycle
+        ? 'Правило расхода на цикл и временный потолок имеют приоритет.'
+        : 'Недельное правило и временный потолок имеют приоритет для общего окна 7 д. Фиксированный недельный потолок применяется к квотам семейств моделей.'}</p>}
       {account.role === 'reserve' && numberField('reserveDrainHours', 'Подключать резерв за рабочих часов до сброса', drainHours)}
       <label className="pool-settings-toggle"><input type="checkbox" checked={draft.schedule !== null} onChange={e => change({ schedule: e.target.checked ? { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, intervals: [{ days: [1,2,3,4,5], start: '09:00', end: '18:00' }] } : null })} />Личное расписание</label>
       {draft.schedule && <div className="pool-settings-fields pool-settings-schedule-fields">

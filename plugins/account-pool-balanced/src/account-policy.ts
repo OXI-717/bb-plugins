@@ -1,26 +1,27 @@
-import type { Account, AccountQuota, AccountPolicy, AccountPoolConfig } from './contracts.js';
+import type { Account, AccountQuota, AccountPolicy, AccountPoolConfig, PoolProvider } from './contracts.js';
 import { currentWeeklyBudget } from './weekly-budget.js';
 
 export interface QuotaThresholds { other: number; fiveHour: number; weekly: number; familyWeekly?: number }
 export type PoolThresholdConfig = Pick<AccountPoolConfig,
   "switchThreshold" | "fiveHourSwitchThreshold" | "weeklySwitchThreshold">;
 
-export function poolThresholds(config: PoolThresholdConfig): QuotaThresholds {
+export function poolThresholds(config: PoolThresholdConfig, provider: PoolProvider): QuotaThresholds {
   return {
     other: config.switchThreshold,
     fiveHour: config.fiveHourSwitchThreshold ?? config.switchThreshold,
-    weekly: config.weeklySwitchThreshold ?? config.switchThreshold,
+    // Cursor stores its billing cycle in the long-window slot.
+    weekly: (provider === "cursor" ? null : config.weeklySwitchThreshold) ?? config.switchThreshold,
   };
 }
 
 export function policyThresholds(
-  account: Pick<Account, "policy" | "drainOnce" | "weeklyBudget">,
+  account: Pick<Account, "provider" | "policy" | "drainOnce" | "weeklyBudget">,
   config: PoolThresholdConfig,
   quota?: Pick<AccountQuota, "sevenDayUtilization" | "sevenDayResetAt" | "sevenDayStatus" | "limitWindows">,
   now = Date.now(),
 ): QuotaThresholds {
   if (account.drainOnce) return { other: 1, fiveHour: 1, weekly: 1 };
-  const fallback = poolThresholds(config);
+  const fallback = poolThresholds(config, account.provider);
   const p = account.policy?.enabled ? account.policy : undefined;
   const weekly = p?.weeklyKeep == null ? fallback.weekly : (100 - p.weeklyKeep) / 100;
   const budget = quota && currentWeeklyBudget(account, quota, now);
@@ -45,11 +46,11 @@ export function scheduleAllows(policy: AccountPolicy | undefined, now: number): 
 export function reserveHours(account: { policy?: AccountPolicy }, fallback: number): number {
   return account.policy?.enabled ? account.policy.reserveDrainHours ?? fallback : fallback;
 }
-export function policySummary(policy?: AccountPolicy, modelReserveOnly = false): string {
+export function policySummary(policy?: AccountPolicy, modelReserveOnly = false, provider?: PoolProvider): string {
   if (!policy?.enabled) return '';
   return [
     policy.fiveHourKeep == null ? null : `5 ч: оставить ${policy.fiveHourKeep}%`,
-    policy.weeklyKeep == null ? null : `${modelReserveOnly ? 'Модели' : 'Неделя'}: оставить ${policy.weeklyKeep}%`,
+    policy.weeklyKeep == null ? null : `${provider === 'cursor' ? 'Расчётный цикл' : modelReserveOnly ? 'Модели' : 'Неделя'}: оставить ${policy.weeklyKeep}%`,
     policy.reserveDrainHours == null ? null : `Резерв: за ${policy.reserveDrainHours} ч`,
     policy.schedule ? `${policy.schedule.intervals.map(i => `${i.days.map(d => ["Вс","Пн","Вт","Ср","Чт","Пт","Сб"][d]).join(",")} ${i.start}–${i.end}`).join("; ") || "Нет разрешённых интервалов"} · ${policy.schedule.timeZone}` : null,
   ].filter(Boolean).join(' · ') || 'Наследуются общие значения';

@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+import { ACCOUNT_POOL_CONFIG_CHANGED } from "./src/realtime.js";
 import { version } from "./package.json";
 import { egressStateSchema } from "./src/account-egress.js";
 import type {
@@ -898,6 +899,49 @@ describe("Account Pool settings", () => {
       expect((reopened.getByLabelText("Фиксированный потолок 5 ч, %") as HTMLInputElement).value).toBe("50");
       expect((reopened.getByLabelText("Фиксированный потолок 7 д, %") as HTMLInputElement).value).toBe("80");
     });
+  });
+
+  it("preserves an unsaved weekly draft when another tab saves the five-hour ceiling", async () => {
+    let persisted = config({ weeklySwitchThreshold: .8, fiveHourSwitchThreshold: .6 });
+    const slot = render([account()], {
+      "config.get": () => persisted,
+      "config.set": (patch: Partial<AccountPoolConfig>) => persisted = { ...persisted, ...patch },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Дополнительно" }));
+    const short = slot.getByLabelText("Фиксированный потолок 5 ч, %") as HTMLInputElement;
+    const week = slot.getByLabelText("Фиксированный потолок 7 д, %") as HTMLInputElement;
+    await waitFor(() => expect(week.value).toBe("80"));
+    fireEvent.change(week, { target: { value: "72" } });
+    persisted = { ...persisted, fiveHourSwitchThreshold: .5 };
+    await slot.emitRealtime(ACCOUNT_POOL_CONFIG_CHANGED, {});
+    await waitFor(() => expect(short.value).toBe("50"));
+    expect(week.value).toBe("72");
+    expect(slot.rpcCalls.filter(call => call.method === "config.set")).toHaveLength(0);
+    fireEvent.blur(week);
+    await waitFor(() => expect(persisted).toMatchObject({ fiveHourSwitchThreshold: .5, weeklySwitchThreshold: .72 }));
+    await waitFor(() => expect(week.disabled).toBe(false));
+    fireEvent.change(week, { target: { value: "71" } });
+    fireEvent.keyDown(week, { key: "Escape" });
+    expect(week.value).toBe("72");
+    fireEvent.blur(week);
+    expect(slot.rpcCalls.filter(call => call.method === "config.set")).toHaveLength(1);
+  });
+
+  it("labels the Cursor long bucket and its inherited ceiling as a billing cycle", async () => {
+    const cursor = account({ provider: "cursor", fiveHourUtilization: null, sevenDayUtilization: .65 });
+    const slot = render([cursor], {
+      "config.get": () => config({ switchThreshold: .85, fiveHourSwitchThreshold: .5, weeklySwitchThreshold: .6 }),
+      "projects.list": () => [],
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Открыть person@example.com" }));
+    const card = within(slot.getByRole("region", { name: "person@example.com" }));
+    expect(card.getByText("Расчётный период")).toBeTruthy();
+    expect(card.getByText(/· потолок 85% ·/)).toBeTruthy();
+    fireEvent.click(card.getByText(/Доступ и маршрут/, { selector: "summary" }));
+    const cycle = card.getByRole("spinbutton", { name: /Фиксированный потолок на расчётный цикл/ });
+    expect(cycle.getAttribute("placeholder")).toBe("85");
+    expect(within(cycle.closest("label")!).getByText(/Унаследован фиксированный потолок 85%/)).toBeTruthy();
+    expect(card.queryByText("Фиксированный потолок 7 д, %")).toBeNull();
   });
 
   it("edits Advanced config fields and shows URL validation inline", async () => {

@@ -1037,22 +1037,7 @@ function UnlockedAccountPoolSettings() {
   const [nativeError, setNativeError] = useState<string | null>(null);
   const [statusIsCached, setStatusIsCached] = useState(status !== null);
   const [config, setConfig] = useState<AccountPoolConfig | null>(null);
-  const [drafts, setDrafts] = useState<Record<ConfigField, string>>({
-    anthropicUpstreamBaseUrl: "",
-    codexUpstreamBaseUrl: "",
-    kimiUpstreamBaseUrl: "",
-    zaiUpstreamBaseUrl: "",
-    opencodeGoUpstreamBaseUrl: "",
-    opencodeFreeUpstreamBaseUrl: "",
-    neuraldeepUpstreamBaseUrl: "",
-    cursorUpstreamBaseUrl: "",
-    devinUpstreamBaseUrl: "",
-    grokUpstreamBaseUrl: "",
-    maxConcurrentRequestsPerAccount: "",
-    switchThreshold: "",
-    fiveHourSwitchThreshold: "",
-    weeklySwitchThreshold: "",
-  });
+  const [configEdits, setConfigEdits] = useState<Partial<Record<ConfigField, string>>>({});
   const [configErrors, setConfigErrors] = useState<
     Record<ConfigField, string | null>
   >({
@@ -1109,9 +1094,9 @@ function UnlockedAccountPoolSettings() {
   const [countdown, setCountdown] = useState(0);
   const mounted = useRef(true);
   const threshold = config ?? DEFAULT_ACCOUNT_POOL_CONFIG;
+  const drafts = { ...configDrafts(threshold), ...configEdits };
   const applyConfig = useCallback((next: AccountPoolConfig) => {
     setConfig(next);
-    setDrafts(configDrafts(next));
     setDrainDraft(String(next.reserveDrainHours));
   }, []);
   const refresh = useCallback(async () => {
@@ -1260,31 +1245,39 @@ function UnlockedAccountPoolSettings() {
     }
   }
   function updateConfigDraft(field: ConfigField, value: string): void {
-    setDrafts((current) => ({ ...current, [field]: value }));
+    setConfigEdits(current => ({ ...current, [field]: value }));
     setConfigErrors((current) => ({ ...current, [field]: null }));
   }
+  function revertConfigField(field: ConfigField): void {
+    setConfigEdits(current => {
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+    setConfigErrors(current => ({ ...current, [field]: null }));
+  }
   async function saveConfigField(field: ConfigField): Promise<void> {
-    if (config === null || pending !== null) return;
+    const draft = configEdits[field];
+    if (config === null || pending !== null || draft === undefined) return;
     let update: AccountPoolConfigSetInput;
     if (field === "maxConcurrentRequestsPerAccount") {
-      const value = Number(drafts[field]);
+      const value = Number(draft);
       if (!Number.isInteger(value) || value < 1 || value > 32) {
         setConfigErrors(previous => ({...previous,[field]: "Нужно целое число от 1 до 32."}));
         return;
       }
       update = {maxConcurrentRequestsPerAccount:value};
     } else if (field === "switchThreshold" || field === "fiveHourSwitchThreshold" || field === "weeklySwitchThreshold") {
-      const raw = drafts[field].trim();
+      const raw = draft.trim();
       const legacy = field === "switchThreshold";
       const value = raw === "" && !legacy ? null : Number(raw) / (legacy ? 1 : 100);
       if (value !== null && (!Number.isFinite(value) || value <= 0 || value > 1)) {
         setConfigErrors(current => ({ ...current, [field]: legacy ? "Должно быть больше 0 и не больше 1." : "Должно быть больше 0 и не больше 100%." }));
         return;
       }
-      if (value === config[field]) return;
       update = { [field]: value };
     } else {
-      const value = drafts[field].trim();
+      const value = draft.trim();
       const validationError = httpUrlError(value);
       if (validationError !== null) {
         setConfigErrors((current) => ({
@@ -1293,16 +1286,20 @@ function UnlockedAccountPoolSettings() {
         }));
         return;
       }
-      if (value === config[field]) return;
       update =
         field === "anthropicUpstreamBaseUrl"
           ? { anthropicUpstreamBaseUrl: value }
           : { codexUpstreamBaseUrl: value };
     }
+    if (update[field] === config[field]) {
+      revertConfigField(field);
+      return;
+    }
     setPending(`config-${field}`);
     setConfigErrors((current) => ({ ...current, [field]: null }));
     try {
       applyConfig(await rpc.call("config.set", update));
+      revertConfigField(field);
       if (field === "switchThreshold" || field === "fiveHourSwitchThreshold" || field === "weeklySwitchThreshold") await refresh();
     } catch (saveError) {
       setConfigErrors((current) => ({
@@ -1986,7 +1983,7 @@ function UnlockedAccountPoolSettings() {
             ] as const).map(([field, label]) => (
               <ConfigFieldRow key={field} label={label}
                 description={field === "switchThreshold"
-                  ? "Доля использованной квоты. Применяется также к окнам 5 ч и 7 д без отдельного потолка."
+                  ? "Доля использованной квоты. Действует для расчётного цикла Cursor и для окон 5 ч и 7 д без отдельного потолка."
                   : `${config?.[field] == null ? `Унаследован потолок ${thresholdPercent(threshold.switchThreshold)}%.` : "Задан отдельный потолок."} Пустое поле возвращает общий порог.`}
                 error={configErrors[field]}>
                 <Input type="number" min="0" max={field === "switchThreshold" ? 1 : 100} step="any" aria-label={label}
@@ -2003,7 +2000,13 @@ function UnlockedAccountPoolSettings() {
                     }
                     void saveConfigField(field);
                   }}
-                  onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+                  onKeyDown={event => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      revertConfigField(field);
+                    }
+                  }} />
               </ConfigFieldRow>
             ))}
           </div>
@@ -2552,7 +2555,7 @@ function AccountCard({
           </section>
           <AccountEgressForm key={account.id} accountId={account.id} provider={account.provider} />
           <AccountProjectsForm account={account} loadProjects={loadProjects} save={saveProjects} onUnsavedChange={setProjectsUnsaved} />
-          <AccountPolicyForm account={account} thresholds={poolThresholds(threshold)} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
+          <AccountPolicyForm account={account} thresholds={poolThresholds(threshold, account.provider)} drainHours={inheritedDrainHours} save={savePolicy} onUnsavedChange={setQuotaUnsaved} />
           <section className="pool-settings-section">
           <label className="pool-settings-toggle">
             <input type="checkbox" checked={account.drainOnce === true} disabled={pending}
