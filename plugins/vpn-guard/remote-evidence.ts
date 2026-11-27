@@ -13,14 +13,14 @@ function errorCategory(error:unknown):Diagnostic['category'] {
   const code=parsed.success?(parsed.data.body?.code??parsed.data.code):undefined;
   if(code==='command_timeout'||code==='host_rpc_timeout'||error instanceof Error&&/deadline|timed out|timeout/i.test(error.message))return 'timeout';
   if(code==='host_unavailable'||error instanceof Error&&error.message==='Host is not connected')return 'host_unavailable';
-  if(code==='request_cancelled'||parsed.success&&parsed.data.name==='AbortError')return 'cancelled';
+  if(code==='request_cancelled'||parsed.success&&parsed.data.name==='AbortError'||error instanceof Error&&/cancelled|abort/i.test(error.message))return 'cancelled';
   return 'rpc_error';
 }
-export async function readRemoteEvidence(call:(timeoutMs:number)=>Promise<HostState>,onFailure:(diagnostic:Diagnostic)=>void):Promise<HostState&{rpc:Diagnostic}> {
+export async function readRemoteEvidence(call:(timeoutMs:number)=>Promise<HostState>,onFailure:(diagnostic:Diagnostic)=>void,timeoutMs=10_000):Promise<HostState&{rpc:Diagnostic}> {
   const started=performance.now();
   const diagnostic=(category:Diagnostic['category']):Diagnostic=>({category,elapsedMs:Math.max(0,Math.round(performance.now()-started))});
   let result:HostState;
-  try {result=await call(10_000);}
+  try {result=await call(timeoutMs);}
   catch(error){const rpc=diagnostic(errorCategory(error));onFailure(rpc);return {state:'unknown',rpc};}
   const evidence=result.evidence;
   const now=Date.now();

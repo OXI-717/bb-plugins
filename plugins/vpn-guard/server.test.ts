@@ -20,12 +20,16 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;fai
   let enableAction:(()=>void)|null=null;
   let failListRunning=false;
   let failHostList=false;
+  let hangingHostList=false;
+  let hangingHostRpc=false;
+  let lateRpcResolver:((val:unknown)=>void)|null=null;
+  let rpcInterceptor:(()=>Promise<unknown>)|null=null;
   let pausedRpc:{hostId:string;entered:()=>void;release:Promise<void>}|null=null;
   let pausedDisable:{entered:()=>void;release:Promise<void>}|null=null;
   const fake=createFakePluginHost({
     pluginId:'vpn-guard',
     sdk:{
-      hosts:{list:async()=>{if(failHostList) throw Error('host list unavailable');return [...available].map(id=>makeHostResponse({id,name:id}));}},
+      hosts:{list:async()=>{if(hangingHostList) return new Promise<never>(()=>{});if(failHostList) throw Error('host list unavailable');return [...available].map(id=>makeHostResponse({id,name:id}));}},
       plugins:{
         list:async()=>{pluginListAction?.();return {plugins:[...enabled].map(([id,value])=>({id,enabled:value}))} as PluginList;},
         disable:async({pluginId})=>{if(pluginId==='provider-codex'&&pausedDisable){const pause=pausedDisable;pausedDisable=null;pause.entered();await pause.release;}if(options.failDisable||(options.failCodexDisable&&pluginId==='provider-codex')) throw Error('interrupted');enabled.set(pluginId,false);mutations.push(`disable:${pluginId}`);return {} as never;},
@@ -42,13 +46,13 @@ async function setup(options:{failDisable?:boolean;failCodexDisable?:boolean;fai
         stop:async({threadId})=>{stopped.push(threadId);stoppedTimes.set(threadId,Date.now());return {} as never;},
       },
     },
-    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(options.failHostRpc)throw Error('sensitive-synthetic-payload');if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}const result=verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');if(options.evidenceAgeMs!==undefined)result.evidence.updatedAt-=options.evidenceAgeMs;if(options.passive&&result.state==='connected')return {state:'connected' as const,evidence:{state:'connected' as const,assurance:'system_ipv4' as const,source:'tailscale' as const,reason:'ok',updatedAt:Date.now(),probeAt:null}};return result;},
+    experimental_callHostRpc:async({hostId})=>{hostCalls.push(hostId);if(hangingHostRpc)return new Promise<never>(resolve=>{lateRpcResolver=resolve as never;});if(rpcInterceptor)return rpcInterceptor() as never;if(options.failHostRpc)throw Error('sensitive-synthetic-payload');if(!available.has(hostId)) throw Error('host unavailable');if(pausedRpc?.hostId===hostId){const pause=pausedRpc;pausedRpc=null;pause.entered();await pause.release;}const result=verifiedHostResult((states.get(hostId)??'unknown') as 'connected'|'disconnected'|'unknown');if(options.evidenceAgeMs!==undefined)result.evidence.updatedAt-=options.evidenceAgeMs;if(options.passive&&result.state==='connected')return {state:'connected' as const,evidence:{state:'connected' as const,assurance:'system_ipv4' as const,source:'tailscale' as const,reason:'ok',updatedAt:Date.now(),probeAt:null}};return result;},
   });
   await plugin(fake.bb);
   const hook=fake.harness.registrations.hooks['message.dispatch'];
   if(!hook) throw Error('missing hook');
   const dispatch=(providerId:string,hostId:string|null)=>hook(makeMessageDispatchHookContext({requestedExecution:{providerId},host:hostId?{id:hostId,name:hostId}:null}));
-  return {fake,states,available,enabled,stopped,hostCalls,mutations,dispatch,setFailEnable:(value:boolean)=>{failEnable=value;},setPluginListAction:(action:()=>void)=>{pluginListAction=action;},setEnableAction:(action:()=>void)=>{enableAction=action;},setFailListRunning:(value:boolean)=>{failListRunning=value;},setFailHostList:(value:boolean)=>{failHostList=value;},pauseNextRpc:(pause:{hostId:string;entered:()=>void;release:Promise<void>})=>{pausedRpc=pause;},pauseNextCodexDisable:(pause:{entered:()=>void;release:Promise<void>})=>{pausedDisable=pause;}};
+  return {fake,states,available,enabled,stopped,hostCalls,mutations,dispatch,setFailEnable:(value:boolean)=>{failEnable=value;},setPluginListAction:(action:()=>void)=>{pluginListAction=action;},setEnableAction:(action:()=>void)=>{enableAction=action;},setFailListRunning:(value:boolean)=>{failListRunning=value;},setFailHostList:(value:boolean)=>{failHostList=value;},setHangingHostList:(v:boolean)=>{hangingHostList=v;},setHangingHostRpc:(v:boolean)=>{hangingHostRpc=v;},setHangingHostRpcWithResolver:(fn:(resolve:(val:unknown)=>void)=>void)=>{hangingHostRpc=true;fn((val:unknown)=>lateRpcResolver?.(val));},setRpcInterceptor:(fn:((()=>Promise<unknown>)|null))=>{rpcInterceptor=fn;},pauseNextRpc:(pause:{hostId:string;entered:()=>void;release:Promise<void>})=>{pausedRpc=pause;},pauseNextCodexDisable:(pause:{entered:()=>void;release:Promise<void>})=>{pausedDisable=pause;}};
 }
 const select=async(fake:Awaited<ReturnType<typeof setup>>['fake'],hostIds:string[])=>fake.harness.behavior.callRpc('setHosts',{hostIds});
 const mode=async(fake:Awaited<ReturnType<typeof setup>>['fake'],next:'observe'|'enforce')=>fake.harness.behavior.callRpc('setMode',{mode:next});
@@ -817,4 +821,291 @@ it('checks an unselected enrolled machine without changing protection or running
   expect((await fake.harness.behavior.runCli(['check','unregistered'])).exitCode).toBe(1);
   expect(hostCalls).toHaveLength(calls);
  } finally {await fake.harness.lifecycle.dispose();}
+});
+
+describe('admission deadline and fail-closed queueing', () => {
+  it('bounds message.dispatch when hosts.list hangs and returns wait with sendAt within 2500ms', async () => {
+    vi.useFakeTimers();
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-b']);
+      await mode(s.fake, 'enforce');
+      s.setHangingHostList(true);
+      const dispatchPromise = s.dispatch('codex', 'host-b');
+      await vi.advanceTimersByTimeAsync(2500);
+      const result = await dispatchPromise;
+      expect(result).toEqual({
+        action: 'wait',
+        reason: 'VPN Guard: status check timed out on selected host',
+        sendAt: expect.any(Number),
+      });
+      expect((result as any).sendAt).toBe(Date.now() + 5000);
+    } finally {
+      vi.useRealTimers();
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('bounds message.dispatch when host readState hangs and returns wait with sendAt within 2500ms', async () => {
+    vi.useFakeTimers();
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-b']);
+      await mode(s.fake, 'enforce');
+      s.setHangingHostRpc(true);
+      const dispatchPromise = s.dispatch('codex', 'host-b');
+      await vi.advanceTimersByTimeAsync(2500);
+      const result = await dispatchPromise;
+      expect(result).toEqual({
+        action: 'wait',
+        reason: 'VPN Guard: status check timed out on selected host',
+        sendAt: expect.any(Number),
+      });
+      expect((result as any).sendAt).toBe(Date.now() + 5000);
+    } finally {
+      vi.useRealTimers();
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('ignores late connected response arriving after admission timeout without altering the decision', async () => {
+    vi.useFakeTimers();
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-b']);
+      await mode(s.fake, 'enforce');
+      let resolveLate: ((val: unknown) => void) | undefined;
+      s.setHangingHostRpcWithResolver(resolve => { resolveLate = resolve; });
+      const dispatchPromise = s.dispatch('codex', 'host-b');
+      await vi.advanceTimersByTimeAsync(2500);
+      const result = await dispatchPromise;
+      expect(result).toMatchObject({
+        action: 'wait',
+        reason: 'VPN Guard: status check timed out on selected host',
+      });
+      resolveLate?.(verifiedHostResult('connected'));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(result.action).toBe('wait');
+    } finally {
+      vi.useRealTimers();
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('shares monotonic 2500ms deadline across policyVersion changes during admission', async () => {
+    vi.useFakeTimers();
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-b']);
+      await mode(s.fake, 'enforce');
+
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      let release!: () => void;
+      const stalled = new Promise<void>(resolve => { release = resolve; });
+      s.pauseNextRpc({ hostId: 'host-b', entered, release: stalled });
+
+      const dispatchPromise = s.dispatch('codex', 'host-b');
+      await started;
+
+      await vi.advanceTimersByTimeAsync(1000);
+      await select(s.fake, ['host-b']);
+
+      s.setHangingHostRpc(true);
+      release();
+
+      await vi.advanceTimersByTimeAsync(1500);
+
+      const result = await dispatchPromise;
+      expect(result).toMatchObject({
+        action: 'wait',
+        reason: 'VPN Guard: status check timed out on selected host',
+      });
+    } finally {
+      vi.useRealTimers();
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('blocks unconfirmed VPN status and proceeds on fresh connected result', async () => {
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-a', 'host-b']);
+      await mode(s.fake, 'enforce');
+      expect(await s.dispatch('codex', 'host-a')).toMatchObject({ action: 'wait', reason: 'VPN Guard: unknown on selected host' });
+      expect(await s.dispatch('codex', 'host-b')).toEqual({ action: 'proceed' });
+    } finally {
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('admission timeout does not stop running threads or violate 90s observation grace', async () => {
+    vi.useFakeTimers();
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-b']);
+      await mode(s.fake, 'enforce');
+      s.setHangingHostRpc(true);
+      const dispatchPromise = s.dispatch('codex', 'host-b');
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(await dispatchPromise).toMatchObject({ action: 'wait' });
+      expect(s.stopped).toEqual([]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(s.stopped).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('bounds Pooler networkDecision/V2 to 2500ms with fail-closed vpn_unavailable', async () => {
+    vi.useFakeTimers();
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-b']);
+      await mode(s.fake, 'enforce');
+      s.setHangingHostRpc(true);
+      const decisionPromise = s.fake.harness.behavior.callRpc('networkDecisionV2', { hostId: 'host-b', provider: 'codex' });
+      await vi.advanceTimersByTimeAsync(2500);
+      const result = await decisionPromise;
+      expect(result).toMatchObject({
+        allowed: false,
+        reason: 'vpn_unavailable',
+      });
+    } finally {
+      vi.useRealTimers();
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('rejects proceed and allow if performance.now >= deadline after await before timer callback fires', async () => {
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-b']);
+      await mode(s.fake, 'enforce');
+
+      // Mock performance.now to jump past 2500ms right after the await
+      const realNow = performance.now.bind(performance);
+      let callCount = 0;
+      const base = realNow();
+      vi.spyOn(performance, 'now').mockImplementation(() => {
+        callCount++;
+        // First few calls are start times, then jump past 2500ms
+        if (callCount > 3) return base + 2600;
+        return base;
+      });
+
+      const dispatchResult = await s.dispatch('codex', 'host-b');
+      expect(dispatchResult).toMatchObject({
+        action: 'wait',
+        reason: 'VPN Guard: status check timed out on selected host',
+        sendAt: expect.any(Number),
+      });
+
+      callCount = 0;
+      const decisionResult = await s.fake.harness.behavior.callRpc('networkDecisionV2', { hostId: 'host-b', provider: 'codex' });
+      expect(decisionResult).toMatchObject({
+        allowed: false,
+        reason: 'vpn_unavailable',
+      });
+    } finally {
+      vi.restoreAllMocks();
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('evaluates direct host before observe in networkDecision for schema v1 and v2', async () => {
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-a', 'host-b']);
+      await mode(s.fake, 'observe');
+      await s.fake.harness.behavior.callRpc('setDirectHosts', { hostIds: ['host-b'] });
+
+      // Direct host connected in catalog: schema v1 denies with vpn_unavailable, schema v2 allows with direct
+      const v1Direct = await s.fake.harness.behavior.callRpc('networkDecision', { hostId: 'host-b', provider: 'codex' });
+      expect(v1Direct).toEqual({ schema: 'bb-vpn-guard/network-decision/1', allowed: false, reason: 'vpn_unavailable' });
+
+      const v2Direct = await s.fake.harness.behavior.callRpc('networkDecisionV2', { hostId: 'host-b', provider: 'codex' });
+      expect(v2Direct).toEqual({ schema: 'bb-vpn-guard/network-decision/2', hostId: 'host-b', allowed: true, reason: 'direct' });
+
+      // Non-direct host in observe mode: allows with observe
+      const v1NonDirect = await s.fake.harness.behavior.callRpc('networkDecision', { hostId: 'host-a', provider: 'codex' });
+      expect(v1NonDirect).toEqual({ schema: 'bb-vpn-guard/network-decision/1', allowed: true, reason: 'observe' });
+    } finally {
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('provides sendAt on fast timeout, cancellation or catalog failure, but omits sendAt on confirmed disconnected', async () => {
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-b']);
+      await mode(s.fake, 'enforce');
+
+      // 1. Fast RPC timeout error (under 100ms)
+      s.setRpcInterceptor(() => Promise.reject(Object.assign(Error('Host read timed out'), { code: 'host_rpc_timeout' })));
+      const fastTimeoutResult = await s.dispatch('codex', 'host-b');
+      expect(fastTimeoutResult).toMatchObject({
+        action: 'wait',
+        sendAt: expect.any(Number),
+      });
+
+      // 2. Fast catalog failure
+      s.setRpcInterceptor(null);
+      s.setFailHostList(true);
+      const catalogFailResult = await s.dispatch('codex', 'host-b');
+      expect(catalogFailResult).toMatchObject({
+        action: 'wait',
+        sendAt: expect.any(Number),
+      });
+      s.setFailHostList(false);
+
+      // 3. Confirmed disconnected evidence: no sendAt (recheck is sufficient)
+      s.setRpcInterceptor(() => Promise.resolve(verifiedHostResult('disconnected')));
+      const disconnectedResult = await s.dispatch('codex', 'host-b');
+      expect(disconnectedResult).toEqual({
+        action: 'wait',
+        reason: 'VPN Guard: unknown on selected host',
+      });
+      expect((disconnectedResult as { sendAt?: number }).sendAt).toBeUndefined();
+    } finally {
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
+
+  it('treats host read deadline as unobservable without immediately stopping running threads', async () => {
+    const s = await setup();
+    try {
+      await select(s.fake, ['host-b']);
+      await mode(s.fake, 'enforce');
+
+      const cycle = async () => {
+        const run = s.fake.harness.behavior.runService('reconcile');
+        await Promise.resolve();
+        run.controller.abort();
+        await run.done;
+      };
+
+      // Host read timed out: status sees unobservable, running threads NOT stopped
+      s.setRpcInterceptor(() => Promise.reject(Object.assign(Error('Host read timed out'), { code: 'command_timeout' })));
+      await cycle();
+      expect(s.stopped).toEqual([]);
+
+      // But confirmed invalid evidence immediately stops running threads
+      s.setRpcInterceptor(() => Promise.resolve({
+        state: 'unknown',
+        evidence: {
+          state: 'unknown',
+          assurance: 'invalid',
+          reason: 'invalid_evidence',
+          updatedAt: null,
+          probeAt: null,
+        },
+      }));
+      await cycle();
+      expect(s.stopped).toEqual(['healthy']);
+    } finally {
+      await s.fake.harness.lifecycle.dispose();
+    }
+  });
 });

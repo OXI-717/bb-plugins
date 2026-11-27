@@ -1,8 +1,8 @@
-import {expect,it} from 'vitest';
+import {expect,it,vi} from 'vitest';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {readPassiveState,selectVpnEvidence,type Reader} from './passive-state.js';
+import {lstatWithTimeout,readCommand,readPassiveState,selectVpnEvidence,type Reader} from './passive-state.js';
 import {readRemoteEvidence} from './remote-evidence.js';
 import type {VpnEvidence} from './passive-state.js';
 const ip='100.80.1.2';
@@ -67,4 +67,89 @@ it('does not mistake an intentional INCY DNS bypass for VPN loss',async()=>{
 it('recognizes INCY with an embedded core',async()=>{
  const {read}=fixture({iface:'utun244',external:'en0',core:true});
  expect(await readPassiveState((file,args)=>file==='/bin/ps'?Promise.resolve(' 1234 Wed Nov 11 12:00:00 2026 /Applications/incy.app/Contents/MacOS/incy'):read(file,args),'darwin')).toMatchObject({state:'connected',source:'incy'});
+});
+
+it('rejects passive observation when second snapshot exceeds the budget',async()=>{
+  let callCount=0;
+  const slowSecondRead:Reader=async(file,args,options)=>{
+    callCount++;
+    if(callCount>5){
+      return new Promise(resolve=>setTimeout(()=>resolve(''),500));
+    }
+    return fixture().read(file,args,options);
+  };
+  const result=await readPassiveState(slowSecondRead,'darwin',Date.now,{timeoutMs:50});
+  expect(result).toMatchObject({state:'unknown',assurance:'invalid'});
+});
+
+it('returns unknown and does not fall back to passive INCY when lstat times out',async()=>{
+  const root=await mkdtemp(path.join(tmpdir(),'vpn-passive-'));
+  try{
+    const file=path.join(root,'state');
+    const stored:VpnEvidence={state:'unknown',assurance:'invalid',reason:'probe_failed',updatedAt:null,probeAt:null};
+    const incyPassive=await readPassiveState(fixture({iface:'utun244',core:true}).read,'darwin');
+    expect(incyPassive).toMatchObject({state:'connected',source:'incy'});
+
+    const slowLstat=()=>new Promise<never>((_,reject)=>setTimeout(()=>reject(Error('timeout')),500));
+    const result=await selectVpnEvidence(file,stored,async()=>incyPassive,{
+      timeoutMs:50,
+      lstatFn:slowLstat,
+    });
+    expect(result).toMatchObject({state:'unknown',assurance:'invalid'});
+  }finally{
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+it('aborts commands when signal is triggered',async()=>{
+  const controller=new AbortController();
+  controller.abort();
+  const result=await readPassiveState(readCommand,'darwin',Date.now,{signal:controller.signal});
+  expect(result).toMatchObject({state:'unknown',assurance:'invalid'});
+});
+
+it('returns read_deadline when passive read exhausts budget with a valid stored file',async()=>{
+  const stored:VpnEvidence={state:'connected',assurance:'verified_ipv4',reason:'ok',updatedAt:Date.now(),probeAt:Date.now()};
+  const slowPassive=()=>new Promise<VpnEvidence>(resolve=>setTimeout(()=>resolve({state:'unknown',assurance:'invalid',reason:'read_deadline',updatedAt:null,probeAt:null}),200));
+  const result=await selectVpnEvidence('/tmp/dummy',stored,slowPassive as never,{timeoutMs:50});
+  expect(result).toMatchObject({state:'unknown',assurance:'invalid',reason:'read_deadline'});
+});
+
+it('retains invalid_evidence when stored evidence is invalid and read is within budget',async()=>{
+  const stored:VpnEvidence={state:'unknown',assurance:'invalid',reason:'invalid_evidence',updatedAt:null,probeAt:null};
+  const fastPassive=async():Promise<VpnEvidence>=>({state:'unknown',assurance:'invalid',reason:'invalid_evidence',updatedAt:null,probeAt:null});
+  const fastLstat=async()=>({});
+  const result=await selectVpnEvidence('/tmp/dummy',stored,fastPassive as never,{timeoutMs:1000,lstatFn:fastLstat});
+  expect(result).toMatchObject({state:'unknown',assurance:'invalid',reason:'invalid_evidence'});
+});
+
+it('cleans up abort listener on lstatWithTimeout completion in finally',async()=>{
+  const root=await mkdtemp(path.join(tmpdir(),'vpn-lstat-'));
+  try{
+    const file=path.join(root,'test-file');
+    await import('node:fs/promises').then(fs=>fs.writeFile(file,'ok'));
+    const controller=new AbortController();
+    const spy=vi.spyOn(controller.signal,'removeEventListener');
+    await lstatWithTimeout(file,1000,controller.signal);
+    expect(spy).toHaveBeenCalledWith('abort',expect.any(Function));
+  }finally{
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+it('passes only the remaining budget to ifconfig after parallel commands',async()=>{
+  const recordedTimeouts:number[]=[];
+  const mockRead:Reader=async(file,args,options)=>{
+    if(file==='/sbin/ifconfig'){
+      recordedTimeouts.push(options?.timeout??0);
+      return 'inet 100.64.0.1';
+    }
+    if(file==='/sbin/route')return 'interface: utun10';
+    if(file==='/bin/ps')return '123 /Applications/Tailscale.app/Contents/MacOS/Tailscale';
+    if(file.includes('Tailscale'))return JSON.stringify({BackendState:'Running',ExitNodeStatus:{ID:'exit1',Online:true},Self:{TailscaleIPs:['100.64.0.1']}});
+    return '';
+  };
+  await readPassiveState(mockRead,'darwin',Date.now,{timeoutMs:1000});
+  expect(recordedTimeouts.length).toBeGreaterThan(0);
+  expect(recordedTimeouts[0]).toBeLessThanOrEqual(1000);
 });

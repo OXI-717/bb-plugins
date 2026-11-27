@@ -7,21 +7,26 @@ import type {VpnEvidence as FileVpnEvidence} from './vpn-evidence.js';
 export type VpnEvidence=Omit<FileVpnEvidence,'assurance'> & {assurance:FileVpnEvidence['assurance']|'system_ipv4';source?:'incy'|'tailscale'};
 
 // Only OS observations: no shell, network probes, VPN controls or state files.
-export type Reader=(file:string,args:string[])=>Promise<string>;
-export const readCommand:Reader=(file,args)=>new Promise((resolve,reject)=>{
-  execFile(file,args,{timeout:1200,maxBuffer:1048576,encoding:'utf8',env:{...process.env,LC_ALL:'C',...(file===TAILSCALE?{TAILSCALE_BE_CLI:'1'}:{})}},
+export type ReaderOptions={timeout?:number;signal?:AbortSignal};
+export type Reader=(file:string,args:string[],options?:ReaderOptions)=>Promise<string>;
+export const readCommand:Reader=(file,args,options)=>new Promise((resolve,reject)=>{
+  const timeout=Math.max(1,Math.min(1200,options?.timeout??1200));
+  execFile(file,args,{timeout,killSignal:'SIGKILL',signal:options?.signal,maxBuffer:1048576,encoding:'utf8',env:{...process.env,LC_ALL:'C',...(file===TAILSCALE?{TAILSCALE_BE_CLI:'1'}:{})}},
     (error,stdout)=>error?reject(Error('VPN state command unavailable')):resolve(stdout));
 });
-const unknown=():VpnEvidence=>({state:'unknown',assurance:'invalid',reason:'invalid_evidence',updatedAt:null,probeAt:null});
+export const unknown=():VpnEvidence=>({state:'unknown',assurance:'invalid',reason:'invalid_evidence',updatedAt:null,probeAt:null});
+export const readDeadline=():VpnEvidence=>({state:'unknown',assurance:'invalid',reason:'read_deadline',updatedAt:null,probeAt:null});
 const iface=(route:string)=>/^\s*interface:\s*(utun[0-9]+)\s*$/m.exec(route)?.[1];
 const TAILSCALE='/Applications/Tailscale.app/Contents/MacOS/Tailscale';
 
-async function snapshot(read:Reader) {
+async function snapshot(read:Reader,options?:ReaderOptions) {
+  const startSnapshot=performance.now();
+  const snapshotBudget=options?.timeout??1200;
   const [route,trafficRoute,processes,raw]=await Promise.all([
-    read('/sbin/route',['-n','get','default']),
-    read('/sbin/route',['-n','get','1.1.1.1']),
-    read('/bin/ps',['-axo','pid=,lstart=,comm=']),
-    read(TAILSCALE,['status','--json']).catch(()=>''),
+    read('/sbin/route',['-n','get','default'],options),
+    read('/sbin/route',['-n','get','1.1.1.1'],options),
+    read('/bin/ps',['-axo','pid=,lstart=,comm='],options),
+    read(TAILSCALE,['status','--json'],options).catch(()=>''),
   ]);
   const tunnel=iface(route);
   if(!tunnel)return null;
@@ -37,28 +42,92 @@ async function snapshot(read:Reader) {
   if(!Array.isArray(status?.Self?.TailscaleIPs))return null;
   const addresses=status.Self.TailscaleIPs.filter((value:unknown):value is string=>typeof value==='string'&&isIP(value)===4&&/^100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(value));
   if(!addresses.length)return null;
-  const link=await read('/sbin/ifconfig',[tunnel]);
+  const remIfconfig=snapshotBudget-Math.round(performance.now()-startSnapshot);
+  if(remIfconfig<=0||options?.signal?.aborted)return null;
+  const link=await read('/sbin/ifconfig',[tunnel],{signal:options?.signal,timeout:remIfconfig});
   const bound=addresses.find((address:string)=>link.split('\n').some(line=>line.trim().split(/\s+/).slice(0,2).join(' ')==='inet '+address));
   if(!bound)return null;
   return {source:'tailscale' as const,epoch:exit.ID+'|'+bound,tunnel};
 }
 
-export async function readPassiveState(read:Reader=readCommand,os=platform(),now=Date.now):Promise<VpnEvidence> {
+export type PassiveStateOptions={signal?:AbortSignal;timeoutMs?:number};
+
+export async function readPassiveState(read:Reader=readCommand,os=platform(),now=Date.now,options?:PassiveStateOptions):Promise<VpnEvidence> {
   if(os!=='darwin')return unknown();
   const started=now();
+  const budget=options?.timeoutMs??2000;
+  const deadline=started+budget;
   try {
-    const before=await snapshot(read),after=await snapshot(read);
-    if(!before||!after||JSON.stringify(before)!==JSON.stringify(after)||now()-started>8000)return unknown();
+    const rem1=deadline-now();
+    if(rem1<=0||options?.signal?.aborted)return readDeadline();
+    const before=await snapshot(read,{signal:options?.signal,timeout:Math.min(1200,Math.max(1,rem1))});
+    const rem2=deadline-now();
+    if(rem2<=0||options?.signal?.aborted)return readDeadline();
+    const after=await snapshot(read,{signal:options?.signal,timeout:Math.min(1200,Math.max(1,rem2))});
+    if(now()-started>budget||options?.signal?.aborted)return readDeadline();
+    if(!before||!after||JSON.stringify(before)!==JSON.stringify(after))return unknown();
     return {state:'connected',assurance:'system_ipv4',reason:'ok',source:after.source,updatedAt:started,probeAt:null};
-  }catch{return unknown();}
+  }catch{
+    if(now()-started>budget||options?.signal?.aborted)return readDeadline();
+    return unknown();
+  }
 }
+
+export async function lstatWithTimeout(file:string,timeoutMs:number,signal?:AbortSignal) {
+  if(timeoutMs<=0||signal?.aborted)throw Error('timeout');
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  let onAbort:(()=>void)|undefined;
+  const timeoutPromise=new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('timeout')),timeoutMs);});
+  const abortPromise=signal?new Promise<never>((_,reject)=>{
+    if(signal.aborted)reject(Error('timeout'));
+    else {
+      onAbort=()=>reject(Error('timeout'));
+      signal.addEventListener('abort',onAbort,{once:true});
+    }
+  }):null;
+  try {
+    return await Promise.race([lstat(file),timeoutPromise,...(abortPromise?[abortPromise]:[])]);
+  } finally {
+    clearTimeout(timer);
+    if(signal&&onAbort)signal.removeEventListener('abort',onAbort);
+  }
+}
+
+export type SelectEvidenceOptions=PassiveStateOptions&{now?:()=>number;lstatFn?:(file:string)=>Promise<unknown>};
 
 // Existing INCY proof remains authoritative, including a failed probe or stale writer.
 // Tailscale is a different active route; it does not consume INCY's proof file.
-export async function selectVpnEvidence(file:string,stored:VpnEvidence,read=readPassiveState):Promise<VpnEvidence> {
-  const passive=await read();
+export async function selectVpnEvidence(
+  file:string,
+  stored:VpnEvidence,
+  read:(r?:Reader,os?:NodeJS.Platform,n?:()=>number,opts?:PassiveStateOptions)=>Promise<VpnEvidence>=readPassiveState,
+  options?:SelectEvidenceOptions
+):Promise<VpnEvidence> {
+  const now=options?.now??Date.now;
+  const started=now();
+  const budget=options?.timeoutMs??2000;
+  const deadline=started+budget;
+  const remForPassive=deadline-now();
+  if(remForPassive<=0||options?.signal?.aborted)return readDeadline();
+
+  const passive=await read(readCommand,platform(),now,{signal:options?.signal,timeoutMs:remForPassive});
   if(passive.source==='tailscale'&&passive.state==='connected')return passive;
-  try {await lstat(file);return stored;}catch(error){
-    return (error as NodeJS.ErrnoException).code==='ENOENT'?passive:stored;
+  if(passive.reason==='read_deadline')return readDeadline();
+
+  const remForLstat=deadline-now();
+  if(remForLstat<=0||options?.signal?.aborted)return readDeadline();
+
+  try {
+    if(options?.lstatFn)await options.lstatFn(file);
+    else await lstatWithTimeout(file,remForLstat,options?.signal);
+    if(now()-started>budget||options?.signal?.aborted)return readDeadline();
+    return stored;
+  }catch(error){
+    if((error as NodeJS.ErrnoException).code==='ENOENT'){
+      if(now()-started>budget||options?.signal?.aborted)return readDeadline();
+      return passive;
+    }
+    if((error as Error).message==='timeout'||now()-started>budget||options?.signal?.aborted)return readDeadline();
+    return stored;
   }
 }

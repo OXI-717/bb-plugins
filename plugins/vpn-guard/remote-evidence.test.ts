@@ -12,6 +12,15 @@ it('allows a fresh remote response beyond the former worker deadline',async()=>{
   await vi.advanceTimersByTimeAsync(2000);
   expect(await read).toMatchObject({state:'connected',evidence:{assurance:'verified_ipv4'},rpc:{category:'ok'}});
 });
+it('enforces a separate admission deadline when configured',async()=>{
+  vi.useFakeTimers();
+  const read=readRemoteEvidence(timeoutMs=>new Promise((resolve,reject)=>{
+    const deadline=setTimeout(()=>reject(Object.assign(Error('deadline exceeded'),{code:'command_timeout'})),timeoutMs);
+    setTimeout(()=>{clearTimeout(deadline);resolve(verifiedHostResult('connected'));},2000);
+  }),()=>{},1500);
+  await vi.advanceTimersByTimeAsync(1500);
+  expect(await read).toMatchObject({state:'unknown',rpc:{category:'timeout'}});
+});
 it.each([
   [Object.assign(Error('private-payload'),{code:'command_timeout'}),'timeout'],
   [Object.assign(Error('private-payload'),{body:{code:'host_unavailable'}}),'host_unavailable'],

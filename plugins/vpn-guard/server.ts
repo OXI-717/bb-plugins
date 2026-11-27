@@ -133,13 +133,23 @@ export default async function plugin(bb: BbPluginApi) {
   let policyVersion=0;
   let recheckDirty=false;
 
+  const ADMISSION_BUDGET_MS=2500;
+  const ADMISSION_RETRY_DELAY_MS=5000;
+  const HOST_WORKER_MAX_TIMEOUT_MS=2000;
+  const TRANSPORT_RESERVE_MS=400;
+
   function serial<T>(operation:()=>Promise<T>):Promise<T> {
     const run=tail.then(operation,operation);
     tail=run.then(()=>undefined,()=>undefined);
     return run;
   }
-  async function readHost(hostId:string) {
-    const result=await readRemoteEvidence(timeoutMs=>host.call('readState',null,{hostId,timeoutMs,signal:lifetime.signal}),()=>{});
+  async function readHost(hostId:string,options?:{signal?:AbortSignal;timeoutMs?:number}) {
+    const combinedSignal=options?.signal?AbortSignal.any([lifetime.signal,options.signal]):lifetime.signal;
+    const rpcTimeoutMs=options?.timeoutMs??10_000;
+    const startTransport=performance.now();
+    const result=await readRemoteEvidence(timeoutMs=>host.call('readState',null,{hostId,timeoutMs,signal:combinedSignal}),()=>{},rpcTimeoutMs);
+    const transportDuration=Math.round(performance.now()-startTransport);
+    bb.log.debug?.(`VPN Guard host ${hostId} read stage=transport duration=${transportDuration}ms category=${result.rpc.category}`);
     // Log transitions only: a machine that stays offline must not write a line per cycle.
     const previous=rpcHealth.get(hostId);
     if(!disposed&&previous!==result.rpc.category) {
@@ -151,7 +161,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const trustedState=(result:Awaited<ReturnType<typeof readHost>>):VpnState=>['verified_ipv4','system_ipv4'].includes(result.evidence?.assurance??'')?result.state:'unknown';
   function readingOf(result:Awaited<ReturnType<typeof readHost>>):Reading {
-    if(result.rpc.category!=='ok')return {kind:'unobservable',reason:'host_rpc_failed'};
+    if(result.rpc.category!=='ok'||result.evidence?.reason==='read_deadline'||result.evidence?.reason==='host_read_deadline')
+      return {kind:'unobservable',reason:'host_rpc_failed'};
     const state=trustedState(result);
     if(state==='connected')return {kind:'evidence',state,reason:undefined};
     // The machine answered: whatever it reported is evidence, never "unobservable".
@@ -161,16 +172,21 @@ export default async function plugin(bb: BbPluginApi) {
   async function vpn(hostId:string):Promise<VpnState> {
     const readAt=Date.now();
     const result=await readHost(hostId);
-    if(config.hostIds.includes(hostId)&&!directHost(hostId))
-      observations.record(hostId,'vpn-required',readingOf(result),readAt,Date.now());
+    if(config.hostIds.includes(hostId)&&!directHost(hostId)) {
+      const isTimeoutOrCancel=result.rpc.category==='timeout'||result.rpc.category==='cancelled'||result.evidence?.reason==='read_deadline';
+      if(!isTimeoutOrCancel) {
+        observations.record(hostId,'vpn-required',readingOf(result),readAt,Date.now());
+      }
+    }
     return trustedState(result);
   }
   const manuallyBlocked = (hostId:string) => config.manualBlock || config.manualBlockHostIds.includes(hostId);
   const directHost = (hostId:string) => config.hostIds.includes(hostId) && config.directHostIds.includes(hostId);
   async function networkState(hostId:string):Promise<VpnState> {
     if(!directHost(hostId)) return vpn(hostId);
-    try {return (await bb.sdk.hosts.list()).some(h=>h.id===hostId&&h.status==='connected')?'connected':'unknown';}
-    catch {return 'unknown';}
+    try {
+      return (await bb.sdk.hosts.list()).some(h=>h.id===hostId&&h.status==='connected')?'connected':'unknown';
+    } catch {return 'unknown';}
   }
   const poolPolicySchema=z.object({vpnGuardEnabled:z.boolean(),vpnPolicyVersion:z.literal(2),vpnOnlyProviders:z.array(z.string())});
   async function poolPolicy() {
@@ -246,7 +262,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
   async function assertNativeRecovery(automatic:boolean) {
     if(config.manualBlock) throw new Error("Release the manual block before restoring native plugins.");
-    if((automatic&&config.hostIds.length===0)||(await Promise.all(config.hostIds.map(networkState))).some(state=>state!=='connected')) throw new Error('Selected machines must be connected before restoring native plugins.');
+    if((automatic&&config.hostIds.length===0)||(await Promise.all(config.hostIds.map(id=>networkState(id)))).some(state=>state!=='connected')) throw new Error('Selected machines must be connected before restoring native plugins.');
   }
   async function restoreOwned(automatic=false) {
     await assertNativeRecovery(automatic);
@@ -487,44 +503,214 @@ export default async function plugin(bb: BbPluginApi) {
     const id=context.requestedExecution.providerId;
     if(!protectedProvider(id)) return {action:'proceed'};
     const hostId=context.host?.id;
-    while(true) {
-      const version=policyVersion;
-      if(owned.has(nativePluginFor(id)) || pending.has(nativePluginFor(id))) return {action:'wait',reason:'VPN Guard: native plugin change awaits review or restore'};
-      if(!hostId || !config.hostIds.includes(hostId)) return {action:'proceed'};
-      if(manuallyBlocked(hostId)) return {action:'wait',reason:'VPN Guard: manual block on selected host'};
-      if(config.mode!=='enforce') return {action:'proceed'};
-      let available=false;
-      try {available=(await bb.sdk.hosts.list()).some(h=>h.id===hostId);}
-      catch { /* unavailable host catalog fails closed */ }
-      const state=available?await networkState(hostId):'unknown';
-      if(version!==policyVersion) continue;
-      return state==='connected'?{action:'proceed'}:{action:'wait',reason:`VPN Guard: ${state} on selected host`};
+
+    if(owned.has(nativePluginFor(id)) || pending.has(nativePluginFor(id))) return {action:'wait',reason:'VPN Guard: native plugin change awaits review or restore'};
+    if(!hostId || !config.hostIds.includes(hostId)) return {action:'proceed'};
+    if(manuallyBlocked(hostId)) return {action:'wait',reason:'VPN Guard: manual block on selected host'};
+    if(config.mode!=='enforce') return {action:'proceed'};
+
+    const admissionController=new AbortController();
+    const admissionStart=performance.now();
+    const admissionDeadline=admissionStart+ADMISSION_BUDGET_MS;
+    let timer:ReturnType<typeof setTimeout>|undefined;
+
+    const timeoutPromise=new Promise<{action:'wait';reason:string;sendAt:number}>(resolve=>{
+      timer=setTimeout(()=>{
+        admissionController.abort();
+        resolve({
+          action:'wait',
+          reason:'VPN Guard: status check timed out on selected host',
+          sendAt:Date.now()+ADMISSION_RETRY_DELAY_MS,
+        });
+      },ADMISSION_BUDGET_MS);
+    });
+
+    const passPromise=(async():Promise<{action:'proceed'}|{action:'wait';reason:string;sendAt?:number}>=>{
+      while(true) {
+        if(performance.now()>=admissionDeadline||admissionController.signal.aborted)
+          return {action:'wait',reason:'VPN Guard: status check timed out on selected host',sendAt:Date.now()+ADMISSION_RETRY_DELAY_MS};
+        const version=policyVersion;
+        if(owned.has(nativePluginFor(id)) || pending.has(nativePluginFor(id))) return {action:'wait',reason:'VPN Guard: native plugin change awaits review or restore'};
+        if(!hostId || !config.hostIds.includes(hostId)) return {action:'proceed'};
+        if(manuallyBlocked(hostId)) return {action:'wait',reason:'VPN Guard: manual block on selected host'};
+        if(config.mode!=='enforce') return {action:'proceed'};
+
+        const remCatalog=Math.round(admissionDeadline-performance.now());
+        if(remCatalog<=0||performance.now()>=admissionDeadline||admissionController.signal.aborted)
+          return {action:'wait',reason:'VPN Guard: status check timed out on selected host',sendAt:Date.now()+ADMISSION_RETRY_DELAY_MS};
+
+        const catalogStart=performance.now();
+        let hostList:Awaited<ReturnType<typeof bb.sdk.hosts.list>>=[];
+        let available=false;
+        let catalogFailed=false;
+        try {
+          hostList=await bb.sdk.hosts.list();
+          available=hostList.some(h=>h.id===hostId);
+        }catch{ catalogFailed=true; }
+        const catalogDuration=Math.round(performance.now()-catalogStart);
+        bb.log.debug?.(`VPN Guard admission stage=catalog duration=${catalogDuration}ms`);
+
+        if(performance.now()>=admissionDeadline||admissionController.signal.aborted)
+          return {action:'wait',reason:'VPN Guard: status check timed out on selected host',sendAt:Date.now()+ADMISSION_RETRY_DELAY_MS};
+
+        const remainingMs=Math.round(admissionDeadline-performance.now());
+        if(remainingMs<=0||performance.now()>=admissionDeadline||admissionController.signal.aborted)
+          return {action:'wait',reason:'VPN Guard: status check timed out on selected host',sendAt:Date.now()+ADMISSION_RETRY_DELAY_MS};
+
+        const workerTimeoutMs=Math.max(100,Math.min(HOST_WORKER_MAX_TIMEOUT_MS,remainingMs-TRANSPORT_RESERVE_MS));
+        let state:VpnState='unknown';
+        let admissionReading:Reading|undefined;
+        let admissionReadAt:number|undefined;
+        let isTimeoutOrCancel=false;
+
+        if(directHost(hostId)) {
+          state=hostList.some(h=>h.id===hostId&&h.status==='connected')?'connected':'unknown';
+        } else if(available) {
+          try {
+            const readAt=Date.now();
+            const result=await readHost(hostId,{signal:admissionController.signal,timeoutMs:workerTimeoutMs});
+            state=trustedState(result);
+            admissionReading=readingOf(result);
+            admissionReadAt=readAt;
+            isTimeoutOrCancel=result.rpc.category==='timeout'||result.rpc.category==='cancelled'||result.evidence?.reason==='read_deadline'||result.evidence?.reason==='host_read_deadline';
+          }catch{state='unknown';isTimeoutOrCancel=true;}
+        }
+
+        if(performance.now()>=admissionDeadline||admissionController.signal.aborted)
+          return {action:'wait',reason:'VPN Guard: status check timed out on selected host',sendAt:Date.now()+ADMISSION_RETRY_DELAY_MS};
+
+        if(version!==policyVersion) continue;
+
+        if(!directHost(hostId)&&!isTimeoutOrCancel&&admissionReading&&admissionReadAt!==undefined&&config.hostIds.includes(hostId)) {
+          observations.record(hostId,'vpn-required',admissionReading,admissionReadAt,Date.now());
+        }
+
+        if(state==='connected') {
+          if(performance.now()>=admissionDeadline||admissionController.signal.aborted)
+            return {action:'wait',reason:'VPN Guard: status check timed out on selected host',sendAt:Date.now()+ADMISSION_RETRY_DELAY_MS};
+          return {action:'proceed'};
+        }
+        const needsSendAt=catalogFailed||!available||isTimeoutOrCancel;
+        return {
+          action:'wait',
+          reason:isTimeoutOrCancel?'VPN Guard: status check timed out on selected host':`VPN Guard: ${state} on selected host`,
+          ...(needsSendAt?{sendAt:Date.now()+ADMISSION_RETRY_DELAY_MS}:{}),
+        };
+      }
+    })();
+
+    try {
+      return await Promise.race([passPromise,timeoutPromise]);
+    } finally {
+      clearTimeout(timer);
     }
   });
+
   async function networkDecision(hostId:string,provider:string,versioned=false) {
-    while(true) {
-      const version=policyVersion;
-      const decision=(allowed:boolean,reason:'manual_block'|'vpn_unavailable'|'outside_scope'|'observe'|'connected'|'restore_required'|'direct')=>versioned?({schema:'bb-vpn-guard/network-decision/2' as const,hostId,allowed,reason}):({schema:'bb-vpn-guard/network-decision/1' as const,allowed:reason==='direct'?false:allowed,reason:reason==='direct'?'vpn_unavailable' as const:reason});
-      if(owned.has(nativePluginFor(provider)) || pending.has(nativePluginFor(provider))) return decision(false,'restore_required');
-      if(!config.hostIds.includes(hostId)) return decision(true,'outside_scope');
-      if(manuallyBlocked(hostId)) return decision(false,'manual_block');
-      if(directHost(hostId)) {
-        const ready=await networkState(hostId);
-        if(version!==policyVersion)continue;
-        return ready==='connected'?decision(true,'direct'):decision(false,'vpn_unavailable');
-      }
-      if(config.mode==='observe') return decision(true,'observe');
-      {
+    const decision=(allowed:boolean,reason:'manual_block'|'vpn_unavailable'|'outside_scope'|'observe'|'connected'|'restore_required'|'direct')=>versioned?({schema:'bb-vpn-guard/network-decision/2' as const,hostId,allowed,reason}):({schema:'bb-vpn-guard/network-decision/1' as const,allowed:reason==='direct'?false:allowed,reason:reason==='direct'?'vpn_unavailable' as const:reason});
+
+    if(owned.has(nativePluginFor(provider)) || pending.has(nativePluginFor(provider))) return decision(false,'restore_required');
+    if(!config.hostIds.includes(hostId)) return decision(true,'outside_scope');
+    if(manuallyBlocked(hostId)) return decision(false,'manual_block');
+
+    const decisionController=new AbortController();
+    const decisionStart=performance.now();
+    const decisionDeadline=decisionStart+ADMISSION_BUDGET_MS;
+    let timer:ReturnType<typeof setTimeout>|undefined;
+
+    const timeoutPromise=new Promise<ReturnType<typeof decision>>(resolve=>{
+      timer=setTimeout(()=>{
+        decisionController.abort();
+        resolve(decision(false,'vpn_unavailable'));
+      },ADMISSION_BUDGET_MS);
+    });
+
+    const passPromise=(async():Promise<ReturnType<typeof decision>>=>{
+      while(true) {
+        if(performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+        const version=policyVersion;
+        if(owned.has(nativePluginFor(provider)) || pending.has(nativePluginFor(provider))) return decision(false,'restore_required');
+        if(!config.hostIds.includes(hostId)) return decision(true,'outside_scope');
+        if(manuallyBlocked(hostId)) return decision(false,'manual_block');
+
+        if(directHost(hostId)) {
+          const rem=Math.round(decisionDeadline-performance.now());
+          if(rem<=0||performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+          let directAvailable=false;
+          try {
+            const list=await bb.sdk.hosts.list();
+            directAvailable=list.some(h=>h.id===hostId&&h.status==='connected');
+          }catch{}
+          if(performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+          if(version!==policyVersion)continue;
+          if(!directAvailable) return decision(false,'vpn_unavailable');
+          if(performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+          return decision(true,'direct');
+        }
+
+        if(config.mode==='observe') {
+          if(performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+          return decision(true,'observe');
+        }
+
         try {
           const pool=await poolPolicy();
+          if(performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
           if(provider!=='opencode-go'&&!pool.vpnOnlyProviders.includes(provider))return decision(false,'vpn_unavailable');
         }catch{return decision(false,'vpn_unavailable');}
+
+        const remCatalog=Math.round(decisionDeadline-performance.now());
+        if(remCatalog<=0||performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+
+        const catalogStart=performance.now();
+        let hostList:Awaited<ReturnType<typeof bb.sdk.hosts.list>>=[];
+        let available=false;
+        try {
+          hostList=await bb.sdk.hosts.list();
+          available=hostList.some(h=>h.id===hostId);
+        }catch{}
+        const catalogDuration=Math.round(performance.now()-catalogStart);
+        bb.log.debug?.(`VPN Guard decision stage=catalog duration=${catalogDuration}ms`);
+
+        if(performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+
+        const remainingMs=Math.round(decisionDeadline-performance.now());
+        if(remainingMs<=0||performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+
+        const workerTimeoutMs=Math.max(100,Math.min(HOST_WORKER_MAX_TIMEOUT_MS,remainingMs-TRANSPORT_RESERVE_MS));
+        let state:VpnState='unknown';
+        let admissionReading:Reading|undefined;
+        let admissionReadAt:number|undefined;
+        let isTimeoutOrCancel=false;
+
+        if(available) {
+          try {
+            const readAt=Date.now();
+            const result=await readHost(hostId,{signal:decisionController.signal,timeoutMs:workerTimeoutMs});
+            state=trustedState(result);
+            admissionReading=readingOf(result);
+            admissionReadAt=readAt;
+            isTimeoutOrCancel=result.rpc.category==='timeout'||result.rpc.category==='cancelled'||result.evidence?.reason==='read_deadline'||result.evidence?.reason==='host_read_deadline';
+          }catch{state='unknown';isTimeoutOrCancel=true;}
+        }
+
+        if(performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+        if(version!==policyVersion) continue;
+
+        if(!isTimeoutOrCancel&&admissionReading&&admissionReadAt!==undefined&&config.hostIds.includes(hostId)) {
+          observations.record(hostId,'vpn-required',admissionReading,admissionReadAt,Date.now());
+        }
+
+        if(state!=='connected') return decision(false,'vpn_unavailable');
+        if(performance.now()>=decisionDeadline||decisionController.signal.aborted) return decision(false,'vpn_unavailable');
+        return decision(true,'connected');
       }
-      let available=false;
-      try {available=(await bb.sdk.hosts.list()).some(h=>h.id===hostId);} catch {}
-      const state=available?await networkState(hostId):'unknown';
-      if(version!==policyVersion) continue;
-      return state==='connected'?decision(true,'connected'):decision(false,'vpn_unavailable');
+    })();
+
+    try {
+      return await Promise.race([passPromise,timeoutPromise]);
+    } finally {
+      clearTimeout(timer);
     }
   }
   const resumeClaimSchema=z.array(z.object({threadId:z.string().min(1).max(160),stoppedAt:z.number().int().nonnegative()}));
