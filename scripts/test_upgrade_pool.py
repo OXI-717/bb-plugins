@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -213,6 +214,21 @@ class UpgradeTests(unittest.TestCase):
             self.assertFalse(u.wait_idle(lambda _: None))
             confirm.assert_not_called()
 
+    def test_second_idle_phase_uses_remaining_shared_drain_budget(self):
+        clock = [98.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with patch.object(u.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(u.time, 'sleep', side_effect=sleep), \
+             patch.object(u, 'pool_status', return_value={'inFlight': 0}) as reads, \
+             patch.object(u, 'report_pool'):
+            with self.assertRaisesRegex(u.UpgradeError, 'Idle wait expired'):
+                u.wait_idle(lambda _: None, deadline_seconds=90, deadline=100.0)
+        self.assertEqual(clock[0], 100.0)
+        reads.assert_called_once()
+
     def test_interruption_requires_explicit_answer_and_timeout_cancels(self):
         with patch.object(u, 'bb', return_value={'inFlight':1}), patch.object(u,'report_pool'), patch.object(u,'confirm_interrupt',return_value=True):
             self.assertTrue(u.wait_idle(lambda _: None, prompt_now=True))
@@ -236,7 +252,7 @@ class UpgradeTests(unittest.TestCase):
                 self.assertEqual(copied.execute('SELECT value FROM sample').fetchone()[0],42)
             self.assertEqual((target/'secrets'/'synthetic.txt').stat().st_mode & 0o777,0o600)
 
-    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False, wrong_drain=False, weekly_budget_after=(), routing_after=None, routing_before=None, routing_failure=False):
+    def workflow(self, *, check=False, changed=False, fail=False, wrong_sha=False, wrong_accounts=False, wrong_drain=False, weekly_budget_after=(), routing_after=None, routing_before=None, routing_failure=False, drain=False, native_after_backup=None):
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         data = Path(temp.name); db=sqlite3.connect(data/'data.db'); db.close()
         state = {'accepting':True,'inFlight':0,'accounts':[{'id':'synthetic','enabled':True,'policy':{'enabled':False}, 'drainOnce':True, 'drainGeneration':'synthetic-generation', 'weeklyBudget': {'enabled': True, 'floorPercent': 10}}], 'routing':{'codex':True},'enabledAccountCount':1}
@@ -248,8 +264,24 @@ class UpgradeTests(unittest.TestCase):
         sources = [source, source, updated_source]
         targets = [('0.4.7','a'*40), ('0.4.8','c'*40) if changed else ('0.4.7','a'*40)]
         status_reads = 0
+        owner = 'example-owner'
+        phase = 'draining'
+
         def command(*args):
-            nonlocal status_reads
+            nonlocal status_reads, phase
+            if drain:
+                expires = time.time() * 1000 + 1_800_000
+                if args == ('pool', 'maintenance', 'seal-upgrade', '--owner', owner):
+                    phase = 'sealed'
+                if args[:2] == ('pool', 'maintenance'):
+                    return {'schemaVersion': 1, 'scope': 'all-model-clients', 'transportInFlight': 0,
+                            'lease': {'owner': owner, 'expiresAt': expires, 'upgrade': phase}}
+                if args == ('pool-maintenance', 'status'):
+                    return {'schemaVersion': 1, 'scope': 'all-hosts-all-projects',
+                            'lease': {'owner': owner, 'expiresAt': expires}}
+                if args == ('pool', 'native', 'status'):
+                    native_state = native_after_backup if (data/'backup').exists() and native_after_backup else 'queued'
+                    return {'leases': [{'state': native_state}]}
             if args[:2] == ('pool','status'):
                 status_reads += 1
                 if routing_after is not None and status_reads == 3:
@@ -267,22 +299,28 @@ class UpgradeTests(unittest.TestCase):
             if args[:2] == ('plugin','config'): return {'values':{'threshold':.98}}
             if args[:2] == ('thread','list'): return []
             raise AssertionError(args)
-        args=argparse.Namespace(check=check, version=None, interrupt_now=False)
+        args=argparse.Namespace(check=check, version=None, interrupt_now=False, drain_sessions=drain, maintenance_owner=owner)
         with patch.object(u,'installed',side_effect=infos), patch.object(u,'source_info',side_effect=sources), patch.object(u,'release_target',side_effect=targets), patch.object(u,'wait_idle',return_value=False) as idle, patch.object(u,'bb',side_effect=command), patch.object(u,'run',side_effect=u.UpgradeError('simulated update failure') if fail else None) as run:
             output = []
-            if changed or fail or wrong_sha or wrong_accounts or wrong_drain or weekly_budget_after != () or routing_failure:
+            if changed or fail or wrong_sha or wrong_accounts or wrong_drain or weekly_budget_after != () or routing_failure or native_after_backup:
                 with self.assertRaises(u.UpgradeError): u.perform(args,data,data,output.append)
             else:
                 self.assertEqual(u.perform(args,data,data,output.append),'PREFLIGHT_PASS' if check else 'PASS')
             if check:
                 idle.assert_not_called(); run.assert_not_called(); self.assertFalse((data/'backup').exists())
-            elif changed:
+            elif changed or native_after_backup:
                 run.assert_not_called(); self.assertTrue((data/'backup'/'data.db').exists())
             else:
                 run.assert_called_once_with('bb','plugin','update',u.PLUGIN,'--yes',timeout=600)
                 self.assertTrue((data/'backup'/'RECOVERY.txt').exists())
 
             return output
+
+    def test_drain_updates_with_a_sealed_hold_and_only_queued_leases(self):
+        self.workflow(drain=True)
+
+    def test_drain_refuses_an_unconfirmed_lease_after_backup(self):
+        self.workflow(drain=True, native_after_backup='uncertain')
 
     def test_post_update_new_provider_key_is_reported(self):
         output = self.workflow(routing_after={'codex': True, 'grok': True})

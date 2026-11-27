@@ -196,7 +196,11 @@ export function createAccountPoolPlugin(
       await bb.sdk.plugins.callRpc({pluginId:'oxi-op',method:'runPreparedTask',input:{requestId},
         outputSchema:z.object({completed:z.literal(true)}).strict(),signal});
     });
-    nativeSessions.admissionCheck=()=>{if(maintenance.status().lease)throw new NativeSessionError(503,'POOL_MAINTENANCE');};
+    nativeSessions.admissionCheck=activePoll=>{
+      const admission=maintenance.nativeAdmission;
+      if(admission==='open'||(admission==='draining'&&activePoll?.()))return;
+      throw new NativeSessionError(503,'POOL_MAINTENANCE');
+    };
     await nativeSessions.initialize();
     registerNativeUnlockRpc(bb,nativeSessions);
     let catalogReconcileInFlight:Promise<void>|null=null;
@@ -426,14 +430,14 @@ export function createAccountPoolPlugin(
       localOpen:async(query,url)=>openAccountBrowser({accounts:await operations.list(),routedAccountIds:Object.keys(egress.snapshot().bindings),query,url,proxyUrl:await egress.browserProxy(query),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId,vpnStatusFile:config.get().vpnStatusFile}),
       localList:async()=>listBrowserProfiles({accounts:await operations.list(),routedAccountIds:Object.keys(egress.snapshot().bindings),dataDir:bb.server.experimental_dataDir,pluginId:bb.pluginId}),
     });
-    maintenanceActivity=()=>hub.maintenanceActivity();
+    maintenanceActivity=()=>hub.maintenanceActivity()+nativeSessions.upgradeBlockers();
     bb.onDispose(startLoopDelay(message=>bb.log.warn(message),()=>hub.inFlightCount()));
     const maintenanceApi = {
       status:()=>maintenance.status(),
       acquire:(owner:string)=>maintenance.acquire(owner),
       acquireGraceful:(owner:string)=>maintenance.acquireGraceful(owner),
       acquireUpgrade:(owner:string)=>maintenance.acquireUpgrade(owner),
-      sealUpgrade:(owner:string)=>maintenance.sealUpgrade(owner),
+      sealUpgrade:(owner:string)=>nativeSessions.withUpgradeSeal(()=>maintenance.sealUpgrade(owner)),
       release:(owner:string)=>maintenance.release(owner),
       interrupt:async(owner:string)=>{hub.interruptForMaintenance(owner);return maintenance.status();},
     };

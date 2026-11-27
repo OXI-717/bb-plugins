@@ -231,11 +231,12 @@ it('shares in-flight native Guard checks per host without caching completed deci
     const post=(tok:string,body:object)=>host.harness.behavior.fetchHttp('POST','/native/agy',{headers:{authorization:`Bearer ${tok}`},body:JSON.stringify(body)});
     const leaseA=await (await post(tokA,{action:'acquire',executorId:'native-one',sessionId:randomUUID()})).json();
     const leaseB=await (await post(tokB,{action:'acquire',executorId:'native-one',sessionId:randomUUID()})).json();
+    expect((await cli('maintenance','acquire-upgrade','--owner',upgradeOwner,'--json')).exitCode).toBe(0);
     const beforeConcurrent=rpcCalls;
     rpcMode='deferred';
     const pendingA=post(tokA,{action:'poll',leaseId:leaseA.leaseId});
     const pendingB=post(tokB,{action:'poll',leaseId:leaseB.leaseId});
-    while(!releaseDeferred)await new Promise(resolve=>setTimeout(resolve,5));
+    await vi.waitFor(()=>expect(releaseDeferred).toBeDefined());
     // Give second concurrent poll a tick to join the same in-flight Guard read.
     await new Promise(resolve=>setTimeout(resolve,15));
     (releaseDeferred as ()=>void)();
@@ -260,5 +261,169 @@ it('shares in-flight native Guard checks per host without caching completed deci
     // Release still succeeds without Guard check.
     expect((await post(tokA,{action:'release',leaseId:leaseA.leaseId,stopped:true})).status).toBe(200);
     expect((await post(tokB,{action:'release',leaseId:leaseB.leaseId,stopped:true})).status).toBe(200);
+  } finally {await host.harness.lifecycle.dispose();}
+});
+
+const upgradeOwner = '11111111-1111-4111-8111-111111111111';
+
+async function upgradeFixture(now = Date.now, checkHost = async()=>{}) {
+  const host = createFakePluginHost({pluginId:'account-pool',sdk:{hosts:{list:async()=>{
+    await checkHost();
+    return [{id:'host-one',name:'One'}];
+  }}}});
+  const plugin = createAccountPoolPlugin({now,fetch:vi.fn(async()=>new Response('{}'))});
+  await plugin(host.bb);
+  const cli = (...args:string[]) => host.harness.behavior.runCli(args);
+  const executor = {id:'native-one',accountId:'subscription-one',hostId:'host-one',callerIds:['host-one'],projectIds:['project-one'],enabled:true};
+  const configure = (changes = {}) => cli('native','configure',JSON.stringify({...executor,...changes}));
+  expect((await configure()).exitCode).toBe(0);
+  expect((await cli('native','mode','managed')).exitCode).toBe(0);
+  const tokenFor = async (threadId:string) => (await host.harness.behavior.resolveProviderEnv(
+    'acp-agy',{hostId:'host-one',projectId:'project-one',threadId},
+  )).find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
+  const token = await tokenFor('thread-one');
+  const foreign = await tokenFor('thread-two');
+  const post = (input:object, caller=token) => host.harness.behavior.fetchHttp('POST','/native/agy',{
+    headers:{authorization:`Bearer ${caller}`},body:JSON.stringify(input),
+  });
+  const maintenance = (action:string) => cli('maintenance',action,...(action==='status'?[]:['--owner',upgradeOwner]),'--json');
+  const acquire = () => ({action:'acquire',executorId:executor.id,sessionId:randomUUID()});
+  return {host, plugin, cli, post, maintenance, acquire, foreign};
+}
+
+it('drains only owned active native polls and seals once only queued leases remain', async()=>{
+  const f = await upgradeFixture();
+  try {
+    const original = f.acquire();
+    const active = await (await f.post(original)).json();
+    const queued = await (await f.post(f.acquire())).json();
+    expect(active.state).toBe('active');
+    expect(queued.state).toBe('queued');
+    expect((await f.maintenance('acquire-upgrade')).exitCode).toBe(0);
+    const poll = {action:'poll',leaseId:active.leaseId};
+    expect((await f.post(poll)).status).toBe(200);
+    expect((await f.post(poll,f.foreign)).status).toBe(403);
+    expect(JSON.parse((await f.maintenance('status')).stdout)).toMatchObject({transportInFlight:1,nativeDrain:true});
+    expect(await f.host.harness.behavior.callRpc('maintenance.status',null)).toMatchObject({transportInFlight:1,nativeDrain:true});
+    expect((await f.maintenance('seal-upgrade')).exitCode).toBe(1);
+    for (const input of [original,f.acquire(),{action:'unlock-start',leaseId:active.leaseId}]) {
+      expect(await (await f.post(input)).json()).toEqual({error:'POOL_MAINTENANCE'});
+    }
+    expect((await f.post({action:'unlock-cancel',leaseId:active.leaseId})).status).toBe(200);
+    expect((await f.post({action:'release',leaseId:active.leaseId,completed:true})).status).toBe(200);
+    const queuedPoll = {action:'poll',leaseId:queued.leaseId};
+    expect(await (await f.post(queuedPoll)).json()).toEqual({error:'POOL_MAINTENANCE'});
+    const sealed = await f.maintenance('seal-upgrade');
+    expect(sealed.exitCode).toBe(0);
+    expect(JSON.parse(sealed.stdout)).toMatchObject({transportInFlight:0,lease:{upgrade:'sealed'}});
+    expect(await (await f.post(queuedPoll)).json()).toEqual({error:'POOL_MAINTENANCE'});
+  } finally {await f.host.harness.lifecycle.dispose();}
+});
+
+it('draining rechecks thread policy and treats expired active leases as blockers',async()=>{
+  let now = 1_800_000_000_000;
+  const f = await upgradeFixture(()=>now);
+  try {
+    const {leaseId} = await (await f.post(f.acquire())).json();
+    expect((await f.maintenance('acquire-upgrade')).exitCode).toBe(0);
+    expect((await f.cli('bypass','thread-one')).exitCode).toBe(0);
+    const poll = {action:'poll',leaseId};
+    expect(await (await f.post(poll)).json()).toEqual({error:'native-thread-bypassed'});
+    now += 125_000;
+    expect((await f.post(poll)).status).toBe(503);
+    expect(JSON.parse((await f.maintenance('status')).stdout).transportInFlight).toBe(1);
+    expect((await f.maintenance('seal-upgrade')).exitCode).toBe(1);
+    expect((await f.post({action:'release',leaseId,completed:true})).status).toBe(409);
+    expect((await f.post({action:'release',leaseId,stopped:true})).status).toBe(200);
+    expect((await f.maintenance('seal-upgrade')).exitCode).toBe(0);
+  } finally {await f.host.harness.lifecycle.dispose();}
+});
+
+it.each(['activate','release','failed-release'])('orders seal after an in-flight native %s write',async operation=>{
+  const f = await upgradeFixture();
+  const release = operation!=='activate';
+  const {leaseId} = release ? await (await f.post(f.acquire())).json() : {};
+  const kv = f.host.bb.storage.kv;
+  const set = kv.set.bind(kv);
+  let openWrite!:()=>void;
+  let entered!:()=>void;
+  const blocked = new Promise<void>(resolve=>{entered=resolve;});
+  const resume = new Promise<void>(resolve=>{openWrite=resolve;});
+  const spy = vi.spyOn(kv,'set').mockImplementation(async(key,value)=>{
+    if(key==='native-agy-sessions-v1'){
+      entered();
+      await resume;
+      if(operation==='failed-release')throw Error('fixture write failure');
+    }
+    return set(key,value);
+  });
+  try {
+    const pending = f.post(release ? {action:'release',leaseId,stopped:true} : f.acquire());
+    await blocked;
+    expect((await f.maintenance('acquire-upgrade')).exitCode).toBe(0);
+    expect(JSON.parse((await f.maintenance('status')).stdout).transportInFlight).toBe(1);
+    let finished = false;
+    const sealing = f.maintenance('seal-upgrade').then(result=>{finished=true;return result;});
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    expect(finished).toBe(false);
+    openWrite();
+    expect((await pending).status).toBe(operation==='failed-release'?503:200);
+    expect((await sealing).exitCode).toBe(operation==='release'?0:1);
+  } finally {
+    openWrite();
+    spy.mockRestore();
+    await f.host.harness.lifecycle.dispose();
+  }
+});
+
+it('rechecks admission after host verification for acquire, queued poll and unlock-start',async()=>{
+  let checks=0;
+  let resume!:()=>void;
+  const gate=new Promise<void>(resolve=>{resume=resolve;});
+  let hold=false;
+  const f=await upgradeFixture(Date.now,async()=>{
+    if(hold){checks++;await gate;}
+  });
+  try {
+    const active=await (await f.post(f.acquire())).json();
+    const queued=await (await f.post(f.acquire())).json();
+    hold=true;
+    const incoming=[
+      f.post(f.acquire()),
+      f.post({action:'poll',leaseId:queued.leaseId}),
+      f.post({action:'unlock-start',leaseId:active.leaseId}),
+    ];
+    await vi.waitFor(()=>expect(checks).toBe(3));
+    expect((await f.maintenance('acquire-upgrade')).exitCode).toBe(0);
+    expect((await f.post({action:'release',leaseId:active.leaseId,completed:true})).status).toBe(200);
+    resume();
+    for(const response of await Promise.all(incoming)) {
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({error:'POOL_MAINTENANCE'});
+    }
+    expect((await f.maintenance('seal-upgrade')).exitCode).toBe(0);
+  } finally {resume();await f.host.harness.lifecycle.dispose();}
+});
+
+it('reload quarantines active leases and refuses to seal a persisted drain',async()=>{
+  const f=await upgradeFixture();
+  let host=f.host;
+  try {
+    const {leaseId}=await (await f.post(f.acquire())).json();
+    expect((await f.maintenance('acquire-upgrade')).exitCode).toBe(0);
+    host=await host.harness.lifecycle.reload(f.plugin);
+    const cli=(...args:string[])=>host.harness.behavior.runCli(args);
+    expect(JSON.parse((await cli('native','status','--json')).stdout).leases).toMatchObject([{id:leaseId,state:'uncertain'}]);
+    expect(JSON.parse((await cli('maintenance','status','--json')).stdout)).toMatchObject({transportInFlight:1,lease:{upgrade:'draining'}});
+    expect((await cli('maintenance','seal-upgrade','--owner',upgradeOwner,'--json')).exitCode).toBe(1);
+    const env=await host.harness.behavior.resolveProviderEnv('acp-agy',{hostId:'host-one',projectId:'project-one',threadId:'thread-one'});
+    const token=env.find(e=>e.name==='OXI_AGY_NATIVE_TOKEN')!.value;
+    const poll=await host.harness.behavior.fetchHttp('POST','/native/agy',{
+      headers:{authorization:`Bearer ${token}`},body:JSON.stringify({action:'poll',leaseId}),
+    });
+    expect(poll.status).toBe(503);
+    expect(await poll.json()).toEqual({error:'POOL_MAINTENANCE'});
+    expect((await cli('native','attest-stopped',leaseId,'--confirmed')).exitCode).toBe(0);
+    expect((await cli('maintenance','seal-upgrade','--owner',upgradeOwner,'--json')).exitCode).toBe(0);
   } finally {await host.harness.lifecycle.dispose();}
 });

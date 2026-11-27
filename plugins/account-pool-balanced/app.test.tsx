@@ -240,7 +240,7 @@ describe("Account Pool settings", () => {
     await slot.findByText('Подготовка и обновление выполняются. Работа возобновится автоматически.');
     expect(slot.getByRole('button',{name:'Проверяю обновление…'}).hasAttribute('disabled')).toBe(true);
     expect(start).toHaveBeenCalledTimes(1);
-    expect(slot.getByText(/Приостановит сессии и запросы автопилота/)).toBeTruthy();
+    expect(slot.getByText(/Новые сообщения подождут в очереди/)).toBeTruthy();
   });
   it("explains when the installed Pooler release is already current", async () => {
     const operation = {

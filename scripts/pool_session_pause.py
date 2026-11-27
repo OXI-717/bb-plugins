@@ -69,11 +69,12 @@ class SessionPause:
     def show(self, thread_id):
         return self.identity(self.bb('thread', 'show', thread_id)['thread'])
 
-    def acquire_hold(self):
+    def acquire_hold(self, *, drain_timeout=0):
         self.state['admission'] = 'acquire-intent'
         self.save()
-        value = self.bb('pool-maintenance', 'acquire', '--owner', self.state['operationId'])
-        verify_hold(value, self.state['operationId'])
+        command = 'acquire-drain' if drain_timeout > 600 else 'acquire'
+        value = self.bb('pool-maintenance', command, '--owner', self.state['operationId'])
+        verify_hold(value, self.state['operationId'], minimum_ms=(drain_timeout + 900) * 1000)
         self.state['admission'] = 'held'
         self.save()
 
@@ -116,31 +117,31 @@ class SessionPause:
             self.state['modelAdmission'] = 'not-owned-or-expired'
         self.save()
 
-    def drain(self, idle, deadline_seconds=600):
+    def drain(self, idle, deadline_seconds=600, *, deadline=None):
         """Hold dispatch, wait for natural completion; never stop or continue turns."""
         self.state['mode'] = 'graceful'
         self.state['phase'] = 'draining'
         self.save()
-        deadline = self.clock() + deadline_seconds
+        if deadline is None:
+            deadline = self.clock() + deadline_seconds
+        next_report = self.clock()
         stable = 0
         while self.clock() < deadline:
             verify_hold(self.bb('pool-maintenance', 'status'), self.state['operationId'])
             rows = self.running()
             stable = stable + 1 if not rows and idle() else 0
+            now = self.clock()
+            if now >= deadline:
+                break
             if stable == 3:
                 self.state['phase'] = 'drained'
                 self.save()
                 return
-            self.sleep(3)
+            if now >= next_report:
+                self.say(f'Waiting for existing work and warm runtimes to finish ({len(rows)} running BB sessions).')
+                next_report = now + 60
+            self.sleep(min(3, deadline - now))
         raise RuntimeError('Natural session drain expired; no sessions interrupted, nothing updated')
-
-    def acquire_graceful_model_hold(self):
-        self.state['modelAdmission'] = 'acquire-intent'
-        self.save()
-        value = self.bb('pool', 'maintenance', 'acquire-graceful', '--owner', self.state['operationId'])
-        verify_model_hold(value, self.state['operationId'])
-        self.state['modelAdmission'] = 'held'
-        self.save()
 
     def stop(self):
         # The CLI thread list is paginated; never use it as a complete inventory.
@@ -273,14 +274,14 @@ class SessionPause:
                 self.release_hold()
 
 
-def verify_hold(value, owner, now=None):
+def verify_hold(value, owner, now=None, *, minimum_ms=900_000):
     now = time.time() * 1000 if now is None else now
     lease = value.get('lease') if isinstance(value, dict) else None
     if (not isinstance(value, dict) or value.get('schemaVersion') != 1 or value.get('scope') != 'all-hosts-all-projects'
             or not isinstance(lease, dict) or lease.get('owner') != owner
             or type(lease.get('expiresAt')) not in (int, float)
             or not math.isfinite(lease['expiresAt'])
-            or lease['expiresAt'] - now < 900_000):
+            or lease['expiresAt'] - now < minimum_ms):
         raise RuntimeError('Maintenance dispatch pause is missing, foreign or expiring; update refused')
 
 

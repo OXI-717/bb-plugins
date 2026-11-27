@@ -77,6 +77,7 @@ export class NativeSessions {
   private diagnostics=new Map<string,{input:NativeProbeInput;caller:NativeCaller;deadline:number;reservationId:string;sessionId?:string;finished?:boolean}>();
   private tail:Promise<unknown>=Promise.resolve();
   private failed=false;
+  private persistedBlockers=0;
   private unlockJobs=new Map<string,{abort:AbortController;done:Promise<void>}>();
   constructor(private storage:Storage,private now=Date.now,private admit: (hostId:string,caller:NativeCaller)=>Promise<void>=async()=>{},
     private validateExecution:(executor:Executor)=>void=executor=>{if(executor.execution)throw new NativeSessionError(503,'native-execution-unprepared');},
@@ -88,18 +89,38 @@ export class NativeSessions {
     for(const lease of this.state.leases)if(lease.state==='active')this.uncertain(lease);
     this.sweep();
     await this.storage.set(KEY,this.state);
+    this.persistedBlockers=this.countBlockers();
   }
   managed(){return this.state.managed;}
-  private async serial<T>(fn:()=>T|Promise<T>):Promise<T>{
-    const run=this.tail.then(async()=>{
+  private countBlockers(){
+    return this.state.leases.filter(lease=>lease.state==='active'||lease.state==='uncertain').length;
+  }
+  upgradeBlockers(){
+    // A release is only final once stored. Expired active leases still count.
+    return Math.max(this.countBlockers(),this.persistedBlockers,Number(this.failed));
+  }
+  withUpgradeSeal<T>(seal:()=>Promise<T>):Promise<T>{
+    // The drain latch closes admission while we wait for pending native writes.
+    // Hold the lane until maintenance has persisted the seal.
+    return this.enqueue(seal);
+  }
+  private enqueue<T>(fn:()=>Promise<T>):Promise<T>{
+    const run=this.tail.then(()=>{
       if(this.failed)throw new NativeSessionError(503,'native-storage-unavailable');
+      return fn();
+    });
+    this.tail=run.catch(()=>{});
+    return run;
+  }
+  private serial<T>(fn:()=>T|Promise<T>):Promise<T>{
+    return this.enqueue(async()=>{
       this.sweep();
       const result=await fn();
       try{await this.storage.set(KEY,structuredClone(this.state));}
       catch{this.failed=true;throw new NativeSessionError(503,'native-storage-unavailable');}
+      this.persistedBlockers=this.countBlockers();
       return result;
     });
-    this.tail=run.catch(()=>{});return run;
   }
   private event(lease:Lease,event:z.infer<typeof eventSchema>['event']){
     const now=this.now();
@@ -284,11 +305,18 @@ export class NativeSessions {
     });
   }
 
-  admissionCheck: () => void = () => {};
-  async request(caller:NativeCaller,raw:unknown,diagnosticToken?:string):Promise<NativeReply>{const input=nativeRequestSchema.parse(raw);
+  admissionCheck: (activePoll?:()=>boolean) => void = () => {};
+  async request(caller:NativeCaller,raw:unknown,diagnosticToken?:string):Promise<NativeReply>{
+    return this.handleRequest(caller,nativeRequestSchema.parse(raw),diagnosticToken,true);
+  }
+  private async handleRequest(caller:NativeCaller,input:z.infer<typeof nativeRequestSchema>,diagnosticToken:string|undefined,allowDrainPoll:boolean):Promise<NativeReply>{
     if(input.action==='acquire'&&input.catalogProcess&&input.kind!=='catalog')
       throw new NativeSessionError(400,'native-catalog-process-only');
-    if(input.action!=='release'&&input.action!=='unlock-cancel')this.admissionCheck();
+    const activePoll=allowDrainPoll&&input.action==='poll'?()=>{
+      const lease=this.owned(caller,input.leaseId);
+      return lease.state==='active'&&lease.deadline>this.now();
+    }:undefined;
+    if(input.action!=='release'&&input.action!=='unlock-cancel')this.admissionCheck(activePoll);
     if(diagnosticToken&&(input.action==='unlock-start'||input.action==='unlock-cancel'))throw new NativeSessionError(403,'native-diagnostic-only');
     if(input.action==='unlock-start')return this.startUnlock(caller,input.leaseId);
     if(input.action==='unlock-cancel')return this.cancelUnlock(caller,input.leaseId);
@@ -318,7 +346,7 @@ export class NativeSessions {
       if(reservation?.finished&&diagnosticToken)this.diagnostics.delete(createHash('sha256').update(diagnosticToken).digest('hex'));
       return {released:true};
     }
-    this.admissionCheck();
+    this.admissionCheck(activePoll);
     if(!this.state.managed)throw new NativeSessionError(503,'native-not-managed');
     let lease:Lease;
     if(input.action==='acquire'){
@@ -388,7 +416,7 @@ export class NativeSessions {
     this.validateExecution(executor);return lease;
   }
   private async startUnlock(caller:NativeCaller,leaseId:string){
-    await this.request(caller,{action:'poll',leaseId}); // Same admission/Guard checks, no new authority.
+    await this.handleRequest(caller,{action:'poll',leaseId},undefined,false); // Check Guard without the drain exception.
     const issued=await this.serial(()=>{
       this.admissionCheck();
       const lease=this.owned(caller,leaseId);

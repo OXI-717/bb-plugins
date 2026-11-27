@@ -1,5 +1,5 @@
 import {describe,it,expect,vi} from 'vitest';
-import {PoolMaintenance} from './maintenance.js';
+import {maintenanceStatusSchema,PoolMaintenance} from './maintenance.js';
 
 const owner='11111111-1111-4111-8111-111111111111';
 const foreign='22222222-2222-4222-8222-222222222222';
@@ -105,4 +105,19 @@ it('keeps one live admission generation across an upgrade refusal for a later ha
   expect(gate.signal).toBe(duringUpgrade);
   await gate.acquire(foreign);
   expect(duringUpgrade.aborted).toBe(true);
+});
+
+it('latches native admission while persisting the upgrade and clears a failed acquire',async()=>{
+  let rejectWrite!:(reason:Error)=>void;
+  const write=new Promise<void>((_resolve,reject)=>{rejectWrite=reject;});
+  const save=vi.fn(()=>write);
+  const gate=new PoolMaintenance(save);
+  const failed=expect(gate.acquireUpgrade(owner)).rejects.toThrow('storage failed');
+  await vi.waitFor(()=>expect(save).toHaveBeenCalledOnce());
+  expect(gate.nativeAdmission).toBe('draining');
+  expect(gate.status().lease).toBeNull();
+  rejectWrite(new Error('storage failed'));
+  await failed;
+  expect(gate.nativeAdmission).toBe('open');
+  expect(maintenanceStatusSchema.parse({schemaVersion:1,scope:'all-model-clients',transportInFlight:0,lease:null}).nativeDrain).toBeUndefined();
 });

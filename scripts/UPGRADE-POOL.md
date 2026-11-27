@@ -6,7 +6,7 @@ Run on the BB server host, from a checkout of this repository:
 git pull --ff-only
 bash scripts/upgrade-pool.sh --sandbox
 bash scripts/upgrade-pool.sh --check
-bash scripts/upgrade-pool.sh --pause-sessions
+bash scripts/upgrade-pool.sh --drain-sessions --operator-key-file "$OPERATOR_KEY_FILE"
 ```
 
 Requirements: `bb`, `git`, Python 3.9+ and a local BB connection. The entrypoint
@@ -92,9 +92,9 @@ hold must have 15 minutes remaining. Missing/foreign/expiring hold refuses updat
 The model hold parks new authenticated HTTP requests before they start their
 account queue deadline. Requests already admitted can drain. Once model work
 drains, the updater seals admission before backup, preventing new auxiliary
-transport. Budget and readiness routes report paused. Native acquisition, poll
-and unlock admission refuse, and confirmed release or cancellation remains
-available. If an unconfirmed native process prevents the update, the failure
+transport. Budget and readiness routes report paused. New native leases, queued promotion and unlock admission are refused.
+Authenticated polls for existing active leases keep their usual Guard and
+route checks during drain. Confirmed release and cancellation remain available. If an unconfirmed native process prevents the update, the failure
 lists the executor, lease kind, age and operator confirmation command.
 The model hold is persisted and loaded before new routes are exposed after
 reload. The updater never resends a request that reached its provider.
@@ -131,7 +131,7 @@ No recovery is promised while BB is not running. No prompts or credentials in re
 ## Update from the pool interface
 
 Pooler 0.4.79+ includes **Обновить Pooler** in its settings. It launches the same
-accepted `--pause-sessions` updater in a BB machine terminal on the server host.
+accepted `--drain-sessions --drain-timeout 2400` updater in a BB machine terminal on the server host.
 The terminal survives pool reload and does not belong to a stopped agent thread.
 Before launch, a private operation directory receives a fixed copy of the updater
 and its Python modules. Its working directory is outside the managed Git cache,
@@ -148,9 +148,9 @@ of the BB machine terminal and private recovery receipt. A failed or disconnecte
 terminal is not reported as a successful update.
 
 Bootstrapping from an older pool without the model-admission API requires its
-previously accepted updater and a coordinated idle window once. The new updater
-refuses the missing API before stopping sessions; it never claims that old external
-clients were paused. Subsequent CLI and interface updates use both barriers.
+previously accepted updater and a coordinated idle window once. The drain updater requires the installed Pooler to advertise native drain support
+before taking either hold. The extended mode also requires `pool-maintenance`
+with `acquire-drain`. It never falls back to stopping active turns.
 
 ## Natural completion without interruption
 
@@ -164,18 +164,28 @@ the existing management client issues and revokes a fresh 60-second grant for
 each command, including post-reload validation and hold release. The interface
 passes only a fixed server-owned file path, never its contents; the browser
 cannot choose a path or command. The two credential flags are mutually exclusive.
-The dispatch queue is held for at most 30 minutes; natural completion waits up
-to 600 seconds (`--drain-timeout`). No thread stop, continuation, model interrupt
-or concurrency change occurs. Three complete empty inventories are required.
-The owned all-client barrier uses `acquire-graceful`, which blocks admission
-without aborting existing transport. The usual backup, idle checks and source,
-account, routing and integrity validation still run. Release and recovery retain
-ownership checks; the private receipt has no stopped sessions to restart.
+Both drain phases share one deadline, 600 seconds by default in CLI mode. The update
+button uses 2400 seconds to give BB's default 30-minute idle-provider reaper time
+to close warm runtimes. A drain longer than 600 seconds takes a bounded one-hour
+dispatch hold instead of the normal 30-minute hold. The updater verifies the
+remaining time before sealing and before reload. It never changes BB's idle
+timeout. If the configured timeout or remaining work outlasts the drain, both
+owned holds are released and the installed plugin stays in place.
 
-Bootstrap: installations without `acquire-graceful` cannot use that API. There is
-no fallback to cancelling `acquire`. Coordinate a separately proven idle window
-with external admission controlled before first installation. Active external
-requests are a blocker, even when BB sessions have finished.
+BB turns finish under the dispatch hold before the all-client upgrade hold is
+taken. Once the second hold starts, no new native lease or queued promotion is
+allowed. Existing active native leases can renew with normal Guard and owner
+checks. Active and unconfirmed native leases block sealing until the authoritative
+release or stop confirmation is durably stored. An ordinary queued native lease
+is not permission to run. The updater verifies the sealed hold through backup and
+reload before reopening admission. It does not stop BB threads or replay prompts.
+Unexpected plugin restart retains the existing quarantine for active leases.
+
+For the first installation on a Pooler without `nativeDrain`, coordinate an idle
+window using the existing accepted updater. Install the released extended
+queue hold before using the new button. A reaped warm ACP process releases its
+lease through the normal launcher cleanup. Unsupported or unconfirmed runtimes
+remain blockers, even after BB turns have finished.
 
 ## Candidate preflight before publication or installation
 
