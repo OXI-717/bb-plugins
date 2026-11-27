@@ -70,7 +70,7 @@ export function NativeAccountRow({
       metrics={
         <div className="text-left text-xs tabular-nums" title="Сеансы в работе / предел">
           <div className="font-semibold text-foreground">Сеансы <span>{account.active} / {maxSessions}</span></div>
-          <QuotaEmpty state="no-data" />
+          <QuotaEmpty state={managed ? "not-connected" : "no-data"} />
         </div>
       }
       actions={

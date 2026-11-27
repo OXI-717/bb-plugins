@@ -403,6 +403,11 @@ describe("Account Pool settings", () => {
     expect(within(first).getByText("Приоритет 2")).toBeTruthy();
     expect(within(first).getByText("Активные допуски: 1")).toBeTruthy();
     expect(within(second).queryByText(/Активные допуски/)).toBeNull();
+    for (const row of [first, second]) {
+      const metrics = within(row).getByTitle("Сеансы в работе / предел");
+      expect(within(metrics).getByText("Pooler пока не получает квоты", {exact: true})).toBeTruthy();
+      expect(within(row).queryByText("Источник не отдаёт данные о квотах")).toBeNull();
+    }
     expect(slot.getByText(/Активные допуски: 1; в очереди: 2/)).toBeTruthy();
     expect(slot.queryByText("Текущий")).toBeNull();
     expect(slot.queryByText(/использован/)).toBeNull();
@@ -447,6 +452,7 @@ describe("Account Pool settings", () => {
     expect(within(slot.getByRole("button", {name:"Открыть error@example.com"})).getByText("Ошибка сбора квот")).toBeTruthy();
     expect(within(slot.getByRole("button", {name:"Открыть pending@example.com"})).getByText("Данные о квотах ещё не получены")).toBeTruthy();
     expect(within(slot.getByRole("button", {name:"Открыть grok@example.com"})).getByText("Источник не отдаёт данные о квотах")).toBeTruthy();
+    expect(slot.queryByText("Pooler пока не получает квоты")).toBeNull();
   });
 
   it("uses only fresh matching OAuth Antigravity evidence and clears each value at its real reset", async () => {
