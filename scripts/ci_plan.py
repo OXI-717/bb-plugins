@@ -32,7 +32,7 @@ UPGRADE_INPUTS = {'scripts/upgrade-pool.sh', 'scripts/upgrade-protection.sh',
                   'scripts/pool_session_pause.py', 'scripts/pool_candidate_preflight.py',
                   'scripts/test_pool_candidate_preflight.py'}
 TAG_VERSION = re.compile(r'([a-z0-9-]+)/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
-KNOWN_PLUGINS = set(PLUGINS) | {'oxi-op', 'auto-archive', 'oxi-thread-list'}
+KNOWN_PLUGINS = set(PLUGINS) | {'oxi-op', 'auto-archive', 'oxi-thread-list', 'oxi-provider-icons'}
 
 
 def cursor_required(paths, version_paths=()):
@@ -81,7 +81,7 @@ def plan(paths, full=False, version_plugin=None, version_paths=()):
     mac = set()
     upgrade = False
     upgrade_mac = False
-    op = archive = session_tree = False
+    op = archive = session_tree = provider_icons = False
     for path in paths:
         if path == CURSOR_TEST:
             continue
@@ -108,12 +108,14 @@ def plan(paths, full=False, version_plugin=None, version_paths=()):
             archive = True
         elif path.startswith('plugins/oxi-thread-list/'):
             session_tree = True
+        elif path.startswith('plugins/oxi-provider-icons/'):
+            provider_icons = True
         else:
             # Includes workflow/planner/shared/lockfile changes and deleted paths.
             full = True
     if full:
         selected, mac = set(PLUGINS), set(PLUGINS)
-        upgrade = upgrade_mac = op = archive = session_tree = True
+        upgrade = upgrade_mac = op = archive = session_tree = provider_icons = True
     # Required branch-protection contexts must exist even for docs-only PRs.
     # Keep selection separate so these placeholder rows do no expensive work.
     matrix = [{'os': osname, 'plugin': plugin,
@@ -124,7 +126,7 @@ def plan(paths, full=False, version_plugin=None, version_paths=()):
               (plugin in selected and (osname == 'ubuntu-latest' or plugin in mac))]
     return {'matrix': {'include': matrix}, 'check': bool(matrix),
             'upgrade': upgrade, 'upgrade_mac': upgrade_mac, 'op': op, 'archive': archive,
-            'cursor': cursor, 'session_tree': session_tree}
+            'cursor': cursor, 'session_tree': session_tree, 'provider_icons': provider_icons}
 
 
 def changed_paths(base, head):
