@@ -153,3 +153,105 @@ it('passes only the remaining budget to ifconfig after parallel commands',async(
   expect(recordedTimeouts.length).toBeGreaterThan(0);
   expect(recordedTimeouts[0]).toBeLessThanOrEqual(1000);
 });
+
+it('readCommand distinguishes subprocess timeout from non-zero exit error',async()=>{
+  const controller=new AbortController();
+  controller.abort();
+  await expect(readCommand('/bin/echo',['test'],{signal:controller.signal})).rejects.toThrow('timeout');
+
+  await expect(readCommand('/bin/sleep',['2'],{timeout:10})).rejects.toThrow('timeout');
+
+  await expect(readCommand('/bin/false',[])).rejects.toThrow('VPN state command unavailable');
+});
+
+it('returns read_deadline when ifconfig times out before the overall deadline',async()=>{
+  const {read:baseRead}=fixture();
+  const mockRead:Reader=async(file,args,options)=>{
+    if(file==='/sbin/ifconfig'){
+      throw Error('timeout');
+    }
+    return baseRead(file,args,options);
+  };
+  const result=await readPassiveState(mockRead,'darwin',Date.now,{timeoutMs:2000});
+  expect(result).toEqual({state:'unknown',assurance:'invalid',reason:'read_deadline',updatedAt:null,probeAt:null});
+
+  const root=await mkdtemp(path.join(tmpdir(),'vpn-passive-'));
+  try{
+    const file=path.join(root,'nonexistent');
+    const stored:VpnEvidence={state:'unknown',assurance:'invalid',reason:'invalid_evidence',updatedAt:null,probeAt:null};
+    const selectResult=await selectVpnEvidence(file,stored,async()=>result,{timeoutMs:2000});
+    expect(selectResult).toMatchObject({state:'unknown',assurance:'invalid',reason:'read_deadline'});
+  }finally{
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+it('returns invalid_evidence when ifconfig encounters an ordinary command failure within budget',async()=>{
+  const {read:baseRead}=fixture();
+  const mockRead:Reader=async(file,args,options)=>{
+    if(file==='/sbin/ifconfig'){
+      throw Error('VPN state command unavailable');
+    }
+    return baseRead(file,args,options);
+  };
+  const result=await readPassiveState(mockRead,'darwin',Date.now,{timeoutMs:2000});
+  expect(result).toEqual({state:'unknown',assurance:'invalid',reason:'invalid_evidence',updatedAt:null,probeAt:null});
+
+  const root=await mkdtemp(path.join(tmpdir(),'vpn-passive-'));
+  try{
+    const file=path.join(root,'nonexistent');
+    const stored:VpnEvidence={state:'unknown',assurance:'invalid',reason:'invalid_evidence',updatedAt:null,probeAt:null};
+    const selectResult=await selectVpnEvidence(file,stored,async()=>result,{timeoutMs:2000});
+    expect(selectResult).toMatchObject({state:'unknown',assurance:'invalid',reason:'invalid_evidence'});
+  }finally{
+    await rm(root,{recursive:true,force:true});
+  }
+});
+
+it('returns read_deadline when ifconfig remainder budget is exhausted',async()=>{
+  const {read:baseRead}=fixture();
+  let elapsed=0;
+  const clock=vi.spyOn(performance,'now').mockImplementation(()=>elapsed);
+  const slowParallelRead:Reader=vi.fn(async(file,args,options)=>{
+    if(file==='/sbin/route')elapsed=51;
+    return baseRead(file,args,options);
+  });
+  try{
+    const result=await readPassiveState(slowParallelRead,'darwin',()=>elapsed,{timeoutMs:50});
+    expect(result).toMatchObject({state:'unknown',assurance:'invalid',reason:'read_deadline'});
+    expect(slowParallelRead).not.toHaveBeenCalledWith('/sbin/ifconfig',expect.anything(),expect.anything());
+  }finally{
+    clock.mockRestore();
+  }
+});
+
+it('propagates read_deadline on Tailscale status timeout, and preserves ordinary failure',async()=>{
+  const {read:baseRead}=fixture();
+  const timeoutRead:Reader=async(file,args,options)=>{
+    if(file.includes('Tailscale')){
+      throw Error('timeout');
+    }
+    return baseRead(file,args,options);
+  };
+  const timeoutResult=await readPassiveState(timeoutRead,'darwin',Date.now,{timeoutMs:2000});
+  expect(timeoutResult).toMatchObject({state:'unknown',assurance:'invalid',reason:'read_deadline'});
+
+  const failRead:Reader=async(file,args,options)=>{
+    if(file.includes('Tailscale')){
+      throw Error('VPN state command unavailable');
+    }
+    return baseRead(file,args,options);
+  };
+  const failResult=await readPassiveState(failRead,'darwin',Date.now,{timeoutMs:2000});
+  expect(failResult).toMatchObject({state:'unknown',assurance:'invalid',reason:'invalid_evidence'});
+
+  const {read:incyRead}=fixture({iface:'utun244',core:true});
+  for(const message of ['VPN state command unavailable','timeout']){
+    const incyFailRead:Reader=async(file,args,options)=>{
+      if(file.includes('Tailscale'))throw Error(message);
+      return incyRead(file,args,options);
+    };
+    const incyResult=await readPassiveState(incyFailRead,'darwin',Date.now,{timeoutMs:2000});
+    expect(incyResult).toMatchObject({state:'connected',source:'incy'});
+  }
+});

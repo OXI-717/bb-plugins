@@ -6,13 +6,38 @@ import {lstat} from 'node:fs/promises';
 import type {VpnEvidence as FileVpnEvidence} from './vpn-evidence.js';
 export type VpnEvidence=Omit<FileVpnEvidence,'assurance'> & {assurance:FileVpnEvidence['assurance']|'system_ipv4';source?:'incy'|'tailscale'};
 
+function isTimeoutError(error: unknown): boolean {
+  if (!error) return false;
+  const err = error as {
+    message?: string;
+    name?: string;
+    code?: string | number;
+    killed?: boolean;
+    signal?: string | null;
+  };
+  return (
+    err.message === 'timeout' ||
+    err.name === 'AbortError' ||
+    err.code === 'ETIMEDOUT' ||
+    err.code === 'ABORT_ERR' ||
+    Boolean(err.killed) ||
+    err.signal === 'SIGKILL' ||
+    err.signal === 'SIGTERM'
+  );
+}
+
 // Only OS observations: no shell, network probes, VPN controls or state files.
 export type ReaderOptions={timeout?:number;signal?:AbortSignal};
 export type Reader=(file:string,args:string[],options?:ReaderOptions)=>Promise<string>;
 export const readCommand:Reader=(file,args,options)=>new Promise((resolve,reject)=>{
+  if(options?.signal?.aborted)return reject(Error('timeout'));
   const timeout=Math.max(1,Math.min(1200,options?.timeout??1200));
   execFile(file,args,{timeout,killSignal:'SIGKILL',signal:options?.signal,maxBuffer:1048576,encoding:'utf8',env:{...process.env,LC_ALL:'C',...(file===TAILSCALE?{TAILSCALE_BE_CLI:'1'}:{})}},
-    (error,stdout)=>error?reject(Error('VPN state command unavailable')):resolve(stdout));
+    (error,stdout)=>{
+      if(!error)return resolve(stdout);
+      if(options?.signal?.aborted||isTimeoutError(error))return reject(Error('timeout'));
+      return reject(Error('VPN state command unavailable'));
+    });
 });
 export const unknown=():VpnEvidence=>({state:'unknown',assurance:'invalid',reason:'invalid_evidence',updatedAt:null,probeAt:null});
 export const readDeadline=():VpnEvidence=>({state:'unknown',assurance:'invalid',reason:'read_deadline',updatedAt:null,probeAt:null});
@@ -26,7 +51,7 @@ async function snapshot(read:Reader,options?:ReaderOptions) {
     read('/sbin/route',['-n','get','default'],options),
     read('/sbin/route',['-n','get','1.1.1.1'],options),
     read('/bin/ps',['-axo','pid=,lstart=,comm='],options),
-    read(TAILSCALE,['status','--json'],options).catch(()=>''),
+    read(TAILSCALE,['status','--json'],options).catch(err=>isTimeoutError(err)?null:''),
   ]);
   const tunnel=iface(route);
   if(!tunnel)return null;
@@ -34,6 +59,7 @@ async function snapshot(read:Reader,options?:ReaderOptions) {
   const core=processes.split('\n').find(line=>/^\s*[1-9][0-9]*\s+/.test(line)&&(/\s\/Applications\/[^\n]+\/resources\/bin\/xray\s*$/.test(line)||/\s\/Applications\/(?:incy|INCY)\.app\/Contents\/MacOS\/(?:incy|INCY)\s*$/.test(line)));
   if(tunnel==='utun244'&&core)return {source:'incy' as const,epoch:core.trim(),tunnel};
   if(iface(trafficRoute)!==tunnel)return null;
+  if(raw===null)throw Error('timeout');
   const schema=z.object({BackendState:z.string(),ExitNodeStatus:z.object({ID:z.string(),Online:z.boolean()}).nullable().optional(),Self:z.object({TailscaleIPs:z.array(z.string())})});
   let status:z.infer<typeof schema>;
   try {status=schema.parse(JSON.parse(raw));}catch{return null;}
@@ -43,7 +69,7 @@ async function snapshot(read:Reader,options?:ReaderOptions) {
   const addresses=status.Self.TailscaleIPs.filter((value:unknown):value is string=>typeof value==='string'&&isIP(value)===4&&/^100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(value));
   if(!addresses.length)return null;
   const remIfconfig=snapshotBudget-Math.round(performance.now()-startSnapshot);
-  if(remIfconfig<=0||options?.signal?.aborted)return null;
+  if(remIfconfig<=0||options?.signal?.aborted)throw Error('timeout');
   const link=await read('/sbin/ifconfig',[tunnel],{signal:options?.signal,timeout:remIfconfig});
   const bound=addresses.find((address:string)=>link.split('\n').some(line=>line.trim().split(/\s+/).slice(0,2).join(' ')==='inet '+address));
   if(!bound)return null;
@@ -67,8 +93,8 @@ export async function readPassiveState(read:Reader=readCommand,os=platform(),now
     if(now()-started>budget||options?.signal?.aborted)return readDeadline();
     if(!before||!after||JSON.stringify(before)!==JSON.stringify(after))return unknown();
     return {state:'connected',assurance:'system_ipv4',reason:'ok',source:after.source,updatedAt:started,probeAt:null};
-  }catch{
-    if(now()-started>budget||options?.signal?.aborted)return readDeadline();
+  }catch(error){
+    if(isTimeoutError(error)||now()-started>budget||options?.signal?.aborted)return readDeadline();
     return unknown();
   }
 }
@@ -110,7 +136,13 @@ export async function selectVpnEvidence(
   const remForPassive=deadline-now();
   if(remForPassive<=0||options?.signal?.aborted)return readDeadline();
 
-  const passive=await read(readCommand,platform(),now,{signal:options?.signal,timeoutMs:remForPassive});
+  let passive:VpnEvidence;
+  try{
+    passive=await read(readCommand,platform(),now,{signal:options?.signal,timeoutMs:remForPassive});
+  }catch(error){
+    if(isTimeoutError(error)||now()-started>budget||options?.signal?.aborted)return readDeadline();
+    return unknown();
+  }
   if(passive.source==='tailscale'&&passive.state==='connected')return passive;
   if(passive.reason==='read_deadline')return readDeadline();
 
@@ -127,7 +159,7 @@ export async function selectVpnEvidence(
       if(now()-started>budget||options?.signal?.aborted)return readDeadline();
       return passive;
     }
-    if((error as Error).message==='timeout'||now()-started>budget||options?.signal?.aborted)return readDeadline();
+    if(isTimeoutError(error)||(error as Error).message==='timeout'||now()-started>budget||options?.signal?.aborted)return readDeadline();
     return stored;
   }
 }
