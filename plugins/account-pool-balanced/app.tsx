@@ -2002,31 +2002,37 @@ function UnlockedAccountPoolSettings() {
                 }}
               />
             </ConfigFieldRow>
-            <div className="flex items-start justify-between gap-4">
-              <div className="py-2.5">
-                <div className="text-sm text-foreground">Токены машин</div>
-                <div className="mt-0.5 text-xs text-muted-foreground">
-                  {hubHosts}
-                </div>
-              </div>
-              <div className="flex flex-wrap justify-end gap-2 py-2.5">
-                {status?.hosts.map((host) => (
-                  <Button
-                    key={host.hostId}
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      void run(`rotate-${host.hostId}`, async () => {
-                        await rpc.call("token.rotate", {
-                          machine: host.hostId,
-                        });
-                      })
-                    }
-                  >
-                    Обновить {host.hostName ?? host.hostId}
-                  </Button>
-                ))}
-              </div>
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
+      <Collapsible className="rounded-lg border border-border px-4">
+        <CollapsibleTrigger className="flex w-full items-center gap-2 py-2.5 text-sm font-medium text-foreground">
+          <Icon
+            name="ChevronRight"
+            className="size-4 transition-transform [[data-state=open]>&]:rotate-90"
+          />
+          Токены машин
+        </CollapsibleTrigger>
+        <CollapsibleContent className="border-t border-border">
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-2.5">
+            <p className="text-xs text-muted-foreground">
+              {status === null ? "Загрузка…" : hubHosts}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {status?.hosts.map((host) => (
+                <Button
+                  key={host.hostId}
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    void run(`rotate-${host.hostId}`, async () => {
+                      await rpc.call("token.rotate", { machine: host.hostId });
+                    })
+                  }
+                >
+                  Обновить {host.hostName ?? host.hostId}
+                </Button>
+              ))}
             </div>
           </div>
         </CollapsibleContent>
