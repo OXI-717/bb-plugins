@@ -18,6 +18,8 @@ export const DEFAULT_ACCOUNT_POOL_CONFIG = {
   busyOverflow: true,
   pinnedFailover: false,
   switchThreshold: 0.98,
+  fiveHourSwitchThreshold: null,
+  weeklySwitchThreshold: null,
   routingStrategy: "sequential" as const,
   reserveDrainHours: 24,
   restDays: [0, 6],
@@ -106,6 +108,8 @@ export const accountPoolConfigSchema = z
     switchThreshold: switchThresholdSchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.switchThreshold,
     ),
+    fiveHourSwitchThreshold: switchThresholdSchema.nullable().default(null),
+    weeklySwitchThreshold: switchThresholdSchema.nullable().default(null),
     routingStrategy: routingStrategySchema.default(
       DEFAULT_ACCOUNT_POOL_CONFIG.routingStrategy,
     ),
@@ -140,6 +144,8 @@ export const accountPoolConfigSetInputSchema = z
     busyOverflow: z.boolean().optional(),
     pinnedFailover: z.boolean().optional(),
     switchThreshold: switchThresholdSchema.optional(),
+    fiveHourSwitchThreshold: switchThresholdSchema.nullable().optional(),
+    weeklySwitchThreshold: switchThresholdSchema.nullable().optional(),
     routingStrategy: routingStrategySchema.optional(),
     reserveDrainHours: reserveDrainHoursSchema.optional(),
     restDays: restDaysSchema.optional(),

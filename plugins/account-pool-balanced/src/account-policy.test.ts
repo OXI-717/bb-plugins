@@ -1,16 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { accountPolicySchema } from './contracts.js';
+import { accountPolicySchema, accountPoolConfigSchema } from './contracts.js';
 import { policyThresholds, scheduleAllows } from './account-policy.js';
 
 describe('account policies', () => {
+  const legacy = accountPoolConfigSchema.parse({ switchThreshold: .98 });
   const policy = accountPolicySchema.parse({ enabled: true, weeklyKeep: 50, fiveHourKeep: 20 });
   it('inherits when disabled and overrides independently', () => {
-    expect(policyThresholds({ policy: { ...policy, enabled: false } }, .98)).toEqual({ other: .98, fiveHour: .98, weekly: .98 });
-    expect(policyThresholds({ policy }, .98)).toEqual({ other: .98, fiveHour: .8, weekly: .5 });
-    expect(policyThresholds({ policy: { ...policy, fiveHourKeep: null } }, .9).fiveHour).toBe(.9);
+    expect(policyThresholds({ provider: "claude", policy: { ...policy, enabled: false } }, legacy)).toEqual({ other: .98, fiveHour: .98, weekly: .98 });
+    expect(policyThresholds({ provider: "claude", policy }, legacy)).toEqual({ other: .98, fiveHour: .8, weekly: .5 });
+    expect(policyThresholds({ provider: "claude", policy: { ...policy, fiveHourKeep: null } }, accountPoolConfigSchema.parse({ switchThreshold: .9 })).fiveHour).toBe(.9);
+  });
+  it('keeps the legacy threshold for other windows and inherits each fixed ceiling separately', () => {
+    const config = { ...legacy, fiveHourSwitchThreshold: .45, weeklySwitchThreshold: .75 };
+    expect(policyThresholds({ provider: "claude" }, config)).toEqual({ other: .98, fiveHour: .45, weekly: .75 });
+    expect(policyThresholds({ provider: "claude", policy: { ...policy, fiveHourKeep: null } }, config)).toEqual({ other: .98, fiveHour: .45, weekly: .5 });
+    expect(policyThresholds({ provider: "claude", policy: { ...policy, weeklyKeep: null } }, config)).toEqual({ other: .98, fiveHour: .8, weekly: .75 });
   });
   it('drain once bypasses protection', () => {
-    expect(policyThresholds({ policy, drainOnce: true }, .98)).toEqual({ other: 1, fiveHour: 1, weekly: 1 });
+    expect(policyThresholds({ provider: "claude", policy, drainOnce: true }, legacy)).toEqual({ other: 1, fiveHour: 1, weekly: 1 });
   });
   it('respects timezone, overnight start weekday and exclusive end', () => {
     const p = { ...policy, schedule: { timeZone: 'Europe/Paris', intervals: [{ days: [1], start: '22:00', end: '08:00' }] } };
@@ -49,6 +56,21 @@ it('applies separate thresholds to rejection and reset hints', () => {
   expect(isQuotaExhausted(quota, 'opus', limits, 2001)).toBe(false);
   const week = { other: .98, fiveHour: .8, weekly: .3 };
   expect(blockingResetAt(quota, 'opus', week, 1000)).toBe(8000);
+});
+it('uses the weekly rule and temporary ceiling for shared quota while family quota keeps the fixed limit', () => {
+  const config = accountPoolConfigSchema.parse({ switchThreshold: .85, fiveHourSwitchThreshold: .6, weeklySwitchThreshold: .8 });
+  const weeklyBudget = {
+    rule: { mode: 'scheduled' as const, ceiling: 30, steps: [{ hoursBeforeReset: 1, ceiling: 50 }] },
+    override: { ceiling: 70, until: 1500, resetAt: 8000 },
+  };
+  const account = { provider: "claude" as const, weeklyBudget };
+  expect(policyThresholds(account, config, quota, 1000)).toEqual({ other: .85, fiveHour: .6, weekly: .7, familyWeekly: .8 });
+  expect(policyThresholds({ ...account, provider: "cursor" }, config, quota, 1000)).toMatchObject({ weekly: .7 });
+  expect(policyThresholds({ ...account, provider: "cursor" }, config, quota, 1500)).toMatchObject({ weekly: .5 });
+  expect(policyThresholds(account, config, quota, 1500)).toEqual({ other: .85, fiveHour: .6, weekly: .5, familyWeekly: .8 });
+  const policy = accountPolicySchema.parse({ enabled: true, weeklyKeep: 10 });
+  expect(policyThresholds({ ...account, policy }, config, quota, 1000)).toMatchObject({ weekly: .7, familyWeekly: .9 });
+  expect(policyThresholds({ ...account, policy, drainOnce: true }, config, quota, 1000)).toEqual({ other: 1, fiveHour: 1, weekly: 1 });
 });
 it('uses Codex window durations rather than primary/secondary position', () => {
   const q = { ...quota, fiveHourUtilization:null, sevenDayUtilization:null, limitWindows: [

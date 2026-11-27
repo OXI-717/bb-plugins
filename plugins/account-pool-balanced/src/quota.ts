@@ -159,7 +159,7 @@ function activeFamilyWindow(
   );
 }
 
-function thresholdFor(threshold: number | QuotaThresholds, minutes?: number | null): number {
+export function thresholdFor(threshold: number | QuotaThresholds, minutes?: number | null): number {
   if (typeof threshold === 'number') return threshold;
   return minutes === 300 ? threshold.fiveHour : minutes === 10080 ? threshold.weekly : threshold.other;
 }

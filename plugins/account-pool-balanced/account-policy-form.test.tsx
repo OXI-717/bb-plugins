@@ -5,32 +5,39 @@ import { AccountPolicyForm } from './account-policy-form';
 import { accountPolicySchema, type AccountSummary } from './src/contracts.js';
 afterEach(cleanup);
 const account = { provider: 'codex', fiveHourUtilization: null, limitWindows: [], role: 'primary', policy: accountPolicySchema.parse({ enabled: true, weeklyKeep:50 }) } as unknown as AccountSummary;
-it('prefills unsaved personal settings from global values before enabling', async () => {
+it('inherits both windows when enabling and saves only the edited override', async () => {
   const save = vi.fn().mockResolvedValue(undefined);
-  const fresh = { ...account, provider: 'claude', role: 'reserve', policy: undefined } as AccountSummary;
-  render(<AccountPolicyForm account={fresh} threshold={.875} drainHours={36} save={save} />);
-  const fiveHour = screen.getByRole('spinbutton', { name: /Оставлять квоту 5 часов/ }) as HTMLInputElement;
-  const weekly = screen.getByRole('spinbutton', { name: /Оставлять недельную квоту/ }) as HTMLInputElement;
-  expect(fiveHour.value).toBe('12.5');
-  expect(weekly.value).toBe('12.5');
+  const fresh = { ...account, provider: 'codex', role: 'reserve', policy: undefined } as AccountSummary;
+  render(<AccountPolicyForm account={fresh} thresholds={{ fiveHour: .75, weekly: .875 }} drainHours={36} save={save} />);
+  const fiveHour = screen.getByRole('spinbutton', { name: /Фиксированный потолок 5 ч/ }) as HTMLInputElement;
+  const weekly = screen.getByRole('spinbutton', { name: /Фиксированный потолок 7 д/ }) as HTMLInputElement;
+  expect(fiveHour.placeholder).toBe('75');
+  expect(weekly.placeholder).toBe('87.5');
+  expect(fiveHour.value).toBe('');
+  expect(weekly.value).toBe('');
   expect(fiveHour.disabled || fiveHour.closest('fieldset')?.disabled).toBe(true);
   expect((screen.getByRole('spinbutton', { name: /Подключать резерв/ }) as HTMLInputElement).value).toBe('36');
   expect(save).not.toHaveBeenCalled();
   fireEvent.click(screen.getByLabelText('Индивидуальные настройки'));
-  await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, fiveHourKeep: 12.5, weeklyKeep: 12.5, reserveDrainHours: 36 })));
+  await screen.findByText('Настройки сохранены');
+  expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, fiveHourKeep: null, weeklyKeep: null, reserveDrainHours: 36 }));
+  fireEvent.change(fiveHour, { target: { value: '80' } });
+  await screen.findByText('Настройки сохранены');
+  expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, fiveHourKeep: 20, weeklyKeep: null }));
+  expect(screen.getByText(/Переопределён фиксированный потолок 80%/)).toBeTruthy();
+  expect(screen.getByText(/Унаследован фиксированный потолок 87.5%/)).toBeTruthy();
 });
 it('restores saved disabled settings when enabled again', async () => {
   const save = vi.fn().mockResolvedValue(undefined);
   const saved = { ...account, policy: accountPolicySchema.parse({ enabled: false, weeklyKeep: 50 }) };
-  render(<AccountPolicyForm account={saved} threshold={.98} drainHours={24} save={save} />);
+  render(<AccountPolicyForm account={saved} thresholds={{ fiveHour: .98, weekly: .98 }} drainHours={24} save={save} />);
   expect(screen.getByDisplayValue('50')).toBeTruthy();
   fireEvent.click(screen.getByLabelText('Индивидуальные настройки'));
   await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, weeklyKeep: 50 })));
 });
-it('saves disabled override without losing personal values and hides absent five-hour quota', async () => {
+it('saves disabled override without losing personal values', async () => {
   const save = vi.fn().mockResolvedValue(undefined);
-  render(<AccountPolicyForm account={account} threshold={.98} drainHours={24} save={save} />);
-  expect(screen.queryByText('Оставлять квоту 5 часов, %')).toBeNull();
+  render(<AccountPolicyForm account={account} thresholds={{ fiveHour: .98, weekly: .98 }} drainHours={24} save={save} />);
   fireEvent.click(screen.getByLabelText('Индивидуальные настройки'));
 
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ enabled:false, weeklyKeep:50 })));
@@ -38,7 +45,7 @@ it('saves disabled override without losing personal values and hides absent five
 });
 it('retains draft and displays failure instead of claiming save succeeded', async () => {
   const save = vi.fn().mockRejectedValue(new Error('offline'));
-  render(<AccountPolicyForm account={account} threshold={.98} drainHours={24} save={save} />);
+  render(<AccountPolicyForm account={account} thresholds={{ fiveHour: .98, weekly: .98 }} drainHours={24} save={save} />);
   fireEvent.change(screen.getByDisplayValue('50'), { target: { value: '60' } });
   await screen.findByRole('alert');
   expect(screen.queryByText('Настройки сохранены')).toBeNull();
@@ -47,11 +54,11 @@ it('retains draft and displays failure instead of claiming save succeeded', asyn
 
 it('coalesces edits, does not save on mount, and retries failed changes', async () => {
   const save = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);
-  render(<AccountPolicyForm account={account} threshold={.98} drainHours={24} save={save} />);
+  render(<AccountPolicyForm account={account} thresholds={{ fiveHour: .98, weekly: .98 }} drainHours={24} save={save} />);
   expect(save).not.toHaveBeenCalled();
   expect(screen.queryByText('Сохранить настройки')).toBeNull();
-  fireEvent.change(screen.getByDisplayValue('50'), { target: { value: '40' } });
-  fireEvent.change(screen.getByDisplayValue('40'), { target: { value: '30' } });
+  fireEvent.change(screen.getByDisplayValue('50'), { target: { value: '60' } });
+  fireEvent.change(screen.getByDisplayValue('60'), { target: { value: '70' } });
   await screen.findByRole('alert');
   expect(save).toHaveBeenCalledTimes(1);
   expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ weeklyKeep: 30 }));
@@ -63,7 +70,7 @@ it('coalesces edits, does not save on mount, and retries failed changes', async 
 it('keeps dismissal guarded until save succeeds or edits are explicitly discarded', async () => {
   const save = vi.fn().mockRejectedValue(new Error('offline'));
   const guard = vi.fn();
-  render(<AccountPolicyForm account={account} threshold={.98} drainHours={24} save={save} onUnsavedChange={guard} />);
+  render(<AccountPolicyForm account={account} thresholds={{ fiveHour: .98, weekly: .98 }} drainHours={24} save={save} onUnsavedChange={guard} />);
   fireEvent.change(screen.getByDisplayValue('50'), { target: { value: '20' } });
   expect(guard).toHaveBeenLastCalledWith(true);
   await screen.findByRole('alert');
@@ -78,7 +85,7 @@ it('autosaves schedule time edits without losing timezone or selected days', asy
   const save = vi.fn().mockResolvedValue(undefined);
   const scheduled = { ...account, policy: accountPolicySchema.parse({ enabled: true, weeklyKeep: 50,
     schedule: { timeZone: 'Europe/Berlin', intervals: [{ days: [1,2,3,4,5], start: '09:00', end: '18:00' }] } }) };
-  render(<AccountPolicyForm account={scheduled} threshold={.98} drainHours={24} save={save} />);
+  render(<AccountPolicyForm account={scheduled} thresholds={{ fiveHour: .98, weekly: .98 }} drainHours={24} save={save} />);
   fireEvent.change(screen.getByLabelText('Начало интервала 1'), { target: { value: '10:30' } });
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ schedule: {
     timeZone: 'Europe/Berlin', intervals: [{ days: [1,2,3,4,5], start: '10:30', end: '18:00' }],
@@ -89,7 +96,7 @@ it('shows weekday preset and expands custom days without changing the saved sche
   const save = vi.fn().mockResolvedValue(undefined);
   const scheduled = { ...account, policy: accountPolicySchema.parse({ enabled: true, weeklyKeep: 50,
     schedule: { timeZone: 'Europe/Berlin', intervals: [{ days: [1,2,3,4,5], start: '09:00', end: '18:00' }] } }) };
-  render(<AccountPolicyForm account={scheduled} threshold={.98} drainHours={24} save={save} />);
+  render(<AccountPolicyForm account={scheduled} thresholds={{ fiveHour: .98, weekly: .98 }} drainHours={24} save={save} />);
   expect((screen.getByLabelText('Дни интервала 1') as HTMLSelectElement).value).toBe('weekdays');
   expect(screen.queryByLabelText('Пн')).toBeNull();
   fireEvent.change(screen.getByLabelText('Дни интервала 1'), { target: { value: 'custom' } });
