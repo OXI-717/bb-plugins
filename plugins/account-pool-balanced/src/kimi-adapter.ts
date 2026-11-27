@@ -74,9 +74,11 @@ export function createKimiAdapter(options: { usagesUrl: string }): ProviderAdapt
         await response.body?.cancel();
         return "error";
       }
+      const payload: unknown = await response.json().catch(() => undefined);
+      if (payload === undefined) return "error";
       const quota = kimiQuotaFromUsages(
         context.account.id,
-        await response.json().catch(() => null),
+        payload,
         context.quotas.get(context.account.id),
         context.now(),
       );

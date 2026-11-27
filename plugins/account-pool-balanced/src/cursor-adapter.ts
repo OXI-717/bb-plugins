@@ -248,7 +248,7 @@ export function createCursorAdapter(options: {
       const rawUsed = parsed.data.planUsage?.totalPercentUsed;
       if (rawUsed == null) return "no-data";
       const used = Number(rawUsed);
-      if (String(rawUsed).trim() === "" || !Number.isFinite(used) || used < 0 || used > 100) return "error";
+      if (String(rawUsed).trim() === "" || !Number.isFinite(used) || used < 0) return "error";
       const cycleEnd = parseReset(parsed.data.billingCycleEnd ?? null);
       const previous = context.quotas.get(context.account.id);
       context.quotas.put({
@@ -256,7 +256,8 @@ export function createCursorAdapter(options: {
         providerBudgetEvidence:providerEvidenceFromUsage('cursor',parsed.data,context.now()),
         // Cursor meters one billing cycle rather than a rolling week; it lands in the
         // long-window slot because that is the one the gate paces against.
-        sevenDayUtilization: Math.min(Math.max(used / 100, 0), 1),
+        // Over-plan usage saturates pacing even when it cannot produce strict budget evidence.
+        sevenDayUtilization: Math.min(used / 100, 1),
         sevenDayResetAt: cycleEnd !== null && cycleEnd > 0 && cycleEnd <= 8.64e15 ? cycleEnd : null,
         sevenDayStatus: null,
         observedAt: context.now(),

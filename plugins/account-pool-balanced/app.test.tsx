@@ -796,6 +796,30 @@ describe("Account Pool settings", () => {
     expect(slot.getByText("—")).toBeTruthy();
   });
 
+  it("shows Claude family-only quotas in the row and in account details", async () => {
+    const resetAt = Date.now() + 3_600_000;
+    const family = (utilization: number) => ({
+      utilization, resetAt, status:null, observedAt:Date.now(), source:"usage" as const,
+    });
+    const slot = render([account({
+      fiveHourUtilization:null,
+      familyWeekly:{fable:null, sonnet:family(.25), opus:family(.5), haiku:family(.75), other:null},
+    })], {"projects.list":() => []});
+    const button = await slot.findByRole("button", {name:"Открыть person@example.com"});
+    const row = within(button);
+    expect(row.queryByText("Данные о квотах ещё не получены")).toBeNull();
+    expect(row.getByText("Осталось 75%")).toBeTruthy();
+    expect(row.getByText("Осталось 50%")).toBeTruthy();
+    expect(row.getByText("Осталось 25%")).toBeTruthy();
+    fireEvent.click(button);
+    const details = within(slot.getByRole("region", {name:"person@example.com"}));
+    for (const [label, remaining] of [["Sonnet",75],["Opus",50],["Haiku",25]] as const) {
+      const familyRow = details.getByText(`${label}, неделя`).parentElement!;
+      expect(within(familyRow).getByText(new RegExp(`осталось ${remaining}%`))).toBeTruthy();
+    }
+    expect(details.queryByText("Данные о квотах ещё не получены")).toBeNull();
+  });
+
   it("keeps the quota slots visible at mobile widths", async () => {
     const slot = render();
     const group = (await slot.findByText("5Ч")).parentElement?.parentElement;

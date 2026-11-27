@@ -452,7 +452,7 @@ type QuotaSlot = {
   requests?: { remaining: number; limit: number };
 };
 
-function hasQuotaValue(slot: QuotaSlot) {
+function hasQuotaValue(slot: Pick<QuotaSlot, "utilization" | "resetAt" | "status">) {
   return slot.utilization !== null || slot.resetAt !== null || slot.status !== null;
 }
 
@@ -517,7 +517,7 @@ function quotaSlots(account: AccountSummary, threshold: PoolThresholdConfig): Qu
   };
   const hasShortWindow = generic.some(slot => slot.label === "5Ч") || (account.provider === "kimi" && generic.length > 0);
   const fable = account.familyWeekly.fable;
-  return [
+  const slots = [
     ...generic,
     ...(!hasShortWindow && (hasQuotaValue(fiveHour) || account.provider === "claude") ? [fiveHour] : []),
     ...(!generic.some(slot => slot.weekly) && (hasQuotaValue(weekly) || account.provider === "claude") ? [weekly] : []),
@@ -526,6 +526,15 @@ function quotaSlots(account: AccountSummary, threshold: PoolThresholdConfig): Qu
       limit: limits.familyWeekly ?? limits.weekly, resetAt: fable.resetAt,
     }] : []),
   ];
+  if (account.provider !== "claude" || slots.some(hasQuotaValue)) return slots;
+  const familySlots = modelFamilySchema.options.flatMap(family => {
+    const quota = account.familyWeekly[family];
+    return quota && hasQuotaValue(quota) ? [{
+      key: family, label: FAMILY_LABELS[family], utilization: quota.utilization, status: quota.status,
+      limit: limits.familyWeekly ?? limits.weekly, resetAt: quota.resetAt,
+    }] : [];
+  });
+  return familySlots.length > 0 ? familySlots : slots;
 }
 
 function quotaToneClass(slot: QuotaSlot, expired: boolean): string {

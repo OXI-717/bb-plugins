@@ -181,8 +181,10 @@ export function createClaudeAdapter(options: {
           );
         }
       }
+      let collectionError: "error" | undefined;
       if (response.ok) {
-        const payload = await response.json().catch(() => null);
+        const payload: unknown = await response.json().catch(() => undefined);
+        if (payload === undefined) collectionError = "error";
         const resets = claudeResetCredits(payload, context.now());
         if (resets === null) context.quotas.clearResetCredits(context.account.id);
         else context.quotas.putResetCredits(context.account.id, resets);
@@ -202,7 +204,7 @@ export function createClaudeAdapter(options: {
         // Expose only the status, not the upstream body, URL or credentials.
         throw new Error(`Claude usage refresh failed with HTTP ${status}.`);
       }
-      if (context.account.accountUuid !== null) return;
+      if (context.account.accountUuid !== null) return collectionError;
       const profile = await context.fetch(options.profileUrl, {
         headers: {
           authorization: `Bearer ${secret.accessToken}`,
@@ -213,7 +215,7 @@ export function createClaudeAdapter(options: {
       });
       if (!profile.ok) {
         await profile.body?.cancel();
-        return;
+        return collectionError;
       }
       const parsed = profileResponseSchema.safeParse(
         await profile.json().catch(() => null),
@@ -224,6 +226,7 @@ export function createClaudeAdapter(options: {
       if (accountUuid !== null) {
         await context.accounts.setAccountUuid(context.account.id, accountUuid);
       }
+      return collectionError;
     },
     errorResponse(status, message, headers, request) {
       return poolErrorResponse("claude", status, message, headers, request);
