@@ -1344,7 +1344,14 @@ describe("Account Pool settings", () => {
       drainOpensAt: Date.now() + 2 * 24 * 60 * 60 * 1_000,
       sevenDayResetAt: Date.now() + 3 * 24 * 60 * 60 * 1_000,
     });
-    const slot = render([account(), later, soon]);
+    const disabled = account({
+      id: "44444444-4444-4444-8444-444444444444",
+      label: "disabled-reserve@example.com",
+      email: "disabled-reserve@example.com",
+      role: "reserve",
+      enabled: false,
+    });
+    const slot = render([account(), later, soon, disabled]);
     expect(await slot.findByText("Окна расхода")).toBeTruthy();
     expect(slot.getByText("уже открыто")).toBeTruthy();
     const table = slot.getByLabelText("Окна расхода Claude");

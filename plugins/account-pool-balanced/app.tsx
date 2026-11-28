@@ -1581,7 +1581,7 @@ function UnlockedAccountPoolSettings() {
   const currentId = (provider: PoolProvider): string | null =>
     status?.activeAccounts[provider] ?? null;
   const reserveAccounts = accounts
-    .filter((account) => account.role === "reserve")
+    .filter((account) => account.enabled && account.role === "reserve")
     .sort(
       (left, right) =>
         (left.drainOpensAt ?? Number.POSITIVE_INFINITY) -
