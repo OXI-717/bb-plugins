@@ -261,7 +261,7 @@ jobs:
   provider-icons:
     needs: plan
     if: needs.plan.outputs.provider_icons == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
