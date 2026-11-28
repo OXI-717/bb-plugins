@@ -261,8 +261,8 @@ jobs:
   provider-icons:
     needs: plan
     if: needs.plan.outputs.provider_icons == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -275,6 +275,13 @@ jobs:
       - run: npm run typecheck
         working-directory: plugins/oxi-provider-icons
       - run: npm test
+        working-directory: plugins/oxi-provider-icons
+      # P0 recurrence guard: real Chromium hit-regression against the
+      # live-DOM picker replica (1440 fine + 390 touch/coarse). Browser
+      # install is allowed only here, on the ephemeral runner.
+      - run: npx playwright install chromium --with-deps
+        working-directory: plugins/oxi-provider-icons
+      - run: node preview/tap-regression.mjs
         working-directory: plugins/oxi-provider-icons
       - run: npm exec --yes --package=bb-app@0.50.1 -- bb plugin build .
         working-directory: plugins/oxi-provider-icons

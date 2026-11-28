@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-oxi-provider-icons",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -42,6 +42,7 @@
     "@types/react-dom": "^19.3.0",
     "esbuild": "^0.28.2",
     "jsdom": "^29.0.1",
+    "playwright": "1.58.2",
     "typescript": "^5.9.3",
     "vitest": "^4.0.0"
   }
