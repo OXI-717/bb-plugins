@@ -55,6 +55,7 @@ import {
   ZAI_MOUNT_PREFIX,
 } from "./openai-compatible-adapter.js";
 import { PoolOperations } from "./operations.js";
+import { NativeQuota } from './native-quota.js';
 import { registerUsageSource } from "./usage-source.js";
 import { accountPoolRpcContract, createRpcHandlers } from "./rpc.js";
 import { openAccountBrowser, listBrowserProfiles } from "./browser-profiles.js";
@@ -212,6 +213,19 @@ export function createAccountPoolPlugin(
     const verifyNativeStopped=async(hostId:string,binding:NativeCatalogProcess)=>
       (await browserHost.call('catalogProcessStatus',binding,{hostId,timeoutMs:5000})).stopped;
     const checkNativeStopped=(leaseId:string)=>nativeSessions.checkStopped(leaseId,verifyNativeStopped);
+    const nativeQuota=new NativeQuota(()=>nativeSessions.quotaTargets(),
+      target=>browserHost.call('nativeQuota',target,{hostId:target.hostId,timeoutMs:80_000}),now);
+    const nativeAccountsWithQuota=async()=>{
+      const accounts=await nativeSessions.accounts();
+      const targets=await nativeQuota.inventory();
+      return {...accounts,accounts:accounts.accounts.map(account=>{
+        const candidates=targets.filter(candidate=>candidate.accountId===account.accountId);
+        if(!candidates.length)return account;
+        void nativeQuota.refreshAccount(candidates);
+        const quota=nativeQuota.readAccount(candidates);
+        return quota?{...account,quota}:account;
+      })};
+    };
     let nativeReconcileInFlight:Promise<void>|null=null;
     const nativeReconcileTimer=setInterval(()=>{
       if(nativeReconcileInFlight)return;
@@ -505,12 +519,12 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update,input=>nativeSessions.updateAccount(input),input=>nativeSessions.probe(input,async()=>{try{return (await browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})).protocol===1;}catch{return false;}},request=>browserHost.call('nativeProbe',request,{hostId:input.hostId,timeoutMs:125000})),selection,checkNativeStopped),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,nativeAccountsWithQuota,(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update,input=>nativeSessions.updateAccount(input),input=>nativeSessions.probe(input,async()=>{try{return (await browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})).protocol===1;}catch{return false;}},request=>browserHost.call('nativeProbe',request,{hostId:input.hostId,timeoutMs:125000})),selection,checkNativeStopped),
     );
     operations.uncertainNativeLeases=()=>nativeSessions.uncertainLeases();
     operations.routeTracking=async()=>{await egress.cleanup();return egress.capacity();};
     registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})),()=>update.status(),checkNativeStopped);
-    registerUsageSource(bb, hub, false);
+    registerUsageSource(bb, hub, false, nativeQuota);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
       if (readiness.reason === "routing-disabled") return null;
