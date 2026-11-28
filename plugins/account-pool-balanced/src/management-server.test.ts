@@ -21,7 +21,11 @@ it('keeps owner RPCs available while CLI and delegated management remain guarded
   for (const method of ['account.list', 'status.get', 'config.get', 'egress.status', 'native.accounts']) await expect(call(method, null)).resolves.toBeDefined();
   expect((await host.harness.behavior.runCli(['egress', 'status', '--json'])).exitCode).toBe(1);
   expect(JSON.parse((await host.harness.behavior.runCli(['status', '--json'])).stdout)).toEqual({ management: 'locked' });
-  await expect(call('provider-usage.v1.listResources', {})).resolves.toEqual({ label: 'Account Pooler', resources: [] });
+  for (const input of [null, undefined, {}]) {
+    await expect(call('provider-usage.v1.listResources', input))
+      .resolves.toEqual({ label: 'Account Pooler', resources: [] });
+  }
+  await expect(call('provider-usage.v1.listResources', [])).rejects.toThrow();
   const key = (await fs.readFile(path.join(dataDir, 'plugins', 'pool-test', 'secrets', 'accounts', 'management', 'operator.env'), 'utf8')).trim().split('=')[1]!;
   const grant = await call('management.unlock', { key, scope: 'manage', ttlSeconds: 60 }) as { token: string };
   const created = await call('management.call', { token: grant.token, method: 'account.add', input: {
