@@ -1109,6 +1109,8 @@ function UnlockedAccountPoolSettings() {
   const [nativeAccounts, setNativeAccounts] = useState<NativeAccounts | null>(null);
   const [nativeSettings, setNativeSettings] = useState<string | null>(null);
   const [nativeError, setNativeError] = useState<string | null>(null);
+  const [leaseCheck, setLeaseCheck] = useState<string | null>(null);
+  const [leaseNotice, setLeaseNotice] = useState<string | null>(null);
   const [statusIsCached, setStatusIsCached] = useState(status !== null);
   const [config, setConfig] = useState<AccountPoolConfig | null>(null);
   const [configEdits, setConfigEdits] = useState<Partial<Record<ConfigField, string>>>({});
@@ -1183,6 +1185,24 @@ function UnlockedAccountPoolSettings() {
       if (mounted.current) setError(errorText(loadError));
     }
   }, [rpc]);
+  async function checkNativeStopped(leaseId: string) {
+    setLeaseCheck(leaseId);
+    setLeaseNotice(null);
+    try {
+      const { state } = await rpc.call("native.checkStopped", { leaseId });
+      if (!mounted.current) return;
+      setLeaseNotice({
+        released: "Остановка подтверждена. Допуск освобождён.",
+        absent: "Допуск уже освобождён.",
+        kept: "Остановка не подтверждена. Допуск сохранён.",
+      }[state]);
+      await refresh();
+    } catch {
+      if (mounted.current) setLeaseNotice("Проверка недоступна. Обновите статус и повторите попытку.");
+    } finally {
+      if (mounted.current) setLeaseCheck(null);
+    }
+  }
   const refreshNative = useCallback(async () => {
     try {
       const next = await rpc.call("native.accounts", null);
@@ -1623,15 +1643,23 @@ function UnlockedAccountPoolSettings() {
           {error}
         </div>
       )}
+      {leaseNotice && <p role="status" className="text-sm">{leaseNotice}</p>}
       {!statusIsCached && !!status?.uncertainNativeLeases?.length && (
         <div role="status" className="rounded-md border border-border px-3 py-2 text-sm">
           <p className="font-medium">Остановка исполнителя Antigravity не подтверждена</p>
-          <p className="text-muted-foreground">После проверки, что процесс остановлен, подтвердите остановку командой.</p>
           <ul className="mt-2 space-y-2">
             {status.uncertainNativeLeases.map(lease => (
               <li key={lease.leaseId}>
                 <span>{lease.executorId} · {{task:"задача", catalog:"каталог", diagnostic:"диагностика"}[lease.kind]} · {lease.ageMs >= 60_000 ? `${Math.floor(lease.ageMs / 60_000)} мин` : `${Math.floor(lease.ageMs / 1000)} с`}</span>
-                <code className="block [overflow-wrap:anywhere]">{attestNativeLeaseCommand(lease.leaseId)}</code>
+                <div className="mt-1">
+                  <Button size="sm" variant="outline" disabled={leaseCheck !== null} onClick={() => void checkNativeStopped(lease.leaseId)}>
+                    {leaseCheck === lease.leaseId ? "Проверяю…" : "Проверить процесс и освободить"}
+                  </Button>
+                </div>
+                <details className="mt-1 text-muted-foreground">
+                  <summary className="cursor-pointer">Ручное подтверждение остановки</summary>
+                  <code className="block [overflow-wrap:anywhere]">{attestNativeLeaseCommand(lease.leaseId)}</code>
+                </details>
               </li>
             ))}
           </ul>

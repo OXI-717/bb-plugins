@@ -1,4 +1,4 @@
-import {describe,it,expect} from 'vitest';
+import {describe,it,expect,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {NativeSessions,nativeHttp,NATIVE_LEASE_MS,NATIVE_REQUEST_BODY_TIMEOUT_MS,type NativeCaller,type NativeHttpRejection} from './native-sessions.js';
 import {GuardRequiredError} from './network-errors.js';
@@ -265,7 +265,15 @@ describe('official native session admission',()=>{
     expect((await sessions.uncertainLeases())[0].leaseId).toBe(tracked.leaseId);
     await sessions.reconcileNativeProcesses(async()=>{throw new Error('offline')});
     expect(await sessions.uncertainLeases()).toHaveLength(1);
-    expect(await sessions.reconcileNativeProcesses(async()=>true)).toBe(1);
+    const other=await sessions.request(catalog,{...acquire(),kind:'catalog',catalogProcess:{...process,groupId:5678}});
+    const verified=vi.fn(async()=>true);
+    expect(await sessions.checkStopped(other.leaseId!,verified)).toEqual({state:'kept'});
+    expect(verified).not.toHaveBeenCalled();
+    expect(await sessions.checkStopped(tracked.leaseId!,async()=>false)).toEqual({state:'kept'});
+    expect(await sessions.checkStopped(tracked.leaseId!,verified)).toEqual({state:'released'});
+    expect(verified).toHaveBeenCalledExactlyOnceWith(executor.hostId,process);
+    expect(await sessions.checkStopped(tracked.leaseId!,verified)).toEqual({state:'absent'});
+    expect(verified).toHaveBeenCalledOnce();
     expect(await sessions.uncertainLeases()).toEqual([]);
     expect((await sessions.snapshot()).events.at(-1)?.event).toBe('released');
   });

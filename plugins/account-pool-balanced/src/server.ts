@@ -10,6 +10,7 @@ import {managementCli,registerManagementRpc} from './management-boundary.js';
 import {PoolMaintenance} from './maintenance.js';
 import {PoolUpdate} from './pool-update.js';
 import {serverGuardRead,runGuardProbe,type GuardServerAccess} from './guard-server.js';
+import type { NativeCatalogProcess } from './native-probe-wire.js';
 import {registerNativeUnlockRpc} from "./native-unlock-rpc.js";
 import { AccountEgress, EgressUnavailable } from "./account-egress.js";
 import type { HttpScopeEnforcementSource } from './http-scope-acceptance.js';
@@ -208,13 +209,13 @@ export function createAccountPoolPlugin(
     };
     await nativeSessions.initialize();
     registerNativeUnlockRpc(bb,nativeSessions);
+    const verifyNativeStopped=async(hostId:string,binding:NativeCatalogProcess)=>
+      (await browserHost.call('catalogProcessStatus',binding,{hostId,timeoutMs:5000})).stopped;
+    const checkNativeStopped=(leaseId:string)=>nativeSessions.checkStopped(leaseId,verifyNativeStopped);
     let nativeReconcileInFlight:Promise<void>|null=null;
     const nativeReconcileTimer=setInterval(()=>{
       if(nativeReconcileInFlight)return;
-      nativeReconcileInFlight=nativeSessions.reconcileNativeProcesses(async(hostId,binding)=>{
-        const result=await browserHost.call('catalogProcessStatus',binding,{hostId,timeoutMs:5000});
-        return result.stopped;
-      }).then(count=>{
+      nativeReconcileInFlight=nativeSessions.reconcileNativeProcesses(verifyNativeStopped).then(count=>{
         if(count)bb.log.info('Account Pooler reconciled stopped native leases '+JSON.stringify({count}));
       }).catch(()=>bb.log.warn('Account Pooler native reconciliation unavailable.'))
         .finally(()=>{nativeReconcileInFlight=null;});
@@ -504,11 +505,11 @@ export function createAccountPoolPlugin(
         if (!inventory.some(account => account.id === accountId)) throw new Error("Account no longer exists");
         await browser.open(accountId,url);
         return { opened: true };
-      }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update,input=>nativeSessions.updateAccount(input),input=>nativeSessions.probe(input,async()=>{try{return (await browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})).protocol===1;}catch{return false;}},request=>browserHost.call('nativeProbe',request,{hostId:input.hostId,timeoutMs:125000})),selection),
+      }, agyLogin, url=>browser.openAgyLogin(url),egress,grokLogin,()=>nativeSessions.accounts(),(accountId,projects,revision)=>nativeSessions.setProjects(accountId,projects,revision),(executorId,revision)=>nativeSessions.prefer(executorId,revision),maintenanceApi,update,input=>nativeSessions.updateAccount(input),input=>nativeSessions.probe(input,async()=>{try{return (await browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})).protocol===1;}catch{return false;}},request=>browserHost.call('nativeProbe',request,{hostId:input.hostId,timeoutMs:125000})),selection,checkNativeStopped),
     );
     operations.uncertainNativeLeases=()=>nativeSessions.uncertainLeases();
     operations.routeTracking=async()=>{await egress.cleanup();return egress.capacity();};
-    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})),()=>update.status());
+    registerPoolCli(managementCli(bb, management), operations, login, codexLogin, config, externalClients,browser,nativeSessions,egress,grokLogin,input=>runGuardProbe(guardAccess,input),(threadId,requestId)=>hub.cursorStreamProbe(threadId,requestId),maintenanceApi,input=>nativeSessions.preflight(input,()=>browserHost.call('nativeProbeCapabilities',{executorId:input.executorId},{hostId:input.hostId,timeoutMs:5000})),()=>update.status(),checkNativeStopped);
     registerUsageSource(bb, hub, false);
     const proxiedHealth = async (provider: PoolProvider, context: {hostId: string; projectId?: string | null}) => {
       const readiness = await operations.providerReadiness(provider, context.projectId ?? null);
