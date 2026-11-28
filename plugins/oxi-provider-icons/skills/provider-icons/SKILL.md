@@ -5,11 +5,13 @@ description: Mark OXI agent providers with local theme-aware icons in BB's model
 
 # OXI Provider Icons
 
-Registers inline SVG marks for exactly seven public-safe agent provider ids
-(`acp-agy`, `acp-opencode-kimi`, `acp-oxi-cursor`, `acp-oxi-devin-pool`,
-`acp-opencode-go`, `acp-opencode-zai`, `acp-opencode-neuraldeep`) through
-the experimental `app.slots.experimental_providerIcon` slot. The host's
-model picker and builtin provider usage header resolve them automatically.
+Registers native mask-span marks (theme-aware alpha-mask spans in the
+host's own provider-icon pattern) for exactly seven public-safe agent
+provider ids (`acp-agy`, `acp-opencode-kimi`, `acp-oxi-cursor`,
+`acp-oxi-devin-pool`, `acp-opencode-go`, `acp-opencode-zai`,
+`acp-opencode-neuraldeep`) through the experimental
+`app.slots.experimental_providerIcon` slot. The host's model picker and
+builtin provider usage header resolve them automatically.
 Presentation-only: no backend surface, settings, storage, network or
 timers.
 

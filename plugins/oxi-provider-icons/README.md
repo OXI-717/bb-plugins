@@ -18,9 +18,16 @@ provider usage header — picks the marks up through the experimental
 | `acp-opencode-zai` | Original neutral "Z" monogram, not an official logo |
 | `acp-opencode-neuraldeep` | Original neutral "ND" monogram, not an official logo |
 
-Every mark is an inline SVG painted with `currentColor`, sized by the host's
-`className` (legible at 14 and 16 px), with no scripts, external references,
-network access, timers or storage.
+Every mark follows the native BB provider-icon pattern: a host-sized `span`
+painted through an inline CSS alpha-mask. The span adopts the host's
+`className`, keeps `display: inline-block`, `pointer-events: none` and both
+standard and `-webkit-` mask longhands, and takes its color from
+`currentColor`, so the encoded mask geometry itself is a static, opaque-black
+shape with explicit `width`/`height` — legible at 14 and 16 px, with no
+scripts, external references, network access, timers or storage. The marks
+never contribute an oversized intrinsic/max-content width to the host's
+`min-w-max` provider-icon wrappers, which is what keeps touch hit-testing
+intact on mobile.
 
 ## Fallback and disable behavior
 
@@ -54,12 +61,33 @@ npm ci
 npm run typecheck
 npm test
 npm run build          # bb plugin build .
-npm run preview:build  # synthetic preview into preview/dist (git-ignored)
+npm run preview:build  # native picker replica into preview/dist (git-ignored)
 ```
 
 Serve `preview/dist/` with any static file server on a free localhost port.
 The preview renders the real registration and the real mark components
-against a shim SDK with synthetic picker and usage chrome; query parameters:
+against a shim SDK inside a faithful replica of the host's model-picker
+drawer (outer Drawer with width/min/max auto, row gap 0.5 / padding-x 2.5,
+h-7 w-6 buttons growing to h-9 w-9 on coarse pointers, 16/20 px `min-w-max`
+icon wrappers, `size-full` mark children); query parameters:
 `theme=light|dark`, `pane=390|768` (default desktop).
+
+Tap regression against that replica (Chromium, 1440 px fine-pointer and
+390 px touch/`pointer:coarse`, real taps on every provider button):
+
+```bash
+PLAYWRIGHT_MODULE=/path/to/node_modules/playwright/index.mjs \
+  node preview/tap-regression.mjs --receipt tap-receipt.json
+```
+
+Requires an existing Playwright installation; the script installs nothing.
+
+## History
+
+- 0.1.1 — marks switched from naked inline SVGs to the native BB mask-span
+  pattern: the 0.1.0 SVGs carried no intrinsic width/height, which broke the
+  host wrapper's `min-w-max` sizing and displaced tap hit targets on mobile
+  model pickers. Shape geometry is unchanged.
+- 0.1.0 — initial registry of seven marks.
 
 Requires BB 0.50.1+ and Plugin SDK 0.6.157.

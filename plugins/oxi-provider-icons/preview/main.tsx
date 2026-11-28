@@ -1,4 +1,5 @@
 import { createRoot } from "react-dom/client";
+import { useState } from "react";
 import type { ComponentType } from "react";
 // The real registration loop from app.tsx runs at import time against the
 // aliased preview shim, so every captured mark below is a real component.
@@ -28,7 +29,7 @@ const FALLBACK_ROWS: PreviewRow[] = [
   { id: "acp-demo-unknown", name: "Unknown provider" },
 ];
 
-const USAGE = [34, 72, 18, 55, 90, 42, 8];
+const ALL_ROWS: PreviewRow[] = [...REGISTRY_ROWS, ...FALLBACK_ROWS];
 
 const params = new URLSearchParams(location.search);
 const theme = params.get("theme") === "dark" ? "dark" : "light";
@@ -45,12 +46,18 @@ function resolveMark(
   )?.icon;
 }
 
-/** Synthetic stand-in for the host's default glyph: honest chrome, not art. */
+/**
+ * Synthetic stand-in for the host's default glyph. Like real host artwork
+ * it carries explicit intrinsic width/height, so fallback rows exercise the
+ * host's own well-formed path rather than the plugin's mark renderer.
+ */
 function HostGlyph({ className }: { className?: string }) {
   return (
     <svg
       className={className}
       viewBox="0 0 24 24"
+      width="24"
+      height="24"
       aria-hidden="true"
       focusable="false"
       xmlns="http://www.w3.org/2000/svg"
@@ -79,13 +86,31 @@ function HostGlyph({ className }: { className?: string }) {
   );
 }
 
-function Mark({ providerId, size }: { providerId: string; size: 14 | 16 }) {
+/**
+ * The host's ProviderIcon slot: the wrapper span the core renders around
+ * whatever the plugin returns, with the host `className` handed down. In
+ * the mobile drawer the wrapper is 16 px (20 px on coarse pointers) with
+ * `min-w-max min-h-max shrink-0`; in the usage header it is 24 px
+ * (`size-6`). The mark child is always `size-full`.
+ */
+function ProviderIconSlot({
+  providerId,
+  wrapperClass,
+  fixture,
+}: {
+  providerId: string;
+  wrapperClass: string;
+  fixture: string;
+}) {
   const Icon = resolveMark(providerId);
-  const className = `pi pi-${size}`;
-  return Icon ? (
-    <Icon className={className} />
-  ) : (
-    <HostGlyph className={className} />
+  return (
+    <span className={wrapperClass} data-fixture={fixture}>
+      {Icon ? (
+        <Icon className="size-full" />
+      ) : (
+        <HostGlyph className="size-full" />
+      )}
+    </span>
   );
 }
 
@@ -122,64 +147,93 @@ function Toolbar() {
   );
 }
 
+/**
+ * Native replica of the mobile model-picker drawer: outer Drawer with
+ * width/min/max auto, a row of eleven provider buttons (flex-shrink 1,
+ * min-width auto, h-7 w-6 on fine pointers, h-9 w-9 on coarse), each
+ * wrapping its mark in the 16/20 px min-w-max icon wrapper.
+ */
+function ModelPickerDrawer({
+  selected,
+  onSelect,
+}: {
+  selected: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div
+      className="drawer w-auto min-w-auto max-w-auto"
+      data-fixture="provider-drawer"
+      role="group"
+      aria-label="Model picker provider drawer"
+    >
+      <div className="drawer-row" data-fixture="provider-row">
+        {ALL_ROWS.map((row) => (
+          <button
+            type="button"
+            key={row.id}
+            className="provider-btn"
+            data-provider-id={row.id}
+            aria-label={row.name}
+            aria-pressed={selected === row.id}
+            onClick={() => onSelect(row.id)}
+          >
+            <ProviderIconSlot
+              providerId={row.id}
+              wrapperClass="icon-wrap"
+              fixture="icon-wrap"
+            />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function UsageHeader() {
+  return (
+    <div className="panel" aria-label="Provider usage">
+      {ALL_ROWS.map((row) => (
+        <div className="usage-row" key={row.id} data-provider-id={row.id}>
+          <ProviderIconSlot
+            providerId={row.id}
+            wrapperClass="usage-wrap"
+            fixture="usage-wrap"
+          />
+          <span className="name">{row.name}</span>
+          <span className="pid">{row.id}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PreviewPage() {
+  const [selected, setSelected] = useState<string | null>(null);
   return (
     <main style={pane ? { maxWidth: `${pane}px` } : undefined}>
       <Toolbar />
-      <h2>Model picker — synthetic surface, 16 px marks</h2>
-      <div className="panel" role="listbox" aria-label="Agent provider picker">
-        {REGISTRY_ROWS.map((row) => (
-          <div className="row" key={row.id} role="option" aria-selected="false">
-            <Mark providerId={row.id} size={16} />
-            <span className="name">{row.name}</span>
-            <span className="pid">{row.id}</span>
-          </div>
-        ))}
-      </div>
-      <h2>Provider usage header — synthetic surface, 14 px marks</h2>
-      <div className="panel" aria-label="Provider usage">
-        {REGISTRY_ROWS.map((row, index) => (
-          <div className="row" key={row.id}>
-            <Mark providerId={row.id} size={14} />
-            <span className="name">{row.name}</span>
-            <span className="usage" aria-hidden="true">
-              <i style={{ width: `${USAGE[index]}%` }} />
-            </span>
-            <span className="pid">{USAGE[index]}%</span>
-          </div>
-        ))}
-      </div>
-      <h2>Registry control — 7 registered + builtin/unknown fallback</h2>
+      <h2>Model picker drawer — native replica, 11 provider buttons</h2>
       <p className="hint">
-        Registered cards draw the real components from icons.tsx. Fallback
-        cards draw a synthetic host glyph because those ids are deliberately
-        not claimed.
+        Drawer width/min/max auto, row gap 0.5 / padding-x 2.5 /
+        overflow-visible; buttons shrink-1 min-w-auto, h-7 w-6 (h-9 w-9 on
+        coarse pointers); icon wrapper 16 px (20 px coarse) with min-w-max /
+        min-h-max / shrink-0; mark child size-full. Tap any provider: the
+        status line must always show the tapped button&apos;s id.
       </p>
-      <div className="cards">
-        {[...REGISTRY_ROWS, ...FALLBACK_ROWS].map((row) => {
-          const registered = Boolean(resolveMark(row.id));
-          return (
-            <div className="card" key={row.id}>
-              <div className="pair">
-                <Mark providerId={row.id} size={16} />
-                <Mark providerId={row.id} size={14} />
-              </div>
-              <span className="name">{row.name}</span>
-              <span className="id">{row.id}</span>
-              <span
-                className={registered ? "badge registered" : "badge"}
-              >
-                {registered ? "registered" : "host fallback"}
-              </span>
-            </div>
-          );
-        })}
+      <ModelPickerDrawer selected={selected} onSelect={setSelected} />
+      <p className="status" data-selected-id={selected ?? "none"}>
+        Selected: {selected ?? "none"}
+      </p>
+      <h2>Provider usage header — native size-6 wrapper, 16 px marks</h2>
+      <div className="panel" aria-label="Provider usage legend">
+        <p className="hint">
+          Registered agent ids: {registrations.length}. Not claimed: codex,
+          claude-code, acp-cursor and unknown ids — the host keeps its own
+          artwork, and disabling this plugin restores it everywhere.
+        </p>
       </div>
-      <p className="hint">
-        Registered agent ids: {registrations.length}. Not claimed: codex,
-        claude-code, acp-cursor and unknown ids — the host keeps its own
-        artwork, and disabling this plugin restores it everywhere.
-      </p>
+      <UsageHeader />
     </main>
   );
 }
