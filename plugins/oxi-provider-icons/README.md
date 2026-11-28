@@ -72,15 +72,27 @@ h-7 w-6 buttons growing to h-9 w-9 on coarse pointers, 16/20 px `min-w-max`
 icon wrappers, `size-full` mark children); query parameters:
 `theme=light|dark`, `pane=390|768` (default desktop).
 
-Tap regression against that replica (Chromium, 1440 px fine-pointer and
-390 px touch/`pointer:coarse`, real taps on every provider button):
+Tap regression against that replica — the P0 recurrence guard. Chromium
+(1.58.2, a devDependency pinned to the prepared browser cache) checks two
+contexts: 1440 px fine-pointer with real mouse clicks and 390 px
+touch/`pointer:coarse` (actual `innerWidth`, actual `matchMedia`, the exact
+`(max-width:767.98px) and (pointer:coarse)` branch, pre-flex-shrink tab
+geometry, wrapper computed sizes) plus a coarse-pointer-at-wide-viewport
+probe proving the mobile rule needs both conditions:
 
 ```bash
-PLAYWRIGHT_MODULE=/path/to/node_modules/playwright/index.mjs \
-  node preview/tap-regression.mjs --receipt tap-receipt.json
+npm ci                       # postinstall browser downloads are not required locally
+node preview/tap-regression.mjs --receipt tap-receipt.json
 ```
 
-Requires an existing Playwright installation; the script installs nothing.
+Every one of the eleven provider tabs is tapped at its center and four
+interior edge points; each tap must select that tab's provider id, and
+`elementFromPoint` must resolve to that tab. Requires the Playwright browser
+cache on the machine (`npx playwright install chromium` downloads it when
+absent); this script itself installs nothing. To point at an existing
+external Playwright installation instead of the devDependency, pass
+`PLAYWRIGHT_MODULE=/path/to/node_modules/playwright/index.mjs`. CI runs the
+same script in the ephemeral runner after installing Chromium there.
 
 ## History
 
