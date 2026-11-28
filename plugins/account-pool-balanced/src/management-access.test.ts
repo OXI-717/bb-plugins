@@ -147,6 +147,16 @@ it('closes CLI inventory and mutation paths including forged identities and help
   }
   expect((await run(['account', 'remove', 'target', '--help'], {})).exitCode).toBe(0);
   expect(actual).not.toHaveBeenCalled();
+  const leaseId = '11111111-1111-4111-8111-111111111111';
+  expect((await run(['native', 'check-stopped', leaseId], {})).exitCode).toBe(0);
+  expect(actual).toHaveBeenCalledExactlyOnceWith(['native', 'check-stopped', leaseId], {});
+  actual.mockClear();
+  for (const argv of [
+    ['native', 'check-stopped', 'invalid'],
+    ['native', 'check-stopped', leaseId, '--confirmed'],
+    ['native', 'attest-stopped', leaseId, '--confirmed'],
+  ]) expect((await run(argv, {})).exitCode).toBe(1);
+  expect(actual).not.toHaveBeenCalled();
   const status = await run(['status', '--json'], {});
   expect(JSON.parse(status.stdout!)).toEqual({ management: 'locked' });
   const read = access.unlock(key, 'read'), manage = access.unlock(key);

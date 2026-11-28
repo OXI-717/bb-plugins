@@ -1,5 +1,5 @@
 import type {NativeProbeInput,NativeProbeResult} from './src/native-probe-wire';
-import {useEffect, useState} from 'react';
+import {useEffect, useState, type ReactNode} from 'react';
 import {Icon} from './ui/components/ui/icon';
 import {Button} from './ui/components/ui/button';
 import {ResourceOverflowMenu} from './ui/components/ui/resource/row';
@@ -20,12 +20,14 @@ export function NativeAccountRow({
   expanded,
   canEditPriority = false,
   managed = true,
+  quota,
 }: {
   account: Account;
   open: () => void;
   expanded?: boolean;
   canEditPriority?: boolean;
   managed?: boolean;
+  quota?: ReactNode;
 }) {
   const name = account.label ?? 'Аккаунт Google';
   const enabled = managed && account.executors.some((executor) => executor.enabled);
@@ -70,7 +72,7 @@ export function NativeAccountRow({
       metrics={
         <div className="text-left text-xs tabular-nums" title="Сеансы в работе / предел">
           <div className="font-semibold text-foreground">Сеансы <span>{account.active} / {maxSessions}</span></div>
-          <QuotaEmpty state={managed ? "not-connected" : "no-data"} />
+          {quota ?? <QuotaEmpty state={managed ? "not-connected" : "no-data"} />}
         </div>
       }
       actions={

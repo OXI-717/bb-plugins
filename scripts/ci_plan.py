@@ -14,7 +14,7 @@ REQUIRED_CHECK_PLUGINS = {'account-pool-balanced', 'automation-catalog'}
 PORTABLE = {'balancer', 'account-policy', 'project-policy', 'purpose-affinity',
             'provider-budget', 'codex-budget', 'zai-budget', 'usage-error', 'hub'}
 # OP's native task integration fixture loads these Pooler modules directly.
-OP_POOL_MODULES = {'native-sessions', 'native-probe-wire', 'native-accounts',
+OP_POOL_MODULES = {'native-sessions', 'native-probe-wire', 'native-accounts', 'native-quota-wire',
                    'native-unlock-rpc', 'contracts', 'project-policy', 'network-errors'}
 
 

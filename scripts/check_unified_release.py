@@ -59,7 +59,8 @@ def main():
     # manual selection, diagnostics and the newer VPN observation grace.
     checks = {
         'plugins/account-pool-balanced/src/host.ts': ['grokHome:', 'nativeProbeCapabilities:', 'nativeProbe:'],
-        'plugins/account-pool-balanced/src/server.ts': ['egress,grokLogin,()=>nativeSessions.accounts()', 'nativeSessions.probe(', 'selection)', 'registerUsageSource(bb, hub, false)'],
+        'plugins/account-pool-balanced/src/server.ts': ['egress,grokLogin,nativeAccountsWithQuota', 'nativeSessions.probe(', 'selection,checkNativeStopped)',
+            'registerUsageSource(bb, hub, false, nativeQuota)'],
         'plugins/account-pool-balanced/src/cli.ts': ['grokLogin', 'nativePreflight'],
         'plugins/account-pool-balanced/app.tsx': ['"grok-login"', '<NativeAccountRow', 'thread.switchAccount'],
         'plugins/account-pool-balanced/src/grok-acp-home.ts': ['ensureGrokAcpHome'],

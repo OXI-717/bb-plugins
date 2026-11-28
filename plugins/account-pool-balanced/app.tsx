@@ -589,6 +589,25 @@ function QuotaValue({
   );
 }
 
+function ManagedNativeQuota({quota, compact = false}: {
+  quota: NonNullable<NativeAccounts['accounts'][number]['quota']>;
+  compact?: boolean;
+}) {
+  const rows = compact ? ['fiveHour','weekly'].flatMap(window => {
+    const row = quota.rows.filter(item => item.window === window)
+      .sort((a,b) => a.remainingPercent - b.remainingPercent || a.resetAt - b.resetAt)[0];
+    return row ? [row] : [];
+  }) : quota.rows;
+  return <div className="mt-1 flex flex-wrap gap-1">{rows.map(row => {
+    const key = JSON.stringify([row.group, row.window]);
+    const window = row.window === 'fiveHour' ? '5 часов' : '7 дней';
+    return <QuotaValue key={key} refreshing={false} slot={{
+      key, label: compact ? window : `${window} · ${row.group}`,
+      utilization: 1 - row.remainingPercent / 100, resetAt: row.resetAt, limit: 1, status: null,
+    }} />;
+  })}</div>;
+}
+
 const restrictAccountDragToVerticalAxis: Modifier = ({ transform }) => ({
   ...transform,
   x: 0,
@@ -1109,6 +1128,8 @@ function UnlockedAccountPoolSettings() {
   const [nativeAccounts, setNativeAccounts] = useState<NativeAccounts | null>(null);
   const [nativeSettings, setNativeSettings] = useState<string | null>(null);
   const [nativeError, setNativeError] = useState<string | null>(null);
+  const [leaseCheck, setLeaseCheck] = useState<string | null>(null);
+  const [leaseNotice, setLeaseNotice] = useState<string | null>(null);
   const [statusIsCached, setStatusIsCached] = useState(status !== null);
   const [config, setConfig] = useState<AccountPoolConfig | null>(null);
   const [configEdits, setConfigEdits] = useState<Partial<Record<ConfigField, string>>>({});
@@ -1183,6 +1204,24 @@ function UnlockedAccountPoolSettings() {
       if (mounted.current) setError(errorText(loadError));
     }
   }, [rpc]);
+  async function checkNativeStopped(leaseId: string) {
+    setLeaseCheck(leaseId);
+    setLeaseNotice(null);
+    try {
+      const { state } = await rpc.call("native.checkStopped", { leaseId });
+      if (!mounted.current) return;
+      setLeaseNotice({
+        released: "Остановка подтверждена. Допуск освобождён.",
+        absent: "Допуск уже освобождён.",
+        kept: "Остановка не подтверждена. Допуск сохранён.",
+      }[state]);
+      await refresh();
+    } catch {
+      if (mounted.current) setLeaseNotice("Проверка недоступна. Обновите статус и повторите попытку.");
+    } finally {
+      if (mounted.current) setLeaseCheck(null);
+    }
+  }
   const refreshNative = useCallback(async () => {
     try {
       const next = await rpc.call("native.accounts", null);
@@ -1581,7 +1620,7 @@ function UnlockedAccountPoolSettings() {
   const currentId = (provider: PoolProvider): string | null =>
     status?.activeAccounts[provider] ?? null;
   const reserveAccounts = accounts
-    .filter((account) => account.role === "reserve")
+    .filter((account) => account.enabled && account.role === "reserve")
     .sort(
       (left, right) =>
         (left.drainOpensAt ?? Number.POSITIVE_INFINITY) -
@@ -1623,15 +1662,23 @@ function UnlockedAccountPoolSettings() {
           {error}
         </div>
       )}
+      {leaseNotice && <p role="status" className="text-sm">{leaseNotice}</p>}
       {!statusIsCached && !!status?.uncertainNativeLeases?.length && (
         <div role="status" className="rounded-md border border-border px-3 py-2 text-sm">
           <p className="font-medium">Остановка исполнителя Antigravity не подтверждена</p>
-          <p className="text-muted-foreground">После проверки, что процесс остановлен, подтвердите остановку командой.</p>
           <ul className="mt-2 space-y-2">
             {status.uncertainNativeLeases.map(lease => (
               <li key={lease.leaseId}>
                 <span>{lease.executorId} · {{task:"задача", catalog:"каталог", diagnostic:"диагностика"}[lease.kind]} · {lease.ageMs >= 60_000 ? `${Math.floor(lease.ageMs / 60_000)} мин` : `${Math.floor(lease.ageMs / 1000)} с`}</span>
-                <code className="block [overflow-wrap:anywhere]">{attestNativeLeaseCommand(lease.leaseId)}</code>
+                <div className="mt-1">
+                  <Button size="sm" variant="outline" disabled={leaseCheck !== null} onClick={() => void checkNativeStopped(lease.leaseId)}>
+                    {leaseCheck === lease.leaseId ? "Проверяю…" : "Проверить процесс и освободить"}
+                  </Button>
+                </div>
+                <details className="mt-1 text-muted-foreground">
+                  <summary className="cursor-pointer">Ручное подтверждение остановки</summary>
+                  <code className="block [overflow-wrap:anywhere]">{attestNativeLeaseCommand(lease.leaseId)}</code>
+                </details>
               </li>
             ))}
           </ul>
@@ -1723,11 +1770,13 @@ function UnlockedAccountPoolSettings() {
                     <NativeAccountRow
                       canEditPriority={!!nativeAccounts?.selectionRevision}
                       account={account}
+                      quota={account.quota && <ManagedNativeQuota quota={account.quota} compact />}
                       expanded={nativeSettings === account.accountId}
                       open={() => setNativeSettings(current => current === account.accountId ? null : account.accountId)}
                     />
                     {nativeSettings === account.accountId && nativeAccounts?.selectionRevision && (
                       <section id={`pool-native-${account.accountId}`} aria-label={account.label ?? "Google Antigravity"} className="pool-settings pool-account-card mb-3">
+                        {account.quota && <ManagedNativeQuota quota={account.quota} />}
                         <NativeAccountSettings account={account} revision={nativeAccounts.selectionRevision}
                           loadProjects={() => rpc.call("projects.list", null)}
                           save={async input => { await rpc.call("native.updateAccount", input); await refreshNative(); }}

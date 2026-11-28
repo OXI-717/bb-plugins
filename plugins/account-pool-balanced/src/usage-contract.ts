@@ -101,7 +101,7 @@ export const usageMeasurementSchema = z.object({
     ),
   usage: usageSchema,
 });
-export const usageListInputSchema = z.object({});
+export const usageListInputSchema = z.object({}).nullish();
 export const usageFetchInputSchema = z.object({
   resourceId: z.string().min(1),
   refresh: z

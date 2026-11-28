@@ -1,6 +1,7 @@
 import { type BbPluginApi } from "@get-bb/plugin-sdk";
 import { PoolManagementLocked } from './management-access.js';
 import type { AccountSummary, PoolProvider } from "./contracts.js";
+import type { NativeQuota } from './native-quota.js';
 import type { AccountPoolHub } from "./hub.js";
 import {
   usageSourceRpcContract,
@@ -78,13 +79,18 @@ function reportsUsage(account: Pick<AccountSummary, "provider">): boolean {
   return account.provider !== "devin" && account.provider !== "neuraldeep" && account.provider !== "agy" && account.provider !== "grok";
 }
 
-export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privateInventory = true) {
+const nativeId = (accountId: string) => 'managed-agy:' + accountId;
+
+export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privateInventory = true,
+  nativeQuota?: NativeQuota) {
   bb.rpc.register(
     usageSourceRpcContract,
     {
       async [usageListMethod]() {
         if (privateInventory) return { label: 'Provider access', resources: [] };
         const { accounts } = await hub.status();
+        const targets = await nativeQuota?.inventory() ?? [];
+        const native = [...new Map(targets.map(target => [target.accountId, target])).values()];
         return {
           label: "Account Pooler",
           resources: accounts.filter(account => account.enabled && reportsUsage(account)).map((account) => ({
@@ -93,11 +99,36 @@ export function registerUsageSource(bb: BbPluginApi, hub: AccountPoolHub, privat
             providerId: USAGE_PROVIDER_IDS[account.provider],
             label: account.email ?? USAGE_FALLBACK_LABELS[account.provider],
             scope: { kind: "shared" as const },
-          })),
+          })).concat(native.map(target => ({
+            id: nativeId(target.accountId),
+            accountKey: null,
+            providerId: USAGE_PROVIDER_IDS.agy,
+            label: target.label ?? USAGE_FALLBACK_LABELS.agy,
+            scope: { kind: "shared" as const },
+          }))),
         };
       },
       async [usageFetchMethod]({ resourceId, refresh }) {
         if (privateInventory) throw new PoolManagementLocked();
+        if(resourceId.startsWith('managed-agy:') && nativeQuota){
+          const candidates = (await nativeQuota.inventory()).filter(candidate => nativeId(candidate.accountId)===resourceId);
+          if(!candidates.length)throw Error('Usage resource no longer exists.');
+          await nativeQuota.refreshAccount(candidates,refresh);
+          const current=(await nativeQuota.inventory()).filter(candidate => nativeId(candidate.accountId)===resourceId);
+          if(!current.length)throw Error('Usage resource no longer exists.');
+          const value=nativeQuota.readAccount(current);
+          const fields={accountEmail:null,planLabel:null,plan:null};
+          return {accountKey:null,observedAt:value?.observedAt??null,usage:value?{...fields,status:'ok' as const,
+            windows:value.rows.map(row=>({
+              kind:row.window==='fiveHour'?'five-hour' as const:'weekly' as const,
+              id:JSON.stringify([row.group,row.window]),
+              label:usageWindowLabel(row.window==='fiveHour'?300:10_080,row.window),
+              usedPercent:Math.round(100-row.remainingPercent),
+              resetsAt:new Date(row.resetAt).toISOString(),
+              model:row.group,cost:null,
+            })),
+          }:{...fields,status:'error' as const,message:'No current quota from the managed Antigravity host.'}};
+        }
         const account = (await hub.status()).accounts.find(account => account.id === resourceId);
         if (!account?.enabled) throw new Error("Usage resource no longer exists.");
         if (!reportsUsage(account)) {

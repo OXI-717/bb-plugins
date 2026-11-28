@@ -32,6 +32,7 @@ import {
   type ModelFamily,
   type PoolStatusReport,
   attestNativeLeaseCommand,
+  nativeCheckStoppedInputSchema, type NativeCheckStoppedResult,
 } from "./contracts.js";
 import type { PoolOperations } from "./operations.js";
 import type {createBrowserRouter} from "./browser-host.js";
@@ -84,6 +85,7 @@ const HELP = [
   '  bb pool native configure <executor-json>',
   '  bb pool native prefer <executor-id>',
   '  bb pool native mode <managed|off>',
+  '  bb pool native check-stopped <lease-id>',
   '  bb pool native attest-stopped <lease-id> --confirmed',
   "  bb pool stream-probe --thread <id> [--interrupt-request <uuid> --confirm] [--json]",
   "  bb pool diagnostics --from <UTC-hour> --to <UTC-hour> [--compare-previous] [--json]",
@@ -232,7 +234,7 @@ function formatStatus(status: PoolStatusReport): string {
     `Enabled accounts: ${status.enabledAccountCount}`,
     `In flight: ${status.inFlight}`,
     ...(status.uncertainNativeLeases ?? []).map(lease =>
-      `Native stop unconfirmed: ${lease.executorId} (${lease.kind}), age ${Math.floor(lease.ageMs / 1000)} s. After confirming stopped: ${attestNativeLeaseCommand(lease.leaseId)}`),
+      `Native stop unconfirmed: ${lease.executorId} (${lease.kind}), age ${Math.floor(lease.ageMs / 1000)} s. Verify: bb pool native check-stopped ${lease.leaseId}. Manual confirmation: ${attestNativeLeaseCommand(lease.leaseId)}`),
     ...(status.routeTracking?[`Route tracking: ${status.routeTracking.decisions}/${status.routeTracking.maxDecisions} decisions; ${status.routeTracking.bytes}/${status.routeTracking.maxBytes} bytes`]:[]),
     ...(status.historyCapacity?[`History: ${status.historyCapacity.rows}/${status.historyCapacity.maxRows} rows; byte limit ${status.historyCapacity.maxBytes}`]:[]),
     "",
@@ -398,6 +400,7 @@ export function registerPoolCli(
   maintenance?: Pick<PoolMaintenance,'status'|'acquire'|'release'> & Partial<Pick<PoolMaintenance,'acquireGraceful'|'acquireUpgrade'|'sealUpgrade'>> & {interrupt:(owner:string)=>Promise<ReturnType<PoolMaintenance['status']>>},
   nativePreflight?:(input:import('./native-probe-wire.js').NativeProbeInput)=>Promise<object>,
   updateStatus?:()=>Promise<import("zod").z.infer<typeof import("./pool-update.js").updateStatusSchema>>,
+  checkNativeStopped?:(id:string)=>Promise<NativeCheckStoppedResult>,
 ): void {
   bb.cli.register({
     name: "pool",
@@ -551,6 +554,11 @@ export function registerPoolCli(
           else if(argv[1]==='configure'&&argv.length===3)result=await nativeSessions.configure(JSON.parse(argv[2]!));
           else if(argv[1]==='prefer'&&argv.length===3){await nativeSessions.prefer(argv[2]!, (await nativeSessions.accounts()).selectionRevision);result={executorId:argv[2]!};}
           else if(argv[1]==='mode'&&argv.length===3&&['managed','off'].includes(argv[2]!))result=await nativeSessions.setManaged(argv[2]==='managed');
+          else if(argv[1]==='check-stopped'&&argv.length===3&&checkNativeStopped){
+            const {leaseId}=nativeCheckStoppedInputSchema.parse({leaseId:argv[2]});
+            const checked=await checkNativeStopped(leaseId);
+            return {exitCode:checked.state==='kept'?2:0,stdout:json(checked)};
+          }
           else if(argv[1]==='attest-stopped'&&argv.length===4&&argv[3]==='--confirmed')result=await nativeSessions.attestStopped(argv[2]!);
           else throw Error(HELP);
           return {exitCode:0,stdout:json(result)};

@@ -506,6 +506,11 @@ export const uncertainNativeLeaseSchema = z.object({
   kind: nativeLeaseKindSchema,
   ageMs: z.number().int().nonnegative(),
 }).strict();
+export const nativeCheckStoppedInputSchema = z.object({ leaseId: z.uuid() }).strict();
+export const nativeCheckStoppedResultSchema = z.object({
+  state: z.enum(['released', 'absent', 'kept']),
+}).strict();
+export type NativeCheckStoppedResult = z.infer<typeof nativeCheckStoppedResultSchema>;
 export const attestNativeLeaseCommand = (leaseId: string) => `bb pool native attest-stopped ${leaseId} --confirmed`;
 
 export const statusSchema = z
