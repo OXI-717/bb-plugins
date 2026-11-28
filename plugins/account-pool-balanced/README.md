@@ -14,6 +14,19 @@ reserve and progressive weekly cap for that account while selected. Shorter
 windows, model-specific quotas, other existing quota windows, and provider
 limits still apply independently.
 
+# Recovering a native lease
+
+Use **Check process and release** in Pooler settings, or run
+`bb pool native check-stopped <lease-id>`. Pooler checks the exact expired
+lease on its assigned host. A live process, missing identity, or unavailable
+host leaves the lease in place. The CLI returns JSON and exit code 2 when
+the lease is kept.
+
+Manual `attest-stopped --confirmed` still requires the existing operator
+grant. Replacing this override requires a verified BB owner signal or another
+explicit authorization capability. The general SDK client caller is not
+sufficient to authorize an override.
+
 # Optional automatic prepared-native unlock
 
 A prepared executor can explicitly add `unlock` with a fixed Oxi Op access

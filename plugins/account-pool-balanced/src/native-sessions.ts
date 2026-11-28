@@ -294,10 +294,11 @@ export class NativeSessions {
     if(!lease||lease.state!=='uncertain')throw new NativeSessionError(409,'native-not-uncertain');
     this.event(lease,'attested-stopped');this.state.leases=this.state.leases.filter(l=>l!==lease);return {released:true};
   });}
-  async reconcileNativeProcesses(verify:(hostId:string,binding:NativeCatalogProcess)=>Promise<boolean>){
+  async reconcileNativeProcesses(verify:(hostId:string,binding:NativeCatalogProcess)=>Promise<boolean>,leaseId?:string){
     const needsCheck=await this.enqueue(async()=>{
       const now=this.now();
       return this.state.leases.some(lease=>
+        (leaseId===undefined||lease.id===leaseId)&&
         (lease.state==='uncertain'||(lease.state==='active'&&lease.deadline<=now))&&reconcileBinding(lease,now));
     });
     if(!needsCheck||this.reconcileClosed)return 0;
@@ -305,7 +306,7 @@ export class NativeSessions {
     const candidates=await this.serial(()=>{
       const now=this.now();
       return this.state.leases.flatMap(lease=>{
-        const binding=lease.state==='uncertain'?reconcileBinding(lease,now):undefined;
+        const binding=lease.state==='uncertain'&&(leaseId===undefined||lease.id===leaseId)?reconcileBinding(lease,now):undefined;
         return binding?[{id:lease.id,kind:lease.kind,sessionId:lease.sessionId,deadline:lease.deadline,
           hostId:lease.executor.hostId,binding:structuredClone(binding)}]:[];
       });
@@ -332,6 +333,11 @@ export class NativeSessions {
       });
       return released;
     });
+  }
+
+  async checkStopped(leaseId:string,verify:(hostId:string,binding:NativeCatalogProcess)=>Promise<boolean>){
+    if(await this.reconcileNativeProcesses(verify,leaseId))return {state:'released' as const};
+    return this.enqueue(async()=>({state:this.state.leases.some(lease=>lease.id===leaseId)?'kept' as const:'absent' as const}));
   }
 
   admissionCheck: (activePoll?:()=>boolean) => void = () => {};

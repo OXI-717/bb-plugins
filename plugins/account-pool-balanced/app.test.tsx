@@ -375,14 +375,22 @@ describe("Account Pool settings", () => {
     expect(slot.getByRole("switch", {name:"Направлять треды Antigravity"})).toBeTruthy();
     expect(slot.rpcCalls.some(call=>call.method.startsWith("agyLogin."))).toBe(false);
   });
-  it("shows the executor, kind, age and operator command for an uncertain lease", async () => {
+  it("checks the selected lease and refreshes status after a confirmed stop", async () => {
     const leaseId = "11111111-1111-4111-8111-111111111111";
-    const slot = render([], {"status.get": () => ({
-      ...status([]),
-      uncertainNativeLeases: [{leaseId, executorId:"example-executor", kind:"catalog", ageMs:125_000}],
-    })});
+    let released = false;
+    const slot = render([], {
+      "status.get": () => ({
+        ...status([]),
+        uncertainNativeLeases: released ? [] : [{leaseId, executorId:"example-executor", kind:"catalog", ageMs:125_000}],
+      }),
+      "native.checkStopped": () => { released = true; return {state:"released"}; },
+    });
     expect(await slot.findByText("example-executor · каталог · 2 мин")).toBeTruthy();
     expect(slot.getByText(`bb pool native attest-stopped ${leaseId} --confirmed`)).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", {name:"Проверить процесс и освободить"}));
+    await slot.findByText("Остановка подтверждена. Допуск освобождён.");
+    await waitFor(() => expect(slot.queryByText("example-executor · каталог · 2 мин")).toBeNull());
+    expect(slot.rpcCalls).toContainEqual({method:"native.checkStopped", input:{leaseId}});
   });
 
   it("sorts managed priorities without presenting an active admission as usage or copying OAuth quota", async () => {

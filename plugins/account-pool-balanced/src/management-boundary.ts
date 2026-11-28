@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import type { BbPluginApi, PluginRpcHandlers } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
+import { nativeCheckStoppedInputSchema } from './contracts.js';
 import { accountPoolRpcContract } from './rpc.js';
 import { ManagementAccess, PoolManagementLocked } from './management-access.js';
 import { managementRpcContract, managementUnlockSchema, type ManagementScope } from './management-wire.js';
@@ -83,8 +84,12 @@ export function managementCli(bb: Pick<BbPluginApi, 'cli' | 'server' | 'pluginId
         async run(argv, context) {
           try {
             if (argv[0] !== 'management') {
+              if (argv[0] === 'native' && argv[1] === 'check-stopped' && argv.length === 3 &&
+                  nativeCheckStoppedInputSchema.safeParse({ leaseId: argv[2] }).success) {
+                return await registration.run(argv, context);
+              }
               if ((argv[0] === 'status' || argv[0] === 'readiness') && argv.slice(1).every(arg => arg === '--json')) return { exitCode: 0, stdout: JSON.stringify({ management: 'locked' }) + '\n' };
-              if (argv.length === 0 || argv.includes('--help')) return { exitCode: 0, stdout: 'Pool management requires an operator-issued grant.\nUse: bb pool management <unlock|execute|lock> --request-stdin\nPublic status: bb pool status --json\n' };
+              if (argv.length === 0 || argv.includes('--help')) return { exitCode: 0, stdout: 'Pool management requires an operator-issued grant.\nUse: bb pool management <unlock|execute|lock> --request-stdin\nPublic status: bb pool status --json\nVerify a native process: bb pool native check-stopped <lease-id>\n' };
               throw new PoolManagementLocked();
             }
             if (argv.length !== 4 || argv[2] !== '--request') throw new Error('Use management <unlock|execute|lock> --request-stdin.');
