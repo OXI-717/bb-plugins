@@ -58,8 +58,7 @@ it('deduplicates requests and discards an in-flight result after the account is 
   const quota=new NativeQuota(async()=>targets,collect,()=>time);
   const first=quota.refreshAccount([primary]);
   const concurrent=quota.refreshAccount([primary],true);
-  await quota.refreshAccount([reserve]);
-  expect(collect).toHaveBeenCalledExactlyOnceWith(primary);
+  await vi.waitFor(() => expect(collect).toHaveBeenCalledExactlyOnceWith(primary));
   targets=[reserve];
   finish(report);
   await Promise.all([first,concurrent]);
@@ -77,4 +76,23 @@ it('uses another enrolled executor for the same subscription if the first host l
   expect(collect.mock.calls).toEqual([[mac],[primary]]);
   expect(quota.readAccount([mac,primary])?.rows).toEqual(report.rows);
   expect(quota.readAccount([reserve])).toBeNull();
+});
+
+it('queues another account on the same host and fulfills its first widget request',async()=>{
+  let finish!:(value:typeof report)=>void;
+  const collect=vi.fn(async (target:typeof primary)=>{
+    if(target.accountId===primary.accountId)
+      return new Promise<typeof report>(resolve=>{finish=resolve;});
+    return {...report,...reserve};
+  });
+  const quota=new NativeQuota(async()=>[primary,reserve],collect,()=>time);
+  const host=createFakePluginHost({pluginId:'account-pool'});
+  registerUsageSource(host.bb,{status:async()=>({accounts:[]})} as unknown as AccountPoolHub,false,quota);
+  const first=quota.refreshAccount([primary]);
+  const second=host.harness.behavior.callRpc(usageFetchMethod,{resourceId:'managed-agy:google-reserve',refresh:true});
+  await vi.waitFor(() => expect(collect).toHaveBeenCalledExactlyOnceWith(primary));
+  finish(report);
+  await expect(second).resolves.toMatchObject({observedAt:time,usage:{status:'ok'}});
+  await first;
+  expect(collect.mock.calls).toEqual([[primary],[reserve]]);
 });

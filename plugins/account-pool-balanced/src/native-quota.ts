@@ -10,7 +10,7 @@ export class NativeQuota {
   private readonly cache = new Map<string, NativeQuotaView>();
   private readonly retryAfter = new Map<string, number>();
   private readonly inFlight = new Map<string, Promise<void>>();
-  private readonly busyHosts = new Set<string>();
+  private readonly hostTail = new Map<string, Promise<void>>();
 
   constructor(
     private readonly targets: () => Promise<NativeQuotaCandidate[]>,
@@ -26,7 +26,7 @@ export class NativeQuota {
     return targets;
   }
 
-  read(target: NativeQuotaTarget): NativeQuotaView | null {
+  private read(target: NativeQuotaTarget): NativeQuotaView | null {
     const value = this.cache.get(key(target));
     const now = this.now();
     if(!value || value.observedAt + maxAge <= now) return null;
@@ -35,11 +35,12 @@ export class NativeQuota {
   }
 
   readAccount(candidates: NativeQuotaTarget[]) {
+    let latest: NativeQuotaView | null = null;
     for (const candidate of candidates) {
       const quota = this.read(candidate);
-      if (quota) return quota;
+      if (quota && (!latest || quota.observedAt > latest.observedAt)) latest = quota;
     }
-    return null;
+    return latest;
   }
 
   async refreshAccount(candidates: NativeQuotaTarget[], force = false) {
@@ -49,37 +50,37 @@ export class NativeQuota {
       return quota && quota.observedAt + maxAge > now && quota.rows.every(row => row.resetAt > now);
     })) return;
     for (const candidate of candidates) {
-      await this.refresh(candidate, force);
+      await this.refresh(candidate);
       if (this.read(candidate)) return;
     }
   }
 
-  private async refresh(target: NativeQuotaTarget, force = false) {
+  private async refresh(target: NativeQuotaTarget) {
     const id = key(target);
     const current = this.inFlight.get(id);
     if(current) return current;
-    const snapshot = this.cache.get(id);
-    const now = this.now();
-    if(this.busyHosts.has(target.hostId) || (this.retryAfter.get(id) ?? 0) > now ||
-        (!force && snapshot && snapshot.observedAt + maxAge > now && snapshot.rows.every(row => row.resetAt > now))) return;
-    this.retryAfter.set(id,now+retryDelay);
-    this.busyHosts.add(target.hostId);
-    const work = Promise.resolve().then(async () => {
+    const previous = this.hostTail.get(target.hostId) ?? Promise.resolve();
+    const work = previous.then(async () => {
       try {
+        const now = this.now();
+        if ((this.retryAfter.get(id) ?? 0) > now) return;
+        if (!(await this.inventory()).some(candidate => key(candidate) === id)) return;
+        this.retryAfter.set(id, now + retryDelay);
         const {hostId,executorId,accountId} = target;
         const report = nativeQuotaReportSchema.parse(await this.collect({hostId,executorId,accountId}));
         const at = this.now();
-        if(key(report)!==id || report.observedAt>at || at-report.observedAt>=maxAge) return;
-        if(!(await this.inventory()).some(candidate => key(candidate)===id)) return;
-        this.cache.set(id, {observedAt:report.observedAt,rows:report.rows});
+        if (key(report) !== id || report.observedAt > at || at - report.observedAt >= maxAge) return;
+        if (!(await this.inventory()).some(candidate => key(candidate) === id)) return;
+        this.cache.set(id, {observedAt:report.observedAt, rows:report.rows});
       } catch {
         this.retryAfter.set(id, this.now() + retryDelay);
       } finally {
         this.inFlight.delete(id);
-        this.busyHosts.delete(target.hostId);
+        if (this.hostTail.get(target.hostId) === work) this.hostTail.delete(target.hostId);
       }
     });
-    this.inFlight.set(id,work);
+    this.inFlight.set(id, work);
+    this.hostTail.set(target.hostId, work);
     return work;
   }
 }
