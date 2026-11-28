@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { accountProjectsSchema, NATIVE_MAX_CONCURRENT_SESSIONS, type AccountProjects } from "./contracts.js";
+import {nativeQuotaViewSchema} from './native-quota-wire.js';
 import { z } from "zod";
 
 export const nativeProjectsSchema = accountProjectsSchema.refine(value => value.rules.length <= 32 && value.rules.every(rule => /^[A-Za-z0-9_-]{1,80}$/.test(rule.projectId)), 'Native project lists allow at most 32 project IDs');
@@ -28,6 +29,7 @@ export const nativeAccountsSchema = z.object({
   selectionRevision:z.string().regex(/^[a-f0-9]{64}$/).optional(),
   accounts: z.array(z.object({
     accountId: z.string(),
+    quota: nativeQuotaViewSchema.optional(),
     label:z.string().optional(),
     role: nativeAccountRoutingSchema.shape.role.optional(),
     priority: nativeAccountRoutingSchema.shape.priority.optional(),

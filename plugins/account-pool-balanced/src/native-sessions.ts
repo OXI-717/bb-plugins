@@ -161,6 +161,17 @@ export class NativeSessions {
     const matches=this.state.executors.filter(e=>this.allowed(e,caller));
     return this.choose(matches,caller.projectId);
   });}
+  async quotaTargets(){
+    await this.tail;
+    if(!this.state.managed)return [];
+    return this.state.executors.filter(executor =>
+      executor.enabled && !executor.execution && executor.catalogCallerIds.length > 0,
+    ).map(executor => ({
+      accountId:executor.accountId,hostId:executor.hostId,executorId:executor.id,
+      label:(Object.hasOwn(this.state.accountRouting,executor.accountId)
+        ? this.state.accountRouting[executor.accountId]?.label : undefined) ?? executor.label,
+    }));
+  }
   async catalogExecutorFor(hostId:string){return this.serial(()=>{
     const matches=this.state.executors.filter(e=>e.enabled&&e.hostId===hostId&&e.catalogCallerIds.length>0);
     return this.choose(matches);

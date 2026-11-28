@@ -589,6 +589,25 @@ function QuotaValue({
   );
 }
 
+function ManagedNativeQuota({quota, compact = false}: {
+  quota: NonNullable<NativeAccounts['accounts'][number]['quota']>;
+  compact?: boolean;
+}) {
+  const rows = compact ? ['fiveHour','weekly'].flatMap(window => {
+    const row = quota.rows.filter(item => item.window === window)
+      .sort((a,b) => a.remainingPercent - b.remainingPercent || a.resetAt - b.resetAt)[0];
+    return row ? [row] : [];
+  }) : quota.rows;
+  return <div className="mt-1 flex flex-wrap gap-1">{rows.map(row => {
+    const key = JSON.stringify([row.group, row.window]);
+    const window = row.window === 'fiveHour' ? '5 часов' : '7 дней';
+    return <QuotaValue key={key} refreshing={false} slot={{
+      key, label: compact ? window : `${window} · ${row.group}`,
+      utilization: 1 - row.remainingPercent / 100, resetAt: row.resetAt, limit: 1, status: null,
+    }} />;
+  })}</div>;
+}
+
 const restrictAccountDragToVerticalAxis: Modifier = ({ transform }) => ({
   ...transform,
   x: 0,
@@ -1751,11 +1770,13 @@ function UnlockedAccountPoolSettings() {
                     <NativeAccountRow
                       canEditPriority={!!nativeAccounts?.selectionRevision}
                       account={account}
+                      quota={account.quota && <ManagedNativeQuota quota={account.quota} compact />}
                       expanded={nativeSettings === account.accountId}
                       open={() => setNativeSettings(current => current === account.accountId ? null : account.accountId)}
                     />
                     {nativeSettings === account.accountId && nativeAccounts?.selectionRevision && (
                       <section id={`pool-native-${account.accountId}`} aria-label={account.label ?? "Google Antigravity"} className="pool-settings pool-account-card mb-3">
+                        {account.quota && <ManagedNativeQuota quota={account.quota} />}
                         <NativeAccountSettings account={account} revision={nativeAccounts.selectionRevision}
                           loadProjects={() => rpc.call("projects.list", null)}
                           save={async input => { await rpc.call("native.updateAccount", input); await refreshNative(); }}
